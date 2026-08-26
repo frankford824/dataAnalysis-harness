@@ -69,7 +69,7 @@ def _run_store(store_id: str):
     mine = set(model.files_of(store_id, (p.name for p in found)))
     files = [p for p in found if p.name in mine]
     assert files, f"{store.name} 一个文件都没找到"
-    result = run(ingest(files, model, [store.name]), store.platform)
+    result = run(ingest(files, model, [store.name, *store.aliases]), store.platform)
     assert result.slices, f"{store.name} 没算出结果"
     return model, store, result
 
@@ -117,7 +117,7 @@ def test_coverage_denominator_is_scoped(store_id: str) -> None:
         report = sl.link_reports.get("goods_cost")
         if report is None or not report.spine_keys:
             continue
-        assert report.expect_label == "已发货"
+        assert report.expect_label in ("已发货", "已发货且未全额退款", "已出库")
         assert report.spine_keys < report.spine_keys_total
         assert report.coverage >= 0.98
 

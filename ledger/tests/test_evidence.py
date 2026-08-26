@@ -27,8 +27,9 @@ import pytest
 from ledger.engine.calculate import evaluate_metric
 from ledger.engine.link import LINK_KEY, LINKED
 from ledger.engine.runtime import _mark_counted as mark_counted
+from ledger.engine.runtime import _spine_frame
 from ledger.engine.types import ANCHOR_FILE, ANCHOR_ROW, ANCHOR_SHA, ANCHOR_SHEET
-from ledger.model.schema import LinkRule, Metric, SourceContract, Template, ValueExpr
+from ledger.model.schema import ColumnBinding, LinkRule, Metric, SourceContract, Template, ValueExpr
 
 
 def _metric(**kw) -> Metric:
@@ -96,6 +97,52 @@ class TestWhoTheRowBelongsTo:
                          "__spine_period__": "2026-05"}])
         facts, _ = evaluate_metric(frame, _metric(time_basis="pay_date"), _template())
         assert facts.get_column("period").to_list() == ["2026-05"]
+
+
+class TestSpineUsesCanonicalStoreName:
+    """订单明细里写的是旧名或别名，脊柱必须换成正名。
+
+    核算侧已经把别名换成正名。脊柱不换的话，切片会按旧名建一份、按正名再建一份，
+    改过显示名的店账会裂开。
+    """
+
+    def test_alias_on_the_order_sheet_becomes_the_registered_name(self):
+        frame = pl.DataFrame({
+            "store_name": ["淘宝喜必顺"],
+            "order_id": ["A1"],
+            "__hint_store__": ["汪学成-天猫喜必顺旗舰店"],
+        })
+        tpl = Template(
+            id="t", source="order", match_columns=("order_id",),
+            bindings=(
+                ColumnBinding(role="store_name", columns=["store_name"]),
+                ColumnBinding(role="order_id", columns=["order_id"]),
+            ),
+        )
+        roster = {
+            "淘宝喜必顺": "汪学成-天猫喜必顺旗舰店",
+            "汪学成-天猫喜必顺旗舰店": "汪学成-天猫喜必顺旗舰店",
+        }
+        out = _spine_frame(frame, tpl, roster)
+        assert out.get_column("store").to_list() == ["汪学成-天猫喜必顺旗舰店"]
+
+    def test_unrecognized_name_falls_back_to_the_file(self):
+        """订单明细写了个档案里没有的名字，退回交表时认出的那家店。"""
+        frame = pl.DataFrame({
+            "store_name": ["谁也不认识的店"],
+            "order_id": ["A1"],
+            "__hint_store__": ["汪学成-天猫喜必顺旗舰店"],
+        })
+        tpl = Template(
+            id="t", source="order", match_columns=("order_id",),
+            bindings=(
+                ColumnBinding(role="store_name", columns=["store_name"]),
+                ColumnBinding(role="order_id", columns=["order_id"]),
+            ),
+        )
+        roster = {"淘宝喜必顺": "汪学成-天猫喜必顺旗舰店"}
+        out = _spine_frame(frame, tpl, roster)
+        assert out.get_column("store").to_list() == ["汪学成-天猫喜必顺旗舰店"]
 
 
 class TestAStoreNameNobodyRegisteredIsNotAStore:

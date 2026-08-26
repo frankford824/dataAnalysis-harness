@@ -199,6 +199,18 @@ class TestShippedRegistry:
         ]:
             assert m.store_of(name) is not None, name
 
+    def test_renamed_stores_still_own_old_filenames(self):
+        """改显示名之后，交上来的文件名还是旧名，必须靠别名认出来。"""
+        m = load_model(MODELS / "cn-ecommerce")
+        tb = m.store("taobao_xibishun")
+        assert tb.name == "汪学成-天猫喜必顺旗舰店"
+        assert "淘宝喜必顺" in tb.aliases
+        assert m.store_of("运费-淘宝喜必顺.xlsx").id == "taobao_xibishun"
+        xz = m.store("alibaba1688_xingze")
+        assert xz.name == "姜惠卉-1688义乌星泽天成供应链管理有限公司"
+        assert "1688星泽气球派对" in xz.aliases
+        assert m.store_of("对账-1688星泽气球派对.xlsx").id == "alibaba1688_xingze"
+
     def test_the_longer_store_name_wins(self):
         """「天猫皇莉诗旗舰店」和「皇莉诗旗舰店」是两个平台上的两家店。
 

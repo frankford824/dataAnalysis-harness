@@ -107,4 +107,4 @@ class TestWhileTakingFiles:
                     "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"))],
         )
         walked = " ".join(client.get("/api/upload/progress/named").json()["trail"])
-        assert "淘宝喜必顺" in walked
+        assert "汪学成-天猫喜必顺旗舰店" in walked

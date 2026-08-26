@@ -1,7 +1,7 @@
 # 店铺注册表。
 #
 # 店铺是数据归属和账期结算的单位。交上来的文件靠文件名认店：文件名形如
-# 「聚水潭成本-淘宝喜必顺.xlsx」，破折号后面就是这里的 name。
+# 「聚水潭成本-淘宝喜必顺.xlsx」，破折号后面是登记名或别名。
 #
 # 店铺和法人主体是多对一。下面 1688星泽气球派对 和 抖音浅花涧节日装饰 就同属
 # 义乌星泽天成供应链管理有限公司——这层关系推不出来，只能配。
@@ -44,22 +44,26 @@
 # 不是谁算错了，是两套政策并存。新店默认 deduct。
 
 - id: taobao_xibishun
-  name: 淘宝喜必顺
+  name: 汪学成-天猫喜必顺旗舰店
   platform: taobao
   entity: ""
+  aliases: [淘宝喜必顺]
   commission_base: net_profit
   commission_on_loss: deduct
   note: >-
-    主体待配。支付宝和微信账单都不带主体信息，引擎读不出来，也不该猜。在界面的店铺设置里填，或者 ledger store set taobao_xibishun --entity 主体全名。
+    2026-08 按运营-平台店名改过显示名。旧名「淘宝喜必顺」留作别名，交上来的文件名仍是这个，认文件靠它。主体待配。支付宝和微信账单都不带主体信息，引擎读不出来，也不该猜。在界面的店铺设置里填，或者 ledger store set taobao_xibishun --entity 主体全名。
 
 - id: alibaba1688_xingze
-  name: 1688星泽气球派对
+  name: 姜惠卉-1688义乌星泽天成供应链管理有限公司
   platform: alibaba1688
   entity: 义乌星泽天成供应链管理有限公司
   entity_tax_id: "91330782MACX8XB45T"
+  aliases: [1688星泽气球派对]
   commission_base: net_profit
   commission_on_loss: skip
-  note: 主体取自 1688 收款明细的「归属主体名称」「归属主体税号」，2,304 行取值唯一。
+  note: >
+    2026-08 按运营-平台-主体改过显示名。旧名「1688星泽气球派对」留作别名，文件名仍是这个。
+    主体取自 1688 收款明细的「归属主体名称」「归属主体税号」，2,304 行取值唯一。
 
 - id: douyin_qianhuajian
   name: 抖音浅花涧节日装饰

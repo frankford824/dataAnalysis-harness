@@ -728,8 +728,9 @@
     随单送出去就是真花了钱。业务 2026-08 确认先维持现状不计入。在此之前它们在
     「取不出订单号，要查归属」那一桶里看得见，没有悄悄进利润，也没有悄悄消失。
 
-    试过按角色兜底（子订单号为空时用主订单号补，且只在补出来的号本身就是脊柱上的
-    一个子订单时才采用），已撤回。它收回天猫 2,646.67 元，方向是让引擎离人工表更远。
+    原始线上订单号那条兜底只接「子订单号有值但对不上」的拆合单，空号行仍然
+    不进账。试过按角色兜底（子订单号为空时用主订单号补），已撤回。它收回天猫
+    2,646.67 元，方向是让引擎离人工表更远。
     要重新捡起来的话，两件事别再走一遍弯路：
       · 判断依据必须逐子订单和人工表比，不能看总差。引擎的商品成本本来就比人工表
         偏小，往里加任何一笔都会让总差变小，那个「变小」和这些行算得对不对无关。
@@ -1231,3 +1232,30 @@
     没有按「反正结算时间全非空，当成都已结算」蒙过去：那是拿推断当口径，
     真混进未结算的行没人看得出来。财务 2026-08-21 定的是重新导出时带上这一列，
     所以上面把 bill_status 的绑定先摆好了，导出带上就直接能算。
+
+# 接表向导登记。2026-08-22 财务重新导出时列名换成了「到账时间」（旧版叫结算时间），
+# 仓库里没有这份模板，部署会把它盖掉。列和角色照抄，归类沿用上面 v10 的字典和改判。
+- id: settlement_v11
+  source: settlement
+  name: 京东对账（后台-费用明细导出，到账时间）
+  match_columns: [订单下单时间, 商品名称, 订单编号, 父单号, 订单状态, 到账时间]
+  time_slots: {settle_date: settle_time}
+  bindings:
+    - {role: base_order_id, columns: [订单编号], required: false}
+    - {role: parent_order_id, columns: [父单号], required: false}
+    - {role: order_state, columns: [订单状态], required: false}
+    - {role: order_time, columns: [订单下单时间], kind: time, required: false}
+    - {role: product_name, columns: [商品名称], required: false}
+    - {role: settle_time, columns: [到账时间], kind: time, required: false}
+    - {role: remark, columns: [资金动账备注], required: false}
+    - {role: subject, columns: [费用名称], required: false}
+    - {role: direction, columns: [费用分类], required: false}
+    - {role: income, columns: [应结金额], kind: number, required: false}
+    - {role: bill_status, columns: [结算状态], required: false}
+  classify_rules:
+    - dictionary: true
+  reclassify:
+    - when_major: trade_receipt
+      and_when: {field: direction, equals: [支出]}
+      major: trade_refund
+  total_row_marker: base_order_id

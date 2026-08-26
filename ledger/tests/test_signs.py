@@ -116,3 +116,36 @@ class TestOccurrence:
         frame, notes = normalize(table, tpl)
         assert frame.get_column("order_id").to_list() == ["展开列"]
         assert any("重复" in n for n in notes)
+
+
+class TestExcelFloatIdsBecomePlainText:
+    """绕过解析、直接构造 RawTable 时，整数 float 也不能留下 `.0`。"""
+
+    def test_float_order_id_loses_dot_zero(self):
+        table = _table(
+            ["订单号", "商品ID", "金额"],
+            [[349603270732.0, 10160070484512.0, -65.41]],
+        )
+        tpl = _template([
+            ColumnBinding(role="order_id", columns=["订单号"]),
+            ColumnBinding(role="product_id", columns=["商品ID"]),
+            ColumnBinding(role="outgo", columns=["金额"]),
+        ])
+        frame, _ = normalize(table, tpl)
+        assert frame.get_column("order_id").to_list() == ["349603270732"]
+        assert frame.get_column("product_id").to_list() == ["10160070484512"]
+        assert frame.get_column("outgo").to_list() == [-65.41]
+
+    def test_csv_style_dot_zero_string_is_folded(self):
+        table = _table(["订单号"], [["349603270732.0"]])
+        tpl = _template([ColumnBinding(role="order_id", columns=["订单号"])])
+        frame, _ = normalize(table, tpl)
+        assert frame.get_column("order_id").to_list() == ["349603270732"]
+
+    def test_version_name_keeps_dot_zero(self):
+        """`V1.0` 不是纯数字，砍了会变成另一个名字。"""
+        table = _table(["商品名"], [["V1.0"]])
+        tpl = _template([ColumnBinding(role="product_name", columns=["商品名"])])
+        frame, _ = normalize(table, tpl)
+        assert frame.get_column("product_name").to_list() == ["V1.0"]
+

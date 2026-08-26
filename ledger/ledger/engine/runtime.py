@@ -33,6 +33,7 @@ from .link import (
     target_role,
 )
 from .normalize import NormalizeError, normalize
+from .rules import norm_expr
 from .parse import ParseError, digest, parse
 from .recognize import infer_period, infer_store, match_headers
 from .types import (
@@ -221,7 +222,10 @@ def _ingest_file(
     items: list[Ingested] = []
     sha = digest(path)
     hint_period = infer_period(path.name)
-    hint_store = infer_store(path.name, known_stores)
+    # 文件名对上哪家店，提示就用那家的登记名。店改过名之后文件名还是旧名，
+    # 只在 known_stores 里找登记名会找不到，账会落到一个对不上切片的店名上。
+    owner = model.store_of(path.name)
+    hint_store = owner.name if owner else infer_store(path.name, known_stores)
     try:
         tables = parse(path)
     except ParseError as exc:
@@ -426,7 +430,13 @@ def run(ingestion: Ingestion, platform: str = "*") -> RunResult:
     """挂钩 → 归类 → 核算 → 自检。"""
     model = ingestion.model
     notes: list[str] = []
-    spine = _build_spine(ingestion, notes)
+    # 店铺档案里的每种写法 → 正名。核算时用来把表格自己报的店名归到登记的那家店，
+    # 认不出来的当没报，见 `calc._own_store`。脊柱也要用同一份：订单明细里写的是
+    # 旧名或别名，不换成正名，切片就会按旧名建一份、按正名再建一份，账裂成两半。
+    store_names = {
+        name: s.name for s in model.stores for name in (s.name, *s.aliases) if name
+    }
+    spine = _build_spine(ingestion, notes, store_names)
 
     bridges = _build_bridges(ingestion, notes)
 
@@ -439,12 +449,6 @@ def run(ingestion: Ingestion, platform: str = "*") -> RunResult:
     # 平台限定的指标只在对应平台生效。三家店的利润口径互不相同，
     # 全部一起算会让 1688 的收支口径混进淘宝的账。下面两个循环都要按这份名单走。
     metrics = [r for r in (m.for_platform(platform) for m in model.metrics) if r is not None]
-
-    # 店铺档案里的每种写法 → 正名。核算时用来把表格自己报的店名归到登记的那家店，
-    # 认不出来的当没报，见 `calc._own_store`。
-    store_names = {
-        name: s.name for s in model.stores for name in (s.name, *s.aliases) if name
-    }
 
     for metric in metrics:
         items = ingestion.frames_of(metric.source)
@@ -821,7 +825,9 @@ def _first_hint(frame: pl.DataFrame, column: str) -> str | None:
 # --------------------------------------------------------------------------- #
 
 
-def _build_spine(ingestion: Ingestion, notes: list[str]) -> Spine:
+def _build_spine(
+    ingestion: Ingestion, notes: list[str], store_names: dict[str, str] | None = None
+) -> Spine:
     """从声明为脊柱的数据源构建订单脊柱。"""
     model = ingestion.model
     spine_sources = [s for s in model.sources if s.is_spine]
@@ -833,7 +839,7 @@ def _build_spine(ingestion: Ingestion, notes: list[str]) -> Spine:
     for source in spine_sources:
         for item in ingestion.frames_of(source.id):
             assert item.frame is not None and item.template is not None
-            parts.append(_spine_frame(item.frame, item.template))
+            parts.append(_spine_frame(item.frame, item.template, store_names))
 
     if not parts:
         names = "、".join(s.name for s in spine_sources)
@@ -844,7 +850,9 @@ def _build_spine(ingestion: Ingestion, notes: list[str]) -> Spine:
     return Spine(frame=frame)
 
 
-def _spine_frame(frame: pl.DataFrame, template: Template) -> pl.DataFrame:
+def _spine_frame(
+    frame: pl.DataFrame, template: Template, store_names: dict[str, str] | None = None
+) -> pl.DataFrame:
     """把脊柱数据整理成 关联键角色 + 店铺 + 账期 + 商品。"""
     slot = next(iter(template.time_slots), "order_date")
     period = (
@@ -852,8 +860,19 @@ def _spine_frame(frame: pl.DataFrame, template: Template) -> pl.DataFrame:
         if str(slot) in frame.columns
         else pl.lit(None, dtype=pl.Utf8)
     )
-    store = pl.col(ROLE_STORE).cast(pl.Utf8) if ROLE_STORE in frame.columns else pl.lit(None, dtype=pl.Utf8)
-    product = pl.col(ROLE_PRODUCT).cast(pl.Utf8) if ROLE_PRODUCT in frame.columns else pl.lit(None, dtype=pl.Utf8)
+    if ROLE_STORE in frame.columns:
+        store = pl.col(ROLE_STORE).cast(pl.Utf8)
+        # 别名、旧名换成正名。不换的话切片键还是文件里的写法，核算侧已经换成正名
+        # 的行对不上号。改过显示名的店，订单明细里仍写着旧名，必走这一步。
+        if store_names:
+            store = store.replace_strict(store_names, default=None, return_dtype=pl.Utf8)
+    else:
+        store = pl.lit(None, dtype=pl.Utf8)
+    product = (
+        norm_expr(pl.col(ROLE_PRODUCT).cast(pl.Utf8))
+        if ROLE_PRODUCT in frame.columns
+        else pl.lit(None, dtype=pl.Utf8)
+    )
 
     # 保留脊柱模板绑定的所有角色，不只是订单号类。分摊比例、商品ID、实付金额都要留：
     # 分摊除数来自脊柱，下钻要展示的字段也来自脊柱。脊柱只有两万行量级，留全了不贵。
@@ -862,9 +881,19 @@ def _spine_frame(frame: pl.DataFrame, template: Template) -> pl.DataFrame:
         if b.role in frame.columns and b.role not in (ROLE_STORE, ROLE_PRODUCT)
     ]
     numeric = {"alloc_ratio", "buyer_paid", "refund_amount", "quantity"}
+    # 标识列收成不带 `.0` 的键。商品名、订单状态这些文本列不能走同一套：
+    # `_norm` 会去掉空白，`皇莉诗 气球` 会变成另一个名字。
+    id_roles = {
+        "order_id", "sub_order_id", "parent_order_id", "merchant_order_id",
+        "tracking_no", "sku_id", "offer_id", "spu_id",
+    }
     return frame.select(
         *[
-            (pl.col(r) if r in numeric else pl.col(r).cast(pl.Utf8)).alias(r)
+            (
+                pl.col(r) if r in numeric
+                else norm_expr(pl.col(r).cast(pl.Utf8)) if r in id_roles
+                else pl.col(r).cast(pl.Utf8)
+            ).alias(r)
             for r in keep
         ],
         pl.coalesce(store, pl.col("__hint_store__") if "__hint_store__" in frame.columns else pl.lit(None, dtype=pl.Utf8)).alias(SPINE_STORE),

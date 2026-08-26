@@ -147,3 +147,31 @@ class TestDuplicateHeaders:
         table, rows = _cells(path)
         assert table.headers[:3] == ["订单号", "订单号", "金额"]
         assert len(rows[0]) >= 3
+
+
+class TestExcelIntegerIds:
+    """Excel 把订单号、商品 ID 存成数字时，读出来不能带 `.0`。
+
+    京东皇莉诗 2026-06 对账：脊柱订单号是 `349603270732.0`，结算表是
+    `349603270732`。挂钩用 normalize_key 折掉了 `.0`，界面显示「关联上了」；
+    投影当时只做 cast(Utf8)，对不上，456 行推广费报表是 0。
+    源头收成不带 `.0` 的整数，以后哪一层忘了归一也不会再踩这个坑。
+    """
+
+    def test_xlsx_numeric_ids_come_out_as_integers(self, tmp_xlsx):
+        path = tmp_xlsx(
+            [
+                ["订单号", "商品ID", "金额"],
+                [349603270732.0, 10160070484512.0, -65.41],
+            ]
+        )
+        _, rows = _cells(path)
+        assert rows[0][0] == 349603270732
+        assert rows[0][1] == 10160070484512
+        assert rows[0][2] == -65.41
+
+    def test_csv_dot_zero_is_left_as_text_here(self, tmp_csv):
+        """CSV 已经是文本，解析层不动；归一阶段会把纯数字的 `.0` 折掉。"""
+        path = tmp_csv("订单号,金额\n349603270732.0,10\n")
+        _, rows = _cells(path)
+        assert rows[0][0] == "349603270732.0"

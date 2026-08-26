@@ -16,7 +16,7 @@ import polars as pl
 from ..model.schema import Metric, Model, NodeExpr, Predicate, Template, ValueExpr
 from ..money import decimal_amount, money_float, sum_amounts
 from .classify import COL_COUNT_WITHOUT_ORDER, COL_MAJOR, COL_MINOR, COL_VIA
-from .link import LINK_KEY, LINKED
+from .link import LINK_KEY, LINK_SPLIT, LINKED
 from .normalize import PARENT_FIRST, is_parent_only
 from .predicate import PredicateError, compile_where
 from .types import ANCHOR_FILE, ANCHOR_ROW, ANCHOR_SHA, ANCHOR_SHEET
@@ -102,6 +102,10 @@ def evaluate_metric(
         amount = -amount.abs()
     elif metric.sign == "abs_positive":
         amount = amount.abs()
+
+    # 源字段兜底会把一行铺成多行，份额在挂钩时算好。这里乘上，总额不变。
+    if LINK_SPLIT in frame.columns:
+        amount = amount * pl.col(LINK_SPLIT).fill_null(1.0)
 
     frame = frame.with_columns(amount.fill_null(0.0).alias(AMOUNT))
 

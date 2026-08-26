@@ -168,8 +168,22 @@ class TestCleaningARow:
         assert self.clean(["", "  ", None, "-"], 4) is None
 
     def test_a_row_of_zeros_is_not_blank(self):
-        """0 是假值，但一行全是 0 是真数据。用 `any()` 判空会把它整行丢掉。"""
-        assert self.clean([0, 0.0, 0], 3) == (0, 0.0, 0)
+        """0 是假值，但一行全是 0 是真数据。用 `any()` 判空会把它整行丢掉。
+
+        Excel 把 0 存成 0.0，清洗层会收成 int 0（和订单号同一条规则）。
+        收成 0 之后仍然是真值，不能当成空行。
+        """
+        assert self.clean([0, 0.0, 0], 3) == (0, 0, 0)
+
+    def test_excel_integer_ids_lose_the_dot_zero(self):
+        """订单号、商品 ID 被 Excel 存成 float 时，不能留下 123.0。"""
+        assert self.clean([349603270732.0, 10160070484512.0, -65.41], 3) == (
+            349603270732, 10160070484512, -65.41,
+        )
+
+    def test_version_like_floats_with_fraction_stay(self):
+        """带小数的格子是金额或时间，不能当成 ID 收成 int。"""
+        assert self.clean([65.41, 45413.5], 2) == (65.41, 45413.5)
 
     def test_short_rows_are_padded_and_long_ones_kept(self):
         assert self.clean(["甲"], 3) == ("甲", None, None)

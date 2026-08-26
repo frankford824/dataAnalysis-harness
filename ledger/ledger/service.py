@@ -179,7 +179,7 @@ def recompute(
     where = note or store.name
     report(f"读表 · {where}", 0, len(files))
     ing = ingest(
-        files, model, [store.name],
+        files, model, [store.name, *store.aliases],
         each=lambda done, total: report(f"读表 · {where}", done, total),
     )
     out.unknown_tables = unknown_tables(ing, store)
@@ -233,7 +233,7 @@ def simulate(ws: Workspace, model: Model, store: Store) -> list[dict[str, Any]]:
     files = ws.active_files(store.id)
     if not files:
         return []
-    ing = ingest(files, model, [store.name])
+    ing = ingest(files, model, [store.name, *store.aliases])
     result = run(ing, store.platform)
     out = []
     for (_s, _period), sl in sorted(result.slices.items(), key=lambda kv: kv[0][1] or ""):

@@ -38,6 +38,33 @@ class NormalizeError(Exception):
     pass
 
 
+#: float64 还能无损表示的最大整数（2^53）。和 parse._EXACT_INT 同一条线。
+_EXACT_INT = 9007199254740992
+
+
+def _as_text(value: object) -> object:
+    """单元格变成进入 Utf8 列之前的值。Excel 整数不要留下 `.0`。
+
+    解析层已经把 xlsx 里的整数 float 收成 int；这里再做一遍，是因为测试和
+    向导会直接构造 RawTable，绕过解析。CSV 里已经写成 `"349603270732.0"`
+    的，也在这里折掉——那是 Excel 另存为文本之后的样子。
+
+    只砍「整段都是数字再加 `.0`」的。`V1.0`、运单号 `SF123.0` 这种真名字不动。
+    datetime 原样留下，交给后面的时间归一。
+    """
+    if value is None or value == "":
+        return None
+    if type(value) is float:
+        if value.is_integer() and abs(value) <= _EXACT_INT:
+            return str(int(value))
+        return value
+    if type(value) is int:
+        return str(value)
+    if type(value) is str and value.endswith(".0") and value[:-2].isdigit():
+        return value[:-2]
+    return value
+
+
 def normalize(table: RawTable, template: Template) -> tuple[pl.DataFrame, list[str]]:
     """把原始表归一为按字段角色命名的数据帧。
 
@@ -60,8 +87,10 @@ def normalize(table: RawTable, template: Template) -> tuple[pl.DataFrame, list[s
         anchors[ANCHOR_SHEET].append(table.ref.sheet or "")
         anchors[ANCHOR_ROW].append(row.row_no)
 
+    # 所有角色先收成 Utf8。整数（订单号、商品 ID）不能走 Polars/Python 默认的
+    # str(123.0) → "123.0"，否则挂钩时和另一张表对不上。金额列随后会再解回数字。
     frame = pl.DataFrame(
-        {role: pl.Series(role, [None if v == "" else v for v in vals], dtype=pl.Utf8, strict=False)
+        {role: pl.Series(role, [_as_text(v) for v in vals], dtype=pl.Utf8, strict=False)
          for role, vals in data.items()}
         | {k: pl.Series(k, v) for k, v in anchors.items()}
     )

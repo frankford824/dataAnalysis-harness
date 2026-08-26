@@ -45,6 +45,42 @@ def _facts(pairs: list[tuple[str, float]], metric_id: str = "freight_cost") -> p
     )
 
 
+class TestExcelFloatOrderIdStillProjects:
+    """脊柱上的订单号带着 Excel 的 `.0`，源事实没有，投影也得对上。
+
+    挂钩用 normalize_key，会把 `349603270732.0` 折成 `349603270732`，所以界面
+    上显示挂上了。投影原先只把脊柱列 cast 成文本再 join，两边对不上，钱就
+    留在未进账清单里——科目对、单号对、linked=True，进账列却是破折号。
+
+    实测京东皇莉诗 2026-06 四单：货款 27.60、平台服务费 −8.67、商品成本 −7.23。
+    """
+
+    def test_a_trailing_dot_zero_still_gets_the_money(self):
+        spine = _spine([
+            {"order_id": "349603270732.0", "store": "s", "period": "2026-06"},
+        ])
+        proj = project(
+            _facts([("349603270732", 20.8)]),
+            _metric(Allocation(mode="even")),
+            spine,
+        )
+        assert proj.facts.get_column("amount").to_list() == [20.8]
+        assert proj.facts.get_column("link_key").to_list() == ["349603270732"]
+
+    def test_two_spine_rows_of_the_same_order_still_split(self):
+        """同一单两行商品，Excel 都留下 .0，费用仍按行均分。"""
+        spine = _spine([
+            {"order_id": "331484473941.0", "store": "s", "period": "p"},
+            {"order_id": "331484473941.0", "store": "s", "period": "p"},
+        ])
+        proj = project(
+            _facts([("331484473941", -6.0)]),
+            _metric(Allocation(mode="even")),
+            spine,
+        )
+        assert proj.facts.get_column("amount").to_list() == [-3.0, -3.0]
+
+
 class TestEvenAllocation:
     """按笔数均分。1688 的口径。"""
 

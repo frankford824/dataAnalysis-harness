@@ -68,7 +68,7 @@ class TestBootstrap:
         """分开取的话，中间有人改了配置，界面会拿半新半旧的结构去渲染。"""
         body = client.get("/api/bootstrap").json()
         assert {"stores", "platforms", "editable", "statement", "sources", "accepts"} <= set(body)
-        assert any(s["name"] == "淘宝喜必顺" for s in body["stores"])
+        assert any(s["name"] == "汪学成-天猫喜必顺旗舰店" for s in body["stores"])
         assert any(n["headline"] == "profit" for n in body["statement"]), \
             "总览上放哪个数由模型说，界面不该写死节点 id"
 
@@ -256,7 +256,7 @@ class TestTrend:
         body = stubbed.get("/api/trend", params={"store_id": "taobao_xibishun"}).json()
         rows = {r["id"]: r for r in body["rows"]}
         assert rows["n_receipt"]["cells"]["2026-05"]["value"] == 1000.0
-        assert body["scope"] == "淘宝喜必顺"
+        assert body["scope"] == "汪学成-天猫喜必顺旗舰店"
 
     def test_empty_workspace_is_not_an_error(self, client):
         body = client.get("/api/trend").json()
@@ -338,7 +338,7 @@ class TestStoreDetail:
         data = _xlsx_bytes([["订单号"], ["A001"]])
         _upload(client, ("运费-淘宝喜必顺.xlsx", data))
         body = client.get("/api/stores/taobao_xibishun").json()
-        assert body["store"]["name"] == "淘宝喜必顺"
+        assert body["store"]["name"] == "汪学成-天猫喜必顺旗舰店"
         assert [f["name"] for f in body["files"]] == ["运费-淘宝喜必顺.xlsx"]
 
     def test_period_never_computed_is_404(self, client):
@@ -372,7 +372,7 @@ class TestStoresEndpoint:
     def test_lists_registered_stores(self, client):
         res = client.get("/api/stores")
         assert res.status_code == 200
-        assert "淘宝喜必顺" in {s["name"] for s in res.json()["stores"]}
+        assert "汪学成-天猫喜必顺旗舰店" in {s["name"] for s in res.json()["stores"]}
 
     def test_exposes_entity_so_ui_can_flag_missing(self, client):
         stores = client.get("/api/stores").json()["stores"]
@@ -426,7 +426,7 @@ class TestEditStore:
         """name 是认文件的依据，改了以前交过的文件立刻认不出。"""
         res = client.patch("/api/stores/taobao_xibishun", json={"name": "新名字"})
         assert res.status_code == 400
-        assert client.get("/api/stores").json()["stores"][0]["name"] == "淘宝喜必顺"
+        assert client.get("/api/stores").json()["stores"][0]["name"] == "汪学成-天猫喜必顺旗舰店"
 
     def test_adds_a_store(self, client, sandbox):
         res = client.post("/api/stores", json={
@@ -438,7 +438,7 @@ class TestEditStore:
 
     def test_refuses_duplicate_name(self, client, sandbox):
         res = client.post("/api/stores", json={
-            "id": "taobao_other", "name": "淘宝喜必顺", "platform": "taobao",
+            "id": "taobao_other", "name": "汪学成-天猫喜必顺旗舰店", "platform": "taobao",
         })
         assert res.status_code == 400
 

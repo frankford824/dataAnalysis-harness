@@ -352,6 +352,31 @@ class TestPddPromotionTotalRow:
         assert item.recognition.template_id == "promotion_pdd_v1", item.recognition.reason
 
 
+class TestJdPromotionNumericSku:
+    """Excel 把跟单 SKU ID 存成数字时，归一后不能带 `.0`。
+
+    京东皇莉诗 2026-06：推广 456 行合计对得上，商品 ID 看起来也对，但报表是 0。
+    根因是 Excel 把 ID 读成 `10160070484512.0`，和订单明细的 `10160070484512` 对不上。
+    """
+
+    HEADER = [
+        "日期", "跟单SKU ID", "跟单SKU名称", "SPU ID", "展现数", "点击数",
+        "点击率(%)", "花费", "千次展现成本", "平均点击成本",
+    ]
+
+    def test_product_id_has_no_dot_zero(self, tmp_path, model):
+        item = _intake(tmp_path, "推广-京东皇莉诗.xlsx", [
+            self.HEADER,
+            ["20260601~20260630", 10160070484512.0, "气球", 10024117767630.0,
+             8328.0, 330.0, 3.96, 33.49, 4.02, 0.1],
+        ], model)
+        assert item.frame is not None, item.error
+        assert item.recognition is not None
+        assert item.recognition.template_id == "promotion_jd_v1", item.recognition.reason
+        assert item.frame.get_column("product_id").to_list() == ["10160070484512"]
+        assert item.frame.get_column("spend").to_list() == [pytest.approx(33.49)]
+
+
 class TestPddOrdersWithNoTimeAtAll:
     """成交时间整列空着的那 127 行。账期得从订单号里兜底，否则它们从损益表上消失。"""
 
@@ -415,6 +440,15 @@ class TestJdSpineHasNoWaybillColumn:
         fields = {p.field for p in jd.expect}
         assert fields == {"order_state"}, "京东的覆盖率分母还在看运单号"
         assert jd.expect_label == "已出库"
+
+    def test_taobao_full_refund_is_not_expected_to_have_cost(self, model):
+        """发货前取消的单子千牛仍有运单号，不能再按「已发货」去要成本。"""
+        tb = next(m for m in model.metrics if m.id == "goods_cost").for_platform("taobao")
+        assert tb is not None
+        fields = {p.field for p in tb.expect}
+        assert fields == {"tracking_no", "refund_status"}
+        assert tb.expect_label == "已发货且未全额退款"
+        assert tb.link.fallback_key == "original_order_id"
 
     def test_the_spine_really_has_no_waybill(self, model):
         template = model.template("jd_order_detail_v1")

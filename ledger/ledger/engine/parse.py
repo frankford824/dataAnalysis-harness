@@ -45,6 +45,10 @@ _HEADER_PROBE_BYTES = 1 << 20
 #: 编码回退顺序。模板会指定编码，这里只在指定编码解不开时兜底。
 _ENCODING_FALLBACKS = ("utf-8-sig", "gb18030", "utf-16", "utf-8")
 
+#: float64 还能无损表示的最大整数（2^53）。再大的订单号 Excel 已经丢位，
+#: 转成 int 是假装能找回，不动它。
+_EXACT_INT = 9007199254740992.0
+
 
 class ParseError(Exception):
     """文件读不出来。消息必须说清是格式问题还是内容问题。"""
@@ -684,11 +688,25 @@ def _cell_cleaner(options: ParseOptions):
         判类型用 `v.__class__ is str` 而不是 `isinstance`，因为后者是一次真函数调用，
         在这个量级上是一秒半。代价是 str 的子类会走到 else 分支不被清洗——上游只有
         calamine、csv、openpyxl 三个来源，都只产出原生 str，所以这个代价目前是零。
+
+        Excel 把所有数字存成 float。订单号、商品 ID 这种整数读出来是 `349603270732.0`，
+        后面一旦 `str()` / `cast(Utf8)` 就会变成带 `.0` 的字符串，和另一张表里的
+        `349603270732` 对不上。整数且没超出 float64 精确范围的，这里收成 int。
+        带小数的金额、Excel 日期序列的小数部分（`.5` 是中午）原样留下。
         """
         cells = [
             ("" if (s := v.strip(chars)) in nulls else s)
             if v.__class__ is str
-            else ("" if v is None else v)
+            else (
+                "" if v is None
+                else (
+                    int(v)
+                    if v.__class__ is float
+                    and v.is_integer()
+                    and -_EXACT_INT <= v <= _EXACT_INT
+                    else v
+                )
+            )
             for v in values or ()
         ]
         if cells.count("") == len(cells):
@@ -704,7 +722,14 @@ def _strip(value: Any, options: ParseOptions) -> str:
     """双向去除空白与制表符。方向不一致，只去一边会留下脏字符。"""
     if value is None:
         return ""
-    s = str(value)
+    if (
+        value.__class__ is float
+        and value.is_integer()
+        and -_EXACT_INT <= value <= _EXACT_INT
+    ):
+        s = str(int(value))
+    else:
+        s = str(value)
     if options.strip_tabs:
         s = s.strip("\t\u3000 \r\n\ufeff")
     else:

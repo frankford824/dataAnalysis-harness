@@ -160,7 +160,7 @@
     - {field: order_state, op: not_in, value: [已取消, 取消], include_null: true}
   sign: negate
   time_basis: order_date
-  link: {key: sub_order_id, to: order.sub_order_id, grain: order}
+  link: {key: sub_order_id, to: order.sub_order_id, grain: order, fallback_key: original_order_id, fallback_to: [order.order_id]}
   expect:
     - {field: tracking_no, op: notnull}
   expect_label: 已发货
@@ -172,7 +172,21 @@
     三家店缺商品成本的订单里，没运单号的占 80%(淘宝)、94%(1688)、95%(抖音)，
     按全部订单算分母的话，覆盖率永远差十几个点，而缺口是虚的。
 
+    子订单号对不上时用原始线上订单号兜底。天猫拆单、合单之后，聚水潭会给
+    新的线上子订单编号，千牛还是买家下单时的号；508 行成本卡在这里，
+    主订单对得上、子订单对不上。兜底后按该主订单下的子订单数均分，
+    这一行聚水潭的金额总额不变。空号行（赠品）不走这条——主字段为空就停，
+    否则会把业务确认暂不计入的赠品成本铺进账。
+
   by_platform:
+    - platform: taobao
+      # 千牛有物流单号不等于货已出库：买家在揽收前取消，千牛仍留着运单号，
+      # 退款状态是「退款成功」，聚水潭没有出库行。按「已发货」去要成本，
+      # 天猫皇莉诗 2026-06 会有 543 笔这种单把覆盖率从 99% 拖到 97.7%，结不了账。
+      expect:
+        - {field: tracking_no, op: notnull}
+        - {field: refund_status, op: not_in, value: [退款成功], include_null: true}
+      expect_label: 已发货且未全额退款
     - platform: alibaba1688
       # 1688 的聚水潭表挂的是主订单号，不是子订单号，而且公式里除了 countifs：
       #   聚水潭成本=sumifs(聚水潭总成本, 原始线上订单号, 订单号)/countifs(订单明细订单号, 订单号)

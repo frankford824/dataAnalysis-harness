@@ -241,6 +241,14 @@ watch(
         <!-- 结账按钮灰着而不说为什么，是最容易被理解成「系统坏了」的一种状态。
              拦路的那几条本来就在自检里，但那是右栏第二个标签页，得先点开才看得见。 -->
         <n-alert
+          v-else-if="snap.can_close"
+          type="success"
+          :bordered="false"
+          style="margin-bottom: var(--s4)"
+        >
+          这一期可以结账了。右边若还有提示，是要人看一眼的，不拦结账。
+        </n-alert>
+        <n-alert
           v-else-if="blockers.length"
           type="error"
           :bordered="false"

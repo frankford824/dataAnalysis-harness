@@ -22,6 +22,7 @@ import polars as pl
 from ..model.schema import Metric
 from ..money import decimal_amount, money_float, sum_amounts
 from .link import SPINE_PERIOD, SPINE_STORE, Spine, target_role
+from .rules import norm_expr
 
 #: 脊柱事实的列。
 SPINE_FACT_COLUMNS = (
@@ -98,9 +99,17 @@ def project(
             notes=[f"脊柱上没有 {role} 这一列，指标 {metric.name} 无法投影"],
         )
 
+    # 两边的键都走同一套归一。挂钩时已经这样处理了（normalize_key），投影这里
+    # 原先只做了 cast(Utf8)，Excel 把订单号存成数字时脊柱上是 `349603270732.0`、
+    # 对账表是 `349603270732`，挂钩显示挂上了，投影对不上，钱进不了损益表。
+    #
+    # 实测京东皇莉诗 2026-06：四单货款 27.60、平台服务费 −8.67、商品成本 −7.23，
+    # 界面上科目对、单号对、linked=True，进账列却是破折号。财务点开未进账清单
+    # 以为漏记，其实是这一处拼接用了两套写法。
     keyed = spine_frame.with_columns(
-        pl.col(role).cast(pl.Utf8).alias("link_key")
+        norm_expr(pl.col(role).cast(pl.Utf8)).alias("link_key")
     ).with_row_index("spine_row")
+    by_key = by_key.with_columns(norm_expr(pl.col("link_key")).alias("link_key"))
 
     factor = _factor(keyed, metric)
     joined = keyed.join(by_key, on="link_key", how="left")

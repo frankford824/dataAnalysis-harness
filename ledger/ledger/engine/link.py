@@ -32,6 +32,8 @@ from .types import LinkReport
 #: 关联键归一后的列名。
 LINK_KEY = "__link_key__"
 LINKED = "__linked__"
+#: 源字段兜底时一行成本要铺到多个子订单上，每行乘这个份额，总额不变。
+LINK_SPLIT = "__link_split__"
 
 #: 脊柱提供的上下文列。挂上订单的行继承这些值，不需要自己带店铺和账期。
 SPINE_STORE = "store"
@@ -75,7 +77,7 @@ class Spine:
             table[key] = (
                 str(values.get(SPINE_STORE) or ""),
                 str(values.get(SPINE_PERIOD) or ""),
-                str(values.get(SPINE_PRODUCT) or ""),
+                normalize_key(values.get(SPINE_PRODUCT) or ""),
             )
 
     def keys(self, role: str) -> set[str]:
@@ -115,6 +117,22 @@ class Spine:
             ka, kb = normalize_key(a), normalize_key(b)
             if ka and kb and ka not in out:
                 out[ka] = kb
+        return out
+
+    def groups(self, source: str, target: str) -> dict[str, list[str]]:
+        """一个源键对应脊柱上的全部目标键。一对多（一个主订单多个子订单）要铺开。"""
+        if self.frame.is_empty():
+            return {}
+        if source not in self.frame.columns or target not in self.frame.columns:
+            return {}
+        out: dict[str, list[str]] = {}
+        for a, b in self.frame.select([source, target]).iter_rows():
+            ka, kb = normalize_key(a), normalize_key(b)
+            if not ka or not kb:
+                continue
+            got = out.setdefault(ka, [])
+            if kb not in got:
+                got.append(kb)
         return out
 
     def context(self, role: str, key: str) -> tuple[str, str, str] | None:
@@ -202,6 +220,15 @@ def link(
         .fill_null(False)
         .alias(LINKED)
     )
+    extra, split_hits = _via_source_fallback(frame, rule, spine, role)
+    if extra is not None:
+        frame = extra
+        report.fallback_rows += split_hits
+        frame = frame.with_columns(
+            (pl.col(LINK_KEY).is_in(list(known)) & (pl.col(LINK_KEY) != EXCLUDED_KEY))
+            .fill_null(False)
+            .alias(LINKED)
+        )
 
     if metric.naturally_unlinked:
         report.naturally_unlinked_rows = int(frame.select((~pl.col(LINKED)).sum()).item())
@@ -254,6 +281,71 @@ def _via_fallback(
             .alias(LINK_KEY)
         )
     return frame, hit
+
+
+def _via_source_fallback(
+    frame: pl.DataFrame, rule: LinkRule, spine: Spine, role: str
+) -> tuple[pl.DataFrame | None, int]:
+    """主字段挂不上的行，换源表另一列再试，命中后按主订单铺到每个子订单。
+
+    聚水潭「线上子订单编号」和千牛「子订单编号」对不上时，「原始线上订单号」
+    往往还能对上主订单。一对多不能只换算成其中一个子订单——成本会堆在一行上，
+    别的行仍显示没成本。铺开之后每行乘 1/n，这一行聚水潭的金额总额不变。
+
+    主字段为空的行不走这条。聚水潭里空号行 100% 是单价为 0 的赠品，业务确认
+    先不计入；要是连空号也按主订单铺进去，赠品成本会悄悄进账，离人工表更远。
+    """
+    alt = rule.fallback_key
+    if not alt or alt not in frame.columns or LINKED not in frame.columns:
+        return None, 0
+    unlinked = ~pl.col(LINKED).fill_null(False)
+    has_primary = pl.col(LINK_KEY).is_not_null() & (pl.col(LINK_KEY) != "")
+    pending = frame.filter(unlinked & has_primary)
+    gifts = frame.filter(unlinked & ~has_primary)
+    if pending.is_empty():
+        return None, 0
+
+    alt_role = ""
+    for spec in rule.fallback_to:
+        name = target_role(spec)
+        if name and name != role:
+            alt_role = name
+            break
+    if not alt_role or alt_role not in spine.frame.columns or role not in spine.frame.columns:
+        return None, 0
+
+    groups = spine.groups(alt_role, role)
+    if not groups:
+        return None, 0
+    mapping = pl.DataFrame({
+        "_fb": [k for k, vs in groups.items() for _ in vs],
+        "_sub": [v for vs in groups.values() for v in vs],
+        "_n": [len(vs) for vs in groups.values() for _ in vs],
+    })
+    if mapping.is_empty():
+        return None, 0
+
+    pending = pending.with_columns(norm_expr(pl.col(alt).cast(pl.Utf8)).alias("_fb"))
+    pending = pending.filter(pl.col("_fb").is_not_null() & (pl.col("_fb") != ""))
+    if pending.is_empty():
+        return None, 0
+    hit = pending.join(mapping, on="_fb", how="inner")
+    if hit.is_empty():
+        return None, 0
+    n_src = hit.get_column("_fb").n_unique()
+    hit = hit.with_columns(
+        pl.col("_sub").alias(LINK_KEY),
+        pl.lit(True).alias(LINKED),
+        (1.0 / pl.col("_n")).alias(LINK_SPLIT),
+    ).drop(["_fb", "_sub", "_n"])
+
+    kept = frame.filter(pl.col(LINKED).fill_null(False)).with_columns(
+        pl.lit(1.0).alias(LINK_SPLIT)
+    )
+    miss = pending.join(mapping.select("_fb").unique(), on="_fb", how="anti").drop("_fb")
+    miss = miss.with_columns(pl.lit(1.0).alias(LINK_SPLIT))
+    leftover = gifts.with_columns(pl.lit(1.0).alias(LINK_SPLIT))
+    return pl.concat([kept, hit, miss, leftover], how="diagonal_relaxed"), n_src
 
 
 def _without_link(frame: pl.DataFrame) -> pl.DataFrame:

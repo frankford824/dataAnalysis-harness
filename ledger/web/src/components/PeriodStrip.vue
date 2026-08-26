@@ -92,6 +92,7 @@ function statusOf(p) {
   if (!p) return { mark: '', text: '' }
   if (p.state === 'closed') return { mark: 'ok', text: '已结账' }
   if (p.can_close === false) return { mark: 'bad', text: '结不了' }
+  if (p.can_close) return { mark: 'ready', text: '可结账' }
   return { mark: 'idle', text: '未结账' }
 }
 
@@ -212,6 +213,7 @@ const status = computed(() => statusOf(current.value))
   background: currentColor;
 }
 .state.ok { color: var(--ok); }
+.state.ready { color: var(--ok); }
 .state.bad { color: var(--bad); }
 .state.idle { color: var(--n5); }
 
