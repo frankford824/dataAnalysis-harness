@@ -748,3 +748,71 @@ class TestMarketingMinorFollowsTheOfficialSubclass:
         assert major == "marketing_fee"
         assert minor == "消费券"
         assert report.unmatched == {}
+
+    #: fee-rules.csv 原先有一条 before 规则把下面五个词并在一起、细项留空，
+    #: 界面下钻只剩一个没有名字的口子。拆开之后两边分工，各有各的理由：
+    #:
+    #:   礼金那两个词    留在 fee-rules.csv 里，补上字典的业务小类。模板链里
+    #:                   没有认「礼金」的规则；字典收了这两个名字，但字典按业务
+    #:                   描述查，而这一族业务描述整列为空——规则是唯一的接盘手。
+    #:   品牌新享那三个  从规则里摘掉，交回模板。模板本来就逐条落了细项，
+    #:                   规则压在前面大类给的一样，只是把细项吞掉。
+    #:
+    #: 生产上这五个词只在淘宝美食专家 2026-06 出过，43186 行 -59008.01 元，
+    #: 其中礼金两个词占 41546 行 -56709.86。回放语料里没有这家店，所以 replay
+    #: 那道门看不见这次改动——下面这几条断言是它唯一的验收保障。
+    LIJIN = [
+        ("淘宝新客礼金技术服务费(KY_ITEM)(5121635871904014202)扣款", "淘宝新客礼金"),
+        ("淘宝新品礼金技术服务费(KY_ITEM)(5121635871904014202)扣款", "淘宝新品礼金"),
+    ]
+
+    #: 摘出去交回模板的那三个。它们同时也在 XINXIANG 里——那边验的是
+    #: 「结果对不对」，这边验的是「谁给出的」。
+    HANDED_BACK = [
+        ("品牌新享淘宝老客礼金软件服务费(5121635871904014202)扣款", "新享淘宝老客"),
+        ("品牌新享-淘宝营销托管软件服务费(5121635871904014202)扣款", "淘宝新客托管"),
+        ("品牌新享淘宝限时礼金软件服务费(5121635871904014202)扣款", "新享淘宝限时"),
+    ]
+
+    @pytest.mark.parametrize("template", SETTLEMENT_TEMPLATES)
+    @pytest.mark.parametrize("remark,minor", LIJIN)
+    def test_lijin_lands_on_the_dictionary_subclass(
+        self, model, template: str, remark: str, minor: str
+    ) -> None:
+        """礼金两个词按字典里的业务小类落细项，三张模板给同一个答案。"""
+        got_major, got_minor, report = self._classify_remark(model, remark, template)
+        assert got_major == "marketing_fee"
+        assert got_minor == minor
+        assert report.unmatched == {}
+
+    @pytest.mark.parametrize("remark", [r for r, _ in LIJIN])
+    def test_lijin_has_no_other_catcher(self, model, remark: str) -> None:
+        """把界面规则整份摘掉，礼金这两个词就掉进未归类。
+
+        这条不验功能，是拦一次「顺手清理」：这两个词长得和品牌新享那一族很像，
+        而那一族确实可以从 fee-rules.csv 里删掉交回模板。谁要是照着一起删了，
+        淘宝美食专家 2026-06 那 41546 行 -56709.86 元会整块掉进未归类——
+        不报错，钱也没少，只是从营销费用里消失，没人会立刻发现。
+        """
+        bare = model.model_copy(update={"fee_rules": ()})
+        got_major, got_minor, report = self._classify_remark(
+            bare, remark, "taobao_settlement_alipay_v1")
+        assert got_major is None
+        assert got_minor is None
+        assert report.unmatched
+
+    @pytest.mark.parametrize("template", SETTLEMENT_TEMPLATES)
+    @pytest.mark.parametrize("remark,minor", HANDED_BACK)
+    def test_handed_back_flavours_come_from_the_template(
+        self, model, template: str, remark: str, minor: str
+    ) -> None:
+        """这三个变体不靠界面规则也归得对，所以从那条规则里摘掉是安全的。
+
+        和上一条正好相反。原先规则压在模板前面，大类给的一样、细项却留空，
+        等于白盖掉模板已经写好的小类；摘掉之后模板自己就给出正确的大类和细项。
+        """
+        bare = model.model_copy(update={"fee_rules": ()})
+        got_major, got_minor, report = self._classify_remark(bare, remark, template)
+        assert got_major == "marketing_fee"
+        assert got_minor == minor
+        assert report.unmatched == {}
