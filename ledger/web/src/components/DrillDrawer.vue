@@ -35,6 +35,10 @@ const file = ref('')
 const term = ref('')
 const order = ref('amount')
 
+const terms = computed(() => [
+  ...new Set(term.value.trim().split(/[\s,，;；]+/).filter(Boolean)),
+])
+
 const diff = computed(() => {
   const d = data.value
   if (!d || d.value === null || d.value === undefined) return null
@@ -78,6 +82,10 @@ function pickSubject(s) {
 }
 function pickFile(f) {
   file.value = file.value === f ? '' : f
+}
+function applyFilter() {
+  page.value = 0
+  load()
 }
 function close() {
   show.value = false
@@ -144,13 +152,16 @@ function close() {
             />
             <n-input
               v-model:value="term"
+              type="textarea"
               size="small"
-              :placeholder="(data?.key_label || '订单号') + '或科目'"
-              style="width: 200px"
+              :autosize="{ minRows: 1, maxRows: 3 }"
+              :placeholder="(data?.key_label || '订单号') + '或科目；多个用逗号、空格或换行'"
+              style="width: 280px"
               clearable
-              @keyup.enter="page = 0; load()"
+              @keydown.enter.exact.prevent="applyFilter"
             />
-            <n-button size="small" @click="page = 0; load()">筛</n-button>
+            <span v-if="terms.length > 1" class="xs muted num">{{ terms.length }} 项</span>
+            <n-button size="small" @click="applyFilter">筛</n-button>
           </div>
 
           <n-alert

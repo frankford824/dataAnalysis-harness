@@ -461,10 +461,16 @@ def _selected(
     if file:
         facts = facts.filter(pl.col("file_name") == file)
     if q and q.strip():
-        text = q.strip()
+        # 批量核对时，人手里通常是一列订单号。直接从 Excel 复制过来是换行，
+        # 从聊天里抄过来常见逗号、中文逗号或空格。每一项仍按字面量包含匹配，
+        # 多项之间取 OR；单关键词的原行为不变。
+        terms = tuple(dict.fromkeys(
+            part for part in re.split(r"[\s,，;；]+", q.strip()) if part
+        ))
         hit = pl.lit(False)
-        for col in ("link_key", "subject", "minor", "file_name", "sheet"):
-            hit = hit | pl.col(col).cast(pl.Utf8).str.contains(text, literal=True)
+        for text in terms:
+            for col in ("link_key", "subject", "minor", "file_name", "sheet"):
+                hit = hit | pl.col(col).cast(pl.Utf8).str.contains(text, literal=True)
         facts = facts.filter(hit.fill_null(False))
     return facts
 

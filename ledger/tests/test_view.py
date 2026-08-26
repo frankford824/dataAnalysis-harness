@@ -378,6 +378,20 @@ def test_keyword_searches_the_order_id():
     assert [r["row_no"] for r in d["sample"]] == [6]
 
 
+def test_keyword_accepts_a_pasted_column_of_order_ids():
+    """从 Excel 复制一列订单号，换行分隔的每一项都按 OR 匹配。"""
+    d = drill(_many(), _tree(), "d1", q="B1\nB3")
+    assert {r["row_no"] for r in d["sample"]} == {5, 7}
+    assert d["selection"]["rows"] == 2
+
+
+def test_keyword_accepts_mixed_batch_separators_and_fields():
+    """逗号、中文逗号、分号和空格都能分项，订单号与科目可以混着筛。"""
+    d = drill(_many(), _tree(), "d1", q="A2，B2; 赔付")
+    assert {r["row_no"] for r in d["sample"]} == {3, 4, 5, 6, 7}
+    assert d["selection"]["rows"] == 5
+
+
 def test_promotion_drill_labels_the_key_as_product_id(real):
     """拼多多商品分天推广挂的是商品 ID。写成订单号的话人会对着订单库去查。"""
     d = drill(_facts([{"metric_id": "ad_cost", "amount": -7.47}]), real, "n_ad")
