@@ -149,3 +149,7 @@
   commission_on_loss: deduct
   note: >
     2026-08-21 从 finance 上同步回来的，同上：界面上登的店，仓库里没有。
+- id: taobao_mt8egr48
+  name: 淘宝美食专家
+  platform: taobao
+  commission_on_loss: deduct

@@ -24,3 +24,7 @@ before,taobao,remark,contains,先用后付技术服务费,software_fee,,,,,,2026
 after,taobao,remark,contains,退差价/退货退款/退货款/退运费/退款/差价/返差价,trade_refund,销售退款,,,空业务描述、备注是退款短词。天猫 6 月这一块拦着结账，不在原先 20 条里。,,2026-08-20T14:00:00+08:00
 after,taobao,remark,contains,好评返现/协商返款/协商售后/KT运损补偿,trade_compensation,交易赔付,,,空业务描述。给买家的钱，不是把货款退回去。避开「退回」，那是网商银行进出腿。,,2026-08-20T14:00:00+08:00
 before,pdd,subject,contains,其他支出-分账支出,logistics_fee,,,,,,2026-08-20T16:41:49+08:00
+before,taobao,subject,contains,软件服务费-淘金币软件服务费/服务费-大服饰全球包邮跨境服务基础费_信息技术服务,software_fee,,,,,,2026-08-25T17:15:24+08:00
+before,taobao,remark,contains,淘宝新客礼金技术服务费/淘宝新品礼金技术服务费/品牌新享淘宝老客礼金软件服务费/品牌新享-淘宝营销托管软件服务费/品牌新享淘宝限时礼金软件服务费/售后退款追缴消费券返还金额,marketing_fee,,,,,,2026-08-25T17:24:39+08:00
+before,taobao,remark,contains,淘宝物流轨迹超时红包/卖家延迟发货赔付红包/淘宝物流轨迹异常红包/淘宝缺货赔付红包/淘宝虚假发货赔付红包/淘宝卖家服务态度差补偿红包/补寄未履行补偿红包/淘宝消费者保证金/淘宝特色服务赔付红包/基金代发任务,trade_compensation,,,,,,2026-08-25T17:24:39+08:00
+before,taobao,remark,contains,超过消费券封顶金额的平台出资合作费用/品牌新享淘宝闪降礼金软件服务费,software_fee,,,,,,2026-08-25T17:24:39+08:00
