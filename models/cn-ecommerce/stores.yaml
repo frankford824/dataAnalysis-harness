@@ -153,3 +153,215 @@
   name: 淘宝美食专家
   platform: taobao
   commission_on_loss: deduct
+- id: douyin_mt9s1onx
+  name: 蔡果-得物气球
+  platform: douyin
+  commission_on_loss: deduct
+  note: 2026-08-26 从 finance 上同步回来的：界面上登记的店，仓库里没有，不写进来下一次部署会把它盖掉。字段照线上 /api/stores 原样抄，id 和 name 不动。
+- id: taobao_mt9s7n9x
+  name: 陈慨-天猫喜舒曼礼品旗舰店
+  platform: taobao
+  commission_on_loss: deduct
+  note: 2026-08-26 从 finance 上同步回来的：界面上登记的店，仓库里没有，不写进来下一次部署会把它盖掉。字段照线上 /api/stores 原样抄，id 和 name 不动。
+- id: douyin_mt9sbkne
+  name: 蔡果-抖店喜品
+  platform: douyin
+  commission_on_loss: deduct
+  note: 2026-08-26 从 finance 上同步回来的：界面上登记的店，仓库里没有，不写进来下一次部署会把它盖掉。字段照线上 /api/stores 原样抄，id 和 name 不动。
+- id: taobao_mt9sc10p
+  name: 陈慨-淘宝拾梦小屋99
+  platform: taobao
+  commission_on_loss: deduct
+  note: 2026-08-26 从 finance 上同步回来的：界面上登记的店，仓库里没有，不写进来下一次部署会把它盖掉。字段照线上 /api/stores 原样抄，id 和 name 不动。
+- id: taobao_mt9scbh6
+  name: 陈慨-淘宝嘻嘻哈哈
+  platform: taobao
+  commission_on_loss: deduct
+  note: 2026-08-26 从 finance 上同步回来的：界面上登记的店，仓库里没有，不写进来下一次部署会把它盖掉。字段照线上 /api/stores 原样抄，id 和 name 不动。
+- id: taobao_mt9scjag
+  name: 陈慨-天猫浅花涧旗舰店
+  platform: taobao
+  commission_on_loss: deduct
+  note: 2026-08-26 从 finance 上同步回来的：界面上登记的店，仓库里没有，不写进来下一次部署会把它盖掉。字段照线上 /api/stores 原样抄，id 和 name 不动。
+- id: taobao_mt9sjmls
+  name: 谷本文-luckyglow旗舰店
+  platform: taobao
+  commission_on_loss: deduct
+  note: 2026-08-26 从 finance 上同步回来的：界面上登记的店，仓库里没有，不写进来下一次部署会把它盖掉。字段照线上 /api/stores 原样抄，id 和 name 不动。
+- id: taobao_mt9sjzvc
+  name: 谷本文-淘宝喜气洋洋家居用品
+  platform: taobao
+  commission_on_loss: deduct
+  note: 2026-08-26 从 finance 上同步回来的：界面上登记的店，仓库里没有，不写进来下一次部署会把它盖掉。字段照线上 /api/stores 原样抄，id 和 name 不动。
+- id: pdd_mt9sliee
+  name: 何润华-PDD泡泡堂气球布置
+  platform: pdd
+  commission_on_loss: deduct
+  note: 2026-08-26 从 finance 上同步回来的：界面上登记的店，仓库里没有，不写进来下一次部署会把它盖掉。字段照线上 /api/stores 原样抄，id 和 name 不动。
+- id: taobao_mt9sluo7
+  name: 何润华-天猫思福喜旗舰店
+  platform: taobao
+  commission_on_loss: deduct
+  note: 2026-08-26 从 finance 上同步回来的：界面上登记的店，仓库里没有，不写进来下一次部署会把它盖掉。字段照线上 /api/stores 原样抄，id 和 name 不动。
+- id: taobao_mt9smaj1
+  name: 刘露-陈婷-天猫阳光朵朵旗舰店
+  platform: taobao
+  commission_on_loss: deduct
+  note: 2026-08-26 从 finance 上同步回来的：界面上登记的店，仓库里没有，不写进来下一次部署会把它盖掉。字段照线上 /api/stores 原样抄，id 和 name 不动。
+- id: taobao_mt9smlcz
+  name: 刘露-王浩冉-淘宝藏依格
+  platform: taobao
+  commission_on_loss: deduct
+  note: 2026-08-26 从 finance 上同步回来的：界面上登记的店，仓库里没有，不写进来下一次部署会把它盖掉。字段照线上 /api/stores 原样抄，id 和 name 不动。
+- id: taobao_mt9snd3i
+  name: 刘露-王浩冉-天猫甜嘴熊旗舰店
+  platform: taobao
+  commission_on_loss: deduct
+  note: 2026-08-26 从 finance 上同步回来的：界面上登记的店，仓库里没有，不写进来下一次部署会把它盖掉。字段照线上 /api/stores 原样抄，id 和 name 不动。
+- id: taobao_mt9sno8d
+  name: 刘露-王岩-似锦童年旗舰店
+  platform: taobao
+  commission_on_loss: deduct
+  note: 2026-08-26 从 finance 上同步回来的：界面上登记的店，仓库里没有，不写进来下一次部署会把它盖掉。字段照线上 /api/stores 原样抄，id 和 name 不动。
+- id: pdd_mt9so37w
+  name: 邱倩倩-PDD乐趣节庆喜品派对
+  platform: pdd
+  commission_on_loss: deduct
+  note: 2026-08-26 从 finance 上同步回来的：界面上登记的店，仓库里没有，不写进来下一次部署会把它盖掉。字段照线上 /api/stores 原样抄，id 和 name 不动。
+- id: pdd_mt9sobot
+  name: 宋永康-PDDLucky惊喜派对
+  platform: pdd
+  commission_on_loss: deduct
+  note: 2026-08-26 从 finance 上同步回来的：界面上登记的店，仓库里没有，不写进来下一次部署会把它盖掉。字段照线上 /api/stores 原样抄，id 和 name 不动。
+- id: pdd_mt9sojk5
+  name: 宋永康-PDD国风新潮礼品店
+  platform: pdd
+  commission_on_loss: deduct
+  note: 2026-08-26 从 finance 上同步回来的：界面上登记的店，仓库里没有，不写进来下一次部署会把它盖掉。字段照线上 /api/stores 原样抄，id 和 name 不动。
+- id: other_yongbo
+  name: 永箔
+  platform: other
+  commission_on_loss: deduct
+  note: ERP shop_id 12876913，2026-06 起 306 单 451.87 万，是全公司金额最大的一家店。挂在「其它平台」下是 ERP 的兜底分类，实际渠道待业务确认。
+- id: offline_sunli
+  name: 孙俪
+  platform: offline
+  commission_on_loss: deduct
+  note: ERP shop_id 10885258，2026-06 起 408 单 282.55 万。店名只有两个字，认文件靠的是「文件名里包含店名」——两个字的店名很容易被别的文件名误命中，交表时文件名务必写成「对账-孙俪.xlsx」这种带前缀的形式。
+- id: taobao_zlvoey
+  name: 天猫zlvoey旗舰店
+  platform: taobao
+  commission_on_loss: deduct
+  note: ERP shop_id 14165762，2026-06 起 36,787 单 128.91 万。
+- id: pdd_xixihaha
+  name: 吴鹏-PDD嘻嘻哈哈派对用品
+  platform: pdd
+  commission_on_loss: deduct
+  note: ERP shop_id 16971532。和 taobao_mt9scbh6「陈慨-淘宝嘻嘻哈哈」是同一个牌子的两家店，两个店名互不包含，认文件不会串。
+- id: pdd_jingxi
+  name: 孙浩禹-PDD京禧派对用品
+  platform: pdd
+  commission_on_loss: deduct
+  note: ERP shop_id 15901117。和 xiaohongshu_jingxi「小红书京禧派对策划的店」同牌子不同平台。
+- id: pdd_xishuman
+  name: 吴鹏-PDD喜舒曼
+  platform: pdd
+  commission_on_loss: deduct
+  note: ERP shop_id 20367998。和 taobao_mt9s7n9x「陈慨-天猫喜舒曼礼品旗舰店」同牌子不同平台。
+- id: taobao_xingyunyuanwang
+  name: 汪学成-天猫幸运的愿望旗舰店
+  platform: taobao
+  aliases:
+  - 汪学成-天猫家居旗舰店
+  commission_on_loss: deduct
+  note: ERP shop_id 19564695。这家店改过名：ERP 里同一个 shop_id 出现两次，旧名「汪学成-天猫家居旗舰店」最后一单 2026-06-22（3 单 0 元），新名「汪学成-天猫幸运的愿望旗舰店」一路到 2026-08-26（11,171 单 39.15 万）。所以是一家店两个名字，登记一条、旧名留作别名，不是两家店。
+- id: pdd_qiqiugongfang
+  name: 宋永康-PDD气球创意工坊
+  platform: pdd
+  commission_on_loss: deduct
+  note: ERP shop_id 11234655。
+- id: pdd_yidali
+  name: 宋永康-PDD意大利本土
+  platform: pdd
+  commission_on_loss: deduct
+  note: ERP shop_id 12211544。
+- id: taobao_xifeimiao
+  name: 徐芹-天猫喜菲喵旗舰店
+  platform: taobao
+  commission_on_loss: deduct
+  note: ERP shop_id 17883875。
+- id: offline_wanghong
+  name: 王红
+  platform: offline
+  commission_on_loss: deduct
+  note: ERP shop_id 10894298，2026-06 起 74 单 18.997 万。店名只有两个字，而且是另外两家店名的子串（「亚马逊-王红」offline_amazon_wanghong、「国际站——王红」other_intl_wanghong）。最长匹配保证带前缀的那两个文件仍归它们自己，但反过来，任何文件名里凑巧出现「王红」二字都会落到这家店上。这家的文件名务必写成「对账-王红.xlsx」，且不要给它加更短的别名。
+- id: pdd_qianhuajian
+  name: 吴鹏-PDD浅花涧
+  platform: pdd
+  commission_on_loss: deduct
+  note: ERP shop_id 19259984。浅花涧这个牌子一共三家店：本店、douyin_qianhuajian（抖音浅花涧节日装饰）、taobao_mt9scjag（陈慨-天猫浅花涧旗舰店）。三个店名两两互不包含，认文件不会串。
+- id: pdd_xiaohongshu_qiqiu
+  name: 宋永康-PDD小红薯气球派对
+  platform: pdd
+  commission_on_loss: deduct
+  note: ERP shop_id 15331794。店名里的「小红薯」是店名，这家店在拼多多，不是小红书平台。
+- id: pdd_huanglishi
+  name: 吴鹏-PDD皇莉诗
+  platform: pdd
+  commission_on_loss: deduct
+  note: ERP shop_id 19259799。皇莉诗这个牌子第三家店（另两家：jd_huanglishi 京东、taobao_msy387nx 天猫皇莉诗旗舰店）。本店名不含也不被含于那两家的任何名字或别名，不影响它们之间那条已知的最长匹配安排。
+- id: pdd_xibishun
+  name: 吴鹏-PDD喜必顺
+  platform: pdd
+  commission_on_loss: deduct
+  note: ERP shop_id 20367885。喜必顺这个牌子在三个平台上各有一家：taobao_xibishun（别名「淘宝喜必顺」，已结算、有历史账）、本店、douyin_xibishun。三者店名两两互不包含，已结算那家的历史文件归属不受影响。
+- id: taobao_tianlougeyu
+  name: 汪学成-淘宝天楼阁宇
+  platform: taobao
+  commission_on_loss: deduct
+  note: ERP shop_id 10854783。
+- id: pdd_zlvoey
+  name: 吴鹏-PDDzlvoey
+  platform: pdd
+  commission_on_loss: deduct
+  note: ERP shop_id 20367522。和 taobao_zlvoey「天猫zlvoey旗舰店」同牌子不同平台。
+- id: douyin_luckywish
+  name: 汪学成-抖店luckywish节日礼品
+  platform: douyin
+  commission_on_loss: deduct
+  note: ERP shop_id 20881555。ERP 侧平台写「头条放心购」，对应台账的 douyin。
+- id: pdd_hunqing
+  name: 宋永康-PDD婚庆节日礼品
+  platform: pdd
+  commission_on_loss: deduct
+  note: ERP shop_id 14221158。2026-07-27 才出第一单，是这批里唯一一家新开的。
+- id: douyin_xibishun
+  name: 汪学成-抖店喜必顺
+  platform: douyin
+  commission_on_loss: deduct
+  note: ERP shop_id 19204641。ERP 侧平台写「头条放心购」，对应台账的 douyin。
+- id: kuaishou_moqianyi
+  name: 蔡果-快手茉茜伊
+  platform: kuaishou
+  commission_on_loss: deduct
+  note: ERP shop_id 20042351，46 单 642.80 元。快手平台目前唯一一家店。
+- id: xiaohongshu_jingxi
+  name: 小红书京禧派对策划的店
+  platform: xiaohongshu
+  commission_on_loss: deduct
+  note: ERP shop_id 16572607，25 单 639.55 元。小红书平台目前唯一一家店。
+- id: offline_amazon_wanghong
+  name: 亚马逊-王红
+  platform: offline
+  commission_on_loss: deduct
+  note: ERP shop_id 10892101，54 单 160 元。ERP 把它挂在「线下店铺」下，但名字明摆着是亚马逊——这是 ERP 侧归类将就，不是事实。平台先照 ERP 抄，等业务确认是不是该单开一个跨境平台。
+- id: other_intl_wanghong
+  name: 国际站——王红
+  platform: other
+  commission_on_loss: deduct
+  note: ERP shop_id 12877138，15 单 52 元。名字里是两个全角破折号，照 ERP 原样抄，改一个字符文件就认不到了。同上，「国际站」大概率是阿里国际站而不是「其它」，等业务确认。
+- id: taobao_liheng
+  name: 西门子砺恒专卖店
+  platform: taobao
+  commission_on_loss: deduct
+  note: ERP shop_id 13452187，14 单 0 元。有单无金额，先登记占位，等第一批表到了再看是不是个测试店或者已经停掉的店。
