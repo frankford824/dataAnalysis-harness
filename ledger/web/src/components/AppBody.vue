@@ -1,12 +1,13 @@
 <script setup>
 import { useMessage } from 'naive-ui'
-import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
+import { computed, defineAsyncComponent, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 
 import { useApp } from '../store'
 import FilterBar from './FilterBar.vue'
-import IntakeResult from './IntakeResult.vue'
-import UploadPanel from './UploadPanel.vue'
+
+const IntakeResult = defineAsyncComponent(() => import('./IntakeResult.vue'))
+const UploadPanel = defineAsyncComponent(() => import('./UploadPanel.vue'))
 
 const props = defineProps({ dropped: { type: Array, default: null } })
 const emit = defineEmits(['taken'])
@@ -18,18 +19,15 @@ const router = useRouter()
 // 懒加载页面时给导航一个明确反馈。保留很短的最小展示时间，避免快请求只闪一下；
 // 真正的数据加载由页面自己的骨架屏接手，两层各自说明自己在等什么。
 const routeLoading = ref(false)
-let routeStarted = 0
 let routeTimer = null
 const stopBefore = router.beforeEach((to, from) => {
   if (to.fullPath === from.fullPath) return
   clearTimeout(routeTimer)
-  routeStarted = performance.now()
-  routeLoading.value = true
+  routeTimer = setTimeout(() => (routeLoading.value = true), 120)
 })
 const stopAfter = router.afterEach(() => {
-  const wait = Math.max(0, 260 - (performance.now() - routeStarted))
   clearTimeout(routeTimer)
-  routeTimer = setTimeout(() => (routeLoading.value = false), wait)
+  routeLoading.value = false
 })
 
 // 鼠标经过或浏览器空闲时提前取页面代码；数据不会预取，仍以当前筛选为准。
@@ -84,7 +82,7 @@ watch(
 const explaining = ref(false)
 
 onMounted(() => {
-  app.load().catch((e) => message.error(e.message, { duration: 6000 }))
+  app.loadNavigation().catch((e) => message.error(e.message, { duration: 6000 }))
   if ('requestIdleCallback' in window) window.requestIdleCallback(preloadDeliver, { timeout: 1500 })
   else setTimeout(preloadDeliver, 500)
 })
@@ -139,7 +137,7 @@ defineExpose({ take })
       </div>
       <main class="page">
         <router-view v-slot="{ Component, route }">
-          <transition name="page-shift" mode="out-in">
+          <transition name="page-shift">
             <div :key="route.name" class="route-page">
               <component :is="Component" />
             </div>
@@ -159,7 +157,7 @@ defineExpose({ take })
       <span v-if="secs > 20" class="dim">别刷新</span>
     </div>
 
-    <UploadPanel v-model:show="explaining" />
-    <IntakeResult />
+    <UploadPanel v-if="explaining" v-model:show="explaining" />
+    <IntakeResult v-if="app.showIntake || app.intake" />
   </div>
 </template>

@@ -26,10 +26,18 @@ function recall() {
 }
 
 export const useApp = defineStore('app', () => {
+  const navigation = ref(null)
   const boot = ref(null)
   const overview = ref(null)
-  const loading = ref(false)
+  const storeDetails = ref({})
+  const loadingJobs = ref(0)
+  const loading = computed(() => loadingJobs.value > 0)
   const error = ref('')
+  let navigationPromise = null
+  let modelPromise = null
+  let overviewPromise = null
+  const detailPromises = new Map()
+  const detailControllers = new Map()
 
   //: 上次看到哪：筛选条、各页选中的标签、左栏选中的店。刷新和切页都不该丢。
   const memo = ref(recall())
@@ -50,11 +58,15 @@ export const useApp = defineStore('app', () => {
 
   const YM = /^\d{4}-\d{2}$/
 
-  const stores = computed(() => overview.value?.stores || boot.value?.stores || [])
+  const stores = computed(
+    () => navigation.value?.stores || overview.value?.stores || boot.value?.stores || [],
+  )
 
   const platforms = computed(() => {
     const seen = new Map()
-    for (const s of boot.value?.platforms || []) seen.set(s.id, s.name || s.id)
+    for (const s of navigation.value?.platforms || boot.value?.platforms || []) {
+      seen.set(s.id, s.name || s.id)
+    }
     return [...seen].map(([id, name]) => ({ id, name }))
   })
 
@@ -65,39 +77,99 @@ export const useApp = defineStore('app', () => {
 
   /** 所有出现过的账期，新的在前。 */
   const periods = computed(() => {
-    const all = new Set(overview.value?.periods || [])
+    const all = new Set(navigation.value?.periods || overview.value?.periods || [])
     return [...all].sort().reverse()
   })
 
-  async function load(force = false) {
-    if (overview.value && !force) return overview.value
-    loading.value = true
+  async function tracked(fn) {
+    loadingJobs.value += 1
     error.value = ''
     try {
-      const [b, o] = await Promise.all([
-        boot.value ? Promise.resolve(boot.value) : api.bootstrap(),
-        api.overview(),
-      ])
-      boot.value = b
-      overview.value = o
-      // 默认账期必须是「多数店都有数的那个月」。空、以及认不出月份的「(未知账期)」，
-      // 都不能拿来当默认值：后者排序在列表末尾，取最后一个就会让总览只剩一家店。
-      const allowed = new Set(o.periods || [])
-      if (!YM.test(period.value) || (allowed.size && !allowed.has(period.value))) {
-        period.value = o.default_period || ''
-      }
-      return o
+      return await fn()
     } catch (e) {
       error.value = e.message
       throw e
     } finally {
-      loading.value = false
+      loadingJobs.value -= 1
     }
   }
 
-  /** 账上的数变了，总览缓存就不能再用。 */
-  function invalidate() {
+  async function loadNavigation(force = false) {
+    if (navigation.value && !force) return navigation.value
+    if (navigationPromise) return navigationPromise
+    navigationPromise = tracked(async () => {
+      const data = await api.navigation()
+      navigation.value = data
+      const allowed = new Set(data.periods || [])
+      if (!YM.test(period.value) || (allowed.size && !allowed.has(period.value))) {
+        period.value = data.default_period || ''
+      }
+      return data
+    }).finally(() => (navigationPromise = null))
+    return navigationPromise
+  }
+
+  async function loadModel(force = false) {
+    if (boot.value && !force) return boot.value
+    if (modelPromise) return modelPromise
+    modelPromise = tracked(async () => {
+      boot.value = await api.bootstrap()
+      return boot.value
+    }).finally(() => (modelPromise = null))
+    return modelPromise
+  }
+
+  async function loadOverview(force = false) {
+    if (overview.value && !force) return overview.value
+    if (overviewPromise) return overviewPromise
+    overviewPromise = tracked(async () => {
+      overview.value = await api.overview()
+      return overview.value
+    }).finally(() => (overviewPromise = null))
+    return overviewPromise
+  }
+
+  async function load(force = false) {
+    await loadNavigation(force)
+    return loadOverview(force)
+  }
+
+  async function loadStoreDetail(id, force = false) {
+    const revision = navigation.value?.data_revision || ''
+    const cached = storeDetails.value[id]
+    if (cached && cached.revision === revision && !force) return cached.data
+    if (detailPromises.has(id) && !force) return detailPromises.get(id)
+    for (const [otherId, active] of detailControllers) {
+      if (otherId !== id) active.abort()
+    }
+    detailControllers.get(id)?.abort()
+    const controller = new AbortController()
+    detailControllers.set(id, controller)
+    const promise = api.store(id, { signal: controller.signal }).then((data) => {
+      storeDetails.value = {
+        ...storeDetails.value,
+        [id]: { revision: navigation.value?.data_revision || revision, data },
+      }
+      return data
+    }).finally(() => {
+      detailPromises.delete(id)
+      if (detailControllers.get(id) === controller) detailControllers.delete(id)
+    })
+    detailPromises.set(id, promise)
+    return promise
+  }
+
+  /** 账上的数变了，精确清掉受影响店铺；generation会阻止旧详情被复用。 */
+  function invalidate(storeIds = []) {
     overview.value = null
+    navigation.value = null
+    if (storeIds.length) {
+      const next = { ...storeDetails.value }
+      for (const id of storeIds) delete next[id]
+      storeDetails.value = next
+    } else {
+      storeDetails.value = {}
+    }
   }
 
   async function run(label, fn) {
@@ -146,7 +218,6 @@ export const useApp = defineStore('app', () => {
         },
       })
       intake.value = res
-      invalidate()
       return res
     } finally {
       clearInterval(poll)
@@ -164,9 +235,13 @@ export const useApp = defineStore('app', () => {
    * 算出来的账期在结果面板里列着，想去点一下就行。
    */
   async function submit(files) {
+    const hadOverview = !!overview.value
     const res = await upload(files)
     if (!res) return null
-    await load(true)
+    const touched = [...new Set((res.kept || []).map((row) => row.store_id).filter(Boolean))]
+    invalidate(touched)
+    await loadNavigation(true)
+    if (hadOverview) await loadOverview(true)
     showIntake.value = true
     return res
   }
@@ -207,9 +282,10 @@ export const useApp = defineStore('app', () => {
   }
 
   return {
-    boot, overview, loading, error,
+    navigation, boot, overview, storeDetails, loading, error,
     platform, storeId, period, busy, intake, memo, showIntake,
     stores, platforms, visibleStores, periods, currentStore,
-    load, invalidate, run, upload, submit, pick, noted,
+    load, loadNavigation, loadModel, loadOverview, loadStoreDetail,
+    invalidate, run, upload, submit, pick, noted,
   }
 })

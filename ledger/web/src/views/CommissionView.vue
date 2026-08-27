@@ -54,6 +54,8 @@ const showPreview = ref(false)
 const hunt = ref('')
 const onlyOwner = ref(null)
 const bulk = ref(null)
+const productPage = ref(1)
+const PRODUCT_PAGE_SIZE = 40
 
 // 配置只认筛选条里明确选的那家店。默认落到第一家的话，页面上没有任何地方写着
 // 「你正在配的是哪家」，而配错店这件事要等到发钱那天才看得出来。
@@ -61,26 +63,41 @@ const storeId = computed(() => app.storeId)
 const period = computed(() => app.period || pay.value?.period || '')
 
 let loadSeq = 0
+const loaded = ref({})
 
-async function load() {
+async function load(force = false) {
+  const name = tab.value
+  const key = name === 'payout'
+    ? period.value
+    : `${period.value}:${app.storeId}`
+  if (!force && loaded.value[name] === key) return
   const seq = ++loadSeq
   loading.value = true
   failed.value = ''
   preview.value = null
   try {
-    const [nextPay, nextPlan, nextConfig] = await Promise.all([
-      api.commission(period.value),
-      api.commissionProducts({
-        period: period.value,
-        store_id: app.storeId,
-      }).catch(() => null),
-      api.commissionConfig(app.storeId).catch(() => null),
-    ])
-    if (seq !== loadSeq) return
-    pay.value = nextPay
-    plan.value = nextPlan
-    config.value = nextConfig
-    seed()
+    if (name === 'payout') {
+      const nextPay = await api.commission(period.value)
+      if (seq !== loadSeq) return
+      pay.value = nextPay
+    } else if (name === 'config') {
+      const [nextPlan, nextConfig] = await Promise.all([
+        api.commissionProducts({
+          period: period.value,
+          store_id: app.storeId,
+        }).catch(() => null),
+        api.commissionConfig(app.storeId).catch(() => null),
+      ])
+      if (seq !== loadSeq) return
+      plan.value = nextPlan
+      config.value = nextConfig
+      seed()
+    } else {
+      const nextConfig = await api.commissionConfig(app.storeId).catch(() => null)
+      if (seq !== loadSeq) return
+      config.value = nextConfig
+    }
+    loaded.value = { ...loaded.value, [name]: key }
   } catch (e) {
     if (seq !== loadSeq) return
     failed.value = e.message
@@ -146,7 +163,7 @@ function seed() {
   owners.value = {}
 }
 
-watch(() => [app.period, app.storeId], load, { immediate: true })
+watch(() => [tab.value, app.period, app.storeId], () => load(), { immediate: true })
 
 /** 人名下拉的选项。配过的、猜出来的、刚加的，都算。 */
 const people = computed(() => {
@@ -201,6 +218,14 @@ const shownProducts = computed(() => {
     return (p.product_name || '').includes(q) || (p.product_id || '').includes(q)
   })
 })
+const pagedProducts = computed(() =>
+  shownProducts.value.slice(
+    (productPage.value - 1) * PRODUCT_PAGE_SIZE,
+    productPage.value * PRODUCT_PAGE_SIZE,
+  ),
+)
+const peopleWithNone = computed(() => [...people.value, { label: '没人管', value: '-' }])
+watch([hunt, onlyOwner, () => storeId.value], () => (productPage.value = 1))
 
 // 只按筛选条里明确选的店过滤。配置那一步没选店会默认落到第一家，但「现在配的是
 // 什么」这张表跟着默认走的话，人看到的是一家店的规则、以为那就是全部。
@@ -370,9 +395,9 @@ async function apply() {
     const res = await app.run('正在展开并重算', () => api.commissionPlan(payload(), true))
     preview.value = res
     showPreview.value = false
-    app.invalidate()
-    await load()
+    app.invalidate([storeId.value].filter(Boolean))
     tab.value = 'rules'
+    await load(true)
     message.success(`配好了 ${res.generated} 条规则`)
   } catch (e) {
     message.error(e.message, { duration: 6000 })
@@ -386,7 +411,8 @@ async function upload(e) {
   try {
     const res = await app.run('正在收提成配置', () => api.uploadCommission(file, true))
     message.success(`收下了 ${res.count} 条规则`)
-    await load()
+    loaded.value = {}
+    await load(true)
   } catch (err) {
     message.error(err.message, { duration: 6000 })
   }
@@ -700,7 +726,7 @@ function open(id) {
                         </tr>
                       </thead>
                       <tbody>
-                        <tr v-for="p in shownProducts.slice(0, 300)" :key="p.product_id">
+                        <tr v-for="p in pagedProducts" :key="p.product_id">
                           <td class="xs">
                             {{ p.product_name || p.product_id }}
                             <div class="xs muted num">{{ p.product_id }}</div>
@@ -715,7 +741,7 @@ function open(id) {
                               tag
                               clearable
                               :value="owners[p.product_id] ?? (p.suggest_person || null)"
-                              :options="[...people, { label: '没人管', value: '-' }]"
+                              :options="peopleWithNone"
                               placeholder="打名字新建"
                               @update:value="(v) => setOwner(p.product_id, v)"
                             />
@@ -724,9 +750,14 @@ function open(id) {
                       </tbody>
                     </n-table>
                   </div>
-                  <p v-if="shownProducts.length > 300" class="xs muted" style="margin-top: var(--s2)">
-                    列的是{{ pay?.base_name || '利润' }}最高的 300 个。剩下的用上面的筛选一批一批指。
-                  </p>
+                  <n-pagination
+                    v-if="shownProducts.length > PRODUCT_PAGE_SIZE"
+                    v-model:page="productPage"
+                    :page-size="PRODUCT_PAGE_SIZE"
+                    :item-count="shownProducts.length"
+                    size="small"
+                    style="justify-content: flex-end; margin-top: var(--s3)"
+                  />
                 </section>
               </div>
             </template>

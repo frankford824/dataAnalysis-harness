@@ -9,7 +9,7 @@
  * 数字的另一种排法，收在标签页后面——两张表竖着摆的话，一屏之内看不完，人会以为
  * 下面那张是别的东西。
  */
-import { computed, ref, watch } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 
 import { api } from '../api'
@@ -20,6 +20,8 @@ import GapList from '../components/GapList.vue'
 
 const app = useApp()
 const router = useRouter()
+
+onMounted(() => app.loadOverview().catch(() => {}))
 
 const period = computed(
   () => app.period || app.overview?.default_period || app.periods[0] || '',

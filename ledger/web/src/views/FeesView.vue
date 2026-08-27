@@ -174,8 +174,9 @@ async function load() {
   loading.value = true
   failed.value = ''
   try {
-    data.value = await api.fees()
-    draft.value = JSON.parse(JSON.stringify(data.value.rules || []))
+    const incoming = await api.fees({ section: tab.value })
+    data.value = { ...(data.value || {}), ...incoming }
+    if (incoming.rules) draft.value = JSON.parse(JSON.stringify(incoming.rules))
     const label = route.query.label
     if (label && typeof label === 'string' && label !== opened.value) {
       opened.value = label
@@ -202,7 +203,7 @@ watch(
   },
 )
 
-watch(() => route.query.label, load, { immediate: true })
+watch(() => [route.query.label, tab.value], load, { immediate: true })
 
 function blank() {
   return {
@@ -312,6 +313,7 @@ async function apply() {
     return
   }
   try {
+    const hadOverview = !!app.overview
     await app.run('正在落库并重算', () =>
       api.feesApply({
         rules: draft.value,
@@ -322,6 +324,8 @@ async function apply() {
     )
     preview.value = null
     app.invalidate()
+    await app.loadNavigation(true)
+    if (hadOverview) await app.loadOverview(true)
     await load()
     message.success('规则已生效，有表的店都重算过了')
   } catch (e) {

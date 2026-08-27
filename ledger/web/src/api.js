@@ -9,7 +9,8 @@ async function call(path, init) {
   let res
   try {
     res = await fetch(path, init)
-  } catch {
+  } catch (error) {
+    if (error?.name === 'AbortError') throw error
     // 网络层失败没有 detail 可取。这套系统跑在内网，多半是服务没起来。
     throw new Error('连不上服务。它可能没在跑，或者这台机器不在内网里。')
   }
@@ -36,12 +37,13 @@ function query(params) {
 }
 
 export const api = {
+  navigation: () => call('/api/navigation'),
   bootstrap: () => call('/api/bootstrap'),
 
-  overview: () => call('/api/overview'),
+  overview: (params, options = {}) => call(`/api/overview${query(params)}`, options),
   trend: (params) => call(`/api/trend${query(params)}`),
   gaps: (params) => call(`/api/gaps${query(params)}`),
-  store: (id) => call(`/api/stores/${encodeURIComponent(id)}`),
+  store: (id, options = {}) => call(`/api/stores/${encodeURIComponent(id)}`, options),
   period: (id, period) =>
     call(`/api/stores/${encodeURIComponent(id)}/periods/${encodeURIComponent(period)}`),
   recompute: (id) =>
@@ -147,7 +149,7 @@ export const api = {
       body: JSON.stringify(commit),
     }),
 
-  fees: () => call('/api/fees'),
+  fees: (params) => call(`/api/fees${query(params)}`),
   feesPreview: (body) =>
     call('/api/fees/preview', {
       method: 'POST',

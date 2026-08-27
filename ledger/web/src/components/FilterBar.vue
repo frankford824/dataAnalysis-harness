@@ -7,12 +7,13 @@
  * 检索在这里而不是单开一页：人要查一个订单号的时候，手上正开着某一页，不该被
  * 赶去另一个地方再回来。
  */
-import { computed, ref } from 'vue'
+import { computed, defineAsyncComponent, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 
 import { canBack } from '../router'
 import { useApp } from '../store'
-import SearchPanel from './SearchPanel.vue'
+
+const SearchPanel = defineAsyncComponent(() => import('./SearchPanel.vue'))
 
 const app = useApp()
 const router = useRouter()
@@ -122,6 +123,6 @@ function submit() {
     />
     <n-button size="small" :disabled="!term.trim()" @click="submit">查</n-button>
 
-    <SearchPanel v-model:show="searching" :term="term" />
+    <SearchPanel v-if="searching" v-model:show="searching" :term="term" />
   </div>
 </template>

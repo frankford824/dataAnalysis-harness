@@ -33,6 +33,7 @@ const only = ref(props.only)
 const subject = ref('')
 const file = ref('')
 const term = ref('')
+const appliedTerm = ref('')
 const order = ref('amount')
 
 const terms = computed(() => [
@@ -55,7 +56,7 @@ async function load() {
       only: only.value,
       subject: subject.value,
       file: file.value,
-      q: term.value.trim(),
+      q: appliedTerm.value,
       order: order.value,
     })
   } catch (e) {
@@ -65,17 +66,23 @@ async function load() {
   }
 }
 
-watch([() => props.node, () => props.only], () => {
+watch([() => props.runId, () => props.node, () => props.only], () => {
   only.value = props.only
   page.value = 0
   subject.value = ''
   file.value = ''
+  term.value = ''
+  appliedTerm.value = ''
 })
 
-watch([() => props.node, only, subject, file, order, page], load, { immediate: true })
+watch(
+  [() => props.runId, () => props.node, only, subject, file, appliedTerm, order, page],
+  load,
+  { immediate: true },
+)
 
 // 换筛选就回第一页。留在第 7 页上看一个只有 3 页的结果，界面会显示空白。
-watch([only, subject, file, term], () => (page.value = 0))
+watch([only, subject, file], () => (page.value = 0))
 
 function pickSubject(s) {
   subject.value = subject.value === s ? '' : s
@@ -84,8 +91,11 @@ function pickFile(f) {
   file.value = file.value === f ? '' : f
 }
 function applyFilter() {
+  const next = term.value.trim()
+  const changed = appliedTerm.value !== next || page.value !== 0
+  appliedTerm.value = next
   page.value = 0
-  load()
+  if (!changed) load()
 }
 function close() {
   show.value = false

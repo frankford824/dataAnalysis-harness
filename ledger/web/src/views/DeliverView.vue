@@ -7,28 +7,27 @@
  * 后回来也不会盖住当前店铺的加载状态。
  */
 import { useDialog, useMessage } from 'naive-ui'
-import { computed, ref, watch } from 'vue'
+import { computed, defineAsyncComponent, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 
 import { api } from '../api'
 import DropZone from '../components/DropZone.vue'
 import StoreNavigator from '../components/StoreNavigator.vue'
-import UploadPanel from '../components/UploadPanel.vue'
 import { ago, bytes, count } from '../format'
 import { useApp } from '../store'
+
+const UploadPanel = defineAsyncComponent(() => import('../components/UploadPanel.vue'))
 
 const app = useApp()
 const message = useMessage()
 const dialog = useDialog()
 const router = useRouter()
 
-const detail = ref({})
 const loadingStore = ref('')
 const loadError = ref('')
 const adding = ref(false)
 const explaining = ref(false)
 const draft = ref({ name: '', platform: '' })
-let requestSequence = 0
 
 // 平台、每个平台上次看的店都记住。平台很多时来回切换，不该每次从第一家重新找。
 const activePlatform = app.noted('deliver.platform', '')
@@ -36,7 +35,9 @@ const picked = app.noted('deliver.store', '')
 const rememberedStores = app.noted('deliver.platformStores', {})
 
 const here = computed(() => app.stores.find((store) => store.id === picked.value) || null)
-const currentDetail = computed(() => (here.value ? detail.value[here.value.id] || null : null))
+const currentDetail = computed(() =>
+  here.value ? app.storeDetails[here.value.id]?.data || null : null,
+)
 const detailLoading = computed(() => !!here.value && loadingStore.value === here.value.id)
 const platformLabel = computed(
   () => app.platforms.find((platform) => platform.id === activePlatform.value)?.name || '',
@@ -44,11 +45,10 @@ const platformLabel = computed(
 
 /** 这家店最近一次交表是什么时候。放在店名底下，省得为了知道「新不新」去逐行扫表格。 */
 const lastUpdated = computed(() => {
-  const newest = (currentDetail.value?.files || [])
-    .map((file) => file.updated_at)
-    .filter(Boolean)
-    .sort()
-    .at(-1)
+  const newest = (currentDetail.value?.files || []).reduce(
+    (latest, file) => file.updated_at > latest ? file.updated_at : latest,
+    '',
+  )
   return newest ? ago(newest) : ''
 })
 
@@ -82,19 +82,16 @@ watch(
 )
 
 async function loadDetail(id, force = false) {
-  if (!id || (detail.value[id] && !force)) return detail.value[id]
-  const sequence = ++requestSequence
+  if (!id) return null
   loadingStore.value = id
   loadError.value = ''
   try {
-    const got = await api.store(id)
-    detail.value = { ...detail.value, [id]: got }
-    return got
+    return await app.loadStoreDetail(id, force)
   } catch (error) {
-    if (sequence === requestSequence) loadError.value = error.message
+    if (error.name !== 'AbortError' && loadingStore.value === id) loadError.value = error.message
     throw error
   } finally {
-    if (sequence === requestSequence) loadingStore.value = ''
+    if (loadingStore.value === id) loadingStore.value = ''
   }
 }
 
@@ -141,9 +138,11 @@ function drop(storeId, name) {
     negativeText: '算了',
     onPositiveClick: async () => {
       try {
+        const hadOverview = !!app.overview
         await app.run('正在撤下并重算', () => api.dropFile(storeId, name))
-        app.invalidate()
-        await app.load(true)
+        app.invalidate([storeId])
+        await app.loadNavigation(true)
+        if (hadOverview) await app.loadOverview(true)
         await loadDetail(storeId, true)
         message.success('撤下了')
       } catch (error) {
@@ -157,11 +156,14 @@ async function register() {
   if (!draft.value.name.trim() || !draft.value.platform) return
   const id = `${draft.value.platform}_${Date.now().toString(36)}`
   try {
+    const hadOverview = !!app.overview
     await api.addStore({ id, name: draft.value.name.trim(), platform: draft.value.platform })
     adding.value = false
     const platform = draft.value.platform
     draft.value = { name: '', platform: '' }
-    await app.load(true)
+    app.invalidate([id])
+    await app.loadNavigation(true)
+    if (hadOverview) await app.loadOverview(true)
     const store = app.stores.find((item) => item.id === id)
     activePlatform.value = platform
     picked.value = id
@@ -328,5 +330,5 @@ function open(period = '') {
     </n-space>
   </n-modal>
 
-  <UploadPanel v-model:show="explaining" />
+  <UploadPanel v-if="explaining" v-model:show="explaining" />
 </template>
