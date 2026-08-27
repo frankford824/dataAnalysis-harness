@@ -162,6 +162,7 @@ class TestOverview:
         body = client.get("/api/overview").json()
         assert body["cells"] == []
         assert body["stores"], "还没数据也要把已登记的店列出来"
+        assert all(s["file_count"] == 0 for s in body["stores"])
         assert body["default_period"] == ""
 
     def test_lists_stores_and_periods(self, client):
@@ -171,6 +172,8 @@ class TestOverview:
         # 这份表算不出账期也没关系，重点是矩阵结构成立。
         assert isinstance(body["periods"], list)
         assert isinstance(body["totals"], list)
+        store = next(s for s in body["stores"] if s["id"] == "taobao_xibishun")
+        assert store["file_count"] == 1
 
     def test_default_period_is_the_month_most_stores_have(self, client, monkeypatch):
         """有「(未知账期)」和更早那个月时，默认不能落到只剩一家店的那一格。"""
@@ -269,6 +272,9 @@ class _FakeWorkspace:
 
     def overview(self):
         return self._states
+
+    def submissions(self):
+        return []
 
     def state(self, store_id, period):
         return next(

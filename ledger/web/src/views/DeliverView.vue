@@ -12,6 +12,7 @@ import { useRouter } from 'vue-router'
 
 import { api } from '../api'
 import DropZone from '../components/DropZone.vue'
+import StoreNavigator from '../components/StoreNavigator.vue'
 import UploadPanel from '../components/UploadPanel.vue'
 import { ago, bytes, count } from '../format'
 import { useApp } from '../store'
@@ -24,7 +25,6 @@ const router = useRouter()
 const detail = ref({})
 const loadingStore = ref('')
 const loadError = ref('')
-const search = ref('')
 const adding = ref(false)
 const explaining = ref(false)
 const draft = ref({ name: '', platform: '' })
@@ -35,30 +35,11 @@ const activePlatform = app.noted('deliver.platform', '')
 const picked = app.noted('deliver.store', '')
 const rememberedStores = app.noted('deliver.platformStores', {})
 
-const platformCards = computed(() =>
-  app.platforms
-    .map((platform) => ({
-      ...platform,
-      count: app.stores.filter((store) => store.platform === platform.id).length,
-    }))
-    .filter((platform) => platform.count),
-)
-
-const platformStores = computed(() =>
-  app.stores.filter((store) => store.platform === activePlatform.value),
-)
-
-const visibleStores = computed(() => {
-  const word = search.value.trim().toLocaleLowerCase()
-  if (!word) return platformStores.value
-  return platformStores.value.filter((store) => store.name.toLocaleLowerCase().includes(word))
-})
-
 const here = computed(() => app.stores.find((store) => store.id === picked.value) || null)
 const currentDetail = computed(() => (here.value ? detail.value[here.value.id] || null : null))
 const detailLoading = computed(() => !!here.value && loadingStore.value === here.value.id)
 const platformLabel = computed(
-  () => platformCards.value.find((platform) => platform.id === activePlatform.value)?.name || '',
+  () => app.platforms.find((platform) => platform.id === activePlatform.value)?.name || '',
 )
 
 /** 外部筛选条选了平台或店铺时，这一页跟着定位，但左栏仍保留同平台的全部店铺。 */
@@ -70,9 +51,9 @@ function syncSelection() {
     picked.value = externallyPicked.id
     return
   }
-  const validPlatforms = new Set(platformCards.value.map((platform) => platform.id))
+  const validPlatforms = new Set(app.stores.map((store) => store.platform))
   if (app.platform && validPlatforms.has(app.platform)) activePlatform.value = app.platform
-  if (!validPlatforms.has(activePlatform.value)) activePlatform.value = platformCards.value[0]?.id || ''
+  if (!validPlatforms.has(activePlatform.value)) activePlatform.value = app.stores[0]?.platform || ''
   const list = app.stores.filter((store) => store.platform === activePlatform.value)
   if (!list.some((store) => store.id === picked.value)) {
     const remembered = rememberedStores.value?.[activePlatform.value]
@@ -120,7 +101,6 @@ function remember(store) {
 function choosePlatform(id) {
   if (id === activePlatform.value) return
   activePlatform.value = id
-  search.value = ''
   const list = app.stores.filter((store) => store.platform === id)
   const remembered = rememberedStores.value?.[id]
   const next = list.find((store) => store.id === remembered) || list[0] || null
@@ -213,71 +193,17 @@ function open(period = '') {
     </n-space>
   </div>
 
-  <div class="deliver-layout">
-    <aside class="card store-browser" aria-label="平台和店铺">
-      <div class="store-browser-title">
-        <div>
-          <b>平台</b>
-          <span class="xs muted">{{ count(app.stores.length) }} 家店</span>
-        </div>
-      </div>
+  <div class="deliver-workspace">
+    <StoreNavigator
+      :platforms="app.platforms"
+      :stores="app.stores"
+      :active-platform="activePlatform"
+      :selected-store="picked"
+      @select-platform="choosePlatform"
+      @select-store="chooseStore"
+    />
 
-      <div class="platform-switcher" role="tablist" aria-label="选择平台">
-        <button
-          v-for="platform in platformCards"
-          :key="platform.id"
-          class="platform-choice"
-          :class="{ on: platform.id === activePlatform }"
-          role="tab"
-          :aria-selected="platform.id === activePlatform"
-          @click="choosePlatform(platform.id)"
-        >
-          <span>{{ platform.name }}</span>
-          <span class="platform-count num">{{ platform.count }}</span>
-        </button>
-      </div>
-
-      <n-input
-        v-model:value="search"
-        class="store-search"
-        size="small"
-        clearable
-        :placeholder="`搜索${platformLabel || '当前平台'}店铺`"
-      />
-
-      <div class="store-list-scroll" role="listbox" :aria-label="`${platformLabel}店铺`">
-        <button
-          v-for="store in visibleStores"
-          :key="store.id"
-          class="store-choice"
-          :class="{ on: store.id === picked }"
-          role="option"
-          :aria-selected="store.id === picked"
-          @click="chooseStore(store)"
-        >
-          <span class="store-choice-name">
-            <span class="store-dot" />
-            <span>{{ store.name }}</span>
-          </span>
-          <span class="store-choice-tail">
-            <span v-if="detail[store.id]" class="xs muted num">
-              {{ count((detail[store.id].files || []).length) }} 张
-            </span>
-            <span v-else class="xs muted">详情</span>
-            <span aria-hidden="true">›</span>
-          </span>
-        </button>
-        <div v-if="!visibleStores.length" class="store-empty">
-          当前平台没有匹配的店铺。
-        </div>
-      </div>
-
-      <div class="store-browser-foot xs muted">
-        {{ platformLabel || '未选平台' }} · {{ count(platformStores.length) }} 家
-      </div>
-    </aside>
-
-    <section v-if="here" class="card store-detail" aria-live="polite">
+    <section v-if="here" class="store-detail" aria-live="polite">
       <header class="store-detail-head">
         <div>
           <div class="detail-breadcrumb">
@@ -310,6 +236,25 @@ function open(period = '') {
       </n-alert>
 
       <template v-else-if="currentDetail">
+        <div v-if="periods().length" class="detail-periods">
+          <span class="detail-periods-label">算过的账期</span>
+          <button
+            v-for="period in periods().slice(0, 6)"
+            :key="period.period"
+            class="period-tab"
+            :class="{ on: period.period === app.period }"
+            @click="open(period.period)"
+          >
+            {{ period.period }}
+            <span>{{ period.state === 'closed' ? '已结' : '未结' }}</span>
+          </button>
+        </div>
+
+        <div class="detail-section-head">
+          <h3>文件</h3>
+          <span class="xs muted">{{ count(files().length) }} 张当前生效</span>
+        </div>
+
         <div v-if="files().length" class="scroll tall store-files">
           <n-table size="small" :bordered="false">
             <thead>
@@ -342,30 +287,10 @@ function open(period = '') {
           </n-table>
         </div>
         <DropZone v-else />
-
-        <div v-if="periods().length" class="panel period-links">
-          <div class="spread">
-            <h3>算过的账期</h3>
-            <span class="xs muted">点击进入该月损益</span>
-          </div>
-          <div class="row wrap" style="margin-top: var(--s2)">
-            <n-button
-              v-for="period in periods()"
-              :key="period.period"
-              size="tiny"
-              @click="open(period.period)"
-            >
-              {{ period.period }}
-              <span class="xs muted" style="margin-left: 4px">
-                {{ period.state === 'closed' ? '已结' : '未结' }}
-              </span>
-            </n-button>
-          </div>
-        </div>
       </template>
     </section>
 
-    <section v-else class="card store-detail store-detail-empty">
+    <section v-else class="store-detail store-detail-empty">
       先选择一个有店铺的平台。
     </section>
   </div>

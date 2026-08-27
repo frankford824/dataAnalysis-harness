@@ -42,7 +42,7 @@ from .model.schema import FeeRule, Model, SourceContract, Store, Template
 from .model.transaction import model_revision
 from .money import decimal_amount, money_float
 from .web import STATIC, page
-from .workspace import Workspace, WorkspaceError, default_root
+from .workspace import PeriodState, Workspace, WorkspaceError, default_root
 
 app = FastAPI(title="记账", docs_url="/api/docs")
 app.mount("/static", StaticFiles(directory=STATIC), name="static")
@@ -212,8 +212,11 @@ def overview() -> dict:
     # 同一家店按账期排，让每个账期都能和它前一个比——「上个月有、这个月成了 0」
     # 只能这样看出来。
     states = sorted(ws.overview(), key=lambda st: (st.store_id, st.period))
+    file_counts = Counter(row["store_id"] for row in ws.submissions())
+    latest: dict[str, PeriodState] = {}
     before: dict[str, dict] = {}
     for st in states:
+        latest[st.store_id] = st
         store = by_id.get(st.store_id)
         payload = st.result or {}
         prev = before.get(st.store_id)
@@ -248,7 +251,13 @@ def overview() -> dict:
         "periods": periods,
         "default_period": working_period(periods, cells),
         "stores": [
-            view.store_dict(s) for s in model.stores
+            {
+                **view.store_dict(s),
+                "file_count": file_counts[s.id],
+                "latest_period": latest[s.id].period if s.id in latest else "",
+                "latest_state": latest[s.id].state if s.id in latest else "",
+            }
+            for s in model.stores
             if not s.archived or any(c["store_id"] == s.id for c in cells)
         ],
         "totals": _totals(cells),
