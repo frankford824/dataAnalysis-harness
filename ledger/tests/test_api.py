@@ -13,6 +13,7 @@ from __future__ import annotations
 import io
 import re
 import shutil
+from pathlib import Path
 
 import openpyxl
 import pytest
@@ -90,6 +91,24 @@ class TestBootstrap:
         bootstrap = client.get("/api/bootstrap", headers={"Accept-Encoding": "gzip"})
         assert bootstrap.headers["content-encoding"] == "gzip"
 
+    def test_navigation_is_lightweight_and_conditionally_cached(self, client):
+        first = client.get("/api/navigation")
+        assert first.status_code == 200
+        body = first.json()
+        assert body["stores"] and body["platforms"]
+        assert "cells" not in body and "totals" not in body
+        tag = first.headers["etag"]
+        assert client.get("/api/navigation", headers={"If-None-Match": tag}).status_code == 304
+
+        _upload(client, ("运费-淘宝喜必顺.xlsx", _xlsx_bytes([["订单号"], ["A001"]])))
+        refreshed = client.get("/api/navigation", headers={"If-None-Match": tag})
+        assert refreshed.status_code == 200
+        assert refreshed.headers["etag"] != tag
+
+    def test_health_and_version_are_explicit(self, client):
+        assert client.get("/api/health").json()["ok"] is True
+        assert client.get("/api/version").json()["version"]
+
 
 # --------------------------------------------------------------------------- #
 # 交表
@@ -130,12 +149,19 @@ class TestUpload:
     def test_no_files_at_all_is_an_error(self, client):
         assert client.post("/api/upload", files=[]).status_code == 422
 
-    def test_reupload_says_nothing_changed(self, client):
+    def test_reupload_says_nothing_changed(self, client, monkeypatch):
         """重复交同一份表是常事。说「和上次一样」比说「已上传」有用。"""
         data = _xlsx_bytes([["订单号"], ["A001"]])
         _upload(client, ("运费-淘宝喜必顺.xlsx", data))
+        calls = []
+        original = api.service.recompute
+        monkeypatch.setattr(
+            api.service, "recompute",
+            lambda *args, **kwargs: (calls.append(1), original(*args, **kwargs))[1],
+        )
         body = _upload(client, ("运费-淘宝喜必顺.xlsx", data)).json()
         assert body["kept"][0]["unchanged"] is True
+        assert calls == [], "内容完全相同不能再做整店重算"
 
     def test_same_name_new_content_replaces(self, client):
         """店长改数重导出，文件名不变。两版都算就是双份成本。"""
@@ -188,6 +214,16 @@ class TestOverview:
         assert isinstance(body["totals"], list)
         store = next(s for s in body["stores"] if s["id"] == "taobao_xibishun")
         assert store["file_count"] == 1
+
+    def test_filtered_overview_and_etag_keep_the_old_endpoint_compatible(self, client):
+        first = client.get("/api/overview")
+        assert first.status_code == 200
+        assert client.get(
+            "/api/overview", headers={"If-None-Match": first.headers["etag"]}
+        ).status_code == 304
+
+        filtered = client.get("/api/overview", params={"store_id": "taobao_xibishun"})
+        assert all(c["store_id"] == "taobao_xibishun" for c in filtered.json()["cells"])
 
     def test_default_period_is_the_month_most_stores_have(self, client, monkeypatch):
         """有「(未知账期)」和更早那个月时，默认不能落到只剩一家店的那一格。"""
@@ -283,12 +319,28 @@ class TestTrend:
 class _FakeWorkspace:
     def __init__(self, states):
         self._states = states
+        self.root = Path("/fake-workspace")
 
     def overview(self):
         return self._states
 
+    def periods_of_store(self, store_id):
+        return [state for state in self._states if state.store_id == store_id]
+
     def submissions(self):
         return []
+
+    def generation(self):
+        return 0
+
+    def file_counts(self):
+        return {}
+
+    def navigation_states(self):
+        out = {}
+        for state in sorted(self._states, key=lambda s: s.period):
+            out[state.store_id] = (state.period, state.state)
+        return out
 
     def state(self, store_id, period):
         return next(

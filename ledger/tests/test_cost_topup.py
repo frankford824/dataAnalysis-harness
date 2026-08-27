@@ -22,10 +22,13 @@
 
 from __future__ import annotations
 
+import shutil
+
 import polars as pl
 import pytest
 from conftest import MODELS, write_xlsx
 
+import ledger.engine.runtime as runtime
 from ledger.engine.runtime import ingest
 from ledger.model.loader import load_model
 
@@ -66,6 +69,49 @@ def _frames(paths, model) -> list[pl.DataFrame]:
     out = [i.frame for i in result.items if i.frame is not None]
     assert len(out) == len(paths), "有文件没被认出来是聚水潭成本表"
     return out
+
+
+def test_parse_cache_reuses_bytes_but_reapplies_filename_hints(
+    tmp_path, model, monkeypatch,
+):
+    original = write_xlsx(tmp_path / "聚水潭成本-淘宝喜必顺-2026-05.xlsx", [
+        TITLE, HEADER, _row("330001", "HSC001", 2, 5.25),
+    ])
+    cache = tmp_path / "parse-cache"
+    first = ingest([original], model, ["淘宝喜必顺"], cache_root=cache)
+    assert first.known
+
+    renamed = tmp_path / "聚水潭成本-淘宝喜必顺-2026-06.xlsx"
+    shutil.copy2(original, renamed)
+
+    def should_not_parse(*_args, **_kwargs):
+        raise AssertionError("相同SHA、模型和引擎版本应该命中解析缓存")
+
+    monkeypatch.setattr(runtime, "_ingest_file", should_not_parse)
+    second = runtime.ingest([renamed], model, ["淘宝喜必顺"], cache_root=cache)
+    frame = second.known[0].frame
+    assert frame.get_column("__file__").unique().to_list() == [renamed.name]
+    assert frame.get_column("__hint_period__").unique().to_list() == ["2026-06"]
+
+
+def test_corrupt_parse_cache_falls_back_to_the_source(tmp_path, model, monkeypatch):
+    source = write_xlsx(tmp_path / "聚水潭成本-淘宝喜必顺.xlsx", [
+        TITLE, HEADER, _row("330001", "HSC001", 2, 5.25),
+    ])
+    cache = tmp_path / "parse-cache"
+    assert ingest([source], model, ["淘宝喜必顺"], cache_root=cache).known
+    next(cache.rglob("0.parquet")).write_bytes(b"broken")
+
+    actual = runtime._ingest_file
+    calls = []
+
+    def counted(*args, **kwargs):
+        calls.append(1)
+        return actual(*args, **kwargs)
+
+    monkeypatch.setattr(runtime, "_ingest_file", counted)
+    recovered = runtime.ingest([source], model, ["淘宝喜必顺"], cache_root=cache)
+    assert recovered.known and calls == [1]
 
 
 class TestSecondExportFillsTheBlanks:

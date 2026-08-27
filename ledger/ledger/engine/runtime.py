@@ -8,15 +8,22 @@
 from __future__ import annotations
 
 import itertools
+import json
 import os
+import shutil
+import threading
+import uuid
+from dataclasses import asdict
 from concurrent.futures import ThreadPoolExecutor
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
+from hashlib import sha256
 from pathlib import Path
 
 import polars as pl
 
 from ..model.schema import Metric, Model, ParseOptions, Template
+from ..version import engine_version
 from . import calculate as calc
 from .audit import AuditResult, audit
 from .project import Projection, claims, project
@@ -48,6 +55,14 @@ from .types import (
 #: 引擎的角色词汇表里表示店铺名的角色。
 ROLE_STORE = "store_name"
 ROLE_PRODUCT = "product_id"
+
+_parse_cache_guard = threading.Lock()
+_parse_cache_locks: dict[str, threading.Lock] = {}
+
+
+def _parse_cache_lock(key: str) -> threading.Lock:
+    with _parse_cache_guard:
+        return _parse_cache_locks.setdefault(key, threading.Lock())
 
 
 @dataclass
@@ -163,6 +178,7 @@ def ingest(
     model: Model,
     known_stores: list[str] | None = None,
     each: Callable[[int, int], None] | None = None,
+    cache_root: str | Path | None = None,
 ) -> Ingestion:
     """识别 + 解析 + 归一。一个文件里的每张工作表单独处理。
 
@@ -187,9 +203,13 @@ def ingest(
     candidates = _header_row_candidates(model)
     stores = known_stores or []
     done = itertools.count(1)
+    model_key = sha256(
+        (model.model_dump_json() + "\0" + engine_version()).encode("utf-8")
+    ).hexdigest()
+    cache = Path(cache_root) if cache_root is not None else None
 
     def one(p: Path) -> list[Ingested]:
-        got = _ingest_file(p, model, stores, candidates)
+        got = _ingest_file_cached(p, model, stores, candidates, cache, model_key)
         if each:
             # count() 的自增是原子的（CPython 里由 C 层做完），几个读线程同时报
             # 也不会数错。
@@ -208,11 +228,135 @@ def ingest(
     return result
 
 
+def _ingest_file_cached(
+    path: Path,
+    model: Model,
+    known_stores: list[str],
+    candidates: list[int],
+    cache_root: Path | None,
+    model_key: str,
+) -> list[Ingested]:
+    """Cache recognition/parse/normalisation; filename-derived hints stay live."""
+    if cache_root is None:
+        return _ingest_file(path, model, known_stores, candidates)
+    file_sha = digest(path)
+    # The parser dispatches by suffix, so equal bytes under a different file
+    # type cannot safely share an entry.  Filename/store/period are not in the
+    # key: those hints and evidence labels are reapplied when loading.
+    key = sha256(
+        (file_sha + "\0" + path.suffix.lower() + "\0" + model_key).encode("utf-8")
+    ).hexdigest()
+    target = cache_root / key[:2] / key
+    with _parse_cache_lock(key):
+        if target.exists():
+            try:
+                return _load_ingest_cache(target, path, model, known_stores)
+            except Exception:
+                # Cache is derived and content-addressed.  A partial/corrupt
+                # entry is never evidence; discard it and parse the source.
+                shutil.rmtree(target, ignore_errors=True)
+        items = _ingest_file(
+            path, model, known_stores, candidates, file_sha=file_sha,
+        )
+        try:
+            _save_ingest_cache(target, items)
+        except Exception:
+            # Cache failure must never turn a readable source file into a
+            # failed recompute.
+            pass
+        return items
+
+
+def _save_ingest_cache(target: Path, items: list[Ingested]) -> None:
+    target.parent.mkdir(parents=True, exist_ok=True)
+    temp = target.with_name(f".{target.name}-{uuid.uuid4().hex}.tmp")
+    temp.mkdir(parents=True, exist_ok=False)
+    payload: list[dict] = []
+    try:
+        for index, item in enumerate(items):
+            frame_name = ""
+            if item.frame is not None:
+                frame_name = f"{index}.parquet"
+                item.frame.write_parquet(temp / frame_name, row_group_size=100_000)
+            payload.append({
+                "sheet": item.ref.sheet,
+                "recognition": {
+                    **asdict(item.recognition),
+                    "ref": None,
+                },
+                "rows": item.rows,
+                "template_id": item.template.id if item.template else None,
+                "notes": item.notes,
+                "controls": [asdict(control) for control in item.controls],
+                "derivative": asdict(item.derivative) if item.derivative else None,
+                "error": item.error,
+                "frame": frame_name,
+            })
+        (temp / "meta.json").write_text(
+            json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
+            encoding="utf-8",
+        )
+        try:
+            temp.replace(target)
+        except OSError:
+            if not target.exists():
+                raise
+            shutil.rmtree(temp, ignore_errors=True)
+    except Exception:
+        shutil.rmtree(temp, ignore_errors=True)
+        raise
+
+
+def _load_ingest_cache(
+    target: Path, path: Path, model: Model, known_stores: list[str],
+) -> list[Ingested]:
+    payload = json.loads((target / "meta.json").read_text(encoding="utf-8"))
+    file_sha = digest(path)
+    owner = model.store_of(path.name)
+    hint_store = owner.name if owner else infer_store(path.name, known_stores)
+    hint_period = infer_period(path.name)
+    out: list[Ingested] = []
+    for raw in payload:
+        ref = FileRef(sha256=file_sha, filename=path.name, sheet=raw.get("sheet"))
+        recog_raw = raw["recognition"]
+        recognition = Recognition(
+            ref=ref,
+            signature=recog_raw.get("signature", ""),
+            header_count=int(recog_raw.get("header_count", 0)),
+            template_id=recog_raw.get("template_id"),
+            source_id=recog_raw.get("source_id"),
+            reason=recog_raw.get("reason", ""),
+            unmapped_columns=list(recog_raw.get("unmapped_columns") or []),
+            near_misses=[
+                (str(item[0]), tuple(item[1]))
+                for item in (recog_raw.get("near_misses") or [])
+            ],
+        )
+        frame = None
+        if raw.get("frame"):
+            frame = pl.read_parquet(target / raw["frame"])
+            if "__file__" in frame.columns:
+                frame = frame.with_columns(pl.lit(path.name).alias("__file__"))
+            frame = _attach_hints(frame, hint_store, hint_period)
+        out.append(Ingested(
+            ref=ref,
+            recognition=recognition,
+            rows=int(raw.get("rows", 0)),
+            frame=frame,
+            template=model.template(raw["template_id"]) if raw.get("template_id") else None,
+            notes=list(raw.get("notes") or []),
+            controls=[ControlResult(**item) for item in (raw.get("controls") or [])],
+            derivative=Derivative(**raw["derivative"]) if raw.get("derivative") else None,
+            error=raw.get("error", ""),
+        ))
+    return out
+
+
 #: 同时读几个文件。见 `ingest` 里为什么是这个数。
 #:
 #: 留了环境变量是给内存小的机器用的：并行读的代价是几个工作簿同时在内存里，
 #: 一台只有 8 G 的机器上把它调成 1，慢一点但不会被系统杀掉。
-_READERS = max(1, int(os.environ.get("LEDGER_READERS", "4")))
+_READERS = max(1, int(os.environ.get("LEDGER_READERS", "2")))
 
 #: 自动识别 Excel 表头时最多检查前多少行。
 #:
@@ -223,11 +367,12 @@ _HEADER_SCAN_ROWS = 20
 
 
 def _ingest_file(
-    path: Path, model: Model, known_stores: list[str], candidates: list[int]
+    path: Path, model: Model, known_stores: list[str], candidates: list[int],
+    *, file_sha: str = "",
 ) -> list[Ingested]:
     """一个文件读出来的全部表。不碰任何共享状态，才能并行跑。"""
     items: list[Ingested] = []
-    sha = digest(path)
+    sha = file_sha or digest(path)
     hint_period = infer_period(path.name)
     # 文件名对上哪家店，提示就用那家的登记名。店改过名之后文件名还是旧名，
     # 只在 known_stores 里找登记名会找不到，账会落到一个对不上切片的店名上。

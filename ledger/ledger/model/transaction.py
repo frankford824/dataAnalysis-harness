@@ -21,10 +21,13 @@ _local = threading.local()
 
 
 def model_revision(model_dir: str | Path) -> str:
-    """Hash all model YAML bytes so stale clients cannot overwrite newer edits."""
+    """Hash every YAML/CSV model input so stale clients cannot overwrite newer edits."""
     root = Path(model_dir).resolve()
     digest = hashlib.sha256()
-    for path in sorted(root.glob("*.yaml")):
+    for path in sorted(
+        p for p in root.iterdir()
+        if p.is_file() and p.suffix.lower() in {".yaml", ".csv"}
+    ):
         digest.update(path.name.encode("utf-8"))
         digest.update(b"\0")
         digest.update(path.read_bytes())

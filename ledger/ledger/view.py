@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import re
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import polars as pl
@@ -475,7 +476,8 @@ def _selected(
     return facts
 
 
-def drill(facts: pl.DataFrame, model: Model, node_id: str, limit: int = DRILL_LIMIT,
+def drill(facts: pl.DataFrame | str | Path, model: Model, node_id: str,
+          limit: int = DRILL_LIMIT,
           value: float | None = None, *, offset: int = 0,
           subject: str | None = None, file: str | None = None,
           q: str | None = None, order: str = "amount",
@@ -521,6 +523,34 @@ def drill(facts: pl.DataFrame, model: Model, node_id: str, limit: int = DRILL_LI
     因为人下钻的目的就是拿它跟报表核对——核对基准在翻页过程中变来变去，这事就没法做了。
     """
     only = only if only in ("counted", "uncounted", "all") else "counted"
+    if isinstance(facts, (str, Path)):
+        lazy = pl.scan_parquet(facts)
+        columns = set(lazy.collect_schema().names())
+        # Normal statement nodes can be reduced before materialisation.  The
+        # exceptional audit buckets need their wider source columns, so they
+        # deliberately keep the compatible full-frame path below.
+        if not (
+            node_id == UNLINKED_NODE
+            or node_id.startswith(UNLINKED_NODE + ":")
+            or node_id == UNCLASSIFIED_NODE
+        ):
+            metrics = (
+                [node_id[len(METRIC_PREFIX):]]
+                if node_id.startswith(METRIC_PREFIX)
+                else node_metrics(model, node_id)
+            )
+            if metrics:
+                lazy = lazy.filter(_claimed_by(model, metrics))
+            keep = [
+                column for column in (
+                    "metric_id", "link_key", "linked", "counted", "contribution",
+                    "amount", "subject", "minor", "classify_via", "file_name",
+                    "sheet", "row_no", "major", "file_sha",
+                )
+                if column in columns
+            ]
+            lazy = lazy.select(keep)
+        facts = lazy.collect()
     special = _special_drill(facts, model, node_id)
     if special is not None:
         facts, name, bucket_value, kind = special

@@ -79,6 +79,20 @@ def test_forget_removes_from_calculation_but_keeps_bytes(ws):
     assert ws.path_of(kept.sha).exists()
 
 
+def test_workspace_generation_changes_in_the_same_write_transaction(ws):
+    before = ws.generation()
+    ws.keep("成本.xlsx", _blob("a"), "s1")
+    after_keep = ws.generation()
+    assert after_keep > before
+    ws.forget("s1", "成本.xlsx")
+    assert ws.generation() > after_keep
+
+    run_id = ws.record("s1", "2025-05", _result(), ["a"], evidence_ready=False)
+    before_evidence = ws.generation()
+    ws.mark_evidence(run_id, ready=True)
+    assert ws.generation() > before_evidence
+
+
 def test_empty_name_refused(ws):
     with pytest.raises(WorkspaceError):
         ws.keep("", _blob("a"), "s1")
@@ -111,6 +125,17 @@ def test_every_run_says_which_engine_computed_it(ws):
 
     ws.record("s1", "2025-05", _result(), ["a"])
     assert ws.state("s1", "2025-05").engine == engine_version()
+
+
+def test_run_records_model_and_input_identity_without_guessing_old_rows(ws):
+    run_id = ws.record(
+        "s1", "2025-05", _result(), ["a"],
+        model_revision="model-1", input_fingerprint="input-1",
+    )
+    row = ws.conn.execute(
+        "select model_revision, input_fingerprint from run where id=?", (run_id,)
+    ).fetchone()
+    assert dict(row) == {"model_revision": "model-1", "input_fingerprint": "input-1"}
 
 
 def test_the_engine_stamp_stays_out_of_the_numbers(ws):
@@ -262,6 +287,29 @@ def test_overview_covers_every_store_period(ws):
     assert grid[0].period == "2025-06"  # 最近的账期排在前面
 
 
+def test_overview_reads_all_states_in_one_select(ws):
+    ws.record("s1", "2025-05", _result(), ["a"])
+    ws.record("s1", "2025-06", _result(False), ["a"])
+    ws.record("s2", "2025-06", _result(), ["a"])
+    sql: list[str] = []
+    ws.conn.set_trace_callback(sql.append)
+    try:
+        assert len(ws.overview()) == 3
+    finally:
+        ws.conn.set_trace_callback(None)
+    selects = [statement for statement in sql if statement.lstrip().lower().startswith("select")]
+    assert len(selects) == 1, selects
+
+
+def test_scoped_state_helpers_do_not_change_semantics(ws):
+    run_id = ws.record("s1", "2025-05", _result(profit=1), ["a"])
+    ws.record("s1", "2025-06", _result(profit=2), ["a"])
+    ws.record("s2", "2025-06", _result(profit=3), ["a"])
+    assert [s.period for s in ws.periods_of_store("s1")] == ["2025-06", "2025-05"]
+    assert ws.previous_state("s1", "2025-06").result["profit"] == 1
+    assert ws.state_by_run(run_id).result["profit"] == 1
+
+
 def test_state_of_unknown_period_is_none(ws):
     assert ws.state("s1", "2099-01") is None
 
@@ -305,3 +353,30 @@ def test_several_requests_can_read_at_once(ws):
 
     assert not boom, f"并发读崩了：{boom[0]!r}"
     assert set(seen) == {6}
+
+
+def test_concurrent_writers_queue_without_database_locked(ws):
+    """单机多人同时交表时写事务排队，不能留下文件已落盘但slot没登记的半截状态。"""
+    import threading
+
+    boom: list[Exception] = []
+
+    def write(worker: int) -> None:
+        try:
+            for index in range(10):
+                ws.keep(
+                    f"{worker}-{index}.xlsx",
+                    _blob(f"{worker}:{index}"),
+                    f"store-{worker}",
+                )
+        except Exception as exc:  # noqa: BLE001 - 正是在验证不会抛SQLite锁错误
+            boom.append(exc)
+
+    threads = [threading.Thread(target=write, args=(worker,)) for worker in range(8)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert not boom, boom
+    assert len(ws.submissions()) == 80

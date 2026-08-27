@@ -568,6 +568,14 @@ def test_an_unknown_view_falls_back_to_the_safe_one():
     assert drill(_graded(_MIXED), _tree(), "d1", only="乱写")["only"] == "counted"
 
 
+def test_parquet_drill_matches_in_memory_and_pushes_the_node_filter(tmp_path):
+    facts = _graded(_MIXED)
+    path = tmp_path / "facts.parquet"
+    facts.write_parquet(path)
+    expected = drill(facts, _tree(), "d1", limit=2, q="A1")
+    assert drill(path, _tree(), "d1", limit=2, q="A1") == expected
+
+
 # --------------------------------------------------------------------------- #
 # 文案
 # --------------------------------------------------------------------------- #

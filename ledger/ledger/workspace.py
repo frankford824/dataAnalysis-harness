@@ -69,6 +69,8 @@ create table if not exists version (
   at       text not null,
   by       text not null default ''
 );
+create index if not exists version_store_id on version (store_id, id);
+create index if not exists version_store_name on version (store_id, name);
 
 -- 算账快照。result 是给界面的整份结构，冻结用。
 create table if not exists run (
@@ -82,6 +84,8 @@ create table if not exists run (
   -- 哪一版代码算的。改坏了要回滚，得先说得清回到哪一版；带 -dirty 的那些
   -- 是拿没进版本库的代码算的，不可复现，不能当回滚目标。
   engine    text not null default '',
+  model_revision text,
+  input_fingerprint text,
   shas      text not null,
   result    text not null
 );
@@ -110,6 +114,44 @@ create table if not exists config_log (
   before_json text not null default '',
   after_json text not null default ''
 );
+
+-- 所有业务写入的统一版本。读缓存只认这一项，不能靠进程内变量猜数据库有没有变。
+create table if not exists workspace_meta (
+  id         integer primary key check (id = 1),
+  generation integer not null default 0
+);
+insert or ignore into workspace_meta (id, generation) values (1, 0);
+
+create trigger if not exists bump_file_insert after insert on file begin
+  update workspace_meta set generation=generation+1 where id=1;
+end;
+create trigger if not exists bump_slot_insert after insert on slot begin
+  update workspace_meta set generation=generation+1 where id=1;
+end;
+create trigger if not exists bump_slot_update after update on slot begin
+  update workspace_meta set generation=generation+1 where id=1;
+end;
+create trigger if not exists bump_slot_delete after delete on slot begin
+  update workspace_meta set generation=generation+1 where id=1;
+end;
+create trigger if not exists bump_version_insert after insert on version begin
+  update workspace_meta set generation=generation+1 where id=1;
+end;
+create trigger if not exists bump_run_insert after insert on run begin
+  update workspace_meta set generation=generation+1 where id=1;
+end;
+create trigger if not exists bump_run_update after update on run begin
+  update workspace_meta set generation=generation+1 where id=1;
+end;
+create trigger if not exists bump_period_insert after insert on period begin
+  update workspace_meta set generation=generation+1 where id=1;
+end;
+create trigger if not exists bump_period_update after update on period begin
+  update workspace_meta set generation=generation+1 where id=1;
+end;
+create trigger if not exists bump_config_log_insert after insert on config_log begin
+  update workspace_meta set generation=generation+1 where id=1;
+end;
 """
 
 #: 后加的列。老工作区打开时补上，不用导数据。
@@ -122,6 +164,8 @@ _COLUMNS = {
         "evidence_error": "text not null default ''",
         # 老记录留空。空就是空——不知道是哪一版算的，别猜一个填进去。
         "engine": "text not null default ''",
+        "model_revision": "text",
+        "input_fingerprint": "text",
     },
 }
 
@@ -200,6 +244,16 @@ class Workspace:
     def __post_init__(self) -> None:
         self.root = Path(self.root)
         (self.root / "files").mkdir(parents=True, exist_ok=True)
+        conn = sqlite3.connect(self.root / "workspace.db")
+        conn.row_factory = sqlite3.Row
+        try:
+            conn.execute("pragma journal_mode=wal")
+            conn.execute("pragma busy_timeout=30000")
+            conn.executescript(_SCHEMA)
+            _migrate(conn)
+            conn.commit()
+        finally:
+            conn.close()
 
     # ------------------------------------------------------------------ #
     # 连接
@@ -220,16 +274,12 @@ class Workspace:
         if conn is None:
             conn = sqlite3.connect(self.root / "workspace.db", check_same_thread=False)
             conn.row_factory = sqlite3.Row
-            # 界面读、上传写，同时发生很正常。WAL 让读不被写挡住。
-            conn.execute("pragma journal_mode=wal")
-            # WAL 只解决读写并发，写与写还是要排队。默认排不到就立刻抛
+            # WAL在Workspace启动时只设置一次。连接这里只保留等待策略。
+            # 写与写还是要排队。默认排不到就立刻抛
             # "database is locked"：两个人同时交表，后一个直接失败，而他交的表
             # 已经落盘了——文件在、账没记，这种半截状态最难查。等一会儿再说没写上，
             # 比立刻报错诚实得多。写事务本身只是插几行运行记录，等不到 30 秒。
             conn.execute("pragma busy_timeout=30000")
-            conn.executescript(_SCHEMA)
-            _migrate(conn)
-            conn.commit()
             self._local.conn = conn
         return conn
 
@@ -327,29 +377,46 @@ class Workspace:
         rows = self.conn.execute(
             "select name, sha from slot where store_id=? order by name", (store_id,)
         ).fetchall()
-        out: list[Path] = []
-        work = self.root / "work" / store_id
+        signature = hashlib.sha256()
+        for row in rows:
+            signature.update(row["name"].encode("utf-8"))
+            signature.update(b"\0")
+            signature.update(row["sha"].encode("ascii"))
+            signature.update(b"\0")
+        work = self.root / "work" / store_id / signature.hexdigest()[:20]
         if work.exists():
-            shutil.rmtree(work, ignore_errors=True)
-        work.mkdir(parents=True, exist_ok=True)
+            return [work / row["name"] for row in rows if (work / row["name"]).exists()]
+
+        temp = work.with_name(f".{work.name}-{uuid.uuid4().hex}.tmp")
+        temp.mkdir(parents=True, exist_ok=False)
+        out: list[Path] = []
         for r in rows:
             src = self.path_of(r["sha"])
             if not src.exists():
                 continue
-            link = work / r["name"]
+            link = temp / r["name"]
             try:
                 link.hardlink_to(src)
             except OSError:
                 shutil.copy2(src, link)
             out.append(link)
-        return out
+        work.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            temp.replace(work)
+        except OSError:
+            if not work.exists():
+                raise
+            shutil.rmtree(temp, ignore_errors=True)
+        return [work / path.name for path in out]
 
     def submissions(self, store_id: str | None = None) -> list[dict[str, Any]]:
         """交表清单。数据交付看板就是这张表。"""
         sql = (
             "select s.store_id, s.name, s.sha, s.updated_at, s.by, f.size, "
-            "(select count(*) from version v where v.store_id=s.store_id and v.name=s.name) as versions "
-            "from slot s join file f on f.sha=s.sha"
+            "coalesce(v.versions, 0) as versions "
+            "from slot s join file f on f.sha=s.sha "
+            "left join (select store_id, name, count(*) as versions from version "
+            "group by store_id, name) v on v.store_id=s.store_id and v.name=s.name"
         )
         args: tuple[Any, ...] = ()
         if store_id:
@@ -357,6 +424,33 @@ class Workspace:
             args = (store_id,)
         sql += " order by s.store_id, s.name"
         return [dict(r) for r in self.conn.execute(sql, args).fetchall()]
+
+    def file_counts(self) -> dict[str, int]:
+        """店铺导航只要数量，不读取每个文件的完整元数据。"""
+        return {
+            row["store_id"]: int(row["n"])
+            for row in self.conn.execute(
+                "select store_id, count(*) as n from slot group by store_id"
+            ).fetchall()
+        }
+
+    def navigation_states(self) -> dict[str, tuple[str, str]]:
+        """每家店最近账期及状态，不读取run.result。"""
+        out: dict[str, tuple[str, str]] = {}
+        rows = self.conn.execute(
+            "select store_id, period, state from period order by store_id, period desc"
+        ).fetchall()
+        for row in rows:
+            out.setdefault(row["store_id"], (row["period"], row["state"]))
+        return out
+
+    def period_counts(self) -> dict[str, int]:
+        return {
+            row["period"]: int(row["n"])
+            for row in self.conn.execute(
+                "select period, count(*) as n from period group by period"
+            ).fetchall()
+        }
 
     def forget(self, store_id: str, name: str) -> None:
         """把一份表撤下来，不再参与计算。内容和历史都留着。"""
@@ -375,6 +469,8 @@ class Workspace:
         shas: list[str],
         *,
         evidence_ready: bool = True,
+        model_revision: str = "",
+        input_fingerprint: str = "",
     ) -> int:
         """存一次算账结果。已结账的账期不覆盖快照，只标记有新数据。"""
         with self.conn as conn:
@@ -383,11 +479,13 @@ class Workspace:
             ).fetchone()
             cur = conn.execute(
                 "insert into run "
-                "(store_id, period, at, can_close, evidence_ready, engine, shas, result) "
-                "values (?,?,?,?,?,?,?,?)",
+                "(store_id, period, at, can_close, evidence_ready, engine, "
+                "model_revision, input_fingerprint, shas, result) "
+                "values (?,?,?,?,?,?,?,?,?,?)",
                 (
                     store_id, period, _now(), int(bool(result.get("can_close"))),
                     int(evidence_ready), engine_version(),
+                    model_revision or None, input_fingerprint or None,
                     json.dumps(sorted(shas)), json.dumps(result, ensure_ascii=False),
                 ),
             )
@@ -447,49 +545,97 @@ class Workspace:
 
     def state(self, store_id: str, period: str) -> PeriodState | None:
         """一个账期的完整状态：状态 + 该展示的那份快照 + 有没有过期。"""
-        row = self.conn.execute(
-            "select * from period where store_id=? and period=?", (store_id, period)
-        ).fetchone()
-        if row is None:
-            return None
-        return self._state(row)
+        rows = self._states(store_id=store_id, period=period)
+        return rows[0] if rows else None
 
     def overview(self) -> list[PeriodState]:
         """所有店 × 所有账期。总览矩阵的数据源。"""
-        rows = self.conn.execute(
-            "select * from period order by period desc, store_id"
-        ).fetchall()
-        return [self._state(r) for r in rows]
+        return self._states()
 
-    def _state(self, row: sqlite3.Row) -> PeriodState:
-        store_id, period = row["store_id"], row["period"]
-        if row["state"] == CLOSED and row["run_id"]:
-            shown = self.conn.execute("select * from run where id=?", (row["run_id"],)).fetchone()
-        else:
-            shown = self.conn.execute(
-                "select * from run where store_id=? and period=? order by id desc limit 1",
-                (store_id, period),
-            ).fetchone()
-        stale = False
-        if row["state"] == CLOSED:
-            # 结账之后有没有交过新表：比留档版本号。
-            newer = self.conn.execute(
-                "select count(*) as n from version where store_id=? and id > ?",
-                (store_id, row["at_version"] or 0),
-            ).fetchone()
-            stale = bool(newer and newer["n"])
+    def periods_of_store(self, store_id: str) -> list[PeriodState]:
+        """一家店的全部账期，不扫描其他店。"""
+        return self._states(store_id=store_id)
+
+    def previous_state(self, store_id: str, period: str) -> PeriodState | None:
+        """指定账期之前最近的一期。"""
+        rows = self._states(store_id=store_id, before=period, limit=1)
+        return rows[0] if rows else None
+
+    def state_by_run(self, run_id: int) -> PeriodState | None:
+        """按运行号读取冻结结果，不扫描其他店期。"""
+        row = self.conn.execute(
+            "select p.store_id, p.period, p.state, p.changed_at, p.by, p.note, "
+            "r.id as shown_id, r.result as shown_result, r.at as shown_at, "
+            "r.engine as shown_engine, "
+            "case when p.state=? and exists (select 1 from version nv "
+            "where nv.store_id=p.store_id and nv.id>p.at_version) then 1 else 0 end as stale "
+            "from run r left join period p on p.store_id=r.store_id and p.period=r.period "
+            "where r.id=?",
+            (CLOSED, run_id),
+        ).fetchone()
+        return self._state_from_row(row) if row and row["store_id"] else None
+
+    def generation(self) -> int:
+        row = self.conn.execute(
+            "select generation from workspace_meta where id=1"
+        ).fetchone()
+        return int(row["generation"] if row else 0)
+
+    def _states(
+        self,
+        *,
+        store_id: str | None = None,
+        period: str | None = None,
+        before: str | None = None,
+        limit: int | None = None,
+    ) -> list[PeriodState]:
+        where: list[str] = []
+        args: list[Any] = []
+        if store_id is not None:
+            where.append("p.store_id=?")
+            args.append(store_id)
+        if period is not None:
+            where.append("p.period=?")
+            args.append(period)
+        if before is not None:
+            where.append("p.period<?")
+            args.append(before)
+        clause = " where " + " and ".join(where) if where else ""
+        sql = (
+            "select p.store_id, p.period, p.state, p.changed_at, p.by, p.note, "
+            "p.run_id as frozen_run_id, p.at_version, "
+            "r.id as shown_id, r.result as shown_result, r.at as shown_at, "
+            "r.engine as shown_engine, "
+            "case when p.state=? and exists (select 1 from version nv "
+            "where nv.store_id=p.store_id and nv.id>p.at_version) then 1 else 0 end as stale "
+            "from period p left join run r on r.id = case "
+            "when p.state=? and p.run_id is not null then p.run_id else "
+            "(select lr.id from run lr where lr.store_id=p.store_id and lr.period=p.period "
+            "order by lr.id desc limit 1) end"
+            + clause
+            + " order by p.period desc, p.store_id"
+        )
+        values: list[Any] = [CLOSED, CLOSED, *args]
+        if limit is not None:
+            sql += " limit ?"
+            values.append(limit)
+        rows = self.conn.execute(sql, values).fetchall()
+        return [self._state_from_row(row) for row in rows]
+
+    @staticmethod
+    def _state_from_row(row: sqlite3.Row) -> PeriodState:
         return PeriodState(
-            store_id=store_id,
-            period=period,
+            store_id=row["store_id"],
+            period=row["period"],
             state=row["state"],
             changed_at=row["changed_at"] or "",
             by=row["by"] or "",
             note=row["note"] or "",
-            run_id=int(shown["id"]) if shown else None,
-            result=json.loads(shown["result"]) if shown else None,
-            at=shown["at"] if shown else "",
-            engine=(shown["engine"] or "") if shown else "",
-            stale=stale,
+            run_id=int(row["shown_id"]) if row["shown_id"] else None,
+            result=json.loads(row["shown_result"]) if row["shown_result"] else None,
+            at=row["shown_at"] or "",
+            engine=row["shown_engine"] or "",
+            stale=bool(row["stale"]),
         )
 
     # ------------------------------------------------------------------ #

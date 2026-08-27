@@ -23,6 +23,15 @@ $env:PYTHONUTF8       = '1'
 $env:PYTHONIOENCODING = 'utf-8'
 $env:PYTHONUNBUFFERED = '1'
 
+# 单机服务只有一个Web worker。限制各层线程池，避免AnyIO、Polars和BLAS分别按
+# CPU核数扩张；外部显式配置仍优先，便于以后按机器基准调整。
+if (-not $env:LEDGER_THREAD_TOKENS)   { $env:LEDGER_THREAD_TOKENS = '16' }
+if (-not $env:LEDGER_READERS)         { $env:LEDGER_READERS = '2' }
+if (-not $env:LEDGER_RECOMPUTE_LIMIT) { $env:LEDGER_RECOMPUTE_LIMIT = '2' }
+if (-not $env:POLARS_MAX_THREADS)      { $env:POLARS_MAX_THREADS = '4' }
+if (-not $env:OPENBLAS_NUM_THREADS)    { $env:OPENBLAS_NUM_THREADS = '1' }
+if (-not $env:OMP_NUM_THREADS)         { $env:OMP_NUM_THREADS = '4' }
+
 # 让 python 找得到 ledger 包，但不要把 app\ledger 当当前目录——进程的 cwd 会在
 # 目录上压一个句柄，换代码时那个目录就删不掉，部署卡在这儿。
 $env:PYTHONPATH = $App

@@ -10,6 +10,9 @@
 
 from __future__ import annotations
 
+import os
+import hashlib
+import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import IO, Any, Iterable
@@ -21,10 +24,21 @@ from . import progress
 from .engine.runtime import Ingestion, RunResult, Slice, ingest, run
 from .model.schema import Model, Store
 from .view import commission_dict, slice_dict
+from .version import engine_version
 from .workspace import Kept, Workspace
 
 #: 能解析的文件后缀。别的一律不碰，也不假装能读。
 SUFFIXES = {".xlsx", ".xlsm", ".xls", ".xlsb", ".csv", ".zip"}
+
+_RECOMPUTE_LIMIT = max(1, int(os.environ.get("LEDGER_RECOMPUTE_LIMIT", "2")))
+_recompute_slots = threading.Semaphore(_RECOMPUTE_LIMIT)
+_store_locks_guard = threading.Lock()
+_store_locks: dict[str, threading.RLock] = {}
+
+
+def _store_lock(store_id: str) -> threading.RLock:
+    with _store_locks_guard:
+        return _store_locks.setdefault(store_id, threading.RLock())
 
 
 @dataclass
@@ -105,8 +119,9 @@ def intake(
                 suggest=suggest_store(name, model),
             ))
             continue
-        out.kept.append(ws.keep(name, src, store.id, by=by))
-        if store.id not in touched:
+        kept = ws.keep(name, src, store.id, by=by)
+        out.kept.append(kept)
+        if not kept.unchanged and store.id not in touched:
             touched.append(store.id)
 
     out.stores = touched
@@ -165,6 +180,30 @@ def recompute(
     report: progress.Reporter = progress.SILENT,
     note: str = "",
 ) -> Recomputed:
+    """同店串行、全局最多两个重算，避免目录竞态和内存失控。"""
+    lock = _store_lock(store.id)
+    if not lock.acquire(blocking=False):
+        report(f"排队中 · {note or store.name}")
+        lock.acquire()
+    try:
+        if not _recompute_slots.acquire(blocking=False):
+            report(f"排队中 · {note or store.name}")
+            _recompute_slots.acquire()
+        try:
+            return _recompute_locked(ws, model, store, report=report, note=note)
+        finally:
+            _recompute_slots.release()
+    finally:
+        lock.release()
+
+
+def _recompute_locked(
+    ws: Workspace,
+    model: Model,
+    store: Store,
+    report: progress.Reporter = progress.SILENT,
+    note: str = "",
+) -> Recomputed:
     """拿这家店当前生效的全部文件重算，把每个账期的结果存成快照。
 
     已结账的账期不会被覆盖：`Workspace.record` 只追加，展示时仍然给结账那一版。
@@ -181,6 +220,7 @@ def recompute(
     ing = ingest(
         files, model, [store.name, *store.aliases],
         each=lambda done, total: report(f"读表 · {where}", done, total),
+        cache_root=ws.root / "cache" / "parse",
     )
     out.unknown_tables = unknown_tables(ing, store)
     # 这一段说不出份数：挂钩、归类、核算是把全店的行放在一起算的，没有「第几份」
@@ -206,12 +246,19 @@ def recompute(
         return out
 
     shas = [i.ref.sha256 for i in ing.items]
+    model_revision = hashlib.sha256(model.model_dump_json().encode("utf-8")).hexdigest()
+    fingerprint = hashlib.sha256(
+        (model_revision + "\0" + engine_version() + "\0" + "\0".join(sorted(shas))).encode("utf-8")
+    ).hexdigest()
     slices = sorted(result.slices.items(), key=lambda kv: (kv[0][1] or ""))
     for i, ((_s, _p), sl) in enumerate(slices, 1):
         report(f"存账期 · {where}", i, len(slices))
         payload = slice_dict(sl, store, model)
         payload["commission"] = _commission(result, model, store, sl.period)
-        run_id = ws.record(store.id, sl.period, payload, shas, evidence_ready=False)
+        run_id = ws.record(
+            store.id, sl.period, payload, shas, evidence_ready=False,
+            model_revision=model_revision, input_fingerprint=fingerprint,
+        )
         _keep_facts(ws, run_id, sl)
         state = ws.state(store.id, sl.period)
         shown = state.result if state and state.result else payload
@@ -254,7 +301,18 @@ def _keep_facts(ws: Workspace, run_id: int, sl: Slice) -> None:
         return
     path = ws.facts_path(run_id)
     try:
-        sl.facts.write_parquet(path)
+        facts = sl.facts
+        if isinstance(facts, pl.DataFrame):
+            order = [
+                column for column in ("metric_id", "counted") if column in facts.columns
+            ]
+            if order:
+                facts = facts.sort(order)
+            facts.write_parquet(path, row_group_size=100_000)
+        else:
+            # Test doubles and compatible frame implementations keep the old
+            # minimal protocol; their own write error is the evidence to log.
+            facts.write_parquet(path)
         ws.mark_evidence(run_id, ready=True)
     except Exception as exc:  # 磁盘满、权限之类必须显式拦住结账
         path.unlink(missing_ok=True)

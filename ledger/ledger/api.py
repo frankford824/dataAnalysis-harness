@@ -13,12 +13,19 @@
 from __future__ import annotations
 
 import re
-from collections import Counter
+import os
+import threading
+import uuid
+from collections import Counter, OrderedDict
+from contextlib import asynccontextmanager
 from datetime import datetime
+from hashlib import sha256
 from pathlib import Path
+from time import perf_counter
 from typing import Annotated, Any, Literal
 
-from fastapi import FastAPI, File, HTTPException, UploadFile
+import anyio.to_thread
+from fastapi import FastAPI, File, HTTPException, Request, Response, UploadFile
 from fastapi.responses import HTMLResponse, PlainTextResponse
 from starlette.middleware.gzip import GZipMiddleware
 from pydantic import BaseModel, ValidationError
@@ -37,16 +44,40 @@ from .model.config import (
     replace_fee_rules,
     update_store,
 )
-from .model.loader import ModelError, load_model
+from .model.loader import ModelError
+from .model.repository import ModelRepository, ModelSnapshot
 from .model.schema import FeeRule, Model, SourceContract, Store, Template
-from .model.transaction import model_revision
 from .money import decimal_amount, money_float
+from .version import engine_version
 from .web import STATIC, HashedStaticFiles, page
 from .workspace import PeriodState, Workspace, WorkspaceError, default_root
 
-app = FastAPI(title="记账", docs_url="/api/docs")
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    anyio.to_thread.current_default_thread_limiter().total_tokens = max(
+        1, int(os.environ.get("LEDGER_THREAD_TOKENS", "16")),
+    )
+    _snapshot()
+    workspace()
+    yield
+
+
+app = FastAPI(title="记账", docs_url="/api/docs", lifespan=lifespan)
 app.add_middleware(GZipMiddleware, minimum_size=1024, compresslevel=6)
 app.mount("/static", HashedStaticFiles(directory=STATIC), name="static")
+
+
+@app.middleware("http")
+async def request_metrics(request: Request, call_next):
+    started = perf_counter()
+    request_id = request.headers.get("X-Request-ID") or uuid.uuid4().hex[:16]
+    response = await call_next(request)
+    elapsed = (perf_counter() - started) * 1000
+    response.headers.setdefault("X-Request-ID", request_id)
+    response.headers.setdefault("Server-Timing", f"app;dur={elapsed:.1f}")
+    if request.method == "GET" and request.url.path.startswith("/api/"):
+        response.headers.setdefault("Cache-Control", "private,no-cache")
+    return response
 
 #: 仓库自带的模型。
 DEFAULT_MODEL = Path(__file__).resolve().parents[2] / "models" / "cn-ecommerce"
@@ -60,13 +91,82 @@ ANONYMOUS = ""
 WORKSPACE_ROOT: Path | None = None
 
 _ws: Workspace | None = None
+_model_repo: ModelRepository | None = None
+_model_repo_root: Path | None = None
+_model_repo_guard = threading.Lock()
+_read_cache_guard = threading.RLock()
+_overview_cache: OrderedDict[tuple, dict] = OrderedDict()
+_gap_cache: OrderedDict[tuple, dict | None] = OrderedDict()
+_payload_cache: OrderedDict[tuple, dict] = OrderedDict()
+_READ_CACHE_MAX = 64
+_GAP_CACHE_MAX = 1024
+
+
+def _etag(*parts: object) -> str:
+    raw = "\0".join(str(part) for part in parts).encode("utf-8")
+    return '"' + sha256(raw).hexdigest()[:24] + '"'
+
+
+def _conditional_headers(
+    request: Request,
+    response: Response,
+    etag: str,
+    data_revision: str,
+) -> Response | None:
+    headers = {
+        "ETag": etag,
+        "X-Data-Revision": data_revision,
+        "Cache-Control": "private,no-cache",
+    }
+    if request.headers.get("if-none-match") == etag:
+        return Response(status_code=304, headers=headers)
+    for name, value in headers.items():
+        response.headers[name] = value
+    return None
+
+
+def _bounded_cache(cache: OrderedDict, key: tuple, build, maximum: int):
+    with _read_cache_guard:
+        if key in cache:
+            value = cache.pop(key)
+            cache[key] = value
+            return value
+        # 首次构建也在同一把可重入锁里做：同一revision的20个并发请求只算一次。
+        value = build()
+        cache[key] = value
+        while len(cache) > maximum:
+            cache.popitem(last=False)
+        return value
+
+
+def _snapshot() -> ModelSnapshot:
+    global _model_repo, _model_repo_root
+    root = Path(DEFAULT_MODEL).resolve()
+    if _model_repo is None or _model_repo_root != root:
+        with _model_repo_guard:
+            if _model_repo is None or _model_repo_root != root:
+                _model_repo = ModelRepository(root)
+                _model_repo_root = root
+    return _model_repo.get()
 
 
 def _model() -> Model:
     try:
-        return load_model(DEFAULT_MODEL)
+        return _snapshot().model
     except ModelError as exc:
         raise HTTPException(500, f"模型有问题：{exc}") from exc
+
+
+def _model_revision() -> str:
+    try:
+        return _snapshot().revision
+    except ModelError as exc:
+        raise HTTPException(500, f"模型有问题：{exc}") from exc
+
+
+def _invalidate_model() -> None:
+    if _model_repo is not None:
+        _model_repo.invalidate()
 
 
 def workspace() -> Workspace:
@@ -78,6 +178,14 @@ def workspace() -> Workspace:
             _ws.close()
         _ws = Workspace(Path(root))
     return _ws
+
+
+def _periods_of_store(ws: Any, store_id: str) -> list[PeriodState]:
+    """Use the scoped query while keeping small test/adapter workspaces compatible."""
+    scoped = getattr(ws, "periods_of_store", None)
+    if callable(scoped):
+        return scoped(store_id)
+    return [state for state in ws.overview() if state.store_id == store_id]
 
 
 def _store(model: Model, store_id: str) -> Store:
@@ -97,34 +205,112 @@ def index() -> HTMLResponse:
     return HTMLResponse(page(), headers={"Cache-Control": "no-store"})
 
 
+@app.get("/api/health")
+def health() -> dict:
+    return {
+        "ok": True,
+        "service": "ledger",
+        "workspace_generation": workspace().generation(),
+        "model_revision": _model_revision(),
+    }
+
+
+@app.get("/api/version")
+def version_info() -> dict:
+    return {"version": engine_version(), "model_revision": _model_revision()}
+
+
 # --------------------------------------------------------------------------- #
 # 启动信息
 # --------------------------------------------------------------------------- #
 
 
 @app.get("/api/bootstrap")
-def bootstrap() -> dict:
+def bootstrap(request: Request, response: Response) -> Any:
     """界面启动拉一次就够。店铺、平台、可改字段、报表骨架都在里面。
 
     合成一个端点而不是让前端连打四枪，是因为这四样东西必须来自同一次模型加载：
     分开取的话，中间有人改了配置，界面会拿着半新半旧的结构去渲染。
     """
-    model = _model()
+    snapshot = _snapshot()
+    model = snapshot.model
+    tag = _etag("bootstrap", snapshot.revision)
+    not_modified = _conditional_headers(request, response, tag, snapshot.revision)
+    if not_modified is not None:
+        return not_modified
+    key = ("bootstrap", str(Path(DEFAULT_MODEL).resolve()), snapshot.revision)
+    return _bounded_cache(
+        _payload_cache,
+        key,
+        lambda: {
+            "stores": [view.store_dict(s) for s in model.stores],
+            "platforms": view.platform_options(model),
+            "editable": list(EDITABLE),
+            "statement": [
+                {"id": n.id, "name": n.name, "level": n.level, "display": n.display,
+                 "is_total": n.is_total, "headline": n.headline}
+                for n in view.statement_order(model)
+            ],
+            "sources": [{"id": s.id, "name": s.name} for s in model.sources],
+            "commission_bases": [
+                {"id": n.id, "name": n.name} for n in model.commission_bases()
+            ],
+            "accepts": sorted(service.SUFFIXES),
+            "model_revision": snapshot.revision,
+        },
+        _READ_CACHE_MAX,
+    )
+
+
+@app.get("/api/navigation")
+def navigation(request: Request, response: Response) -> Any:
+    """应用壳所需的轻量导航；不读取任何run.result。"""
+    snapshot = _snapshot()
+    model = snapshot.model
+    ws = workspace()
+    generation = ws.generation()
+    data_revision = f"{snapshot.revision}:{generation}"
+    tag = _etag("navigation", data_revision)
+    not_modified = _conditional_headers(request, response, tag, data_revision)
+    if not_modified is not None:
+        return not_modified
+
+    key = ("navigation", str(ws.root.resolve()), snapshot.revision, generation)
+    return _bounded_cache(
+        _payload_cache,
+        key,
+        lambda: _build_navigation(ws, model, snapshot.revision, generation),
+        _READ_CACHE_MAX,
+    )
+
+
+def _build_navigation(
+    ws: Workspace, model: Model, revision: str, generation: int,
+) -> dict:
+    counts = ws.file_counts()
+    latest = ws.navigation_states()
+    period_counts = ws.period_counts()
+    periods = sorted(period_counts, reverse=True)
+    real = [period for period in periods if _YM.match(period or "")]
+    pool = real or periods
+    default_period = max(pool, key=lambda p: (period_counts[p], p)) if pool else ""
     return {
-        "stores": [view.store_dict(s) for s in model.stores],
+        "model_revision": revision,
+        "workspace_generation": generation,
+        "data_revision": f"{revision}:{generation}",
         "platforms": view.platform_options(model),
-        "editable": list(EDITABLE),
-        "statement": [
-            {"id": n.id, "name": n.name, "level": n.level, "display": n.display,
-             "is_total": n.is_total, "headline": n.headline}
-            for n in view.statement_order(model)
+        "periods": periods,
+        "default_period": default_period,
+        "stores": [
+            {
+                **view.store_dict(store),
+                "file_count": counts.get(store.id, 0),
+                "latest_period": latest.get(store.id, ("", ""))[0],
+                "latest_state": latest.get(store.id, ("", ""))[1],
+            }
+            for store in model.stores
+            if not store.archived or store.id in latest
         ],
-        "sources": [{"id": s.id, "name": s.name} for s in model.sources],
-        # 提成基数的下拉选项。由模型说哪几行能选，界面不写死节点 id——换一家公司
-        # 换一套损益表，这个下拉自己就跟着变。
-        "commission_bases": [{"id": n.id, "name": n.name} for n in model.commission_bases()],
-        "accepts": sorted(service.SUFFIXES),
-        "model_revision": model_revision(DEFAULT_MODEL),
     }
 
 
@@ -203,26 +389,65 @@ def drop_file(store_id: str, name: str) -> dict:
 
 
 @app.get("/api/overview")
-def overview() -> dict:
+def overview(
+    request: Request,
+    response: Response,
+    period: str = "",
+    platform: str = "",
+    store_id: str = "",
+) -> Any:
     """总览：所有店 × 所有账期。首页就是这张矩阵。"""
-    model = _model()
+    snapshot = _snapshot()
+    model = snapshot.model
     ws = workspace()
+    generation = ws.generation()
+    data_revision = f"{snapshot.revision}:{generation}"
+    tag = _etag("overview", data_revision, period, platform, store_id)
+    not_modified = _conditional_headers(request, response, tag, data_revision)
+    if not_modified is not None:
+        return not_modified
+
+    cache_key = (
+        str(ws.root.resolve()), snapshot.revision, generation,
+        period, platform, store_id,
+    )
+    return _bounded_cache(
+        _overview_cache,
+        cache_key,
+        lambda: _build_overview(ws, model, snapshot.revision, period, platform, store_id),
+        _READ_CACHE_MAX,
+    )
+
+
+def _build_overview(
+    ws: Workspace,
+    model: Model,
+    revision: str,
+    period: str,
+    platform: str,
+    store_id: str,
+) -> dict:
     by_id = {s.id: s for s in model.stores}
     headline = {n.headline: n.id for n in model.statement if n.headline}
     cells = []
     # 同一家店按账期排，让每个账期都能和它前一个比——「上个月有、这个月成了 0」
     # 只能这样看出来。
     states = sorted(ws.overview(), key=lambda st: (st.store_id, st.period))
-    file_counts = Counter(row["store_id"] for row in ws.submissions())
-    latest: dict[str, PeriodState] = {}
-    before: dict[str, dict] = {}
+    file_counts = ws.file_counts()
+    latest = ws.navigation_states()
+    before: dict[str, PeriodState] = {}
     for st in states:
-        latest[st.store_id] = st
         store = by_id.get(st.store_id)
         payload = st.result or {}
         prev = before.get(st.store_id)
         if payload:
-            before[st.store_id] = payload
+            before[st.store_id] = st
+        if store_id and st.store_id != store_id:
+            continue
+        if platform and (store is None or store.platform != platform):
+            continue
+        if period and st.period != period:
+            continue
         cells.append({
             "store_id": st.store_id,
             "store": store.name if store else st.store_id,
@@ -244,7 +469,7 @@ def overview() -> dict:
             ],
             # 这一格有几处不对。总览摆不下清单本身，但摆得下这个数——没有它，
             # 人得逐店逐月点进去才知道哪个月要看。
-            "gaps": gaps.summary(gaps.gaps(payload, model, prev)) if payload else None,
+            "gaps": _cached_gap_summary(ws, st, prev, model, revision) if payload else None,
         })
     periods = sorted({c["period"] for c in cells}, reverse=True)
     return {
@@ -254,15 +479,38 @@ def overview() -> dict:
         "stores": [
             {
                 **view.store_dict(s),
-                "file_count": file_counts[s.id],
-                "latest_period": latest[s.id].period if s.id in latest else "",
-                "latest_state": latest[s.id].state if s.id in latest else "",
+                "file_count": file_counts.get(s.id, 0),
+                "latest_period": latest.get(s.id, ("", ""))[0],
+                "latest_state": latest.get(s.id, ("", ""))[1],
             }
             for s in model.stores
-            if not s.archived or any(c["store_id"] == s.id for c in cells)
+            if (not platform or s.platform == platform)
+            and (not store_id or s.id == store_id)
+            and (not s.archived or any(c["store_id"] == s.id for c in cells))
         ],
         "totals": _totals(cells),
     }
+
+
+def _cached_gap_summary(
+    ws: Workspace,
+    state: PeriodState,
+    previous: PeriodState | None,
+    model: Model,
+    revision: str,
+) -> dict | None:
+    key = (
+        str(ws.root.resolve()), state.run_id or 0,
+        previous.run_id if previous else 0, revision,
+    )
+    return _bounded_cache(
+        _gap_cache,
+        key,
+        lambda: gaps.summary(gaps.gaps(
+            state.result or {}, model, previous.result if previous else None,
+        )),
+        _GAP_CACHE_MAX,
+    )
 
 
 _YM = re.compile(r"^\d{4}-\d{2}$")
@@ -342,8 +590,9 @@ def trend(store_id: str = "", platform: str = "", periods: int = TREND_PERIODS) 
         s.id for s in model.stores
         if (not store_id or s.id == store_id) and (not platform or s.platform == platform)
     }
+    available = _periods_of_store(ws, store_id) if store_id else ws.overview()
     snaps = [
-        st for st in ws.overview()
+        st for st in available
         if st.store_id in keep and st.result
     ]
     months = sorted({st.period for st in snaps}, reverse=True)[:max(periods, 1)]
@@ -436,39 +685,80 @@ def _trend_ratio(
 
 
 @app.get("/api/stores/{store_id}")
-def store_detail(store_id: str) -> dict:
+def store_detail(store_id: str, request: Request, response: Response) -> Any:
     """一家店的全部：账期清单 + 交了哪些表。"""
-    model = _model()
+    snapshot = _snapshot()
+    model = snapshot.model
     store = _store(model, store_id)
     ws = workspace()
+    generation = ws.generation()
+    data_revision = f"{snapshot.revision}:{generation}"
+    tag = _etag("store", store_id, data_revision)
+    not_modified = _conditional_headers(request, response, tag, data_revision)
+    if not_modified is not None:
+        return not_modified
+    key = ("store", str(ws.root.resolve()), snapshot.revision, generation, store_id)
+    return _bounded_cache(
+        _payload_cache,
+        key,
+        lambda: _build_store_detail(ws, store),
+        _READ_CACHE_MAX,
+    )
+
+
+def _build_store_detail(ws: Workspace, store: Store) -> dict:
     periods = [
         {
             "period": st.period, "state": st.state, "stale": st.stale,
             "at": st.at, "run_id": st.run_id, "by": st.by, "note": st.note,
             "can_close": bool((st.result or {}).get("can_close")),
         }
-        for st in ws.overview() if st.store_id == store_id
+        for st in _periods_of_store(ws, store.id)
     ]
     return {
         "store": view.store_dict(store),
         "periods": periods,
-        "files": ws.submissions(store_id),
+        "files": ws.submissions(store.id),
     }
 
 
 @app.get("/api/stores/{store_id}/periods/{period}")
-def period_detail(store_id: str, period: str) -> dict:
+def period_detail(
+    store_id: str, period: str, request: Request, response: Response,
+) -> Any:
     """一个账期的完整快照。单店页面渲染这个。"""
-    model = _model()
+    snapshot = _snapshot()
+    model = snapshot.model
     _store(model, store_id)
-
-    st = workspace().state(store_id, period)
+    ws = workspace()
+    generation = ws.generation()
+    data_revision = f"{snapshot.revision}:{generation}"
+    tag = _etag("period", store_id, period, data_revision)
+    not_modified = _conditional_headers(request, response, tag, data_revision)
+    if not_modified is not None:
+        return not_modified
+    st = ws.state(store_id, period)
     if st is None or st.result is None:
         raise HTTPException(404, f"{period} 还没算过账")
+    key = (
+        "period", str(ws.root.resolve()), snapshot.revision,
+        generation, store_id, period,
+    )
+    return _bounded_cache(
+        _payload_cache,
+        key,
+        lambda: _build_period_detail(ws, model, store_id, period, st),
+        _READ_CACHE_MAX,
+    )
+
+
+def _build_period_detail(
+    ws: Workspace, model: Model, store_id: str, period: str, st: PeriodState,
+) -> dict:
     return {
         "state": st.state, "stale": st.stale, "at": st.at, "run_id": st.run_id,
         "by": st.by, "note": st.note, "engine": st.engine,
-        "history": workspace().history(store_id, period),
+        "history": ws.history(store_id, period),
         "gaps": gaps.gaps(st.result, model, _previous(store_id, period)),
         **_period_payload(st.result, model),
     }
@@ -489,15 +779,7 @@ def _previous(store_id: str, period: str) -> dict | None:
     取的是「比它早的里最近的一个」，不是「上一个自然月」：中间断月的时候，
     拿不存在的那个月去比等于这条永远不响。
     """
-    ws = workspace()
-    earlier = sorted(
-        (st.period for st in ws.overview()
-         if st.store_id == store_id and st.period < period and st.result),
-        reverse=True,
-    )
-    if not earlier:
-        return None
-    st = ws.state(store_id, earlier[0])
+    st = workspace().previous_state(store_id, period)
     return st.result if st else None
 
 
@@ -512,8 +794,9 @@ def all_gaps(platform: str = "", store_id: str = "", period: str = "") -> dict:
     ws = workspace()
     by_id = {s.id: s for s in model.stores}
     # 同一家店的账期按时间排，好让每个账期都能拿到它前一个账期做比对。
+    available = _periods_of_store(ws, store_id) if store_id else ws.overview()
     states = sorted(
-        (st for st in ws.overview() if st.result),
+        (st for st in available if st.result),
         key=lambda st: (st.store_id, st.period),
     )
     out = []
@@ -601,8 +884,10 @@ def search(q: str, store_id: str = "", period: str = "", platform: str = "",
         raise HTTPException(400, "要给一个订单号、金额或者科目名")
     model = _model()
     by_id = {s.id: s for s in model.stores}
+    ws = workspace()
+    available = _periods_of_store(ws, store_id) if store_id else ws.overview()
     states = [
-        st for st in workspace().overview()
+        st for st in available
         if (not store_id or st.store_id == store_id)
         and (not period or st.period == period)
         and (not platform or getattr(by_id.get(st.store_id), "platform", "") == platform)
@@ -633,13 +918,16 @@ def drill(run_id: int, node_id: str, limit: int = view.DRILL_LIMIT,
     明细可以按科目、来源文件、关键词收窄，并翻页。淘宝那家店一个月的推广扣费就有
     六千多行，只给头 200 行等于没给。
     """
-    facts = service.facts_of(workspace(), run_id)
-    if facts is None:
+    facts = workspace().facts_path(run_id)
+    if not facts.exists():
         raise HTTPException(404, "这次算账没留明细，重算一次就有了")
-    return view.drill(facts, _model(), node_id, limit=min(limit, 2000),
-                      value=_node_value(run_id, node_id), offset=offset,
-                      subject=subject or None, file=file or None,
-                      q=q or None, order=order, only=only)
+    try:
+        return view.drill(facts, _model(), node_id, limit=min(limit, 2000),
+                          value=_node_value(run_id, node_id), offset=offset,
+                          subject=subject or None, file=file or None,
+                          q=q or None, order=order, only=only)
+    except Exception as exc:
+        raise HTTPException(404, f"这次算账的明细读不了，重算一次就有了：{exc}") from exc
 
 
 def _node_value(run_id: int, node_id: str) -> float | None:
@@ -648,7 +936,7 @@ def _node_value(run_id: int, node_id: str) -> float | None:
     自己算一遍就会有两个「平台服务费」，而它们必然会在某天分叉。分叉的那天没人
     会发现，因为两个数都长得像对的。
     """
-    state = next((s for s in workspace().overview() if s.run_id == run_id), None)
+    state = workspace().state_by_run(run_id)
     for line in ((state.result or {}).get("statement") or []) if state else []:
         if line.get("id") == node_id:
             return line.get("value")
@@ -701,6 +989,7 @@ def patch_store(store_id: str, patch: StorePatch) -> dict:
         store = update_store(DEFAULT_MODEL, store_id, changes)
     except ModelError as exc:
         raise HTTPException(400, str(exc)) from exc
+    _invalidate_model()
     return {"store": view.store_dict(store)}
 
 
@@ -723,6 +1012,7 @@ def create_store(new: StoreNew) -> dict:
         )
     except ModelError as exc:
         raise HTTPException(400, str(exc)) from exc
+    _invalidate_model()
     return {"store": view.store_dict(store)}
 
 
@@ -914,7 +1204,8 @@ def commission_products(period: str = "", store_id: str = "", limit: int = 5000)
     """
     ws = workspace()
     model = _model()
-    states = [st for st in ws.overview()
+    available = _periods_of_store(ws, store_id) if store_id else ws.overview()
+    states = [st for st in available
               if (not period or st.period == period)
               and (not store_id or st.store_id == store_id)]
     if not states:
@@ -967,7 +1258,8 @@ def commission_product_list(period: str = "", store_id: str = "") -> dict:
     """
     ws = workspace()
     model = _model()
-    states = [st for st in ws.overview()
+    available = _periods_of_store(ws, store_id) if store_id else ws.overview()
+    states = [st for st in available
               if (not period or st.period == period)
               and (not store_id or st.store_id == store_id)]
     if not states:
@@ -1167,6 +1459,7 @@ def commission_plan(plan: RatePlan, apply: bool = False) -> dict:
         replace_commission(DEFAULT_MODEL, merged)
     except (ModelError, ValueError) as exc:
         raise HTTPException(400, str(exc)) from exc
+    _invalidate_model()
     result["applied"] = True
     result["periods"] = service.recompute(workspace(), _model(), store).periods
     return result
@@ -1202,6 +1495,7 @@ def commission_upload(
     except (ModelError, ValueError) as exc:
         raise HTTPException(400, str(exc)) from exc
 
+    _invalidate_model()
     model = _model()
     touched = sorted((before | {r.get("store", "") for r in rows}) & {s.id for s in model.stores})
     periods: list[dict] = []
@@ -1326,11 +1620,11 @@ class FeeSuggestIn(BaseModel):
 
 
 @app.get("/api/fees")
-def fees_catalog() -> dict:
+def fees_catalog(section: str = "", platform: str = "") -> dict:
     """费项台账：引擎认识什么、这个月认不出什么、界面上配了哪些规则。"""
     model = _model()
-    known = fees_mod.known_fees(model)
-    return {
+    all_sections = not section
+    payload: dict[str, Any] = {
         "majors": fees_mod.major_options(model),
         "fields": [
             {"id": i, "name": n, "platform": p} for i, n, p in fees_mod.FEE_FIELDS
@@ -1338,21 +1632,28 @@ def fees_catalog() -> dict:
         "hows": [{"id": i, "name": n} for i, n in fees_mod.FEE_HOWS],
         "stages": [{"id": i, "name": n} for i, n in fees_mod.FEE_STAGES],
         "platforms": view.platform_options(model),
-        "rules": [fees_mod.rule_dict(r) for r in model.fee_rules],
-        "known": [
+        "platform_aliases": fees_mod.platform_aliases(model),
+        "model_revision": _model_revision(),
+    }
+    if all_sections or section in {"unmatched", "rules"}:
+        payload["rules"] = [fees_mod.rule_dict(r) for r in model.fee_rules]
+    if all_sections or section == "unmatched":
+        payload["unmatched"] = fees_mod.unmatched_from(workspace())
+    if all_sections or section == "known":
+        known = fees_mod.known_fees(model)
+        payload["known"] = [
             {
                 "key": f.key, "major": f.major, "platform": f.platform,
                 "origin": f.origin, "origin_name": f.origin_name,
                 "how": f.how, "field": f.field,
                 "excluded": f.excluded,
             }
-            for f in known if f.origin != "fee-rules"
-        ],
-        "platform_aliases": fees_mod.platform_aliases(model),
-        "unmatched": fees_mod.unmatched_from(workspace()),
-        "log": workspace().config_history("fee-rules"),
-        "model_revision": model_revision(DEFAULT_MODEL),
-    }
+            for f in known
+            if f.origin != "fee-rules" and (not platform or f.platform == platform)
+        ]
+    if all_sections or section == "log":
+        payload["log"] = workspace().config_history("fee-rules")
+    return payload
 
 
 @app.post("/api/fees/suggest")
@@ -1406,6 +1707,7 @@ def fees_apply(body: FeeRulesBody) -> dict:
         count = replace_fee_rules(DEFAULT_MODEL, rules)
     except (ModelError, ValidationError, ValueError) as exc:
         raise HTTPException(400, str(exc)) from exc
+    _invalidate_model()
     after = [fees_mod.rule_dict(r) for r in _model().fee_rules]
     workspace().log_config(
         "fee-rules",
@@ -1479,7 +1781,7 @@ def onboard_draft(sha: str, sheet: str = "", header_row: int | None = None, sour
         payload = view.draft_dict(draft, table, model)
     except ModelError as exc:
         raise HTTPException(400, str(exc)) from exc
-    return {**payload, "model_revision": model_revision(DEFAULT_MODEL)}
+    return {**payload, "model_revision": _model_revision()}
 
 
 @app.get("/api/onboard/{sha}/assist")
@@ -1508,7 +1810,7 @@ def onboard_assist(sha: str, sheet: str = "", header_row: int | None = None, sou
     return {
         **payload,
         "assist": view.assist_dict(assisted),
-        "model_revision": model_revision(DEFAULT_MODEL),
+        "model_revision": _model_revision(),
     }
 
 
@@ -1594,6 +1896,7 @@ def onboard_commit(commit: OnboardCommit) -> dict:
         )
     except (ModelError, ValueError) as exc:
         raise HTTPException(400, str(exc)) from exc
+    _invalidate_model()
     return {
         "template_id": landed.template_id,
         "source_id": landed.source_id,
