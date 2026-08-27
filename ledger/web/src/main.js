@@ -1,4 +1,3 @@
-import naive from 'naive-ui'
 import { createPinia } from 'pinia'
 import { createApp } from 'vue'
 
@@ -14,6 +13,4 @@ import { router } from './router'
 // 一次动态 import。这种「点了没反应」最招人烦，而且看不出是版本问题。
 window.addEventListener('vite:preloadError', () => window.location.reload())
 
-// 整包注册。按需引入能省几百 KB，但这套系统跑在内网、用的人不超过十个，
-// 省下的带宽换来的是每加一个组件就要回来改一次 import 清单。
-createApp(App).use(naive).use(createPinia()).use(router).mount('#app')
+createApp(App).use(createPinia()).use(router).mount('#app')

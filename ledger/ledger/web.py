@@ -11,23 +11,21 @@
 
 from __future__ import annotations
 
-import re
 from pathlib import Path
+
+from fastapi.staticfiles import StaticFiles
 
 STATIC = Path(__file__).resolve().parent / "static"
 
-_ASSET = re.compile(r'(href|src)="(/static/[^"?]+)"')
 
+class HashedStaticFiles(StaticFiles):
+    """Vite哈希资源长期缓存；index.html仍由首页接口明确no-store。"""
 
-def version() -> str:
-    """静态资源的版本号，取所有资源里最新的修改时间。
-
-    构建产物的文件名自带内容哈希，本来不需要这个。但 index.html 引用的路径要是
-    因为什么原因没带上哈希（比如手工塞进去一张图），照样会被缓存住——那时页面看着像
-    没更新，或者更糟：新接口配旧脚本，报一堆看不懂的错。
-    """
-    latest = max((p.stat().st_mtime_ns for p in STATIC.rglob("*") if p.is_file()), default=0)
-    return f"{latest:x}"
+    async def get_response(self, path: str, scope):
+        response = await super().get_response(path, scope)
+        if response.status_code == 200 and path.startswith("assets/"):
+            response.headers["Cache-Control"] = "public,max-age=31536000,immutable"
+        return response
 
 
 def built() -> bool:
@@ -51,6 +49,6 @@ def page() -> str:
             "pnpm install\npnpm build</pre>"
             "<p>产物会落到 <code>ledger/ledger/static/</code>，刷新这一页就好了。</p>"
         )
-    html = (STATIC / "index.html").read_text(encoding="utf-8")
-    tag = version()
-    return _ASSET.sub(lambda m: f'{m.group(1)}="{m.group(2)}?v={tag}"', html)
+    # Vite文件名已经带内容哈希。再追加查询参数会让异步分片以无参数URL反向导入
+    # 主chunk，浏览器把两者当成不同ES module，导致主应用和启动API各执行两次。
+    return (STATIC / "index.html").read_text(encoding="utf-8")

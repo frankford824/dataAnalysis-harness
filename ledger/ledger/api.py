@@ -20,7 +20,7 @@ from typing import Annotated, Any, Literal
 
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.responses import HTMLResponse, PlainTextResponse
-from fastapi.staticfiles import StaticFiles
+from starlette.middleware.gzip import GZipMiddleware
 from pydantic import BaseModel, ValidationError
 
 from . import assist, fees as fees_mod, gaps, onboard, overhead, ownership, progress, service, view
@@ -41,11 +41,12 @@ from .model.loader import ModelError, load_model
 from .model.schema import FeeRule, Model, SourceContract, Store, Template
 from .model.transaction import model_revision
 from .money import decimal_amount, money_float
-from .web import STATIC, page
+from .web import STATIC, HashedStaticFiles, page
 from .workspace import PeriodState, Workspace, WorkspaceError, default_root
 
 app = FastAPI(title="记账", docs_url="/api/docs")
-app.mount("/static", StaticFiles(directory=STATIC), name="static")
+app.add_middleware(GZipMiddleware, minimum_size=1024, compresslevel=6)
+app.mount("/static", HashedStaticFiles(directory=STATIC), name="static")
 
 #: 仓库自带的模型。
 DEFAULT_MODEL = Path(__file__).resolve().parents[2] / "models" / "cn-ecommerce"

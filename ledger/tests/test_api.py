@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import io
+import re
 import shutil
 
 import openpyxl
@@ -75,6 +76,19 @@ class TestBootstrap:
     def test_says_what_files_it_accepts(self, client):
         """界面上的「支持哪些格式」不该由前端写死。"""
         assert ".xlsx" in client.get("/api/bootstrap").json()["accepts"]
+
+    def test_text_responses_are_compressed_and_hashed_assets_are_immutable(self, client):
+        home = client.get("/")
+        assert home.headers["cache-control"] == "no-store"
+        assert "?v=" not in home.text, "哈希chunk不能再带查询参数，否则会被异步分片重复导入"
+
+        script = re.search(r'src="(/static/assets/[^"]+\.js)"', home.text).group(1)
+        asset = client.get(script, headers={"Accept-Encoding": "gzip"})
+        assert asset.headers["content-encoding"] == "gzip"
+        assert asset.headers["cache-control"] == "public,max-age=31536000,immutable"
+
+        bootstrap = client.get("/api/bootstrap", headers={"Accept-Encoding": "gzip"})
+        assert bootstrap.headers["content-encoding"] == "gzip"
 
 
 # --------------------------------------------------------------------------- #
