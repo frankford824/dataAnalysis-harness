@@ -110,6 +110,27 @@ class TestBootstrap:
         assert client.get("/api/version").json()["version"]
 
 
+class TestSearchCache:
+    def test_same_revision_reuses_result_and_a_write_invalidates_it(
+        self, client, monkeypatch,
+    ):
+        calls = []
+
+        def searched(*_args, **_kwargs):
+            calls.append(1)
+            return object()
+
+        monkeypatch.setattr(api.search_mod, "search", searched)
+        monkeypatch.setattr(
+            api.search_mod, "to_dict", lambda _result: {"build": len(calls)},
+        )
+        assert client.get("/api/search", params={"q": "绝不命中"}).json()["build"] == 1
+        assert client.get("/api/search", params={"q": "绝不命中"}).json()["build"] == 1
+
+        _upload(client, ("运费-淘宝喜必顺.xlsx", _xlsx_bytes([["订单号"], ["A001"]])))
+        assert client.get("/api/search", params={"q": "绝不命中"}).json()["build"] == 2
+
+
 # --------------------------------------------------------------------------- #
 # 交表
 # --------------------------------------------------------------------------- #

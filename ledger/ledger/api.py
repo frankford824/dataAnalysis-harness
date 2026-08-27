@@ -98,6 +98,7 @@ _read_cache_guard = threading.RLock()
 _overview_cache: OrderedDict[tuple, dict] = OrderedDict()
 _gap_cache: OrderedDict[tuple, dict | None] = OrderedDict()
 _payload_cache: OrderedDict[tuple, dict] = OrderedDict()
+_search_cache: OrderedDict[tuple, dict] = OrderedDict()
 _READ_CACHE_MAX = 64
 _GAP_CACHE_MAX = 1024
 
@@ -137,6 +138,22 @@ def _bounded_cache(cache: OrderedDict, key: tuple, build, maximum: int):
         while len(cache) > maximum:
             cache.popitem(last=False)
         return value
+
+
+def _bounded_parallel_cache(cache: OrderedDict, key: tuple, build, maximum: int):
+    """Bounded cache whose cold build does not block unrelated read keys."""
+    with _read_cache_guard:
+        if key in cache:
+            value = cache.pop(key)
+            cache[key] = value
+            return value
+    value = build()
+    with _read_cache_guard:
+        existing = cache.pop(key, None)
+        cache[key] = existing if existing is not None else value
+        while len(cache) > maximum:
+            cache.popitem(last=False)
+        return cache[key]
 
 
 def _snapshot() -> ModelSnapshot:
@@ -882,24 +899,50 @@ def search(q: str, store_id: str = "", period: str = "", platform: str = "",
     """
     if not q.strip():
         raise HTTPException(400, "要给一个订单号、金额或者科目名")
-    model = _model()
+    snapshot = _snapshot()
+    model = snapshot.model
     by_id = {s.id: s for s in model.stores}
     ws = workspace()
+    bounded_limit = min(limit, 1000)
+    key = (
+        str(ws.root.resolve()), snapshot.revision, ws.generation(),
+        q.strip(), store_id, period, platform, bounded_limit,
+    )
+    return _bounded_parallel_cache(
+        _search_cache,
+        key,
+        lambda: _build_search(
+            ws, model, by_id, q.strip(), store_id, period, platform, bounded_limit,
+        ),
+        _READ_CACHE_MAX,
+    )
+
+
+def _build_search(
+    ws: Workspace,
+    model: Model,
+    by_id: dict[str, Store],
+    q: str,
+    store_id: str,
+    period: str,
+    platform: str,
+    limit: int,
+) -> dict:
     available = _periods_of_store(ws, store_id) if store_id else ws.overview()
     states = [
-        st for st in available
-        if (not store_id or st.store_id == store_id)
-        and (not period or st.period == period)
-        and (not platform or getattr(by_id.get(st.store_id), "platform", "") == platform)
-        and st.run_id
+        state for state in available
+        if (not store_id or state.store_id == store_id)
+        and (not period or state.period == period)
+        and (not platform or getattr(by_id.get(state.store_id), "platform", "") == platform)
+        and state.run_id
     ]
     # 从新到旧翻。查的多半是最近的账，而翻到上限就停——这个顺序决定了那句
     #「还有 N 个店期没翻」出现时，没翻的是最旧的那几个。
-    states.sort(key=lambda s: (s.period, s.store_id), reverse=True)
-    res = search_mod.search(
-        states, lambda rid: _facts_path(rid), model, q, limit=min(limit, 1000)
+    states.sort(key=lambda state: (state.period, state.store_id), reverse=True)
+    result = search_mod.search(
+        states, lambda run_id: _facts_path(run_id), model, q, limit=limit,
     )
-    return search_mod.to_dict(res)
+    return search_mod.to_dict(result)
 
 
 def _facts_path(run_id: int) -> Path | None:
