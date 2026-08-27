@@ -415,91 +415,85 @@
 }
 
 /* --------------------------------------------------------------------------
- * 数据与店铺：一个连续的“平台 → 店铺 → 详情”工作区。
+ * 数据与店铺：左边找店，右边看这家店交了什么。
+ *
+ * 两栏是两张独立的卡片，各自决定自己的高度。上一版把它们塞进同一张卡片，于是卡片
+ * 高度被左栏的一屏高撑满，而右栏只有十行文件——底下空出四百多像素白，看起来像表
+ * 没加载完。店越少、文件越少，那块白越大。
  * -------------------------------------------------------------------------- */
 
 .deliver-heading { margin-bottom: var(--s4); align-items: flex-start; }
-.deliver-workspace {
+/* 说明只留一句。上一版是两个字号、同一个灰度的三行灰字摞在标题下面，占掉七十像素，
+   读起来是一团噪音而不是三条信息。限宽是因为一行灰字拉到一米五宽会跑行；用 px 不用
+   ch——ch 是数字「0」的宽度，中文字比它宽一半，按 ch 限宽会提前折行。 */
+.deliver-heading p { max-width: 720px; margin-top: var(--s1); }
+
+.deliver-layout {
   display: grid;
-  grid-template-columns: minmax(286px, 318px) minmax(0, 1fr);
-  min-height: 560px;
-  overflow: hidden;
-  border: 1px solid var(--n3);
-  border-radius: var(--r-lg);
-  background: var(--n0);
-  box-shadow: 0 8px 28px rgba(20, 23, 28, .04);
+  grid-template-columns: minmax(268px, 300px) minmax(0, 1fr);
+  gap: var(--s4);
+  align-items: start;
 }
+.deliver-layout > * { min-width: 0; }
+
 .store-detail {
   min-width: 0;
-  min-height: 560px;
+  /* 只给个下限，别给上限。文件表自己会滚（.scroll.tall），所以这张卡片长不到哪去。 */
+  min-height: 380px;
+  background: var(--n0);
+  border: 1px solid var(--n3);
+  border-radius: var(--r-lg);
   padding: var(--s5);
 }
 .store-detail-head {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   justify-content: space-between;
   gap: var(--s4);
-  min-height: 68px;
   padding-bottom: var(--s4);
-  margin-bottom: 0;
   border-bottom: 1px solid var(--n3);
 }
-.store-detail-head h2 { margin-top: 3px; font-size: var(--t-xl); letter-spacing: -.01em; }
-.detail-breadcrumb {
+.store-detail-head h2 { font-size: var(--t-xl); letter-spacing: -.01em; }
+/* 上一版这里写的是「淘宝天猫 / 店铺详情」。后半句是废话——底下就是店名，
+   人知道自己在看店铺详情。 */
+.detail-crumb { color: var(--n5); font-size: var(--t-xs); }
+.detail-meta { margin-top: var(--s1); }
+
+.detail-periods {
   display: flex;
   align-items: center;
-  gap: 7px;
-  color: var(--n5);
-  font-size: var(--t-xs);
+  flex-wrap: wrap;
+  gap: var(--s2);
+  margin-top: var(--s4);
 }
-.detail-periods {
-  min-height: 50px;
-  display: flex;
-  align-items: stretch;
-  gap: var(--s3);
-  overflow-x: auto;
-  border-bottom: 1px solid var(--n2);
-  scrollbar-width: thin;
-}
-.detail-periods-label {
+.detail-periods-label { flex: 0 0 auto; color: var(--n6); font-size: var(--t-xs); }
+button.period-chip {
   display: inline-flex;
   align-items: center;
-  flex: 0 0 auto;
-  color: var(--n6);
+  gap: 6px;
+  padding: 3px 10px;
+  border-radius: 999px;
   font-size: var(--t-xs);
-}
-.period-tab {
-  position: relative;
-  flex: 0 0 auto;
-  border: 0;
-  background: transparent;
   color: var(--n7);
-  padding: 0 1px;
-  font-size: var(--t-sm);
-  cursor: pointer;
 }
-.period-tab span { margin-left: 5px; color: var(--n5); font-size: 11px; }
-.period-tab::after {
-  content: '';
-  position: absolute;
-  left: 0;
-  right: 0;
-  bottom: 0;
-  height: 2px;
-  border-radius: 2px;
-  background: transparent;
+button.period-chip i {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--warn);
 }
-.period-tab:hover { color: var(--accent); }
-.period-tab.on { color: var(--accent); font-weight: 620; }
-.period-tab.on::after { background: var(--accent); }
-.detail-section-head {
-  min-height: 54px;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--s3);
+button.period-chip.closed i { background: var(--ok); }
+button.period-chip span { color: var(--n5); font-size: 11px; }
+button.period-chip:hover,
+button.period-chip.on {
+  border-color: var(--accent);
+  background: var(--accent-bg);
+  color: var(--accent);
 }
-.detail-section-head h3 { margin: 0; font-size: var(--t-md); }
+button.period-chip:hover span,
+button.period-chip.on span { color: var(--accent); }
+
+.detail-files-title { margin: var(--s5) 0 var(--s2); }
 .detail-loading { padding: var(--s4) 0 var(--s6); }
 .detail-loading-title {
   display: flex;
@@ -520,10 +514,41 @@
   animation: orbit 720ms linear infinite;
 }
 @keyframes orbit { to { transform: rotate(360deg); } }
-.store-files { max-height: min(540px, calc(100vh - 300px)); }
+/* 文件表。
+ *
+ * 文件名是这张表唯一真要读的东西，所以剩下的宽度全给它，其余四列各自只占放得下的
+ * 宽度。上一版五列均分一千一百像素：文件名和「12 天前」一样宽，而「交表人」整列
+ * 都是破折号却占了一百八。文件名还用了全表最小最细的字，正好反了。 */
+.store-files { max-height: min(540px, calc(100vh - 320px)); }
+.store-files table.files { table-layout: fixed; }
+.store-files col.f-by { width: 96px; }
+.store-files col.f-size { width: 88px; }
+.store-files col.f-when { width: 96px; }
+.store-files col.f-act { width: 64px; }
+.store-files td.f-name {
+  font-size: var(--t-md);
+  color: var(--n9);
+  overflow-wrap: anywhere;
+}
+.store-files td.f-name .pill { margin-left: var(--s2); vertical-align: 1px; }
+.store-files tbody tr:hover td { background: var(--n1); }
+
+/* 撤下会让这家店重算，损益表上的数会变。平时是灰的，鼠标压到那一行才变红——
+   十行红字排下来，真正危险的那一下反倒不显眼了。 */
+.store-files .f-drop {
+  border: 0;
+  background: none;
+  padding: 2px 4px;
+  color: var(--n5);
+  font-size: var(--t-xs);
+}
+.store-files tr:hover .f-drop { color: var(--bad); }
+.store-files .f-drop:hover { background: none; color: var(--bad); text-decoration: underline; }
+
 .store-detail-empty {
   display: grid;
   place-items: center;
+  min-height: 200px;
   color: var(--n5);
 }
 
@@ -606,8 +631,10 @@
   .brand { padding: 0 var(--s3) 0 0; }
   .navlink { white-space: nowrap; }
   .route-progress { top: 50px; left: 0; }
-  .deliver-workspace { grid-template-columns: minmax(0, 1fr); }
-  .store-detail { min-height: 480px; }
+  /* 叠成一栏时店铺清单在上、详情在下。清单自己收到 44vh（在组件里），否则手机上
+     五十多家店会把详情整个顶到屏幕外面——上一版就是这样，点了店也看不见结果。 */
+  .deliver-layout { grid-template-columns: minmax(0, 1fr); }
+  .store-detail { min-height: 0; }
 }
 
 @media (max-width: 640px) {
@@ -615,9 +642,24 @@
   .topbar { padding: var(--s2) var(--s3); }
   .busy { left: var(--s3); right: var(--s3); bottom: var(--s3); }
   .deliver-heading { display: block; }
-  .deliver-heading > .n-space { margin-top: var(--s3); }
-  .store-detail-head { align-items: flex-start; gap: var(--s2); }
-  .store-detail-head > .n-space { flex-wrap: wrap; justify-content: flex-end; }
+  .deliver-heading > .n-button { margin-top: var(--s3); }
+  .store-detail { padding: var(--s4); }
+  .store-detail-head { flex-direction: column; gap: var(--s3); }
+
+  /* 手机上五列挤不开：四列定宽加起来正好等于容器宽度，文件名就被压成零宽。交表人
+     整列基本都是破折号，大小也不是站在货架前要看的东西——撤掉这两列，剩下文件名、
+     什么时候更新、撤不撤，三列放得下，不用横着拖。
+     列宽要按序号重排：定宽是按第几列生效的，藏掉两个单元格之后剩下的三格会整体
+     往前挪，「更新」去套用了原本给「交表人」的宽度。最后两列没有单元格落在上面，
+     但在 fixed 布局里照样占着自己那份宽度，所以要清成零。 */
+  .store-files col:nth-child(2) { width: 92px; }
+  .store-files col:nth-child(3) { width: 60px; }
+  .store-files col:nth-child(4),
+  .store-files col:nth-child(5) { width: 0; }
+  .store-files th:nth-child(2),
+  .store-files td:nth-child(2),
+  .store-files th:nth-child(3),
+  .store-files td:nth-child(3) { display: none; }
 }
 
 @media (prefers-reduced-motion: reduce) {

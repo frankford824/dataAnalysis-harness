@@ -42,6 +42,16 @@ const platformLabel = computed(
   () => app.platforms.find((platform) => platform.id === activePlatform.value)?.name || '',
 )
 
+/** 这家店最近一次交表是什么时候。放在店名底下，省得为了知道「新不新」去逐行扫表格。 */
+const lastUpdated = computed(() => {
+  const newest = (currentDetail.value?.files || [])
+    .map((file) => file.updated_at)
+    .filter(Boolean)
+    .sort()
+    .at(-1)
+  return newest ? ago(newest) : ''
+})
+
 /** 外部筛选条选了平台或店铺时，这一页跟着定位，但左栏仍保留同平台的全部店铺。 */
 function syncSelection() {
   if (!app.stores.length) return
@@ -176,24 +186,20 @@ function open(period = '') {
 </script>
 
 <template>
+  <!-- 常驻的上传入口在顶栏，每一页同一个位置，这里不再摆第二个——上一版页面标题右边
+       又放了一个同样的蓝色「上传表格」，一屏之内两个主操作，两个都不显眼了。 -->
   <div class="spread deliver-heading">
     <div>
       <h1>数据与店铺</h1>
-      <div class="small muted">
-        先选平台，再选店铺；右侧只读取当前店铺，切换后立即联动。
-      </div>
-      <div class="xs muted" style="margin-top: var(--s1)">
-        表落到哪家店，看文件名里的店名；落到哪个账期，看表里的日期。
+      <p class="small muted">
+        按平台找店，右边看这家店交了哪些表。表落到哪家店看文件名里的店名，落到哪个账期看表里的日期。
         <button class="link" @click="explaining = true">怎么传</button>
-      </div>
+      </p>
     </div>
-    <n-space size="small">
-      <n-button size="small" type="primary" @click="explaining = true">上传表格</n-button>
-      <n-button size="small" @click="adding = true">登记新店</n-button>
-    </n-space>
+    <n-button size="small" @click="adding = true">登记新店</n-button>
   </div>
 
-  <div class="deliver-workspace">
+  <div class="deliver-layout">
     <StoreNavigator
       :platforms="app.platforms"
       :stores="app.stores"
@@ -205,16 +211,15 @@ function open(period = '') {
 
     <section v-if="here" class="store-detail" aria-live="polite">
       <header class="store-detail-head">
-        <div>
-          <div class="detail-breadcrumb">
-            <span>{{ platformLabel }}</span><span aria-hidden="true">/</span><span>店铺详情</span>
-          </div>
+        <div class="grow">
+          <div class="detail-crumb">{{ platformLabel }}</div>
           <h2>{{ here.name }}</h2>
+          <div v-if="currentDetail" class="detail-meta small muted">
+            {{ count(files().length) }} 张表<template v-if="lastUpdated">
+              · 最近更新 {{ lastUpdated }}</template>
+          </div>
         </div>
-        <n-space size="small" align="center">
-          <span v-if="currentDetail" class="sub">{{ count(files().length) }} 张表</span>
-          <n-button size="small" secondary @click="open()">查看损益</n-button>
-        </n-space>
+        <n-button size="small" secondary @click="open()">查看损益</n-button>
       </header>
 
       <div v-if="detailLoading" class="detail-loading">
@@ -236,27 +241,34 @@ function open(period = '') {
       </n-alert>
 
       <template v-else-if="currentDetail">
+        <!-- 点一下会跳到那个月的损益，所以长得像一排链接标签而不是标签页。带下划线的
+             标签页表示「在本页换一个视图」，而这里是要离开这一页。 -->
         <div v-if="periods().length" class="detail-periods">
           <span class="detail-periods-label">算过的账期</span>
           <button
-            v-for="period in periods().slice(0, 6)"
+            v-for="period in periods()"
             :key="period.period"
-            class="period-tab"
-            :class="{ on: period.period === app.period }"
+            class="period-chip"
+            :class="[period.state, { on: period.period === app.period }]"
+            :title="`看 ${period.period} 的损益`"
             @click="open(period.period)"
           >
-            {{ period.period }}
+            <i aria-hidden="true" />{{ period.period }}
             <span>{{ period.state === 'closed' ? '已结' : '未结' }}</span>
           </button>
         </div>
 
-        <div class="detail-section-head">
-          <h3>文件</h3>
-          <span class="xs muted">{{ count(files().length) }} 张当前生效</span>
-        </div>
+        <h3 class="detail-files-title">文件</h3>
 
         <div v-if="files().length" class="scroll tall store-files">
-          <n-table size="small" :bordered="false">
+          <table class="files">
+            <colgroup>
+              <col />
+              <col class="f-by" />
+              <col class="f-size" />
+              <col class="f-when" />
+              <col class="f-act" />
+            </colgroup>
             <thead>
               <tr>
                 <th>文件</th>
@@ -268,23 +280,19 @@ function open(period = '') {
             </thead>
             <tbody>
               <tr v-for="file in files()" :key="file.name">
-                <td class="xs">
+                <td class="f-name">
                   {{ file.name }}
-                  <n-tag v-if="file.versions > 1" size="tiny" :bordered="false">
-                    {{ file.versions }} 版
-                  </n-tag>
+                  <span v-if="file.versions > 1" class="pill">{{ file.versions }} 版</span>
                 </td>
-                <td class="xs muted">{{ file.by || '—' }}</td>
-                <td class="right xs num">{{ bytes(file.size / 1024) }}</td>
+                <td class="xs muted truncate">{{ file.by || '—' }}</td>
+                <td class="right xs num nowrap">{{ bytes(file.size / 1024) }}</td>
                 <td class="right xs muted nowrap">{{ ago(file.updated_at) || '—' }}</td>
                 <td class="right">
-                  <n-button size="tiny" quaternary type="error" @click="drop(here.id, file.name)">
-                    撤下
-                  </n-button>
+                  <button class="f-drop" @click="drop(here.id, file.name)">撤下</button>
                 </td>
               </tr>
             </tbody>
-          </n-table>
+          </table>
         </div>
         <DropZone v-else />
       </template>
