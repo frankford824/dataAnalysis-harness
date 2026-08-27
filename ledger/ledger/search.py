@@ -192,7 +192,11 @@ def search(states: list[Any], facts_of, model, query: str, *,
         if path is None:
             return None, ""
         try:
-            return _one_row_each(pl.scan_parquet(path).filter(cond).collect()), ""
+            lazy = pl.scan_parquet(path).filter(cond)
+            schema = set(lazy.collect_schema().names())
+            wanted = list(dict.fromkeys((*_ROW, "counted", *_COLUMNS)))
+            frame = lazy.select(column for column in wanted if column in schema).collect()
+            return _one_row_each(frame), ""
         except Exception as exc:  # 留档损坏不该让整个检索报错
             return None, str(exc)
 
