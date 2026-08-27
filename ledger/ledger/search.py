@@ -123,7 +123,13 @@ def predicate(query: str, kinds: list[str]) -> pl.Expr | None:
             # 正负都匹配。同一笔钱在订单表里是正的、在对账表里是负的，
             # 人手里那个数是从哪张表抄来的，系统不知道也不该要求他知道。
             parts.append((pl.col("amount").abs() - value).abs() < CENT)
-    if "text" in kinds:
+    if "order" in kinds:
+        # 长数字的文本兜底只需要撞关联键；拿19位订单号再逐行扫科目和文件名
+        # 不会增加有效命中，只会让一次全局无命中查询多读三列字符串。
+        parts.append(pl.col("link_key").cast(pl.Utf8).str.contains(q, literal=True))
+    elif "text" in kinds and "amount" not in kinds:
+        # 金额已经走数值列的分级容差匹配。把同一串数字再扫四个文本列既不会
+        # 改变财务语义，也会把最常用的金额核对拖慢一倍以上。
         for col in ("subject", "minor", "file_name", "link_key"):
             parts.append(pl.col(col).cast(pl.Utf8).str.contains(q, literal=True))
     if not parts:
