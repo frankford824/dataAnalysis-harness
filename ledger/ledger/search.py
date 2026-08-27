@@ -23,6 +23,8 @@
 from __future__ import annotations
 
 import re
+import os
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -36,6 +38,7 @@ LIMIT = 200
 
 #: 最多翻多少个店期的留档。按账期从新到旧翻，翻够就停——查的多半是最近的账。
 MAX_RUNS = 24
+SEARCH_READERS = max(1, int(os.environ.get("LEDGER_SEARCH_READERS", "2")))
 
 #: 金额匹配的容差。事实行留档到分，比这更细的差异是浮点尾数不是另一笔钱。
 CENT = 0.005
@@ -175,17 +178,31 @@ def search(states: list[Any], facts_of, model, query: str, *,
 
     names = {s.id: s.name for s in model.stores}
     per_store: dict[tuple[str, str], dict[str, Any]] = {}
-    for state in states[:MAX_RUNS]:
-        res.scanned += 1
+    selected = states[:MAX_RUNS]
+
+    def read(state):
         path = facts_of(state.run_id)
         if path is None:
-            continue
+            return None, ""
         try:
-            frame = _one_row_each(
-                pl.scan_parquet(path).filter(cond).collect()
-            )
+            return _one_row_each(pl.scan_parquet(path).filter(cond).collect()), ""
         except Exception as exc:  # 留档损坏不该让整个检索报错
-            res.notes.append(f"{state.store_id} {state.period} 的留档读不了：{exc}")
+            return None, str(exc)
+
+    if len(selected) > 1:
+        with ThreadPoolExecutor(max_workers=min(SEARCH_READERS, len(selected))) as pool:
+            loaded = list(pool.map(read, selected))
+    else:
+        loaded = [read(state) for state in selected]
+
+    # pool.map保留输入顺序；结果仍严格按「新账期优先」组合，不能因哪份文件先读完
+    # 就让搜索列表每次跳来跳去。
+    for state, (frame, error) in zip(selected, loaded, strict=True):
+        res.scanned += 1
+        if error:
+            res.notes.append(f"{state.store_id} {state.period} 的留档读不了：{error}")
+            continue
+        if frame is None:
             continue
         if frame.is_empty():
             continue

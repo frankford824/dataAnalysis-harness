@@ -27,6 +27,7 @@ $env:PYTHONUNBUFFERED = '1'
 # CPU核数扩张；外部显式配置仍优先，便于以后按机器基准调整。
 if (-not $env:LEDGER_THREAD_TOKENS)   { $env:LEDGER_THREAD_TOKENS = '16' }
 if (-not $env:LEDGER_READERS)         { $env:LEDGER_READERS = '2' }
+if (-not $env:LEDGER_SEARCH_READERS)  { $env:LEDGER_SEARCH_READERS = '2' }
 if (-not $env:LEDGER_RECOMPUTE_LIMIT) { $env:LEDGER_RECOMPUTE_LIMIT = '2' }
 if (-not $env:POLARS_MAX_THREADS)      { $env:POLARS_MAX_THREADS = '4' }
 if (-not $env:OPENBLAS_NUM_THREADS)    { $env:OPENBLAS_NUM_THREADS = '1' }
