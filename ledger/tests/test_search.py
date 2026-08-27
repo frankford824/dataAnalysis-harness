@@ -128,6 +128,9 @@ class TestFindingThings:
         assert res.total == 2, "甲店乙店各一行"
         assert {h.store for h in res.hits} == {"甲店", "乙店"}
 
+    def test_an_eight_digit_fragment_still_finds_the_order(self, states, facts):
+        assert _find(states, facts, "60088500").total == 4
+
     def test_points_at_the_exact_cell(self, states, facts):
         """文件、工作表、行号缺一不可。少了行号，人还是得自己翻。"""
         hit = _find(states, facts, "5111236008850009226").hits[0]
