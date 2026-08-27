@@ -214,6 +214,13 @@ def ingest(
 #: 一台只有 8 G 的机器上把它调成 1，慢一点但不会被系统杀掉。
 _READERS = max(1, int(os.environ.get("LEDGER_READERS", "4")))
 
+#: 自动识别 Excel 表头时最多检查前多少行。
+#:
+#: 支付宝原始账务明细的前四行是账号、导出区间和分隔说明，真正表头在第 5 行；
+#: 历史上有人手工删过这些说明，表头又会落到第 1 或第 2 行。逐行试前 20 行既能
+#: 直接接原始导出，也能继续读取历史加工文件，不再要求财务先改源文件。
+_HEADER_SCAN_ROWS = 20
+
 
 def _ingest_file(
     path: Path, model: Model, known_stores: list[str], candidates: list[int]
@@ -380,13 +387,15 @@ def _dedupe_across_files(result: Ingestion, model: Model) -> None:
 
 
 def _header_row_candidates(model: Model) -> list[int]:
-    """模型里出现过的表头行位置。识别时逐个试。
+    """前 20 行和模型显式声明的位置都作为表头候选。
 
     先有鸡先有蛋：要识别模板得先有表头，要知道表头在第几行得先知道模板。
-    解法是把模型声明过的表头行都当候选试一遍——候选集来自模型数据，
-    不是写死的 0/1/2。
+    只看模型声明会漏掉平台原始导出的说明行：模板是照人工删行后的历史文件登记的，
+    支付宝原文件却把表头放在第 5 行。先扫一个很小的固定窗口，再保留模型声明的
+    窗口外位置，既兼容原始文件也不破坏特殊模板。
     """
-    return sorted({0} | {t.parse.header_row for t in model.templates})
+    declared = {t.parse.header_row for t in model.templates}
+    return sorted(set(range(_HEADER_SCAN_ROWS)) | declared)
 
 
 def _recognize_any_header_row(

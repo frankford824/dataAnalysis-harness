@@ -1,17 +1,10 @@
 <script setup>
-/* 数据与店铺，一页。
+/* 数据与店铺。
  *
- * 原来这是两页。店铺页上摆着主体、税号、等级这些东西，而它们一年也改不了一次；
- * 真正每周要做的事——这家店的表交齐了没、哪张是旧的、传错了要撤下来——反而分散在
- * 另一页。合成一页之后，一家店就是一张卡：它是哪个平台的、交了哪些表、算到哪个
- * 账期了。
- *
- * 摆法是左边一列店、右边一张表。上一版是每家店一张卡竖着铺，十几家店就是十几屏，
- * 想比较「淘宝那家交齐了没、抖音那家呢」得来回滚。左右分栏之后换店只是点一下，
- * 右边那半屏原地换掉，人的视线不用移动。
- *
- * 登记新店只要店名加平台。剩下的字段系统自己能认：账期从文件名认，店铺主体在
- * 需要开票之前根本用不上。
+ * 平台先选、店铺后选、右侧只加载当前店铺。以前进入页面会并发读取全部店铺详情，
+ * 店铺从十几家涨到五十多家以后，导航要等三秒以上，而且左栏会铺成一条很长的树。
+ * 现在列表只使用启动时已有的店铺注册表，详情按需读取并缓存；快速切店时旧请求即使
+ * 后回来也不会盖住当前店铺的加载状态。
  */
 import { useDialog, useMessage } from 'naive-ui'
 import { computed, ref, watch } from 'vue'
@@ -20,7 +13,7 @@ import { useRouter } from 'vue-router'
 import { api } from '../api'
 import DropZone from '../components/DropZone.vue'
 import UploadPanel from '../components/UploadPanel.vue'
-import { ago, bytes, count, money } from '../format'
+import { ago, bytes, count } from '../format'
 import { useApp } from '../store'
 
 const app = useApp()
@@ -29,64 +22,125 @@ const dialog = useDialog()
 const router = useRouter()
 
 const detail = ref({})
-const loading = ref(false)
+const loadingStore = ref('')
+const loadError = ref('')
+const search = ref('')
 const adding = ref(false)
 const explaining = ref(false)
 const draft = ref({ name: '', platform: '' })
-//: 左栏选中的那家店记在全局里：切去别的页再回来，还停在刚才那家。每页各记各的
-//: 就是「回来又要重找一遍」，多店铺时这一步每天要重复十几次。
-const picked = app.noted('deliver.store', '')
+let requestSequence = 0
 
-const shown = computed(() =>
-  app.stores.filter(
-    (s) =>
-      (!app.platform || s.platform === app.platform) &&
-      (!app.storeId || s.id === app.storeId),
-  ),
+// 平台、每个平台上次看的店都记住。平台很多时来回切换，不该每次从第一家重新找。
+const activePlatform = app.noted('deliver.platform', '')
+const picked = app.noted('deliver.store', '')
+const rememberedStores = app.noted('deliver.platformStores', {})
+
+const platformCards = computed(() =>
+  app.platforms
+    .map((platform) => ({
+      ...platform,
+      count: app.stores.filter((store) => store.platform === platform.id).length,
+    }))
+    .filter((platform) => platform.count),
 )
 
-const groups = computed(() => {
-  const by = new Map()
-  for (const s of shown.value) {
-    const key = s.platform || '(未分平台)'
-    if (!by.has(key)) by.set(key, [])
-    by.get(key).push(s)
-  }
-  return [...by].map(([platform, list]) => ({
-    platform,
-    name: app.platforms.find((p) => p.id === platform)?.name || platform,
-    list,
-  }))
+const platformStores = computed(() =>
+  app.stores.filter((store) => store.platform === activePlatform.value),
+)
+
+const visibleStores = computed(() => {
+  const word = search.value.trim().toLocaleLowerCase()
+  if (!word) return platformStores.value
+  return platformStores.value.filter((store) => store.name.toLocaleLowerCase().includes(word))
 })
 
-const here = computed(() => shown.value.find((s) => s.id === picked.value) || null)
+const here = computed(() => app.stores.find((store) => store.id === picked.value) || null)
+const currentDetail = computed(() => (here.value ? detail.value[here.value.id] || null : null))
+const detailLoading = computed(() => !!here.value && loadingStore.value === here.value.id)
+const platformLabel = computed(
+  () => platformCards.value.find((platform) => platform.id === activePlatform.value)?.name || '',
+)
 
-async function load() {
-  loading.value = true
-  try {
-    const got = await Promise.all(
-      shown.value.map((s) => api.store(s.id).catch(() => null)),
-    )
-    detail.value = Object.fromEntries(shown.value.map((s, i) => [s.id, got[i]]))
-    if (!shown.value.some((s) => s.id === picked.value)) {
-      picked.value = shown.value[0]?.id || ''
-    }
-  } finally {
-    loading.value = false
+/** 外部筛选条选了平台或店铺时，这一页跟着定位，但左栏仍保留同平台的全部店铺。 */
+function syncSelection() {
+  if (!app.stores.length) return
+  const externallyPicked = app.stores.find((store) => store.id === app.storeId)
+  if (externallyPicked) {
+    activePlatform.value = externallyPicked.platform
+    picked.value = externallyPicked.id
+    return
+  }
+  const validPlatforms = new Set(platformCards.value.map((platform) => platform.id))
+  if (app.platform && validPlatforms.has(app.platform)) activePlatform.value = app.platform
+  if (!validPlatforms.has(activePlatform.value)) activePlatform.value = platformCards.value[0]?.id || ''
+  const list = app.stores.filter((store) => store.platform === activePlatform.value)
+  if (!list.some((store) => store.id === picked.value)) {
+    const remembered = rememberedStores.value?.[activePlatform.value]
+    picked.value = list.find((store) => store.id === remembered)?.id || list[0]?.id || ''
   }
 }
 
-watch(shown, load, { immediate: true })
+watch(
+  [
+    () => app.stores.map((store) => `${store.id}:${store.platform}`).join('|'),
+    () => app.platform,
+    () => app.storeId,
+  ],
+  syncSelection,
+  { immediate: true },
+)
 
-/** 这家店在筛选中的账期上算到哪了。没选账期就看最新的。 */
-function state(id) {
-  const periods = detail.value[id]?.periods || []
-  if (!periods.length) return null
-  return app.period ? periods.find((p) => p.period === app.period) || null : periods[0]
+async function loadDetail(id, force = false) {
+  if (!id || (detail.value[id] && !force)) return detail.value[id]
+  const sequence = ++requestSequence
+  loadingStore.value = id
+  loadError.value = ''
+  try {
+    const got = await api.store(id)
+    detail.value = { ...detail.value, [id]: got }
+    return got
+  } catch (error) {
+    if (sequence === requestSequence) loadError.value = error.message
+    throw error
+  } finally {
+    if (sequence === requestSequence) loadingStore.value = ''
+  }
 }
 
-function files(id) {
-  return detail.value[id]?.files || []
+watch(
+  () => here.value?.id || '',
+  (id) => loadDetail(id).catch(() => {}),
+  { immediate: true },
+)
+
+function remember(store) {
+  rememberedStores.value = { ...rememberedStores.value, [store.platform]: store.id }
+}
+
+function choosePlatform(id) {
+  if (id === activePlatform.value) return
+  activePlatform.value = id
+  search.value = ''
+  const list = app.stores.filter((store) => store.platform === id)
+  const remembered = rememberedStores.value?.[id]
+  const next = list.find((store) => store.id === remembered) || list[0] || null
+  picked.value = next?.id || ''
+  app.pick({ platform: id, store: next?.id || '' })
+}
+
+function chooseStore(store) {
+  activePlatform.value = store.platform
+  picked.value = store.id
+  remember(store)
+  app.pick({ platform: store.platform, store: store.id })
+}
+
+function files() {
+  return currentDetail.value?.files || []
+}
+
+function periods() {
+  return currentDetail.value?.periods || []
 }
 
 function drop(storeId, name) {
@@ -100,10 +154,10 @@ function drop(storeId, name) {
         await app.run('正在撤下并重算', () => api.dropFile(storeId, name))
         app.invalidate()
         await app.load(true)
-        await load()
+        await loadDetail(storeId, true)
         message.success('撤下了')
-      } catch (e) {
-        message.error(e.message, { duration: 6000 })
+      } catch (error) {
+        message.error(error.message, { duration: 6000 })
       }
     },
   })
@@ -111,98 +165,152 @@ function drop(storeId, name) {
 
 async function register() {
   if (!draft.value.name.trim() || !draft.value.platform) return
-  // 店铺 id 是系统内部用的稳定标识，人不该被要求想一个。用平台加时间拼一个即可，
-  // 界面上从头到尾只出现店名。
   const id = `${draft.value.platform}_${Date.now().toString(36)}`
   try {
-    await api.addStore({
-      id,
-      name: draft.value.name.trim(),
-      platform: draft.value.platform,
-    })
+    await api.addStore({ id, name: draft.value.name.trim(), platform: draft.value.platform })
     adding.value = false
+    const platform = draft.value.platform
     draft.value = { name: '', platform: '' }
     await app.load(true)
+    const store = app.stores.find((item) => item.id === id)
+    activePlatform.value = platform
     picked.value = id
+    if (store) remember(store)
+    app.pick({ platform, store: id })
     message.success('登记好了。把这家店的表拖进来就能算账。')
-  } catch (e) {
-    message.error(e.message, { duration: 6000 })
+  } catch (error) {
+    message.error(error.message, { duration: 6000 })
   }
 }
 
-function open(id) {
-  const s = state(id)
-  app.pick({ store: id })
-  router.push({ name: 'period', params: { id }, query: { period: s?.period || '' } })
+function open(period = '') {
+  if (!here.value) return
+  const fallback = periods()[0]?.period || ''
+  app.pick({ store: here.value.id, period: period || fallback })
+  router.push({
+    name: 'period',
+    params: { id: here.value.id },
+    query: { period: period || fallback },
+  })
 }
 </script>
 
 <template>
-  <n-spin :show="loading">
-    <div class="spread" style="margin-bottom: var(--s4)">
-      <div>
-        <h1>数据与店铺</h1>
-        <div class="small muted">
-          {{ count(shown.length) }} 家店。左边选一家，右边是它交过的表。
-        </div>
-        <!-- 这一页列的是「哪家店交了哪些表」，人自然会在这儿找上传口。有表的店
-             不摆拖传框（同一个动作在每页长在不同位置，上一版就是这么乱的），
-             所以得在这儿说清楚上传在哪、以及表是怎么落到某家店名下的。 -->
-        <div class="xs muted" style="margin-top: var(--s1)">
-          表落到哪家店，看的是文件名里的店名；落到哪个账期，看的是表里的日期。
-          <button class="link" @click="explaining = true">怎么传</button>
-        </div>
+  <div class="spread deliver-heading">
+    <div>
+      <h1>数据与店铺</h1>
+      <div class="small muted">
+        先选平台，再选店铺；右侧只读取当前店铺，切换后立即联动。
       </div>
-      <n-space size="small">
-        <n-button size="small" type="primary" @click="explaining = true">上传表格</n-button>
-        <n-button size="small" @click="adding = true">登记新店</n-button>
-      </n-space>
+      <div class="xs muted" style="margin-top: var(--s1)">
+        表落到哪家店，看文件名里的店名；落到哪个账期，看表里的日期。
+        <button class="link" @click="explaining = true">怎么传</button>
+      </div>
     </div>
+    <n-space size="small">
+      <n-button size="small" type="primary" @click="explaining = true">上传表格</n-button>
+      <n-button size="small" @click="adding = true">登记新店</n-button>
+    </n-space>
+  </div>
 
-    <div class="cols list">
-      <div class="card" style="margin-top: 0; padding: var(--s3)">
-        <template v-for="g in groups" :key="g.platform">
-          <div class="groupline">{{ g.name }} · {{ g.list.length }} 家</div>
-          <button
-            v-for="s in g.list"
-            :key="s.id"
-            class="pick"
-            :class="{ on: s.id === picked }"
-            @click="picked = s.id"
-          >
-            <div class="spread">
-              <span class="who">{{ s.name }}</span>
-              <span class="xs muted num">{{ files(s.id).length }} 张</span>
-            </div>
-            <div class="meta">
-              <template v-if="state(s.id)">
-                {{ state(s.id).period }} ·
-                {{ state(s.id).state === 'closed' ? '已结账' : '未结账' }}
-                <template v-if="state(s.id).profit !== undefined && state(s.id).profit !== null">
-                  · 利润 <span class="num">{{ money(state(s.id).profit) }}</span>
-                </template>
-              </template>
-              <template v-else>还没交过表</template>
-            </div>
-          </button>
-        </template>
-        <p v-if="!shown.length" class="xs muted" style="padding: var(--s3)">
-          筛选条里没有匹配的店。
-        </p>
+  <div class="deliver-layout">
+    <aside class="card store-browser" aria-label="平台和店铺">
+      <div class="store-browser-title">
+        <div>
+          <b>平台</b>
+          <span class="xs muted">{{ count(app.stores.length) }} 家店</span>
+        </div>
       </div>
 
-      <div v-if="here" class="card rail" style="margin-top: 0">
-        <header>
-          <h2>
-            <button class="link" style="font-size: var(--t-lg); font-weight: 640" @click="open(here.id)">
-              {{ here.name }}
-            </button>
-            <span v-if="here.archived" class="pill" style="margin-left: var(--s2)">已归档</span>
-          </h2>
-          <span class="sub">{{ count(files(here.id).length) }} 张表</span>
-        </header>
+      <div class="platform-switcher" role="tablist" aria-label="选择平台">
+        <button
+          v-for="platform in platformCards"
+          :key="platform.id"
+          class="platform-choice"
+          :class="{ on: platform.id === activePlatform }"
+          role="tab"
+          :aria-selected="platform.id === activePlatform"
+          @click="choosePlatform(platform.id)"
+        >
+          <span>{{ platform.name }}</span>
+          <span class="platform-count num">{{ platform.count }}</span>
+        </button>
+      </div>
 
-        <div v-if="files(here.id).length" class="scroll tall">
+      <n-input
+        v-model:value="search"
+        class="store-search"
+        size="small"
+        clearable
+        :placeholder="`搜索${platformLabel || '当前平台'}店铺`"
+      />
+
+      <div class="store-list-scroll" role="listbox" :aria-label="`${platformLabel}店铺`">
+        <button
+          v-for="store in visibleStores"
+          :key="store.id"
+          class="store-choice"
+          :class="{ on: store.id === picked }"
+          role="option"
+          :aria-selected="store.id === picked"
+          @click="chooseStore(store)"
+        >
+          <span class="store-choice-name">
+            <span class="store-dot" />
+            <span>{{ store.name }}</span>
+          </span>
+          <span class="store-choice-tail">
+            <span v-if="detail[store.id]" class="xs muted num">
+              {{ count((detail[store.id].files || []).length) }} 张
+            </span>
+            <span v-else class="xs muted">详情</span>
+            <span aria-hidden="true">›</span>
+          </span>
+        </button>
+        <div v-if="!visibleStores.length" class="store-empty">
+          当前平台没有匹配的店铺。
+        </div>
+      </div>
+
+      <div class="store-browser-foot xs muted">
+        {{ platformLabel || '未选平台' }} · {{ count(platformStores.length) }} 家
+      </div>
+    </aside>
+
+    <section v-if="here" class="card store-detail" aria-live="polite">
+      <header class="store-detail-head">
+        <div>
+          <div class="detail-breadcrumb">
+            <span>{{ platformLabel }}</span><span aria-hidden="true">/</span><span>店铺详情</span>
+          </div>
+          <h2>{{ here.name }}</h2>
+        </div>
+        <n-space size="small" align="center">
+          <span v-if="currentDetail" class="sub">{{ count(files().length) }} 张表</span>
+          <n-button size="small" secondary @click="open()">查看损益</n-button>
+        </n-space>
+      </header>
+
+      <div v-if="detailLoading" class="detail-loading">
+        <div class="detail-loading-title">
+          <span class="orbit-loader" />
+          <div>
+            <b>正在读取店铺资料</b>
+            <div class="xs muted">文件和账期加载完成后会在这里出现</div>
+          </div>
+        </div>
+        <n-skeleton text :repeat="5" />
+      </div>
+
+      <n-alert v-else-if="loadError" type="error" :bordered="false">
+        {{ loadError }}
+        <button class="link" style="margin-left: var(--s2)" @click="loadDetail(here.id, true)">
+          重试
+        </button>
+      </n-alert>
+
+      <template v-else-if="currentDetail">
+        <div v-if="files().length" class="scroll tall store-files">
           <n-table size="small" :bordered="false">
             <thead>
               <tr>
@@ -214,18 +322,18 @@ function open(id) {
               </tr>
             </thead>
             <tbody>
-              <tr v-for="f in files(here.id)" :key="f.name">
+              <tr v-for="file in files()" :key="file.name">
                 <td class="xs">
-                  {{ f.name }}
-                  <n-tag v-if="f.versions > 1" size="tiny" :bordered="false">
-                    {{ f.versions }} 版
+                  {{ file.name }}
+                  <n-tag v-if="file.versions > 1" size="tiny" :bordered="false">
+                    {{ file.versions }} 版
                   </n-tag>
                 </td>
-                <td class="xs muted">{{ f.by || '—' }}</td>
-                <td class="right xs num">{{ bytes(f.size / 1024) }}</td>
-                <td class="right xs muted nowrap">{{ ago(f.updated_at) || '—' }}</td>
+                <td class="xs muted">{{ file.by || '—' }}</td>
+                <td class="right xs num">{{ bytes(file.size / 1024) }}</td>
+                <td class="right xs muted nowrap">{{ ago(file.updated_at) || '—' }}</td>
                 <td class="right">
-                  <n-button size="tiny" quaternary type="error" @click="drop(here.id, f.name)">
+                  <n-button size="tiny" quaternary type="error" @click="drop(here.id, file.name)">
                     撤下
                   </n-button>
                 </td>
@@ -235,53 +343,57 @@ function open(id) {
         </div>
         <DropZone v-else />
 
-        <div v-if="(detail[here.id]?.periods || []).length" class="panel">
-          <h3>算过的账期</h3>
+        <div v-if="periods().length" class="panel period-links">
+          <div class="spread">
+            <h3>算过的账期</h3>
+            <span class="xs muted">点击进入该月损益</span>
+          </div>
           <div class="row wrap" style="margin-top: var(--s2)">
             <n-button
-              v-for="p in detail[here.id].periods"
-              :key="p.period"
+              v-for="period in periods()"
+              :key="period.period"
               size="tiny"
-              @click="open(here.id)"
+              @click="open(period.period)"
             >
-              {{ p.period }}
+              {{ period.period }}
               <span class="xs muted" style="margin-left: 4px">
-                {{ p.state === 'closed' ? '已结' : '未结' }}
+                {{ period.state === 'closed' ? '已结' : '未结' }}
               </span>
             </n-button>
           </div>
         </div>
-      </div>
-    </div>
+      </template>
+    </section>
 
-    <n-modal
-      v-model:show="adding"
-      preset="dialog"
-      title="登记新店"
-      positive-text="登记"
-      negative-text="算了"
-      :positive-button-props="{ disabled: !draft.name.trim() || !draft.platform }"
-      @positive-click="register"
-    >
-      <p class="small muted" style="margin-bottom: var(--s3)">
-        只要店名和平台，主体和税号等到要开票时再说。
-      </p>
-      <!-- 店名不是个标签，它是认表用的钥匙：以后传上来的文件名里必须出现它，
-           否则那份表会被退回来说「认不出是哪家店」。登记的时候就得说清楚。 -->
-      <p class="xs muted" style="margin-bottom: var(--s3)">
-        店名要和导出文件名里写的一致——认表就是靠它。平台导出的名字五花八门的话，
-        先按其中一种登记，之后在店铺设置里把其余写法加成别名。
-      </p>
-      <n-space vertical>
-        <n-input v-model:value="draft.name" placeholder="店铺名称，比如 淘宝喜必顺" />
-        <n-select
-          v-model:value="draft.platform"
-          placeholder="选平台"
-          :options="app.platforms.map((p) => ({ label: p.name, value: p.id }))"
-        />
-      </n-space>
-    </n-modal>
+    <section v-else class="card store-detail store-detail-empty">
+      先选择一个有店铺的平台。
+    </section>
+  </div>
 
-    <UploadPanel v-model:show="explaining" />
-  </n-spin>
+  <n-modal
+    v-model:show="adding"
+    preset="dialog"
+    title="登记新店"
+    positive-text="登记"
+    negative-text="算了"
+    :positive-button-props="{ disabled: !draft.name.trim() || !draft.platform }"
+    @positive-click="register"
+  >
+    <p class="small muted" style="margin-bottom: var(--s3)">
+      只要店名和平台，主体和税号等到要开票时再说。
+    </p>
+    <p class="xs muted" style="margin-bottom: var(--s3)">
+      店名要和导出文件名里写的一致。平台导出的名字不同，可以之后补充别名。
+    </p>
+    <n-space vertical>
+      <n-input v-model:value="draft.name" placeholder="店铺名称，比如 淘宝喜必顺" />
+      <n-select
+        v-model:value="draft.platform"
+        placeholder="选平台"
+        :options="app.platforms.map((platform) => ({ label: platform.name, value: platform.id }))"
+      />
+    </n-space>
+  </n-modal>
+
+  <UploadPanel v-model:show="explaining" />
 </template>

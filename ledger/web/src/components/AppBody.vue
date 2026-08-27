@@ -1,6 +1,7 @@
 <script setup>
 import { useMessage } from 'naive-ui'
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
+import { useRouter } from 'vue-router'
 
 import { useApp } from '../store'
 import FilterBar from './FilterBar.vue'
@@ -12,6 +13,29 @@ const emit = defineEmits(['taken'])
 
 const app = useApp()
 const message = useMessage()
+const router = useRouter()
+
+// 懒加载页面时给导航一个明确反馈。保留很短的最小展示时间，避免快请求只闪一下；
+// 真正的数据加载由页面自己的骨架屏接手，两层各自说明自己在等什么。
+const routeLoading = ref(false)
+let routeStarted = 0
+let routeTimer = null
+const stopBefore = router.beforeEach((to, from) => {
+  if (to.fullPath === from.fullPath) return
+  clearTimeout(routeTimer)
+  routeStarted = performance.now()
+  routeLoading.value = true
+})
+const stopAfter = router.afterEach(() => {
+  const wait = Math.max(0, 260 - (performance.now() - routeStarted))
+  clearTimeout(routeTimer)
+  routeTimer = setTimeout(() => (routeLoading.value = false), wait)
+})
+
+// 鼠标经过或浏览器空闲时提前取页面代码；数据不会预取，仍以当前筛选为准。
+function preloadDeliver() {
+  import('../views/DeliverView.vue').catch(() => {})
+}
 
 const openCount = computed(
   () => (app.overview?.cells || []).filter((c) => c.state === 'open').length,
@@ -29,7 +53,12 @@ watch(
     if (busy) tick = setInterval(() => (secs.value = Math.round((Date.now() - busy.since) / 1000)), 1000)
   },
 )
-onUnmounted(() => clearInterval(tick))
+onUnmounted(() => {
+  clearInterval(tick)
+  clearTimeout(routeTimer)
+  stopBefore()
+  stopAfter()
+})
 
 async function take(files) {
   if (!files?.length) return
@@ -56,6 +85,8 @@ const explaining = ref(false)
 
 onMounted(() => {
   app.load().catch((e) => message.error(e.message, { duration: 6000 }))
+  if ('requestIdleCallback' in window) window.requestIdleCallback(preloadDeliver, { timeout: 1500 })
+  else setTimeout(preloadDeliver, 500)
 })
 
 defineExpose({ take })
@@ -68,7 +99,13 @@ defineExpose({ take })
       <router-link class="navlink" :class="{ on: $route.name === 'board' }" to="/">
         总览<span v-if="openCount" class="count">{{ openCount }}</span>
       </router-link>
-      <router-link class="navlink" :class="{ on: $route.name === 'deliver' }" to="/deliver">
+      <router-link
+        class="navlink"
+        :class="{ on: $route.name === 'deliver' }"
+        to="/deliver"
+        @mouseenter="preloadDeliver"
+        @focus="preloadDeliver"
+      >
         数据与店铺<span class="count">{{ app.stores.length || '' }}</span>
       </router-link>
       <router-link
@@ -97,8 +134,17 @@ defineExpose({ take })
           上传表格
         </n-button>
       </header>
+      <div class="route-progress" :class="{ on: routeLoading }" aria-hidden="true">
+        <span />
+      </div>
       <main class="page">
-        <router-view />
+        <router-view v-slot="{ Component, route }">
+          <transition name="page-shift" mode="out-in">
+            <div :key="route.name" class="route-page">
+              <component :is="Component" />
+            </div>
+          </transition>
+        </router-view>
       </main>
     </div>
 

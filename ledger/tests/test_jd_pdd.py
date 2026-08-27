@@ -238,6 +238,41 @@ class TestTheTwoSettlementTablesDoNotGetConfused:
         ], model)
         assert item.recognition.template_id == "taobao_settlement_alipay_v1"
 
+    def test_alipay_raw_export_finds_the_header_on_row_five(self, tmp_path, model):
+        """原始支付宝导出不需要先由人删除账号和账期说明。
+
+        平台原文件前四行依次是标题、账号、导出区间和分隔线，真正表头在第 5 行。
+        历史模板来自手工删过说明行的文件，只声明了第 2 行；如果自动识别只试模板
+        声明过的位置，整份原文件会落进「没见过这种表头」，一行钱都不进账。
+        """
+        headers = [
+            "账务流水号", "业务流水号", "商品名称", "发生时间", "收入金额（+元）",
+            "支出金额（-元）", "账户余额（元）", "业务类型", "备注", "商户订单号",
+            "对方账号", "业务描述", "业务基础订单号",
+        ]
+        row = [
+            "1570757242119060731", "20260513200040011100730092344444", "气球",
+            "2026-05-13 09:10:28", "146.92", "0", "1000.00", "交易付款", "订单收款",
+            "T200P5116032541422009305", "买家", "0010001|交易收款-交易收款",
+            "5116032541422009305",
+        ]
+        path = write_xlsx(tmp_path / "对账-淘宝喜必顺.xlsx", [
+            ["#支付宝账务明细查询"],
+            ["#账号：[20880512402512820156]"],
+            ["#起始日期：[2026年05月01日 00:00:00] 终止日期：[2026年06月01日 00:00:00]"],
+            ["#----------------账务明细列表----------------"],
+            headers,
+            row,
+        ])
+
+        result = ingest([path], model, [s.name for s in model.stores])
+        item = next(i for i in result.items if i.recognition.known)
+        assert item.recognition.template_id == "taobao_settlement_alipay_v1"
+        assert not item.error, item.error
+        assert item.rows == 1
+        assert item.frame is not None and item.frame.height == 1
+        assert any("表头在第 5 行" in note for note in item.notes)
+
     def test_pdd_subject_codes_hit_the_dictionary(self, tmp_path, model):
         """业务描述是带编号的全称，字典里存的就是全称。"""
         out, _ = _classified(tmp_path, [

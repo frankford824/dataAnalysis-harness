@@ -3,6 +3,8 @@ import { fileURLToPath, URL } from 'node:url'
 import vue from '@vitejs/plugin-vue'
 import { defineConfig } from 'vite'
 
+const apiProxy = process.env.LEDGER_API_PROXY || 'http://127.0.0.1:8000'
+
 // 产物直接落进后端的 static 目录，由 FastAPI 挂载出去。分两个服务部署会多一个
 // 要一起启停的东西，而这套系统是一个人维护的。
 export default defineConfig({
@@ -19,7 +21,7 @@ export default defineConfig({
   },
   server: {
     proxy: {
-      '/api': 'http://127.0.0.1:8000',
+      '/api': apiProxy,
     },
   },
 })
