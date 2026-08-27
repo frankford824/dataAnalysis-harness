@@ -23,6 +23,8 @@ from pathlib import Path
 
 import pytest
 
+from ledger.web import is_asset_path
+
 STATIC = Path(__file__).parents[1] / "ledger" / "static"
 WEB = Path(__file__).parents[1] / "web"
 
@@ -88,3 +90,8 @@ def test_the_source_is_in_the_repo():
     """产物是编译结果，改它没有意义。源码必须在版本库里，否则没人改得动界面。"""
     assert (WEB / "package.json").exists()
     assert (WEB / "src" / "main.js").exists()
+
+
+def test_windows_static_paths_are_still_recognised_as_assets():
+    assert is_asset_path(r"assets\index-abcdef12.js")
+    assert is_asset_path("assets/index-abcdef12.js")

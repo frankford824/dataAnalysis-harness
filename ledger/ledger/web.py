@@ -18,12 +18,17 @@ from fastapi.staticfiles import StaticFiles
 STATIC = Path(__file__).resolve().parent / "static"
 
 
+def is_asset_path(path: str) -> bool:
+    return path.replace("\\", "/").startswith("assets/")
+
+
 class HashedStaticFiles(StaticFiles):
     """Vite哈希资源长期缓存；index.html仍由首页接口明确no-store。"""
 
     async def get_response(self, path: str, scope):
         response = await super().get_response(path, scope)
-        if response.status_code == 200 and path.startswith("assets/"):
+        # StaticFiles传进来的是平台规范化后的路径；Windows上分隔符是反斜杠。
+        if response.status_code == 200 and is_asset_path(path):
             response.headers["Cache-Control"] = "public,max-age=31536000,immutable"
         return response
 
