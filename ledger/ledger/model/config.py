@@ -363,6 +363,8 @@ def _source_entry(s: SourceContract) -> CommentedMap:
         m["required_for_close"] = False
     if s.company_wide:
         m["company_wide"] = True
+    if s.shared_upload:
+        m["shared_upload"] = True
     if s.filename_hints:
         m["filename_hints"] = list(s.filename_hints)
     if s.dedupe_key:

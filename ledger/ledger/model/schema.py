@@ -312,6 +312,9 @@ class SourceContract(Base):
     #: 其余挂不到这家店的订单上。不标的话这 54.8 万会被报成本店「没进利润的钱」，
     #: 而它本来就不是这家店的钱。这种误报比不报更糟——它会让人不再信这个提示。
     company_wide: bool = False
+    #: 文件本身覆盖全公司、文件名不带店铺名时，只留一份并供所有店读取。
+    #: 默认关闭，避免把普通的「公司级表」误当成可全局上传的数据。
+    shared_upload: bool = False
     note: str = ""
 
 
@@ -565,6 +568,30 @@ class Allocation(Base):
         return self
 
 
+class ExclusionKey(Base):
+    """跨源排除的一列复合键：field 在当前指标源，other 在判定源。"""
+
+    field: str
+    other: str
+
+
+class LinkedExclusion(Base):
+    """另一张业务表命中条件与复合键时，排除当前指标的对应行。"""
+
+    source: str
+    when: tuple[Predicate, ...]
+    keys: tuple[ExclusionKey, ...]
+    note: str = ""
+
+    @model_validator(mode="after")
+    def _check(self) -> LinkedExclusion:
+        if not self.when:
+            raise ValueError("跨源排除必须给 when")
+        if not self.keys:
+            raise ValueError("跨源排除必须给复合键")
+        return self
+
+
 class PlatformRule(Base):
     """某个平台上这条指标的差异写法。
 
@@ -650,6 +677,8 @@ class Metric(Base):
     allocate: Allocation | None = None
     #: 只取归类为这个口径项的行。对账表一张表供给多个指标，靠它区分。
     major: str | None = None
+    #: 由另一数据源决定本源哪些行不计。例如售后单决定聚水潭哪一行商品成本归零。
+    exclude_when: tuple[LinkedExclusion, ...] = ()
     #: 各平台的差异写法。没列到的平台走上面的缺省算法。
     by_platform: tuple[PlatformRule, ...] = ()
     note: str = ""

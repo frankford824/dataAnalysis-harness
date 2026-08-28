@@ -25,7 +25,7 @@ from .engine.runtime import Ingestion, RunResult, Slice, ingest, run
 from .model.schema import Model, Store
 from .view import commission_dict, slice_dict
 from .version import engine_version
-from .workspace import Kept, Workspace
+from .workspace import SHARED_STORE_ID, Kept, Workspace
 
 #: 能解析的文件后缀。别的一律不碰，也不假装能读。
 SUFFIXES = {".xlsx", ".xlsm", ".xls", ".xlsb", ".csv", ".zip"}
@@ -111,6 +111,24 @@ def intake(
             continue
         store = model.store_of(name)
         if store is None:
+            shared = next(
+                (
+                    source for source in model.sources
+                    if source.shared_upload
+                    and any(hint in name for hint in source.filename_hints)
+                ),
+                None,
+            )
+            if shared is not None:
+                kept = ws.keep(name, src, SHARED_STORE_ID, by=by, exclusive=True)
+                out.kept.append(kept)
+                if not kept.unchanged:
+                    active = {candidate.id for candidate in model.active_stores()}
+                    touched.extend(
+                        store_id for store_id in ws.store_ids()
+                        if store_id in active and store_id not in touched
+                    )
+                continue
             # 说清楚是「文件名里没有已登记的店名」而不只是「认不出」：认表靠的就是
             # 文件名，人知道了这一条才改得对——改文件名，或者去把这个写法登记成别名。
             out.rejected.append(Rejected(

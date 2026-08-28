@@ -72,6 +72,21 @@
     拼多多 1.69 元、抖音 0.02 元，因为两次导出之间成本价只动了小数点后几位。
     宁可认一个偏几十块的成本价，也不要把整笔成本记两遍。
 
+- id: after_sales
+  name: 聚水潭售后单
+  filename_hints: [售后单]
+  platform: any
+  owner_role: warehouse
+  cadence: daily
+  required_for_close: false
+  company_wide: true
+  shared_upload: true
+  dedupe_key: [after_sale_id, internal_order_id, sub_order_id, sku]
+  note: >
+    全公司一份，用来判定聚水潭订单成本是否归零，不直接产生金额。
+    文件名无需带店铺；系统只留一份，按内部订单号、线上子订单编号和商品编码
+    逐商品关联各店聚水潭成本。
+
 - id: freight
   name: 运费
   platform: any

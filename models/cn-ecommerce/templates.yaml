@@ -679,6 +679,26 @@
 # ======================================================================== #
 # 成本各源
 # ======================================================================== #
+- id: jushuitan_after_sales_v1
+  source: after_sales
+  name: 聚水潭售后单
+  match_columns: [售后单号, 内部订单号, 线上订单号, 线上状态, 货物状态, 商品编码, 线上子订单编号]
+  parse: {header_row: 0}
+  bindings:
+    - {role: after_sale_id, columns: [售后单号]}
+    - {role: internal_order_id, columns: [内部订单号]}
+    - {role: order_id, columns: [线上订单号]}
+    - {role: sub_order_id, columns: [线上子订单编号]}
+    - {role: sku, columns: [商品编码]}
+    - {role: store_name, columns: [店铺名称], required: false}
+    - {role: after_sale_status, columns: [状态], required: false}
+    - {role: refund_status, columns: [线上状态]}
+    - {role: goods_status, columns: [货物状态]}
+    - {role: quantity, columns: [申请数量], required: false}
+  note: >
+    货物状态与线上状态只决定关联商品的聚水潭成本是否归零；售后单本身不产生金额。
+    必须逐商品关联，不能只按线上订单号整单排除：同一主订单可有多个子订单和商品。
+
 - id: jushuitan_cost_v1
   source: order_cost
   name: 聚水潭订单成本

@@ -130,20 +130,23 @@ function periods() {
   return currentDetail.value?.periods || []
 }
 
-function drop(storeId, name) {
+function drop(storeId, name, shared = false) {
   dialog.warning({
-    title: '撤下这张表',
-    content: `${name}。撤下后这家店会重算，损益表上的数会变。`,
+    title: shared ? '撤下全公司共用表' : '撤下这张表',
+    content: shared
+      ? `${name}。它供所有店使用，撤下后所有已有数据的店都会重算。`
+      : `${name}。撤下后这家店会重算，损益表上的数会变。`,
     positiveText: '撤下',
     negativeText: '算了',
     onPositiveClick: async () => {
       try {
         const hadOverview = !!app.overview
-        await app.run('正在撤下并重算', () => api.dropFile(storeId, name))
-        app.invalidate([storeId])
+        const result = await app.run('正在撤下并重算', () => api.dropFile(storeId, name))
+        const affected = result.stores?.length ? result.stores : [here.value?.id || storeId]
+        app.invalidate(affected)
         await app.loadNavigation(true)
         if (hadOverview) await app.loadOverview(true)
-        await loadDetail(storeId, true)
+        if (here.value?.id) await loadDetail(here.value.id, true)
         message.success('撤下了')
       } catch (error) {
         message.error(error.message, { duration: 6000 })
@@ -281,16 +284,20 @@ function open(period = '') {
               </tr>
             </thead>
             <tbody>
-              <tr v-for="file in files()" :key="file.name">
+              <tr v-for="file in files()" :key="`${file.store_id}:${file.name}`">
                 <td class="f-name">
                   {{ file.name }}
+                  <span v-if="file.shared" class="pill">全公司共用</span>
                   <span v-if="file.versions > 1" class="pill">{{ file.versions }} 版</span>
                 </td>
                 <td class="xs muted truncate">{{ file.by || '—' }}</td>
                 <td class="right xs num nowrap">{{ bytes(file.size / 1024) }}</td>
                 <td class="right xs muted nowrap">{{ ago(file.updated_at) || '—' }}</td>
                 <td class="right">
-                  <button class="f-drop" @click="drop(here.id, file.name)">撤下</button>
+                  <button
+                    class="f-drop"
+                    @click="drop(file.store_id || here.id, file.name, file.shared)"
+                  >撤下</button>
                 </td>
               </tr>
             </tbody>

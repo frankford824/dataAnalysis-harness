@@ -40,6 +40,7 @@ from .link import (
     target_role,
 )
 from .normalize import NormalizeError, normalize
+from .predicate import PredicateError, compile_where
 from .rules import norm_expr
 from .parse import ParseError, digest, parse
 from .recognize import infer_period, infer_store, match_headers
@@ -619,7 +620,8 @@ def run(ingestion: Ingestion, platform: str = "*") -> RunResult:
             if any(r not in item.frame.columns for r in metric.value.of):
                 continue
             supplied = True
-            frame, report = link(item.frame, metric, spine, item.template, bridges)
+            frame = _exclude_linked(item.frame, metric, ingestion, notes, item.ref.label())
+            frame, report = link(frame, metric, spine, item.template, bridges)
             _merge_link(link_reports, metric.id, report)
 
             # 未归类科目要带准确金额，那是用户判断该不该管的唯一依据。只取取值
@@ -692,6 +694,71 @@ def run(ingestion: Ingestion, platform: str = "*") -> RunResult:
             link_reports, classify_report, platform, eval_errors,
         )
     return result
+
+
+def _exclude_linked(
+    frame: pl.DataFrame,
+    metric: Metric,
+    ingestion: Ingestion,
+    notes: list[str],
+    label: str,
+) -> pl.DataFrame:
+    """按模型声明的另一数据源逐复合键排除，不猜主订单或整单范围。"""
+    out = frame
+    for rule_index, rule in enumerate(metric.exclude_when):
+        others = ingestion.frames_of(rule.source)
+        if not others:
+            continue
+        aliases = [f"__exclude_{rule_index}_{index}__" for index in range(len(rule.keys))]
+        current_missing = [key.field for key in rule.keys if key.field not in out.columns]
+        if current_missing:
+            raise RuntimeError(
+                f"{label} 算 {metric.name} 的跨源排除缺列：{'、'.join(current_missing)}"
+            )
+
+        parts: list[pl.DataFrame] = []
+        for other in others:
+            assert other.frame is not None
+            missing = [key.other for key in rule.keys if key.other not in other.frame.columns]
+            if missing:
+                raise RuntimeError(
+                    f"{other.ref.label()} 作为 {metric.name} 的判定表缺列：{'、'.join(missing)}"
+                )
+            try:
+                scoped = other.frame.filter(compile_where(rule.when, other.frame))
+            except PredicateError as exc:
+                raise RuntimeError(f"{other.ref.label()} 的跨源排除条件有问题：{exc}") from exc
+            if scoped.is_empty():
+                continue
+            part = scoped.select(
+                [
+                    norm_expr(pl.col(key.other).cast(pl.Utf8)).alias(alias)
+                    for key, alias in zip(rule.keys, aliases, strict=True)
+                ]
+            ).filter(pl.all_horizontal([pl.col(alias) != "" for alias in aliases]))
+            if not part.is_empty():
+                parts.append(part.unique(maintain_order=True))
+        if not parts:
+            continue
+
+        excluded = pl.concat(parts, how="vertical_relaxed").unique(maintain_order=True)
+        before = out.height
+        out = (
+            out.with_columns(
+                [
+                    norm_expr(pl.col(key.field).cast(pl.Utf8)).alias(alias)
+                    for key, alias in zip(rule.keys, aliases, strict=True)
+                ]
+            )
+            .join(excluded, on=aliases, how="anti", maintain_order="left")
+            .drop(aliases)
+        )
+        removed = before - out.height
+        notes.append(
+            f"{label} · {metric.name}：按 {ingestion.model.source(rule.source).name}"
+            f"逐商品排除 {removed:,} 行" + (f"（{rule.note}）" if rule.note else "")
+        )
+    return out
 
 
 def _mark_counted(facts: pl.DataFrame, spine_facts: pl.DataFrame,

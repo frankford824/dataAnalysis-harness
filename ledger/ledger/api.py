@@ -50,7 +50,9 @@ from .model.schema import FeeRule, Model, SourceContract, Store, Template
 from .money import decimal_amount, money_float
 from .version import engine_version
 from .web import STATIC, HashedStaticFiles, page
-from .workspace import PeriodState, Workspace, WorkspaceError, default_root
+from .workspace import (
+    SHARED_STORE_ID, PeriodState, Workspace, WorkspaceError, default_root,
+)
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
@@ -321,7 +323,7 @@ def _build_navigation(
         "stores": [
             {
                 **view.store_dict(store),
-                "file_count": counts.get(store.id, 0),
+                "file_count": counts.get(store.id, 0) + counts.get(SHARED_STORE_ID, 0),
                 "latest_period": latest.get(store.id, ("", ""))[0],
                 "latest_state": latest.get(store.id, ("", ""))[1],
             }
@@ -377,6 +379,7 @@ def upload(files: Annotated[list[UploadFile], File()], token: str = "") -> dict:
         "summary": result.summary(),
         "kept": [
             {"file": k.name, "store_id": k.store_id,
+             "shared": k.store_id == SHARED_STORE_ID,
              "unchanged": k.unchanged, "replaced": bool(k.replaced)}
             for k in result.kept
         ],
@@ -393,6 +396,19 @@ def upload(files: Annotated[list[UploadFile], File()], token: str = "") -> dict:
 def drop_file(store_id: str, name: str) -> dict:
     """把一份表撤下来，不再参与计算。内容留档不删，之后还能查。"""
     model = _model()
+    if store_id == SHARED_STORE_ID:
+        ws = workspace()
+        ws.forget(SHARED_STORE_ID, name)
+        active = {candidate.id for candidate in model.active_stores()}
+        store_ids = [sid for sid in ws.store_ids() if sid in active]
+        periods: list[dict] = []
+        failures: list[dict] = []
+        for sid in store_ids:
+            report = service.recompute(ws, model, model.store(sid))
+            periods.extend(report.periods)
+            if report.failure:
+                failures.append(report.failure)
+        return {"stores": store_ids, "periods": periods, "failures": failures}
     store = _store(model, store_id)
     ws = workspace()
     ws.forget(store_id, name)
@@ -496,7 +512,7 @@ def _build_overview(
         "stores": [
             {
                 **view.store_dict(s),
-                "file_count": file_counts.get(s.id, 0),
+                "file_count": file_counts.get(s.id, 0) + file_counts.get(SHARED_STORE_ID, 0),
                 "latest_period": latest.get(s.id, ("", ""))[0],
                 "latest_state": latest.get(s.id, ("", ""))[1],
             }

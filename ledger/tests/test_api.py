@@ -170,6 +170,31 @@ class TestUpload:
     def test_no_files_at_all_is_an_error(self, client):
         assert client.post("/api/upload", files=[]).status_code == 422
 
+    def test_company_wide_after_sales_file_needs_no_store_name(self, client):
+        body = _upload(client, (
+            "售后单_20260828.xlsx",
+            _xlsx_bytes([[
+                "售后单号", "内部订单号", "线上订单号", "线上状态", "货物状态",
+                "商品编码", "线上子订单编号",
+            ]]),
+        )).json()
+        assert body["rejected"] == []
+        assert body["kept"][0]["shared"] is True
+
+        store_id = "taobao_xibishun"
+        detail = client.get(f"/api/stores/{store_id}").json()
+        shared = next(row for row in detail["files"] if row["shared"])
+        assert shared["store_id"] == "__shared__"
+        assert next(
+            row for row in client.get("/api/navigation").json()["stores"]
+            if row["id"] == store_id
+        )["file_count"] == 1
+
+        dropped = client.delete(
+            "/api/stores/__shared__/files", params={"name": "售后单_20260828.xlsx"},
+        )
+        assert dropped.status_code == 200
+
     def test_reupload_says_nothing_changed(self, client, monkeypatch):
         """重复交同一份表是常事。说「和上次一样」比说「已上传」有用。"""
         data = _xlsx_bytes([["订单号"], ["A001"]])

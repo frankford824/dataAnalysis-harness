@@ -158,6 +158,16 @@
     # 「注3：对于订单状态已取消的需删除对应行数据」手工删掉了取消行——一条永远
     # 匹配不上的过滤条件，和没有这条过滤是一回事，而它看起来像在把关。
     - {field: order_state, op: not_in, value: [已取消, 取消], include_null: true}
+  exclude_when:
+    - source: after_sales
+      when:
+        - {field: refund_status, op: eq, value: 退款成功}
+        - {field: goods_status, op: in, value: [买家未收到货, 买家已退货, 卖家已收到退货]}
+      keys:
+        - {field: internal_order_id, other: internal_order_id}
+        - {field: sub_order_id, other: sub_order_id}
+        - {field: sku, other: sku}
+      note: 退款成功且货物未由买家保留，成本不计；其他组合默认继续计算
   sign: negate
   time_basis: order_date
   link: {key: sub_order_id, to: order.sub_order_id, grain: order, fallback_key: original_order_id, fallback_to: [order.order_id]}

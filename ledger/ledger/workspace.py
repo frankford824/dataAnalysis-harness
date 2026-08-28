@@ -41,6 +41,7 @@ from .version import engine_version
 #: 账期状态。只有两个——「算过了」不是一种状态，那是有没有快照的事。
 OPEN = "open"
 CLOSED = "closed"
+SHARED_STORE_ID = "__shared__"
 
 _SCHEMA = """
 create table if not exists file (
@@ -323,7 +324,15 @@ class Workspace:
             shutil.copy2(src, out)
         return out
 
-    def keep(self, name: str, src: IO[bytes] | Path, store_id: str, by: str = "") -> Kept:
+    def keep(
+        self,
+        name: str,
+        src: IO[bytes] | Path,
+        store_id: str,
+        by: str = "",
+        *,
+        exclusive: bool = False,
+    ) -> Kept:
         """收一份表。
 
         `name` 必须是原始文件名：店铺归属和数据源识别全靠它，换成随机名这两件事立刻全瞎。
@@ -355,6 +364,11 @@ class Workspace:
             ).fetchone()
             previous = row["sha"] if row else ""
             if previous == sha:
+                if exclusive:
+                    conn.execute(
+                        "delete from slot where store_id=? and name<>?",
+                        (store_id, name),
+                    )
                 return Kept(sha=sha, name=name, store_id=store_id, unchanged=True)
             conn.execute(
                 "insert into slot (store_id, name, sha, updated_at, by) values (?,?,?,?,?) "
@@ -366,6 +380,13 @@ class Workspace:
                 "insert into version (store_id, name, sha, at, by) values (?,?,?,?,?)",
                 (store_id, name, sha, at, by),
             )
+            if exclusive:
+                # 全量快照每次导出的文件名都带时间戳。新快照生效时撤下旧槽位，
+                # 但file/version历史完整保留，既不会两份状态互相打架，也没有删证据。
+                conn.execute(
+                    "delete from slot where store_id=? and name<>?",
+                    (store_id, name),
+                )
         return Kept(sha=sha, name=name, store_id=store_id, replaced=previous)
 
     def active_files(self, store_id: str) -> list[Path]:
@@ -374,9 +395,15 @@ class Workspace:
         文件按原始名字导出到一个工作目录里：引擎靠文件名认店铺和数据源，
         不能直接把 sha 命名的内容文件递进去。
         """
-        rows = self.conn.execute(
-            "select name, sha from slot where store_id=? order by name", (store_id,)
+        fetched = self.conn.execute(
+            "select store_id, name, sha from slot where store_id in (?,?) "
+            "order by case when store_id=? then 0 else 1 end, name",
+            (store_id, SHARED_STORE_ID, store_id),
         ).fetchall()
+        by_name: dict[str, sqlite3.Row] = {}
+        for row in fetched:
+            by_name.setdefault(row["name"], row)
+        rows = list(by_name.values())
         signature = hashlib.sha256()
         for row in rows:
             signature.update(row["name"].encode("utf-8"))
@@ -420,10 +447,21 @@ class Workspace:
         )
         args: tuple[Any, ...] = ()
         if store_id:
-            sql += " where s.store_id=?"
-            args = (store_id,)
+            sql += " where s.store_id in (?,?)"
+            args = (store_id, SHARED_STORE_ID)
         sql += " order by s.store_id, s.name"
-        return [dict(r) for r in self.conn.execute(sql, args).fetchall()]
+        out = [dict(r) for r in self.conn.execute(sql, args).fetchall()]
+        for row in out:
+            row["shared"] = row["store_id"] == SHARED_STORE_ID
+        return out
+
+    def store_ids(self) -> list[str]:
+        return [
+            row["store_id"] for row in self.conn.execute(
+                "select distinct store_id from slot where store_id<>? order by store_id",
+                (SHARED_STORE_ID,),
+            ).fetchall()
+        ]
 
     def file_counts(self) -> dict[str, int]:
         """店铺导航只要数量，不读取每个文件的完整元数据。"""
