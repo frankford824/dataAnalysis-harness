@@ -16,6 +16,7 @@ use axum::{Json, Router};
 use calamine::{DataRef, Reader, Xlsx, open_workbook};
 use chrono::Utc;
 use clap::{Parser, Subcommand};
+use encoding_rs::GBK;
 use parquet::arrow::ArrowWriter;
 use parquet::basic::{Compression, ZstdLevel};
 use parquet::file::properties::WriterProperties;
@@ -298,6 +299,45 @@ fn hash_file(path: &Path) -> Result<String> {
     Ok(hex::encode(h.finalize()))
 }
 
+fn decode_csv(path: &Path) -> Result<String> {
+    let bytes = fs::read(path)?;
+    decode_csv_bytes(&bytes)
+}
+
+fn decode_csv_bytes(bytes: &[u8]) -> Result<String> {
+    let without_bom = bytes.strip_prefix(&[0xEF, 0xBB, 0xBF]).unwrap_or(&bytes);
+    if let Ok(text) = std::str::from_utf8(without_bom) {
+        return Ok(text.to_string());
+    }
+    let (decoded, _encoding, had_errors) = GBK.decode(&bytes);
+    if had_errors {
+        bail!("CSV is neither valid UTF-8 nor losslessly decodable as GB18030/GBK");
+    }
+    Ok(decoded.into_owned())
+}
+
+struct TemporaryArtifact {
+    path: PathBuf,
+    keep: bool,
+}
+
+impl Drop for TemporaryArtifact {
+    fn drop(&mut self) {
+        if !self.keep {
+            let _ = fs::remove_file(&self.path);
+        }
+    }
+}
+
+fn modified_ns(metadata: &fs::Metadata) -> i64 {
+    metadata
+        .modified()
+        .ok()
+        .and_then(|value| value.duration_since(UNIX_EPOCH).ok())
+        .map(|value| value.as_nanos() as i64)
+        .unwrap_or_default()
+}
+
 fn arrow_schema() -> Arc<ArrowSchema> {
     Arc::new(ArrowSchema::new(vec![
         ArrowField::new("file_sha", DataType::Utf8, false),
@@ -451,11 +491,21 @@ fn index_file(
     let metadata = fs::metadata(path).with_context(|| format!("stat {}", path.display()))?;
     let sha = known_sha.unwrap_or(hash_file(path)?);
     let parquet_path = data.join("parquet").join(format!("{sha}.parquet"));
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let mut temporary = TemporaryArtifact {
+        path: data
+            .join("parquet")
+            .join(format!(".{sha}.{}.{}.part", std::process::id(), unique)),
+        keep: false,
+    };
     let props = WriterProperties::builder()
         .set_compression(Compression::ZSTD(ZstdLevel::default()))
         .build();
     let mut parquet =
-        ArrowWriter::try_new(File::create(&parquet_path)?, arrow_schema(), Some(props))?;
+        ArrowWriter::try_new(File::create(&temporary.path)?, arrow_schema(), Some(props))?;
     let index = open_or_create_index(&data.join("tantivy"))?;
     let fields = IndexFields::from_schema(&index.schema())?;
     let mut index_writer = index.writer_with_num_threads(4, 256_000_000)?;
@@ -534,7 +584,10 @@ fn index_file(
         }
         "csv" => {
             sheet_count = 1;
-            let mut csv = csv::ReaderBuilder::new().flexible(true).from_path(path)?;
+            let decoded = decode_csv(path)?;
+            let mut csv = csv::ReaderBuilder::new()
+                .flexible(true)
+                .from_reader(decoded.as_bytes());
             let mut cells = csv
                 .headers()?
                 .iter()
@@ -581,12 +634,22 @@ fn index_file(
     }
     write_batch(&mut parquet, &mut buffered)?;
     parquet.close()?;
+    let final_metadata = fs::metadata(path)?;
+    let final_sha = hash_file(path)?;
+    if final_sha != sha
+        || final_metadata.len() != metadata.len()
+        || modified_ns(&final_metadata) != modified_ns(&metadata)
+    {
+        bail!("file changed while it was being parsed; retry after it is stable");
+    }
+    if parquet_path.exists() {
+        fs::remove_file(&temporary.path)?;
+    } else {
+        fs::rename(&temporary.path, &parquet_path)?;
+    }
+    temporary.keep = true;
     index_writer.commit()?;
-    let mtime_ns = metadata
-        .modified()?
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos() as i64;
+    let mtime_ns = modified_ns(&metadata);
     let conn = Connection::open(data.join("catalog.db"))?;
     conn.execute(
         "insert into file_catalog(path,sha256,size,mtime_ns,platform,store_id,source,authority,state,rows,sheets,parquet_path,indexed_at) values(?,?,?,?,?,?,?,?,?,?,?,?,?)\
@@ -1167,5 +1230,14 @@ mod tests {
         assert!(!supported(Path::new("~$订单.xlsx")));
         assert!(!supported(Path::new("订单.xlsx.part")));
         assert!(supported(Path::new("订单.xlsx")));
+    }
+
+    #[test]
+    fn gbk_csv_is_decoded_without_replacement() {
+        let (encoded, _encoding, had_errors) = GBK.encode("拼多多,商户订单号\n收入,260620-1\n");
+        assert!(!had_errors);
+        let decoded = decode_csv_bytes(&encoded).unwrap();
+        assert!(decoded.contains("商户订单号"));
+        assert!(!decoded.contains('\u{fffd}'));
     }
 }

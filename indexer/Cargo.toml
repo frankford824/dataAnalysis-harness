@@ -12,6 +12,7 @@ calamine = "0.36.1"
 chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4.5", features = ["derive"] }
 csv = "1.4"
+encoding_rs = "0.8"
 hex = "0.4"
 notify = "8.2"
 parquet = { version = "59.2", features = ["arrow"] }

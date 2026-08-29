@@ -1181,6 +1181,7 @@ dependencies = [
  "chrono",
  "clap",
  "csv",
+ "encoding_rs",
  "hex",
  "notify",
  "parquet",
