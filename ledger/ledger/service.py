@@ -157,6 +157,64 @@ def intake(
     return out
 
 
+def intake_assigned(
+    ws: Workspace,
+    model: Model,
+    uploads: Iterable[tuple[str, IO[bytes] | Path, str, str]],
+    by: str = "",
+    report: progress.Reporter = progress.SILENT,
+) -> Intake:
+    """Receive files whose store/source authority has already been validated from NAS paths.
+
+    The browser path intentionally derives ownership from filenames. NAS mode has a stronger
+    contract: platform/store/source directories are generated from the model and conflicts have
+    already been quarantined. Re-running filename inference here would reject valid company-wide
+    files such as ``运费-6月.xlsx`` and would weaken the directory-first matching rule.
+    """
+    out = Intake()
+    touched: list[str] = []
+    files = list(uploads)
+    for i, (name, src, store_id, source_id) in enumerate(files, 1):
+        report("留档", i, len(files))
+        name = Path(name).name
+        if not name or Path(name).suffix.lower() not in SUFFIXES:
+            out.rejected.append(Rejected(file=name, why="不是能解析的表格"))
+            continue
+        try:
+            source = model.source(source_id)
+            if store_id == SHARED_STORE_ID:
+                kept = ws.keep(name, src, SHARED_STORE_ID, by=by, exclusive=source.shared_upload)
+                affected = [
+                    candidate for candidate in ws.store_ids()
+                    if candidate in {store.id for store in model.active_stores()}
+                ]
+            else:
+                model.store(store_id)
+                kept = ws.keep(name, src, store_id, by=by)
+                affected = [store_id]
+        except (KeyError, ValueError) as exc:
+            out.rejected.append(Rejected(file=name, why=str(exc)))
+            continue
+        out.kept.append(kept)
+        if not kept.unchanged:
+            for candidate in affected:
+                if candidate not in touched:
+                    touched.append(candidate)
+
+    out.stores = touched
+    for i, store_id in enumerate(touched, 1):
+        store = model.store(store_id)
+        done = recompute(
+            ws, model, store,
+            report=report, note=f"{store.name}（{i}/{len(touched)} 家店）",
+        )
+        out.periods.extend(done.periods)
+        out.unknown_tables.extend(done.unknown_tables)
+        if done.failure:
+            out.failures.append(done.failure)
+    return out
+
+
 @dataclass
 class Recomputed:
     """一家店重算一次的结果。"""

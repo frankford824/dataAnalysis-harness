@@ -403,7 +403,14 @@ class Workspace:
         by_name: dict[str, sqlite3.Row] = {}
         for row in fetched:
             by_name.setdefault(row["name"], row)
-        rows = list(by_name.values())
+        # NAS migration can expose the same immutable bytes under a legacy and a current filename.
+        # Parsing both is not merely wasteful: sources without a business-key dedupe would count the
+        # same money twice. The query orders store-specific slots before shared slots, so a store's
+        # own filename remains the evidence label while identical shared/legacy aliases are ignored.
+        by_sha: dict[str, sqlite3.Row] = {}
+        for row in by_name.values():
+            by_sha.setdefault(row["sha"], row)
+        rows = list(by_sha.values())
         signature = hashlib.sha256()
         for row in rows:
             signature.update(row["name"].encode("utf-8"))

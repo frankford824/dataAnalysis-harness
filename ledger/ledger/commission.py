@@ -465,7 +465,7 @@ def _people_lines(split: pl.DataFrame) -> tuple[PersonLine, ...]:
             pl.col("base").sum().alias("base"),
             pl.col("product_id").n_unique().alias("products"),
         )
-        .sort("amount", descending=True)
+        .sort(["amount", "person"], descending=[True, False])
     )
     return tuple(
         PersonLine(
@@ -492,7 +492,7 @@ def _product_lines(
             pl.col("fallback").any().alias("fallback"),
             pl.col("effective_from").drop_nulls().max().alias("effective_from"),
         )
-        .sort("base", descending=True)
+        .sort(["base", "product_id"], descending=[True, False])
     )
 
     by_person: dict[str, list[tuple[str, float]]] = {}
@@ -501,7 +501,7 @@ def _product_lines(
         grouped = (
             split.group_by("product_id", "person")
             .agg(pl.col("amount").sum().alias("amount"))
-            .sort("amount", descending=True)
+            .sort(["product_id", "amount", "person"], descending=[False, True, False])
         )
         for row in grouped.iter_rows(named=True):
             pid = row["product_id"]

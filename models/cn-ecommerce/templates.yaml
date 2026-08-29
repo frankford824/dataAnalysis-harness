@@ -835,7 +835,9 @@
     - {role: product_name, columns: [商品名称], required: false}
     # 成交花费只算直接成交的那部分，总花费是这个商品这一天真正花掉的钱。
     - {role: spend, columns: ["总花费(元)", 总花费, "花费(元)"]}
-    - {role: spend_time, columns: [日期]}
+    # 平台有两种原始导出：日明细带「日期」，商品汇总按所选区间聚合且没有日期。
+    # 后者跟着商品挂到订单行的账期，和京东汇总表同理；不能因为少日期整表拒收。
+    - {role: spend_time, columns: [日期], required: false}
   note: >
     一行一个商品一天。表底有一行总计（日期那格写着「总计」，靠 total_row_marker
     丢掉）——不丢的话推广费正好翻倍，店铺那张手工表就是这么翻的：

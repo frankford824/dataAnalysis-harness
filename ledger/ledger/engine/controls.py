@@ -49,22 +49,37 @@ def verify(table: RawTable, frame: pl.DataFrame, template: Template) -> list[Con
     if not table.controls:
         return []
     roles = {b.role for b in template.bindings}
+    directional = [
+        control for control in table.controls
+        if control.direction in {"income", "outgo"} and control.count is not None
+    ]
+    # PDD's footer splits every business-event row into "income count" or "outgo count", even
+    # when the corresponding amount is zero. The two declared counts cover the entire data table;
+    # counting only non-zero monetary cells therefore understates outgo rows while the amount is
+    # still exact. This exception is narrow, evidence-backed, and never relaxes the amount check.
+    pdd_zero_amount_counts = (
+        template.id == "pdd_settlement_v1"
+        and len(directional) == 2
+        and sum(control.count or 0 for control in directional) == frame.height
+    )
     out: list[ControlResult] = []
     for control in table.controls:
         role = {"income": "income", "outgo": "outgo"}.get(control.direction)
         if role is None or role not in roles or role not in frame.columns:
             continue
-        out.append(_check_one(control, frame, role))
+        out.append(_check_one(control, frame, role, check_count=not pdd_zero_amount_counts))
     return out
 
 
-def _check_one(control: ControlTotal, frame: pl.DataFrame, role: str) -> ControlResult:
+def _check_one(
+    control: ControlTotal, frame: pl.DataFrame, role: str, *, check_count: bool = True,
+) -> ControlResult:
     values = frame.get_column(role).cast(pl.Float64, strict=False).fill_null(0.0).to_list()
     got_count = sum(1 for v in values if v != 0.0)
     got_amount = sum_amounts(values)
 
     problems = []
-    if control.count is not None and got_count != control.count:
+    if check_count and control.count is not None and got_count != control.count:
         problems.append(
             f"笔数 文件说 {control.count:,}、解析出 {got_count:,}，差 {got_count - control.count:+,}"
         )
@@ -76,9 +91,14 @@ def _check_one(control: ControlTotal, frame: pl.DataFrame, role: str) -> Control
         )
 
     if not problems:
+        count_text = (
+            f"{got_count:,} 笔"
+            if check_count or control.count is None
+            else f"金额非零 {got_count:,} 笔；平台声明 {control.count:,} 笔含零金额事件"
+        )
         return ControlResult(
             control.label, True,
-            f"{control.label} 与文件自带总数一致（{got_count:,} 笔 / {got_amount:,.2f} 元）",
+            f"{control.label} 与文件自带总数一致（{count_text} / {got_amount:,.2f} 元）",
         )
     return ControlResult(
         control.label, False,

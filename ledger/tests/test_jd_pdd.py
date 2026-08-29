@@ -273,6 +273,24 @@ class TestTheTwoSettlementTablesDoNotGetConfused:
         assert item.frame is not None and item.frame.height == 1
         assert any("表头在第 5 行" in note for note in item.notes)
 
+    def test_pdd_csv_with_blank_preamble_uses_physical_header_row(self, tmp_csv, model):
+        """拼多多原始 CSV 的空白行不能让二次解析偏到分隔线。"""
+        path = tmp_csv(
+            "拼多多店铺账务明细查询\n\n"
+            "起始时间：2026-06-01 00:00:00  终止时间：2026-06-30 23:59:59\n"
+            "----------交易记录明细列表---------\n"
+            "商户订单号,发生时间,收入金额（+元）,支出金额（-元）,账务类型,备注,业务描述\n"
+            "260620-1,2026-06-30 23:30:43,61.80,0,交易收入,-,0010002|交易收入-订单收入\n",
+            name="对账-吴鹏-PDDzlvoey6月.csv",
+            encoding="gb18030",
+        )
+        result = ingest([path], model, [s.name for s in model.stores])
+        item = next(i for i in result.items if i.recognition.known)
+        assert item.recognition.template_id == "pdd_settlement_v1"
+        assert not item.error, item.error
+        assert item.rows == 1
+        assert any("表头在第 5 行" in note for note in item.notes)
+
     def test_pdd_subject_codes_hit_the_dictionary(self, tmp_path, model):
         """业务描述是带编号的全称，字典里存的就是全称。"""
         out, _ = _classified(tmp_path, [

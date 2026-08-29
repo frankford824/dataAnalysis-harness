@@ -557,10 +557,15 @@ def _recognize_any_header_row(
     for h in candidates:
         if h == 0 or h > len(table.rows):
             continue
-        headers = [str(c).strip() if c is not None else "" for c in table.rows[h - 1].cells]
+        candidate = table.rows[h - 1]
+        headers = [str(c).strip() if c is not None else "" for c in candidate.cells]
         recog = match_headers(headers, model, table.ref)
         if recog.known:
-            return recog, h
+            # Empty physical lines are intentionally omitted from RawTable.rows.  The parser
+            # option, however, is a zero-based *physical* row offset. Returning h here shifts the
+            # reparse upward when a platform inserts blank lines in its preamble (PDD does this
+            # between title and date range), turning the separator line into the header.
+            return recog, candidate.row_no - 1
     return first, 0
 
 

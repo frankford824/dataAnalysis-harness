@@ -152,13 +152,27 @@ def reconcile_ready(ws: Workspace, model: Model, catalog: Path, nas_root: Path) 
     connection.commit()
 
     if applicable:
-        result = service.intake(
-            ws, model, [(Path(row["path"]).name, Path(row["path"])) for row in applicable],
+        source_ids = {source.name: source.id for source in model.sources}
+        assigned = []
+        assigned_rows = []
+        for row in applicable:
+            source_id = source_ids.get(row["source"])
+            if source_id is None:
+                reason = f"目录数据源未登记：{row['source']}"
+                _record(connection, row, "error", reason)
+                errors.append(f"{Path(row['path']).name}：{reason}")
+                continue
+            assigned.append((
+                Path(row["path"]).name, Path(row["path"]), row["store_id"], source_id,
+            ))
+            assigned_rows.append(row)
+        result = service.intake_assigned(
+            ws, model, assigned,
             by="NAS自动接收",
         )
         kept = {(item.store_id, item.name) for item in result.kept}
         rejected = {item.file: item.why for item in result.rejected}
-        for row in applicable:
+        for row in assigned_rows:
             path = Path(row["path"])
             name = path.name
             key = (row["store_id"], name)

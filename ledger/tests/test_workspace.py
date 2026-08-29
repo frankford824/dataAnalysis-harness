@@ -39,6 +39,15 @@ def test_same_content_stored_once(ws):
     assert len(ws.submissions("taobao_xibishun")) == 2
 
 
+def test_same_sha_under_legacy_name_is_only_materialized_once(ws):
+    ws.keep("运费-淘宝喜必顺.xlsx", _blob("same bytes"), "taobao_xibishun")
+    ws.keep("运费-汪学成-天猫喜必顺旗舰店.xlsx", _blob("same bytes"), "taobao_xibishun")
+    assert len(ws.submissions("taobao_xibishun")) == 2  # audit keeps both slots
+    active = ws.active_files("taobao_xibishun")
+    assert len(active) == 1  # calculation consumes immutable content once
+    assert active[0].read_text("utf-8") == "same bytes"
+
+
 def test_reupload_identical_is_reported_as_unchanged(ws):
     ws.keep("成本.xlsx", _blob("x"), "s1")
     again = ws.keep("成本.xlsx", _blob("x"), "s1")
