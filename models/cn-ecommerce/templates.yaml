@@ -1279,3 +1279,13 @@
       and_when: {field: direction, equals: [支出]}
       major: trade_refund
   total_row_marker: base_order_id
+
+# 接表向导登记。列名照实测表头原样抄录。
+- id: promotion_v5
+  source: promotion
+  match_columns: [总营销花费(元), 商品ID, 商品名称]
+  bindings:
+    - {role: product_id, columns: [商品ID], required: false}
+    - {role: product_name, columns: [商品名称], required: false}
+    - {role: spend, columns: [总营销花费(元)], kind: number, required: false}
+  total_row_marker: product_id
