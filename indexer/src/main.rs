@@ -25,7 +25,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use tantivy::collector::TopDocs;
-use tantivy::query::QueryParser;
+use tantivy::query::{Query as TantivyQuery, QueryParser, TermQuery};
 use tantivy::schema::{
     FAST, INDEXED, IndexRecordOption, STORED, STRING, Schema, TantivyDocument, TextFieldIndexing,
     TextOptions, Value as TantivyValue,
@@ -84,6 +84,8 @@ create table if not exists network_sample (
   mbps integer not null
 );
 "#;
+
+const INDEX_DIR: &str = "tantivy-v2";
 
 #[derive(Parser)]
 #[command(
@@ -232,7 +234,7 @@ async fn main() -> Result<()> {
 }
 
 fn init_data_dir(data: &Path) -> Result<()> {
-    for name in ["tantivy", "parquet", "hot", "logs"] {
+    for name in [INDEX_DIR, "parquet", "hot", "logs"] {
         fs::create_dir_all(data.join(name))?;
     }
     let conn = Connection::open(data.join("catalog.db"))?;
@@ -242,8 +244,16 @@ fn init_data_dir(data: &Path) -> Result<()> {
         "alter table file_catalog add column last_changed integer not null default 0",
         [],
     );
+    let index_path = data.join(INDEX_DIR);
+    let fresh_index = !index_path.join("meta.json").exists();
+    let _ = open_or_create_index(&index_path)?;
+    if fresh_index {
+        conn.execute(
+            "update file_catalog set state='stabilizing',last_changed=0 where state='ready'",
+            [],
+        )?;
+    }
     drop(conn);
-    let _ = open_or_create_index(&data.join("tantivy"))?;
     Ok(())
 }
 
@@ -258,6 +268,7 @@ fn schema() -> Schema {
     b.add_text_field("store_id", STRING | STORED);
     b.add_text_field("source", STRING | STORED);
     b.add_text_field("authority", STRING | STORED);
+    b.add_text_field("identifier", STRING);
     let indexing = TextFieldIndexing::default()
         .set_tokenizer("ngram2")
         .set_index_option(IndexRecordOption::WithFreqsAndPositions);
@@ -403,6 +414,7 @@ struct IndexFields {
     store_id: tantivy::schema::Field,
     source: tantivy::schema::Field,
     authority: tantivy::schema::Field,
+    identifier: tantivy::schema::Field,
     all_text: tantivy::schema::Field,
     cells_json: tantivy::schema::Field,
 }
@@ -414,7 +426,7 @@ struct SearchRuntime {
 }
 
 fn open_search_runtime(data: &Path) -> Result<SearchRuntime> {
-    let index = open_or_create_index(&data.join("tantivy"))?;
+    let index = open_or_create_index(&data.join(INDEX_DIR))?;
     let fields = IndexFields::from_schema(&index.schema())?;
     let reader = index
         .reader_builder()
@@ -445,10 +457,35 @@ impl IndexFields {
             store_id: field("store_id")?,
             source: field("source")?,
             authority: field("authority")?,
+            identifier: field("identifier")?,
             all_text: field("all_text")?,
             cells_json: field("cells_json")?,
         })
     }
+}
+
+fn is_identifier(value: &str) -> bool {
+    let value = value.trim();
+    (6..=128).contains(&value.len())
+        && value.bytes().any(|byte| byte.is_ascii_digit())
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+}
+
+fn identifier_tokens(cells: &[String]) -> Vec<String> {
+    let mut out = Vec::new();
+    for cell in cells {
+        for token in cell.split(|ch: char| !(ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_')))
+        {
+            if is_identifier(token) {
+                out.push(token.to_ascii_lowercase());
+            }
+        }
+    }
+    out.sort_unstable();
+    out.dedup();
+    out
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -481,13 +518,17 @@ fn flush_row(
     let cells_json = serde_json::to_string(cells)?;
     let path_text = path.to_string_lossy().to_string();
     let uid = format!("{sha}:{sheet}:{row_no}");
-    index_writer.add_document(doc!(
+    let mut document = doc!(
         fields.uid => uid, fields.file_sha => sha.to_string(), fields.path => path_text.clone(),
         fields.sheet => sheet.to_string(), fields.row_no => row_no,
         fields.platform => platform.to_string(), fields.store_id => store.to_string(),
         fields.source => source.to_string(), fields.authority => authority.to_string(),
         fields.all_text => all_text.clone(), fields.cells_json => cells_json.clone(),
-    ))?;
+    );
+    for identifier in identifier_tokens(cells) {
+        document.add_text(fields.identifier, identifier);
+    }
+    index_writer.add_document(document)?;
     parquet_rows.push(RowDoc {
         file_sha: sha.to_string(),
         path: path_text,
@@ -529,7 +570,7 @@ fn index_file(
         .build();
     let mut parquet =
         ArrowWriter::try_new(File::create(&temporary.path)?, arrow_schema(), Some(props))?;
-    let index = open_or_create_index(&data.join("tantivy"))?;
+    let index = open_or_create_index(&data.join(INDEX_DIR))?;
     let fields = IndexFields::from_schema(&index.schema())?;
     let mut index_writer = index.writer_with_num_threads(4, 256_000_000)?;
     index_writer.delete_term(Term::from_field_text(fields.file_sha, &sha));
@@ -990,11 +1031,16 @@ fn search_runtime(
 ) -> Result<Vec<SearchHit>> {
     let fields = runtime.fields;
     let searcher = runtime.reader.searcher();
-    let mut parser = QueryParser::for_index(&runtime.index, vec![fields.all_text]);
-    // Exact containment is validated below. Requiring every generated bigram avoids a very broad
-    // OR query for long order numbers and dramatically reduces candidate rows.
-    parser.set_conjunction_by_default();
-    let query = parser.parse_query(query_text)?;
+    let query: Box<dyn TantivyQuery> = if is_identifier(query_text) {
+        Box::new(TermQuery::new(
+            Term::from_field_text(fields.identifier, &query_text.to_ascii_lowercase()),
+            IndexRecordOption::Basic,
+        ))
+    } else {
+        let mut parser = QueryParser::for_index(&runtime.index, vec![fields.all_text]);
+        parser.set_conjunction_by_default();
+        parser.parse_query(query_text)?
+    };
     let candidate_limit = limit.saturating_mul(20).clamp(limit, 5000);
     let top = searcher.search(
         &query,
@@ -1246,7 +1292,7 @@ fn directory_bytes(path: &Path) -> u64 {
 async fn storage_handler(State(state): State<AppState>) -> Json<Value> {
     let value = tokio::task::spawn_blocking(move || json!({
         "catalog_bytes": fs::metadata(state.data.join("catalog.db")).map(|v|v.len()).unwrap_or(0),
-        "tantivy_bytes": directory_bytes(&state.data.join("tantivy")),
+        "tantivy_bytes": directory_bytes(&state.data.join(INDEX_DIR)),
         "parquet_bytes": directory_bytes(&state.data.join("parquet")),
         "hot_bytes": directory_bytes(&state.data.join("hot")),
     })).await.unwrap_or_else(|_| json!({"error":"storage unavailable"}));
@@ -1280,5 +1326,18 @@ mod tests {
         let decoded = decode_csv_bytes(&encoded).unwrap();
         assert!(decoded.contains("商户订单号"));
         assert!(!decoded.contains('\u{fffd}'));
+    }
+
+    #[test]
+    fn identifiers_include_embedded_order_tokens_but_not_amounts() {
+        let cells = vec![
+            "18122019:5119142221120002016".to_string(),
+            "HSC05548".to_string(),
+            "188.36".to_string(),
+        ];
+        let got = identifier_tokens(&cells);
+        assert!(got.contains(&"5119142221120002016".to_string()));
+        assert!(got.contains(&"hsc05548".to_string()));
+        assert!(!got.contains(&"188".to_string()));
     }
 }
