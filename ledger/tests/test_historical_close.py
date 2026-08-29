@@ -84,6 +84,7 @@ def test_apply_archives_sources_and_preserves_june_state(tmp_path: Path) -> None
 
     old = {"can_close": False, "findings": [], "missing_sources": [], "statement": []}
     workspace.record("taobao_mt8egr48", "2024-12", old, ["old"], evidence_ready=True)
+    workspace.record("douyin_mszr2dhn", "2025-02", old, ["old-2025"], evidence_ready=True)
     june = {"can_close": True, "findings": [], "missing_sources": [], "statement": []}
     workspace.record("taobao_xibishun", "2026-06", june, ["june"], evidence_ready=True)
     workspace.close_period("taobao_xibishun", "2026-06", by="test")
@@ -98,8 +99,9 @@ def test_apply_archives_sources_and_preserves_june_state(tmp_path: Path) -> None
     )
 
     assert result["counts"]["imported"] == 6
-    assert result["counts"]["policy_closed"] == 1
+    assert result["counts"]["policy_closed"] == 2
     assert workspace.state("taobao_mt8egr48", "2024-12").state == CLOSED
+    assert workspace.state("douyin_mszr2dhn", "2025-02").state == CLOSED
     assert workspace.state("taobao_mt8egr48", "2025-01").state == CLOSED
     assert workspace.state("taobao_xibishun", "2026-05").state == CLOSED
     assert workspace.state("taobao_xibishun", "2026-06").state == CLOSED

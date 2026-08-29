@@ -28,7 +28,6 @@ from .workspace import CLOSED, PeriodState, Workspace, WorkspaceError
 
 
 CUTOFF = "2026-05"
-FIRST_STRUCTURED_PERIOD = "2025-01"
 OPERATOR = "历史账迁移"
 
 # Exact business identities.  Longest-substring filename matching must not be reused here:
@@ -459,7 +458,6 @@ def apply_plan(
     nas_root: Path,
     backup_dir: Path,
     cutoff: str = CUTOFF,
-    close_existing_before: str = FIRST_STRUCTURED_PERIOD,
 ) -> dict[str, Any]:
     if plan.errors:
         raise WorkspaceError("历史终态计划有错误，禁止写入")
@@ -517,13 +515,14 @@ def apply_plan(
             "rows": cell.row_numbers,
         })
 
-    # Older current-workspace rows came from pre-Ledger files but have no compatible consolidated
-    # final report.  Freeze the exact existing evidence under the user's explicit cutoff policy;
-    # do not rewrite their result or pretend they passed current checks.
+    # Any remaining current-workspace row inside the cutoff has no compatible consolidated final
+    # report. Freeze its exact existing evidence under the user's explicit cutoff policy; do not
+    # rewrite its result or pretend it passed current checks. This also covers a store that only
+    # started appearing in the structured summary later in 2025.
     for state in workspace.overview():
         if not re.fullmatch(r"\d{4}-\d{2}", state.period or ""):
             continue
-        if state.period >= close_existing_before or state.period > cutoff or state.state == CLOSED:
+        if state.period > cutoff or state.state == CLOSED:
             continue
         workspace.close_historical_period(
             state.store_id,
