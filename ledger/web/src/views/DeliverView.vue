@@ -197,9 +197,16 @@ function open(period = '') {
     <div>
       <h1>数据与店铺</h1>
       <p class="small muted">
-        按平台找店，右边看这家店交了哪些表。表落到哪家店看文件名里的店名，落到哪个账期看表里的日期。
-        <button class="link" @click="explaining = true">怎么传</button>
+        按平台找店，右边看这家店交了哪些表。
+        <template v-if="app.ingestMode === 'nas'">
+          文件放入 NAS 对应的平台、店铺和数据源目录，系统自动索引并核算。
+        </template>
+        <template v-else>
+          表落到哪家店看文件名里的店名，落到哪个账期看表里的日期。
+          <button class="link" @click="explaining = true">怎么传</button>
+        </template>
       </p>
+      <p v-if="app.ingestMode === 'nas'" class="xs num nas-path">{{ app.nasUploadPath }}</p>
     </div>
     <n-button size="small" @click="adding = true">登记新店</n-button>
   </div>
@@ -337,5 +344,5 @@ function open(period = '') {
     </n-space>
   </n-modal>
 
-  <UploadPanel v-if="explaining" v-model:show="explaining" />
+  <UploadPanel v-if="explaining && app.ingestMode !== 'nas'" v-model:show="explaining" />
 </template>

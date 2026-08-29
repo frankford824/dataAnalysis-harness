@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import re
 import os
+import ntpath
 import threading
 import uuid
 from collections import Counter, OrderedDict
@@ -30,7 +31,7 @@ from fastapi.responses import HTMLResponse, PlainTextResponse
 from starlette.middleware.gzip import GZipMiddleware
 from pydantic import BaseModel, ValidationError
 
-from . import assist, fees as fees_mod, gaps, onboard, overhead, ownership, progress, service, view
+from . import assist, fees as fees_mod, gaps, index_client, nas_ingest, nas_status, onboard, overhead, ownership, progress, service, view
 from . import search as search_mod
 from .model import propose
 from .model.config import (
@@ -56,12 +57,24 @@ from .workspace import (
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
+    global _nas_worker
     anyio.to_thread.current_default_thread_limiter().total_tokens = max(
         1, int(os.environ.get("LEDGER_THREAD_TOKENS", "16")),
     )
     _snapshot()
     workspace()
-    yield
+    if nas_status.ingest_mode() == "nas":
+        catalog = Path(os.environ.get("LEDGER_INDEX_CATALOG", r"D:\ledger\index\catalog.db"))
+        _nas_worker = nas_ingest.NasIngestWorker(
+            workspace, lambda: _snapshot().model, catalog, nas_status.nas_root(),
+        )
+        _nas_worker.start()
+    try:
+        yield
+    finally:
+        if _nas_worker is not None:
+            _nas_worker.stop()
+            _nas_worker = None
 
 
 app = FastAPI(title="记账", docs_url="/api/docs", lifespan=lifespan)
@@ -96,6 +109,7 @@ _ws: Workspace | None = None
 _model_repo: ModelRepository | None = None
 _model_repo_root: Path | None = None
 _model_repo_guard = threading.Lock()
+_nas_worker: nas_ingest.NasIngestWorker | None = None
 _read_cache_guard = threading.RLock()
 _overview_cache: OrderedDict[tuple, dict] = OrderedDict()
 _gap_cache: OrderedDict[tuple, dict | None] = OrderedDict()
@@ -226,11 +240,24 @@ def index() -> HTMLResponse:
 
 @app.get("/api/health")
 def health() -> dict:
+    local = nas_status.read()
+    if local["ingest_mode"] == "nas":
+        try:
+            index_health = index_client.get("/health")
+            index_status = index_client.get("/status")
+        except index_client.IndexerUnavailable as exc:
+            index_health = {"ok": False, "error": str(exc)}
+            index_status = {}
+    else:
+        index_health = {"ok": False, "disabled": True}
+        index_status = {}
     return {
         "ok": True,
         "service": "ledger",
         "workspace_generation": workspace().generation(),
         "model_revision": _model_revision(),
+        "ingest": local,
+        "index": {**index_status, "health": index_health},
     }
 
 
@@ -276,6 +303,8 @@ def bootstrap(request: Request, response: Response) -> Any:
             ],
             "accepts": sorted(service.SUFFIXES),
             "model_revision": snapshot.revision,
+            "ingest_mode": nas_status.ingest_mode(),
+            "nas_upload_path": nas_status.upload_path(),
         },
         _READ_CACHE_MAX,
     )
@@ -317,6 +346,8 @@ def _build_navigation(
         "model_revision": revision,
         "workspace_generation": generation,
         "data_revision": f"{revision}:{generation}",
+        "ingest_mode": nas_status.ingest_mode(),
+        "nas_upload_path": nas_status.upload_path(),
         "platforms": view.platform_options(model),
         "periods": periods,
         "default_period": default_period,
@@ -361,6 +392,11 @@ def upload(files: Annotated[list[UploadFile], File()], token: str = "") -> dict:
     starlette 丢进线程池，解析归线程、事件循环继续收请求，而 polars 的计算在 Rust
     里放掉 GIL，该吃满的核照样吃满。
     """
+    if nas_status.ingest_mode() == "nas":
+        raise HTTPException(
+            410,
+            f"网页上传已停用。请把文件放到 {nas_status.upload_path()}，系统会自动识别并核算。",
+        )
     model = _model()
     ws = workspace()
     uploads = [(Path(f.filename or "").name, f.file) for f in files if f.filename]
@@ -905,6 +941,38 @@ def reopen_period(store_id: str, period: str, action: PeriodAction) -> dict:
 # --------------------------------------------------------------------------- #
 
 
+def _index_proxy(path: str) -> dict:
+    try:
+        return index_client.get(path)
+    except index_client.IndexerUnavailable as exc:
+        raise HTTPException(503, str(exc)) from exc
+
+
+@app.get("/api/index/status")
+def index_status() -> dict:
+    return _index_proxy("/status")
+
+
+@app.get("/api/index/files")
+def index_files() -> dict:
+    return _index_proxy("/files")
+
+
+@app.get("/api/index/jobs")
+def index_jobs() -> dict:
+    return _index_proxy("/jobs")
+
+
+@app.get("/api/index/errors")
+def index_errors() -> dict:
+    return _index_proxy("/errors")
+
+
+@app.get("/api/index/storage")
+def index_storage() -> dict:
+    return _index_proxy("/storage")
+
+
 @app.get("/api/search")
 def search(q: str, store_id: str = "", period: str = "", platform: str = "",
            limit: int = search_mod.LIMIT) -> dict:
@@ -915,6 +983,8 @@ def search(q: str, store_id: str = "", period: str = "", platform: str = "",
     """
     if not q.strip():
         raise HTTPException(400, "要给一个订单号、金额或者科目名")
+    if nas_status.ingest_mode() == "nas":
+        return _index_search(q.strip(), store_id, period, platform, min(limit, 1000))
     snapshot = _snapshot()
     model = snapshot.model
     by_id = {s.id: s for s in model.stores}
@@ -934,6 +1004,60 @@ def search(q: str, store_id: str = "", period: str = "", platform: str = "",
     )
 
 
+def _index_search(q: str, store_id: str, period: str, platform: str, limit: int) -> dict:
+    model = _model()
+    platform_name = next(
+        (candidate.name for candidate in model.platforms if candidate.id == platform), platform,
+    )
+    try:
+        result = index_client.search(
+            q, limit=limit, store_id=store_id, platform=platform_name,
+        )
+    except index_client.IndexerUnavailable as exc:
+        raise HTTPException(503, str(exc)) from exc
+    stores = {store.id: store for store in model.stores}
+    hits = []
+    for hit in result.get("hits", []):
+        matches = [
+            {
+                **match,
+                "column_no": int(match.get("column_index", 0)) + 1,
+                "column_name": f"第 {int(match.get('column_index', 0)) + 1} 列",
+            }
+            for match in hit.get("matches", [])
+        ]
+        store = stores.get(hit.get("store_id", ""))
+        hits.append({
+            "subject": hit.get("source") or "原始表格",
+            "metric": hit.get("source") or "",
+            "amount": None,
+            "store": store.name if store else hit.get("store_id") or "全公司共享",
+            "store_id": hit.get("store_id", ""),
+            "platform": hit.get("platform", ""),
+            "period": "",
+            "source": hit.get("source", ""),
+            "authority": hit.get("authority", ""),
+            "file": ntpath.basename(hit.get("path", "")),
+            "path": hit.get("path", ""),
+            "sheet": hit.get("sheet", ""),
+            "row_no": hit.get("row_no", 0),
+            "matches": matches,
+            "snippet": hit.get("snippet", ""),
+        })
+    notes = []
+    if period:
+        notes.append("原始文件全文索引目前不按账期裁剪；命中行仍给出准确文件、Sheet 和行号。")
+    return {
+        "backend": "tantivy",
+        "query": q,
+        "kinds": ["text"],
+        "total": len(hits),
+        "amount": None,
+        "truncated": len(hits) >= limit,
+        "by_store": [],
+        "hits": hits,
+        "notes": notes,
+    }
 def _build_search(
     ws: Workspace,
     model: Model,

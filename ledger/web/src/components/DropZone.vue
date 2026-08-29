@@ -27,7 +27,12 @@ async function choose(e) {
 </script>
 
 <template>
-  <div class="drop" @click="picker.click()">
+  <div v-if="app.ingestMode === 'nas'" class="drop nas-drop">
+    <div class="strong" style="color: var(--n8)">这家店还没有已核算文件</div>
+    <div class="small" style="margin-top: var(--s1)">请把表格放进 NAS 中这家店对应的数据源目录。</div>
+    <div class="xs muted num" style="margin-top: var(--s1)">{{ app.nasUploadPath }}</div>
+  </div>
+  <div v-else class="drop" @click="picker.click()">
     <div class="strong" style="color: var(--n8)">把表拖进来</div>
     <!-- 「从文件名认」曾经只写了半句，人看完仍然要问账期怎么定。店和账期是两条
          不同的规则，各认各的东西，缺一条就得靠猜。 -->

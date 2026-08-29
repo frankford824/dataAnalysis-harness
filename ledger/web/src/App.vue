@@ -8,13 +8,16 @@ import { NConfigProvider, NDialogProvider, NMessageProvider } from 'naive-ui'
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 
 import AppBody from './components/AppBody.vue'
+import { useApp } from './store'
 import { theme } from './theme'
 
+const app = useApp()
 const dragging = ref(0)
 const overlay = computed(() => dragging.value > 0)
 const dropped = ref(null)
 
 function onEnter(e) {
+  if (app.ingestMode === 'nas') return
   if (![...(e.dataTransfer?.types || [])].includes('Files')) return
   dragging.value += 1
 }
@@ -27,6 +30,7 @@ function onOver(e) {
 function onDrop(e) {
   e.preventDefault()
   dragging.value = 0
+  if (app.ingestMode === 'nas') return
   const files = [...(e.dataTransfer?.files || [])]
   if (files.length) dropped.value = files
 }
@@ -50,7 +54,7 @@ onUnmounted(() => {
     <NMessageProvider>
       <NDialogProvider>
         <AppBody :dropped="dropped" @taken="dropped = null" />
-        <div v-if="overlay" class="veil">松手就收下</div>
+        <div v-if="overlay && app.ingestMode !== 'nas'" class="veil">松手就收下</div>
       </NDialogProvider>
     </NMessageProvider>
   </NConfigProvider>

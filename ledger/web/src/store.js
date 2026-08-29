@@ -70,6 +70,13 @@ export const useApp = defineStore('app', () => {
     return [...seen].map(([id, name]) => ({ id, name }))
   })
 
+  const ingestMode = computed(
+    () => navigation.value?.ingest_mode || boot.value?.ingest_mode || 'api',
+  )
+  const nasUploadPath = computed(
+    () => navigation.value?.nas_upload_path || boot.value?.nas_upload_path || '',
+  )
+
   /** 当前筛选下可见的店。平台选了就只留那个平台的。 */
   const visibleStores = computed(() =>
     stores.value.filter((s) => !platform.value || s.platform === platform.value),
@@ -284,7 +291,7 @@ export const useApp = defineStore('app', () => {
   return {
     navigation, boot, overview, storeDetails, loading, error,
     platform, storeId, period, busy, intake, memo, showIntake,
-    stores, platforms, visibleStores, periods, currentStore,
+    stores, platforms, visibleStores, periods, currentStore, ingestMode, nasUploadPath,
     load, loadNavigation, loadModel, loadOverview, loadStoreDetail,
     invalidate, run, upload, submit, pick, noted,
   }

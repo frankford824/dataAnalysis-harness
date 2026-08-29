@@ -109,6 +109,31 @@ class TestBootstrap:
         assert client.get("/api/health").json()["ok"] is True
         assert client.get("/api/version").json()["version"]
 
+    def test_nas_mode_disables_web_upload(self, client, monkeypatch):
+        monkeypatch.setenv("LEDGER_INGEST_MODE", "nas")
+        response = _upload(client, ("运费-淘宝喜必顺.xlsx", _xlsx_bytes([["订单号"], ["A1"]])))
+        assert response.status_code == 410
+        assert "网页上传已停用" in response.json()["detail"]
+
+    def test_nas_mode_searches_the_indexer(self, client, monkeypatch):
+        monkeypatch.setenv("LEDGER_INGEST_MODE", "nas")
+        monkeypatch.setattr(api.index_client, "search", lambda *_args, **_kwargs: {"hits": [{
+            "file_sha": "a" * 64,
+            "path": r"X:\台账系统\10_已接收\拼多多\店\订单明细\订单.csv",
+            "sheet": "CSV",
+            "row_no": 7,
+            "platform": "拼多多",
+            "store_id": "pdd_zlvoey",
+            "source": "订单明细",
+            "authority": "calculation",
+            "matches": [{"column_index": 3, "value": "A001"}],
+            "snippet": "A001",
+        }]})
+        body = client.get("/api/search", params={"q": "A001"}).json()
+        assert body["backend"] == "tantivy"
+        assert body["hits"][0]["file"] == "订单.csv"
+        assert body["hits"][0]["matches"][0]["column_no"] == 4
+
 
 class TestSearchCache:
     def test_same_revision_reuses_result_and_a_write_invalidates_it(

@@ -668,3 +668,16 @@ button.period-chip.on span { color: var(--accent); }
   .page-shift-enter-active,
   .page-shift-leave-active { transition: none; }
 }
+
+.nas-path,
+.nas-drop .num,
+.search-snippet {
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.search-snippet {
+  max-width: 360px;
+  margin-top: var(--s1);
+  white-space: normal;
+}

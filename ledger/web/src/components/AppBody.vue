@@ -60,6 +60,10 @@ onUnmounted(() => {
 
 async function take(files) {
   if (!files?.length) return
+  if (app.ingestMode === 'nas') {
+    message.info(`网页上传已停用，请放到 ${app.nasUploadPath}`)
+    return
+  }
   try {
     // 收完不跳页：人正开着某一页交表，被甩到别处是最讨厌的一种「帮忙」。算出来的
     // 账期在结果面板里列着，要去点一下就行。
@@ -128,9 +132,12 @@ defineExpose({ take })
              这里点开的是说明屏而不是直接弹选文件框：文件一旦送出去就没有再问
              「传到哪家店哪个月」的机会了，而这两件事恰恰是不用人选的——不说清楚，
              「不用选」看起来就是「没得选」。拖到窗口里的仍然直收，不经这一屏。 -->
-        <n-button size="small" type="primary" @click="explaining = true">
+        <n-button v-if="app.ingestMode !== 'nas'" size="small" type="primary" @click="explaining = true">
           上传表格
         </n-button>
+        <n-tag v-else size="small" type="success" :bordered="false">
+          NAS 自动接收
+        </n-tag>
       </header>
       <div class="route-progress" :class="{ on: routeLoading }" aria-hidden="true">
         <span />
@@ -157,7 +164,7 @@ defineExpose({ take })
       <span v-if="secs > 20" class="dim">别刷新</span>
     </div>
 
-    <UploadPanel v-if="explaining" v-model:show="explaining" />
+    <UploadPanel v-if="explaining && app.ingestMode !== 'nas'" v-model:show="explaining" />
     <IntakeResult v-if="app.showIntake || app.intake" />
   </div>
 </template>

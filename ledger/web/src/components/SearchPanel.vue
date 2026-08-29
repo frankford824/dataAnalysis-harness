@@ -118,12 +118,18 @@ watch(
                   <td>
                     {{ h.subject || h.metric || '—' }}
                     <div class="xs muted">{{ h.store }} · {{ h.period }}</div>
+                    <div v-if="h.matches?.length" class="xs muted">
+                      {{ h.matches.map((m) => `${m.column_name}：${m.value}`).join('；') }}
+                    </div>
                   </td>
-                  <td class="right num" :class="{ neg: h.amount < 0 }">{{ money(h.amount) }}</td>
+                  <td class="right num" :class="{ neg: h.amount < 0 }">
+                    {{ h.amount == null ? '—' : money(h.amount) }}
+                  </td>
                   <td class="xs num">
                     {{ h.file }}
                     <template v-if="h.sheet"> · {{ h.sheet }}</template>
                     · 第 {{ h.row_no }} 行
+                    <div v-if="h.snippet" class="muted search-snippet">{{ h.snippet }}</div>
                   </td>
                 </tr>
               </tbody>
