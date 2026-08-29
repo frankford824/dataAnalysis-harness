@@ -56,6 +56,8 @@ def gaps(payload: dict[str, Any], model: Model,
     只读快照，不重算——已结账的账期按设计不能重算，而它同样需要能回答「哪里不对」。
     `before` 是同一家店上一个账期的快照，给「突然变成 0」那一条用；没有就跳过那条。
     """
+    if (payload.get("archive") or {}).get("kind") == "legacy_final_summary":
+        return _historical_review(payload)
     out: list[dict[str, Any]] = []
     out.extend(_blocking(payload, model))
     out.extend(_missing(payload, model))
@@ -67,6 +69,20 @@ def gaps(payload: dict[str, Any], model: Model,
     out.extend(_unclassified(payload))
     out.extend(_unlinked(payload))
     out.sort(key=lambda g: (SEVERITY_ORDER.get(g["severity"], 9), -abs(g["amount"] or 0.0)))
+    return out
+
+
+def _historical_review(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    """Legacy finals have summary evidence, not current-model order-level diagnostics."""
+    out = []
+    for item in (payload.get("archive") or {}).get("review_items") or []:
+        out.append(_gap(
+            str(item.get("kind") or "historical"),
+            str(item.get("severity") or "info"),
+            str(item.get("title") or "历史终态提示"),
+            str(item.get("detail") or ""),
+            amount=item.get("amount"),
+        ))
     return out
 
 

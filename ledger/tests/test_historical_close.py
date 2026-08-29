@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import json
+from copy import deepcopy
 from pathlib import Path
 
 from openpyxl import Workbook
 
-from ledger.historical_close import apply_plan, build_plan, canonical_legacy_name
+from ledger.gaps import gaps
+from ledger.historical_close import apply_plan, build_plan, canonical_legacy_name, payload
 from ledger.model import load_model
 from ledger.workspace import CLOSED, open_workspace
 
@@ -68,6 +70,35 @@ def test_plan_maps_legacy_reports_to_current_model(tmp_path: Path) -> None:
         ("taobao_mt8egr48", "2025-01"),
         *(("taobao_xibishun", f"2026-{month:02d}") for month in range(1, 6)),
     }
+    body = payload(plan.cells[0], model, "model-revision")
+    assert body["archive"]["evidence_schema"] == 2
+    assert len(body["findings"]) == 4
+    assert len(body["sources"]) == 3
+    assert len(body["archive"]["quality_checks"]) == 4
+    assert body["archive"]["unlinked_evidence"]["status"] == "not_available"
+
+
+def test_historical_gaps_only_expose_explicit_review_items(tmp_path: Path) -> None:
+    source_2025 = tmp_path / "2025.xlsx"
+    source_2026 = tmp_path / "2026.xlsx"
+    _source_2025(source_2025)
+    _source_2026(source_2026)
+    model = load_model(Path(__file__).parents[2] / "models" / "cn-ecommerce")
+    cell = build_plan(source_2025, source_2026, model).cells[0]
+    body = payload(cell, model, "model-revision")
+    body["archive"]["review_items"] = [{
+        "kind": "historical_adjustment", "severity": "info", "title": "历史调整",
+        "detail": "显式列示", "amount": -12.34,
+    }]
+    body["missing_sources"] = ["不应按当前门禁报告"]
+
+    rows = gaps(body, model)
+
+    assert rows == [{
+        "kind": "historical_adjustment", "severity": "info", "title": "历史调整",
+        "detail": "显式列示", "node": "", "metric": "", "source": "",
+        "amount": -12.34, "only": "counted",
+    }]
 
 
 def test_apply_archives_sources_and_preserves_june_state(tmp_path: Path) -> None:
@@ -88,6 +119,19 @@ def test_apply_archives_sources_and_preserves_june_state(tmp_path: Path) -> None
     june = {"can_close": True, "findings": [], "missing_sources": [], "statement": []}
     workspace.record("taobao_xibishun", "2026-06", june, ["june"], evidence_ready=True)
     workspace.close_period("taobao_xibishun", "2026-06", by="test")
+    first = plan.cells[0]
+    old_body = payload(first, model, "old-model-revision")
+    old_body = deepcopy(old_body)
+    old_body["archive"].pop("evidence_schema")
+    old_body["archive"].pop("quality_checks")
+    old_body["archive"].pop("unlinked_evidence")
+    old_body["archive"].pop("review_items")
+    old_body["findings"] = old_body["findings"][:1]
+    old_body["sources"] = old_body["sources"][:1]
+    old_run = workspace.record(
+        first.store_id, first.period, old_body, [first.source_sha256], evidence_ready=True,
+    )
+    workspace.close_period(first.store_id, first.period, by="old-import")
 
     result = apply_plan(
         workspace,
@@ -98,11 +142,16 @@ def test_apply_archives_sources_and_preserves_june_state(tmp_path: Path) -> None
         backup_dir=tmp_path / "backups",
     )
 
-    assert result["counts"]["imported"] == 6
+    assert result["counts"]["imported"] == 5
+    assert result["counts"]["enriched"] == 1
     assert result["counts"]["policy_closed"] == 2
     assert workspace.state("taobao_mt8egr48", "2024-12").state == CLOSED
     assert workspace.state("douyin_mszr2dhn", "2025-02").state == CLOSED
     assert workspace.state("taobao_mt8egr48", "2025-01").state == CLOSED
+    enriched = workspace.state(first.store_id, first.period)
+    assert enriched.run_id != old_run
+    assert enriched.result["archive"]["evidence_schema"] == 2
+    assert len(workspace.history(first.store_id, first.period)) == 2
     assert workspace.state("taobao_xibishun", "2026-05").state == CLOSED
     assert workspace.state("taobao_xibishun", "2026-06").state == CLOSED
     archived = list((nas / "90_历史版本").glob("*/*/payload"))

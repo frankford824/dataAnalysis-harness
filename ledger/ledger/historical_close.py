@@ -13,6 +13,7 @@ import json
 import re
 import shutil
 import sqlite3
+from copy import deepcopy
 from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -376,7 +377,7 @@ def payload(cell: LegacyCell, model: Model, model_revision: str) -> dict[str, An
                 "missing_sources": [], "is_total": False, "drillable": False,
             },
         ])
-    return {
+    return enrich_payload({
         "store": store.name,
         "store_id": store.id,
         "platform": store.platform,
@@ -384,21 +385,8 @@ def payload(cell: LegacyCell, model: Model, model_revision: str) -> dict[str, An
         "period": cell.period,
         "can_close": True,
         "statement": statement,
-        "findings": [{
-            "id": "legacy_final_archive",
-            "name": "历史终态归档",
-            "passed": True,
-            "blocking": False,
-            "message": "该账期在台账系统上线前已完成，按只读终态结果映射并冻结。",
-            "head": "历史终态结果已归档",
-            "lines": [],
-        }],
-        "sources": [{
-            "id": "legacy_final_summary",
-            "name": "历史终态结果",
-            "arrived": True,
-            "reason": "只读归档，不参与后续账期自动计算",
-        }],
+        "findings": [],
+        "sources": [],
         "missing_sources": [],
         "quality": [],
         "unclassified": [],
@@ -419,7 +407,105 @@ def payload(cell: LegacyCell, model: Model, model_revision: str) -> dict[str, An
             "legacy_adjustment": float(adjustment),
             "mapped_at": _now(),
         },
+    })
+
+
+def enrich_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    """Fill the five audit panels for an immutable legacy-final snapshot."""
+    body = deepcopy(payload)
+    archive = body.get("archive") or {}
+    if archive.get("kind") != "legacy_final_summary":
+        raise ValueError("只允许补全历史终态归档快照")
+    adjustment = float(archive.get("legacy_adjustment") or 0.0)
+    rows = archive.get("row_numbers") or []
+    row_label = "、".join(str(value) for value in rows)
+    source_sha = str(archive.get("source_sha256") or "")
+    store_id = str(body.get("store_id") or "")
+    period = str(body.get("period") or "")
+    visible = float(archive.get("visible_component_total") or 0.0)
+    reported = float(archive.get("reported_profit") or 0.0)
+
+    archive["evidence_schema"] = 2
+    archive["review_items"] = ([{
+        "kind": "historical_adjustment",
+        "severity": "info",
+        "title": "历史结账调整已单独列示",
+        "detail": (
+            f"终态利润与可见组成列相差 {adjustment:,.2f}，已作为历史结账调整计入利润；"
+            "没有塞进平台费、广告费或商品成本。"
+        ),
+        "amount": adjustment,
+    }] if abs(adjustment) > 0.005 else [])
+    archive["quality_checks"] = [
+        {
+            "id": "legacy_source_integrity", "name": "终态文件完整性", "status": "passed",
+            "result": "通过", "detail": f"原文件与NAS归档使用同一SHA-256：{source_sha}",
+        },
+        {
+            "id": "legacy_scope_mapping", "name": "店铺与账期定位", "status": "passed",
+            "result": "通过", "detail": f"{len(rows)} 行终态结果已唯一映射到 {store_id} · {period}",
+        },
+        {
+            "id": "legacy_profit_tie_out", "name": "终态利润勾稽", "status": "passed",
+            "result": "通过",
+            "detail": f"可见组成项 {visible:,.2f} + 历史调整 {adjustment:,.2f} = 终态利润 {reported:,.2f}",
+        },
+        {
+            "id": "legacy_order_coverage", "name": "订单级挂钩与覆盖", "status": "not_available",
+            "result": "不适用", "detail": "终态汇总不含订单级分母，不能把未知覆盖率伪装成100%。",
+        },
+    ]
+    archive["unlinked_evidence"] = {
+        "status": "not_available",
+        "result": "无订单级证据",
+        "detail": (
+            "历史终态汇总不包含挂不上订单的原始行，不能反推为0。"
+            "历史结账调整已经进入利润，不属于“没进利润的钱”。"
+        ),
     }
+    body["archive"] = archive
+    body["findings"] = [
+        {
+            "id": "legacy_source_integrity", "name": "终态文件完整性", "passed": True,
+            "blocking": False, "message": "原文件与NAS不可变归档哈希一致。",
+            "head": "原件哈希一致", "lines": [f"SHA-256：{source_sha}"],
+        },
+        {
+            "id": "legacy_scope_mapping", "name": "历史店期映射", "passed": True,
+            "blocking": False, "message": "历史店名、账期和当前店铺ID已唯一对应。",
+            "head": "店铺和账期唯一对应", "lines": [f"{store_id} · {period} · 原表第 {row_label} 行"],
+        },
+        {
+            "id": "legacy_profit_tie_out", "name": "历史终态勾稽", "passed": True,
+            "blocking": False, "message": "可见组成项、显式历史调整与终态利润勾稽一致。",
+            "head": "终态金额勾稽一致",
+            "lines": [f"{visible:,.2f} + {adjustment:,.2f} = {reported:,.2f}"],
+        },
+        {
+            "id": "legacy_cutoff", "name": "历史关账边界", "passed": period <= CUTOFF,
+            "blocking": True, "message": f"账期 {period} 不晚于历史截止 {CUTOFF}。",
+            "head": f"未越过 {CUTOFF}", "lines": [],
+        },
+    ]
+    body["sources"] = [
+        {
+            "id": "legacy_final_summary", "name": "历史终态结果", "arrived": True,
+            "status": "archived", "reason": f"{archive.get('sheet') or ''} · 第 {row_label} 行",
+        },
+        {
+            "id": "legacy_nas_archive", "name": "NAS不可变原件", "arrived": True,
+            "status": "archived", "reason": f"内容寻址归档 · {source_sha}",
+        },
+        {
+            "id": "legacy_current_raw_gate", "name": "当前模型原始表门禁", "arrived": None,
+            "status": "not_applicable", "reason": "台账上线前已按当时终态结账，不追溯伪造当前模板的交表状态。",
+        },
+    ]
+    body["missing_sources"] = []
+    body["quality"] = []
+    body["unlinked_total"] = None
+    body["unlinked_buckets"] = []
+    return body
 
 
 def archive_source(source: Path, sha: str, nas_root: Path) -> str:
@@ -470,7 +556,7 @@ def apply_plan(
     for source, sha in plan.sources.items():
         archive_counts[archive_source(source, sha, nas_root)] += 1
 
-    imported = skipped = policy_closed = 0
+    imported = skipped = enriched = policy_closed = 0
     manifest_cells: list[dict[str, Any]] = []
     for cell in plan.cells:
         if cell.period > cutoff:
@@ -480,7 +566,27 @@ def apply_plan(
         if current and current.state == CLOSED:
             archive = (current.result or {}).get("archive") or {}
             if archive.get("source_sha256") == cell.source_sha256:
-                skipped += 1
+                if int(archive.get("evidence_schema") or 0) >= 2:
+                    skipped += 1
+                    continue
+                enriched_body = enrich_payload(current.result or {})
+                fingerprint = hashlib.sha256(
+                    json.dumps(
+                        [cell.source_sha256, cell.store_id, cell.period, model_revision,
+                         engine_version(), "evidence-schema-2"],
+                        ensure_ascii=False,
+                    ).encode("utf-8")
+                ).hexdigest()
+                workspace.enrich_historical_snapshot(
+                    cell.store_id,
+                    cell.period,
+                    enriched_body,
+                    model_revision=model_revision,
+                    input_fingerprint=fingerprint,
+                    by=OPERATOR,
+                    note="补齐历史终态的要看、自检、交表、质量和未归属证据；金额未变",
+                )
+                enriched += 1
                 continue
             raise WorkspaceError(f"{cell.store_id} {cell.period} 已由另一版本冻结")
         fingerprint = hashlib.sha256(
@@ -548,6 +654,7 @@ def apply_plan(
         "counts": {
             "imported": imported,
             "skipped": skipped,
+            "enriched": enriched,
             "policy_closed": policy_closed,
             "archive_copied": archive_counts["copied"],
             "archive_existing": archive_counts["existing"],
@@ -581,5 +688,5 @@ def summarize(plan: ImportPlan) -> dict[str, Any]:
 
 __all__ = [
     "apply_plan", "build_plan", "CUTOFF", "ImportPlan", "LEGACY_STORE_IDS",
-    "payload", "summarize",
+    "enrich_payload", "payload", "summarize",
 ]

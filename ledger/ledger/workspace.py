@@ -787,6 +787,71 @@ class Workspace:
         assert state is not None
         return state
 
+    def enrich_historical_snapshot(
+        self,
+        store_id: str,
+        period: str,
+        result: dict[str, Any],
+        *,
+        model_revision: str,
+        input_fingerprint: str,
+        by: str,
+        note: str,
+    ) -> PeriodState:
+        """Attach evidence metadata to a frozen historical result without changing money.
+
+        The previous run remains immutable and addressable in history.  A new run is appended and
+        the closed period pointer moves to it only after every statement node's amount and
+        availability match exactly and the archived source SHA is unchanged.
+        """
+        if not by.strip() or not note.strip():
+            raise WorkspaceError("历史快照补证必须写操作人和原因")
+        with self.conn as conn:
+            row = conn.execute(
+                "select p.state,p.run_id,r.* from period p join run r on r.id=p.run_id "
+                "where p.store_id=? and p.period=?",
+                (store_id, period),
+            ).fetchone()
+            if row is None or row["state"] != CLOSED:
+                raise WorkspaceError(f"{store_id} {period} 不是已冻结的历史账期")
+            if not row["evidence_ready"]:
+                raise WorkspaceError(f"{store_id} {period} 的原快照证据未完成")
+            before = json.loads(row["result"])
+            old_archive = before.get("archive") or {}
+            new_archive = result.get("archive") or {}
+            if old_archive.get("kind") != "legacy_final_summary":
+                raise WorkspaceError(f"{store_id} {period} 不是终态文件归档快照")
+            if old_archive.get("source_sha256") != new_archive.get("source_sha256"):
+                raise WorkspaceError(f"{store_id} {period} 补证时来源SHA发生变化")
+
+            def numbers(payload: dict[str, Any]) -> list[tuple[str, Any, bool]]:
+                return [
+                    (str(item.get("id") or ""), item.get("value"), bool(item.get("available")))
+                    for item in payload.get("statement") or []
+                ]
+
+            if numbers(before) != numbers(result):
+                raise WorkspaceError(f"{store_id} {period} 补证会改变损益表金额，已拒绝")
+            cursor = conn.execute(
+                "insert into run "
+                "(store_id,period,at,can_close,evidence_ready,evidence_error,engine,"
+                "model_revision,input_fingerprint,shas,result) values (?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    store_id, period, _now(), int(bool(result.get("can_close"))), 1, "",
+                    engine_version(), model_revision or None, input_fingerprint or None,
+                    row["shas"], json.dumps(result, ensure_ascii=False),
+                ),
+            )
+            run_id = int(cursor.lastrowid or 0)
+            conn.execute(
+                "update period set changed_at=?,by=?,note=?,run_id=? "
+                "where store_id=? and period=? and state=?",
+                (_now(), by.strip(), note.strip(), run_id, store_id, period, CLOSED),
+            )
+        state = self.state(store_id, period)
+        assert state is not None
+        return state
+
     def reopen_period(self, store_id: str, period: str, by: str = "", note: str = "") -> PeriodState:
         """反结账。谁反的、为什么反，必须留痕。"""
         if not note.strip():
