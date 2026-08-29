@@ -13,6 +13,7 @@ const loading = ref(false)
 const error = ref('')
 const result = ref(null)
 const offset = ref(0)
+const copied = ref(false)
 const pageSize = 15
 
 const fileName = computed(() => props.target?.file || props.target?.name || '原文件')
@@ -64,7 +65,22 @@ watch(
 
 async function copyPath() {
   const path = props.target?.path || result.value?.metadata?.path || ''
-  if (path) await navigator.clipboard.writeText(path)
+  if (!path) return
+  try {
+    if (!navigator.clipboard?.writeText) throw new Error('clipboard unavailable')
+    await navigator.clipboard.writeText(path)
+  } catch {
+    const textarea = document.createElement('textarea')
+    textarea.value = path
+    textarea.style.position = 'fixed'
+    textarea.style.opacity = '0'
+    document.body.appendChild(textarea)
+    textarea.select()
+    document.execCommand('copy')
+    textarea.remove()
+  }
+  copied.value = true
+  setTimeout(() => (copied.value = false), 1500)
 }
 </script>
 
@@ -86,7 +102,7 @@ async function copyPath() {
         <div class="row">
           <n-button size="tiny" :disabled="offset === 0 || loading" @click="load(offset - pageSize)">上一页</n-button>
           <n-button size="tiny" :disabled="(result?.rows?.length || 0) < pageSize || loading" @click="load(offset + pageSize)">下一页</n-button>
-          <n-button size="tiny" secondary @click="copyPath">复制文件路径</n-button>
+          <n-button size="tiny" secondary @click="copyPath">{{ copied ? '已复制' : '复制文件路径' }}</n-button>
         </div>
       </div>
 
