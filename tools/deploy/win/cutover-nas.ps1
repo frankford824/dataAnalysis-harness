@@ -12,6 +12,15 @@ if (-not $me.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
 $mapping = Get-SmbGlobalMapping -ErrorAction SilentlyContinue |
   Where-Object { $_.RemotePath.TrimEnd('\') -ieq $Share.TrimEnd('\') } |
   Select-Object -First 1
+if ($mapping) {
+  $candidateRoot = $mapping.LocalPath.TrimEnd('\') + '\台账系统'
+  if ($mapping.Status.ToString() -ne 'Connected' -or
+      -not (Test-Path -LiteralPath $candidateRoot -PathType Container)) {
+    Write-Output ('现有全局映射 ' + $mapping.LocalPath + ' 状态为 ' + $mapping.Status + '，将重新建立')
+    Remove-SmbGlobalMapping -LocalPath $mapping.LocalPath -Force -ErrorAction Stop
+    $mapping = $null
+  }
+}
 if (-not $mapping) {
   Write-Output '请输入 NAS 账号 fwk 的密码。密码不会写入应用配置。'
   $credential = Get-Credential -UserName 'fwk' -Message 'NAS SMB 凭据'
