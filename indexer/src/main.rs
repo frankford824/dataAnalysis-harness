@@ -926,7 +926,7 @@ fn supported(path: &Path) -> bool {
             .and_then(|s| s.to_str())
             .map(str::to_ascii_lowercase)
             .as_deref(),
-        Some("xlsx" | "xlsm" | "xls" | "xlsb" | "csv")
+        Some("xlsx" | "xlsm" | "xls" | "xlsb" | "csv" | "zip")
     ) && !path
         .file_name()
         .and_then(|s| s.to_str())
@@ -1151,7 +1151,7 @@ fn scan_once(root: &Path, data: &Path) -> Result<Value> {
                         .and_then(|value| value.to_str())
                         .map(str::to_ascii_lowercase)
                         .as_deref(),
-                    Some("xls" | "xlsb")
+                    Some("xls" | "xlsb" | "zip")
                 ) =>
             {
                 let message = format!("全文索引未生成，交给 Python 财务兼容解析：{error:#}");
@@ -1616,6 +1616,7 @@ mod tests {
         assert!(supported(Path::new("订单.xlsx")));
         assert!(supported(Path::new("历史订单.xls")));
         assert!(supported(Path::new("历史订单.xlsb")));
+        assert!(supported(Path::new("支付宝账单.zip")));
     }
 
     #[test]
