@@ -353,6 +353,25 @@ def test_reopen_then_close_again_uses_new_numbers(ws):
     assert ws.state("s1", "2025-05").result["profit"] == 200
 
 
+def test_historical_close_freezes_failed_snapshot_only_before_cutoff(ws):
+    ws.record("s1", "2024-12", _result(can_close=False), ["a"], evidence_ready=True)
+
+    state = ws.close_historical_period(
+        "s1", "2024-12", cutoff="2026-05", by="迁移员",
+        note="历史政策关账", reference="财务确认截止期",
+    )
+
+    assert state.state == CLOSED
+    assert state.result["can_close"] is False
+    assert "财务确认截止期" in state.note
+    ws.record("s1", "2026-06", _result(), ["b"], evidence_ready=True)
+    with pytest.raises(WorkspaceError, match="晚于"):
+        ws.close_historical_period(
+            "s1", "2026-06", cutoff="2026-05", by="迁移员",
+            note="历史政策关账", reference="财务确认截止期",
+        )
+
+
 def test_several_requests_can_read_at_once(ws):
     """界面一进页面就并发拉三份数据，它们落在不同的线程上。
 

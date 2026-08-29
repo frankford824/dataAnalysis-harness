@@ -459,67 +459,6 @@
 .detail-crumb { color: var(--n5); font-size: var(--t-xs); }
 .detail-meta { margin-top: var(--s1); }
 
-.detail-period-groups {
-  display: grid;
-  gap: var(--s3);
-  margin-top: var(--s4);
-}
-.detail-period-group {
-  display: grid;
-  grid-template-columns: 118px minmax(0, 1fr);
-  align-items: start;
-  gap: var(--s3);
-  padding: var(--s3);
-  border: 1px solid var(--n3);
-  border-radius: var(--r-md);
-}
-.detail-period-group.open-group { background: var(--warn-bg); border-color: #f3d3a9; }
-.detail-period-group.closed-group { background: var(--ok-bg); border-color: #b9dfca; }
-.detail-periods {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: var(--s2);
-}
-.detail-periods-label { display: grid; color: var(--n7); font-size: var(--t-xs); }
-.detail-periods-label b { font-size: var(--t-sm); color: var(--n9); }
-.detail-periods-label span { color: var(--n5); }
-button.period-chip {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  padding: 3px 10px;
-  border-radius: 999px;
-  font-size: var(--t-xs);
-  border: 1px solid var(--n3);
-  background: var(--n0);
-  color: var(--n8);
-}
-button.period-chip i {
-  display: inline-grid;
-  place-items: center;
-  width: 14px;
-  height: 14px;
-  border-radius: 50%;
-  background: var(--warn);
-  color: white;
-  font-size: 10px;
-  font-style: normal;
-}
-button.period-chip.open.ready { border-color: #e8b36c; }
-button.period-chip.open.blocked { border-color: #efaca5; background: var(--bad-bg); }
-button.period-chip.open.blocked i { background: var(--bad); }
-button.period-chip.closed { border-color: #9fd4b8; background: var(--n0); color: var(--ok); }
-button.period-chip.closed i { background: var(--ok); }
-button.period-chip span { color: var(--n5); font-size: 11px; }
-button.period-chip:hover,
-button.period-chip.on {
-  border-color: var(--accent);
-  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 18%, transparent);
-}
-button.period-chip:hover span,
-button.period-chip.on span { color: currentColor; }
-
 .detail-files-title { margin: var(--s5) 0 var(--s2); }
 .detail-loading { padding: var(--s4) 0 var(--s6); }
 .detail-loading-title {
@@ -672,9 +611,6 @@ button.period-chip.on span { color: currentColor; }
   .deliver-heading > .n-button { margin-top: var(--s3); }
   .store-detail { padding: var(--s4); }
   .store-detail-head { flex-direction: column; gap: var(--s3); }
-  .detail-period-group { grid-template-columns: 1fr; gap: var(--s2); }
-  .detail-periods-label { display: flex; gap: var(--s2); align-items: baseline; }
-
   /* 手机上五列挤不开：四列定宽加起来正好等于容器宽度，文件名就被压成零宽。交表人
      整列基本都是破折号，大小也不是站在货架前要看的东西——撤掉这两列，剩下文件名、
      什么时候更新、撤不撤，三列放得下，不用横着拖。

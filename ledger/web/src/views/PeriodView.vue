@@ -237,6 +237,26 @@ watch(
         >
           已结账{{ snap.at ? `于 ${stamp(snap.at)}` : '' }}{{ snap.by ? ` · ${snap.by}` : '' }}
           <template v-if="snap.stale"> · 之后又交了新表，数字还是结账那一版</template>
+          <div v-if="snap.note" class="small" style="margin-top: 4px">{{ snap.note }}</div>
+        </n-alert>
+
+        <n-alert
+          v-if="snap.archive?.kind === 'legacy_final_summary'"
+          type="info"
+          :bordered="false"
+          title="台账上线前的历史终态"
+          style="margin-bottom: var(--s4)"
+        >
+          <div class="small">
+            这期按只读结果归档，没有改写原文件。来源：{{ snap.archive.source_path }}
+            · {{ snap.archive.sheet }} · 第 {{ snap.archive.row_numbers?.join('、') }} 行
+          </div>
+          <div class="xs muted num" style="margin-top: 4px">
+            SHA-256 {{ snap.archive.source_sha256 }}
+            <template v-if="Math.abs(snap.archive.legacy_adjustment || 0) > 0.005">
+              · 历史结账调整 {{ money(snap.archive.legacy_adjustment) }}
+            </template>
+          </div>
         </n-alert>
 
         <!-- 结账按钮灰着而不说为什么，是最容易被理解成「系统坏了」的一种状态。

@@ -27,6 +27,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import shutil
 import sqlite3
 import threading
@@ -728,6 +729,59 @@ class Workspace:
                 "state=excluded.state, changed_at=excluded.changed_at, by=excluded.by, "
                 "note=excluded.note, run_id=excluded.run_id, at_version=excluded.at_version",
                 (store_id, period, CLOSED, _now(), by, note, run["id"], version),
+            )
+        state = self.state(store_id, period)
+        assert state is not None
+        return state
+
+    def close_historical_period(
+        self,
+        store_id: str,
+        period: str,
+        *,
+        cutoff: str,
+        by: str,
+        note: str,
+        reference: str,
+    ) -> PeriodState:
+        """Freeze an existing legacy snapshot under an explicit business cutoff policy.
+
+        This is deliberately separate from :meth:`close_period`.  It is a one-time migration
+        escape hatch for periods that predate Ledger and therefore cannot satisfy checks which
+        did not exist when the books were completed.  It never manufactures a result, never
+        accepts an unknown period, and never crosses the caller-supplied cutoff.
+        """
+        if not re.fullmatch(r"\d{4}-\d{2}", period or ""):
+            raise WorkspaceError(f"{period} 不是可归档的年月账期")
+        if period > cutoff:
+            raise WorkspaceError(f"{period} 晚于历史关账截止 {cutoff}")
+        if not by.strip() or not note.strip() or not reference.strip():
+            raise WorkspaceError("历史关账必须写操作人、原因和终态依据")
+        run = self.latest_run(store_id, period)
+        if run is None:
+            raise WorkspaceError(f"{period} 没有任何可冻结的历史快照")
+        if not run["evidence_ready"]:
+            raise WorkspaceError(f"{period} 的事实证据没有完成留档")
+        current = self.conn.execute(
+            "select state,run_id from period where store_id=? and period=?",
+            (store_id, period),
+        ).fetchone()
+        if current and current["state"] == CLOSED:
+            state = self.state(store_id, period)
+            assert state is not None
+            return state
+        audit_note = f"{note.strip()}；依据：{reference.strip()}"
+        with self.conn as conn:
+            version = conn.execute(
+                "select coalesce(max(id), 0) as v from version where store_id in (?,?)",
+                (store_id, SHARED_STORE_ID),
+            ).fetchone()["v"]
+            conn.execute(
+                "insert into period (store_id,period,state,changed_at,by,note,run_id,at_version) "
+                "values (?,?,?,?,?,?,?,?) on conflict(store_id,period) do update set "
+                "state=excluded.state,changed_at=excluded.changed_at,by=excluded.by,"
+                "note=excluded.note,run_id=excluded.run_id,at_version=excluded.at_version",
+                (store_id, period, CLOSED, _now(), by.strip(), audit_note, run["id"], version),
             )
         state = self.state(store_id, period)
         assert state is not None

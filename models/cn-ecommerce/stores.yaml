@@ -335,6 +335,45 @@
   platform: pdd
   commission_on_loss: deduct
   note: ERP shop_id 14221158。2026-07-27 才出第一单，是这批里唯一一家新开的。
+
+# 下面五家只存在于历史终态报表。它们在当前 ERP 在营店铺清单里已经没有，不能硬并到
+# 名字相近的新店；否则历史利润会串到另一家店。归档店只用于查看和冻结旧账，不参与
+# NAS 新文件自动接收，也不会出现在新账期的待办清单里。
+- id: legacy_pdd_changjia
+  name: PDD厂家（历史归档）
+  platform: pdd
+  archived: true
+  aliases: [PDD厂家]
+  commission_on_loss: deduct
+  note: 来自2025/2026历史终态报表；当前ERP在营店铺中无可证明的同一店铺，不做猜测合并。
+- id: legacy_pdd_lingzhi
+  name: PDD棱智（历史归档）
+  platform: pdd
+  archived: true
+  aliases: [PDD棱智]
+  commission_on_loss: deduct
+  note: 来自2025/2026历史终态报表；只保留历史账，不接收新文件。
+- id: legacy_pdd_yongbo
+  name: PDD永箔（历史归档）
+  platform: pdd
+  archived: true
+  aliases: [PDD永箔]
+  commission_on_loss: deduct
+  note: 来自2025/2026历史终态报表；只保留历史账，不接收新文件。
+- id: legacy_pdd_jiaju
+  name: PDD家居（历史归档）
+  platform: pdd
+  archived: true
+  aliases: [PDD家居]
+  commission_on_loss: deduct
+  note: 来自2025/2026历史终态报表；不能与天猫家居/幸运的愿望合并。
+- id: legacy_pdd_paidui
+  name: PDD派对（历史归档）
+  platform: pdd
+  archived: true
+  aliases: [PDD派对]
+  commission_on_loss: deduct
+  note: 来自2025历史终态报表；与PDDLucky等现有店没有可证明的同店关系，单独归档。
 - id: douyin_xibishun
   name: 汪学成-抖店喜必顺
   platform: douyin

@@ -1,9 +1,9 @@
 <script setup>
 /* 一家店的账期切换。
  *
- * 摆法照日历来：翻页键在最左，后面是当前月份，底下先选年、再从一到十二挑月。
- * 月份不按「新的在前」倒着排——那是列表的逻辑，不是日历的逻辑，人看一月在最
- * 右边会先愣一下。
+ * 摆法照日历来：翻页键在最左，后面是当前月份；选择区分成「年份」和「月份」两级。
+ * 年份放在可滚动的窄栏里，一次只展开一年的十二个月，避免几十个账期继续横向平铺。
+ * 月份仍按一到十二排——倒序是列表逻辑，不是日历逻辑。
  *
  * 没算过的月份留在原位、点不动。这样一年里哪几个月还没账，扫一眼就知道；
  * 只列算过的那几个月，缺口就看不见了。
@@ -16,6 +16,7 @@ import { computed, ref, watch } from 'vue'
 const props = defineProps({
   periods: { type: Array, default: () => [] },
   modelValue: { type: String, default: '' },
+  compact: { type: Boolean, default: false },
 })
 
 const emit = defineEmits(['update:modelValue'])
@@ -91,9 +92,6 @@ function step(dir) {
 
 function pickYear(year) {
   shownYear.value = year
-  if (yearOf(props.modelValue) !== year) {
-    go(list.value.find((p) => yearOf(p.period) === year)?.period)
-  }
 }
 
 function statusOf(p) {
@@ -105,10 +103,23 @@ function statusOf(p) {
 }
 
 const status = computed(() => statusOf(current.value))
+const statusCounts = computed(() => {
+  const counts = { closed: 0, ready: 0, bad: 0, idle: 0 }
+  for (const item of list.value) counts[statusOf(item).mark || 'idle'] += 1
+  return counts
+})
+const yearCounts = computed(() => {
+  const counts = new Map()
+  for (const item of list.value) {
+    const year = yearOf(item.period)
+    counts.set(year, (counts.get(year) || 0) + 1)
+  }
+  return counts
+})
 </script>
 
 <template>
-  <div v-if="list.length" class="periods">
+  <div v-if="list.length" class="periods" :class="{ compact }">
     <div class="head">
       <div class="pager">
         <button
@@ -136,39 +147,50 @@ const status = computed(() => statusOf(current.value))
       </div>
     </div>
 
-    <div class="pick">
-      <div class="years">
-        <button
-          v-for="y in years"
-          :key="y"
-          type="button"
-          :class="{ on: y === shownYear }"
-          @click="pickYear(y)"
-        >
-          {{ y }}
-        </button>
+    <div class="period-levels">
+      <div class="year-level">
+        <div class="level-title">年份</div>
+        <div class="years" role="listbox" aria-label="选择年份">
+          <button
+            v-for="y in years"
+            :key="y"
+            type="button"
+            :class="{ on: y === shownYear }"
+            :aria-selected="y === shownYear"
+            @click="pickYear(y)"
+          >
+            <span>{{ y }}</span><small>{{ yearCounts.get(y) }} 期</small>
+          </button>
+        </div>
       </div>
-      <span v-if="shownYear !== OTHER" class="sep" />
-      <div class="months" :class="{ free: shownYear === OTHER }">
-        <button
-          v-for="m in months"
-          :key="m.key"
-          type="button"
-          :class="[m.status?.mark, { on: m.period === modelValue, off: !m.has }]"
-          :disabled="!m.has"
-          :title="m.has ? `${pretty(m.period)} · ${statusOf(byPeriod.get(m.period)).text}` : '这个月还没算过'"
-          @click="go(m.period)"
-        >
-          {{ m.label }}<i v-if="m.has" class="month-state" />
-        </button>
-        <span v-if="shownYear !== OTHER" class="unit">月</span>
+      <div class="month-level">
+        <div class="level-title month-title">
+          <span>{{ shownYear === OTHER ? '其他账期' : `${shownYear} 年` }}</span>
+          <small>{{ shownYear === OTHER ? '按原始名称选择' : '选择月份' }}</small>
+        </div>
+        <div class="months" :class="{ free: shownYear === OTHER }" role="listbox" aria-label="选择月份">
+          <button
+            v-for="m in months"
+            :key="m.key"
+            type="button"
+            :class="[m.status?.mark, { on: m.period === modelValue, off: !m.has }]"
+            :disabled="!m.has"
+            :aria-selected="m.period === modelValue"
+            :title="m.has ? `${pretty(m.period)} · ${statusOf(byPeriod.get(m.period)).text}` : '这个月还没算过'"
+            @click="go(m.period)"
+          >
+            <span class="month-number">{{ m.label }}<em v-if="shownYear !== OTHER">月</em></span>
+            <small>{{ m.has ? statusOf(byPeriod.get(m.period)).text : '暂无' }}</small>
+            <i v-if="m.has" class="month-state" />
+          </button>
+        </div>
       </div>
     </div>
     <div class="legend">
-      <span class="closed"><i />已结账</span>
-      <span class="ready"><i />可确认结账</span>
-      <span class="bad"><i />待完善</span>
-      <span class="idle"><i />未结账</span>
+      <span class="closed"><i />已结账 {{ statusCounts.closed }}</span>
+      <span class="ready"><i />可确认 {{ statusCounts.ready }}</span>
+      <span class="bad"><i />待完善 {{ statusCounts.bad }}</span>
+      <span class="idle"><i />未结账 {{ statusCounts.idle }}</span>
     </div>
   </div>
 </template>
@@ -176,9 +198,10 @@ const status = computed(() => statusOf(current.value))
 <style scoped>
 .periods {
   margin-bottom: var(--s5);
-  padding-bottom: var(--s4);
+  padding: var(--s3) 0 var(--s4);
   border-bottom: 1px solid var(--n2);
 }
+.periods.compact { margin-top: var(--s4); }
 
 .head {
   display: flex;
@@ -233,23 +256,46 @@ const status = computed(() => statusOf(current.value))
 .state.bad { color: var(--bad); background: var(--bad-bg); }
 .state.idle { color: var(--n5); }
 
-.pick {
-  display: flex;
-  align-items: center;
-  gap: var(--s3);
-  flex-wrap: wrap;
+.period-levels {
+  display: grid;
+  grid-template-columns: 112px minmax(0, 1fr);
+  min-height: 178px;
+  overflow: hidden;
+  border: 1px solid var(--n3);
+  border-radius: var(--r-md);
+  background: var(--n0);
 }
-.sep {
-  width: 1px;
-  height: 14px;
-  background: var(--n3);
+.year-level {
+  min-width: 0;
+  padding: var(--s2);
+  border-right: 1px solid var(--n3);
+  background: var(--n1);
 }
+.month-level { min-width: 0; padding: var(--s2) var(--s3) var(--s3); }
+.level-title {
+  padding: 4px 7px 7px;
+  color: var(--n5);
+  font-size: var(--t-xs);
+  font-weight: 560;
+  letter-spacing: .04em;
+}
+.month-title { display: flex; align-items: baseline; justify-content: space-between; }
+.month-title span { color: var(--n8); font-family: var(--num); font-size: var(--t-sm); }
+.month-title small { color: var(--n5); font-weight: 400; letter-spacing: 0; }
 
-.years, .months { display: flex; align-items: center; gap: 2px; }
+.years {
+  display: grid;
+  gap: 3px;
+  max-height: 140px;
+  overflow-y: auto;
+  scrollbar-width: thin;
+}
+.months { display: grid; grid-template-columns: repeat(4, minmax(76px, 1fr)); gap: 6px; }
+.months.free { grid-template-columns: repeat(2, minmax(110px, 1fr)); }
 
 .years button,
 .months button {
-  border: 0;
+  border: 1px solid transparent;
   background: transparent;
   color: var(--n6);
   font: inherit;
@@ -259,36 +305,47 @@ const status = computed(() => statusOf(current.value))
   transition: color .12s, background .12s;
 }
 .years button {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
   font-family: var(--num);
   font-size: var(--t-xs);
-  letter-spacing: .03em;
-  padding: 5px 8px;
+  padding: 7px 8px;
+  text-align: left;
 }
+.years button small { color: var(--n5); font-family: var(--font); font-size: 10px; }
 .months button {
-  font-family: var(--num);
-  font-size: var(--t-sm);
-  min-width: 30px;
-  padding: 5px 0;
+  display: grid;
+  grid-template-columns: 1fr auto;
+  align-items: center;
+  min-width: 0;
+  min-height: 42px;
+  padding: 6px 9px;
+  border-color: var(--n3);
+  text-align: left;
   position: relative;
 }
 .months.free button {
-  min-width: 0;
-  padding: 5px 8px;
+  min-height: 36px;
 }
 .years button:hover,
-.months button:hover:not(:disabled) { color: var(--n9); background: var(--n1); }
+.months button:hover:not(:disabled) { color: var(--n9); border-color: var(--n5); background: var(--n1); }
 
-.years button.on { color: var(--n9); background: var(--n2); font-weight: 560; }
-.months button.on { color: var(--n0); background: var(--n8); font-weight: 560; }
+.years button.on { color: var(--n0); background: var(--n8); font-weight: 560; }
+.years button.on small { color: var(--n3); }
+.months button.on { color: var(--n0); border-color: var(--n8); background: var(--n8); font-weight: 560; }
 .months button.closed { color: var(--ok); background: var(--ok-bg); }
 .months button.ready { color: var(--accent); background: var(--accent-bg); }
 .months button.bad { color: var(--bad); background: var(--bad-bg); }
 .months button.idle { color: var(--warn); background: var(--warn-bg); }
 .months button.on { color: var(--n0); background: var(--n8); }
+.month-number { font-family: var(--num); font-size: var(--t-sm); font-weight: 600; }
+.month-number em { margin-left: 2px; font-family: var(--font); font-size: 10px; font-style: normal; font-weight: 400; }
+.months button small { color: currentColor; font-size: 10px; opacity: .75; }
 .month-state {
   position: absolute;
-  right: 3px;
-  bottom: 3px;
+  right: 5px;
+  top: 5px;
   width: 4px;
   height: 4px;
   border-radius: 50%;
@@ -297,18 +354,12 @@ const status = computed(() => statusOf(current.value))
 /* 没算过的月份：淡到不像能点，但位置还占着——缺哪个月是要看见的。 */
 .months button.off { color: var(--n4); cursor: default; }
 
-.unit {
-  font-size: var(--t-xs);
-  color: var(--n5);
-  padding-left: 4px;
-}
-
 .legend {
   display: flex;
   flex-wrap: wrap;
   gap: var(--s3);
   margin-top: var(--s2);
-  padding-left: 72px;
+  padding-left: 124px;
   color: var(--n6);
   font-size: var(--t-xs);
 }
@@ -318,4 +369,15 @@ const status = computed(() => statusOf(current.value))
 .legend .ready { color: var(--accent); }
 .legend .bad { color: var(--bad); }
 .legend .idle { color: var(--warn); }
+
+@media (max-width: 640px) {
+  .head { flex-wrap: wrap; }
+  .period-levels { grid-template-columns: minmax(0, 1fr); }
+  .year-level { border-right: 0; border-bottom: 1px solid var(--n3); }
+  .years { display: flex; overflow-x: auto; overflow-y: hidden; max-height: none; }
+  .years button { min-width: 92px; gap: var(--s2); }
+  .months { grid-template-columns: repeat(3, minmax(72px, 1fr)); }
+  .months.free { grid-template-columns: minmax(0, 1fr); }
+  .legend { padding-left: 0; gap: var(--s2); }
+}
 </style>
