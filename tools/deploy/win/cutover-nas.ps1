@@ -5,6 +5,8 @@ $ErrorActionPreference = 'Stop'
 $Root = 'D:\ledger'
 $Share = '\\192.168.0.125\dataAnalysis'
 $Marker = Join-Path $Root 'nas.enabled'
+$Transcript = Join-Path $Root 'logs\cutover-nas.log'
+Start-Transcript -Path $Transcript -Append | Out-Null
 
 $me = [Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()
 if (-not $me.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) { throw '请用管理员 PowerShell 运行' }
@@ -22,8 +24,8 @@ if ($mapping) {
   }
 }
 if (-not $mapping) {
-  Write-Output '请输入 NAS 账号 fwk 的密码。密码不会写入应用配置。'
-  $credential = Get-Credential -UserName 'fwk' -Message 'NAS SMB 凭据'
+  Write-Output '请输入 NAS 账号 192.168.0.125\fwk 的密码。密码不会写入应用配置。'
+  $credential = Get-Credential -UserName '192.168.0.125\fwk' -Message 'NAS SMB 凭据'
   New-SmbGlobalMapping -LocalPath 'X:' -RemotePath $Share -Credential $credential -Persistent $true | Out-Null
   $mapping = Get-SmbGlobalMapping -LocalPath 'X:' -ErrorAction Stop
 }
@@ -63,3 +65,4 @@ Stop-ScheduledTask -TaskName 'LedgerHarness' -ErrorAction SilentlyContinue
 Start-Sleep -Seconds 2
 Start-ScheduledTask -TaskName 'LedgerHarness'
 Write-Output '已切换到 NAS 自动接收；网页上传将返回 410。'
+Stop-Transcript | Out-Null
