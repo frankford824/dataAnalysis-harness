@@ -3,7 +3,11 @@
 $ErrorActionPreference = 'Continue'
 $Root = 'D:\ledger'
 $Exe = Join-Path $Root 'bin\LedgerIndexer.exe'
-$NasRoot = 'X:\台账系统'
+$Share = '\\192.168.0.125\dataAnalysis'
+$mapping = Get-SmbGlobalMapping -ErrorAction SilentlyContinue |
+  Where-Object { $_.RemotePath.TrimEnd('\') -ieq $Share.TrimEnd('\') } |
+  Select-Object -First 1
+$NasRoot = if ($mapping) { $mapping.LocalPath.TrimEnd('\') + '\台账系统' } else { 'X:\台账系统' }
 $Data = Join-Path $Root 'index'
 $LogDir = Join-Path $Root 'logs'
 

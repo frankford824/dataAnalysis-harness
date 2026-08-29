@@ -19,8 +19,12 @@ $env:LEDGER_HOME      = Join-Path $Root 'home'
 $env:LEDGER_INDEXER_URL = 'http://127.0.0.1:8765'
 $env:LEDGER_INDEX_CATALOG = Join-Path $Root 'index\catalog.db'
 if (Test-Path -LiteralPath (Join-Path $Root 'nas.enabled')) {
+  $share = '\\192.168.0.125\dataAnalysis'
+  $mapping = Get-SmbGlobalMapping -ErrorAction SilentlyContinue |
+    Where-Object { $_.RemotePath.TrimEnd('\') -ieq $share.TrimEnd('\') } |
+    Select-Object -First 1
   $env:LEDGER_INGEST_MODE = 'nas'
-  $env:LEDGER_NAS_ROOT = 'X:\台账系统'
+  $env:LEDGER_NAS_ROOT = if ($mapping) { $mapping.LocalPath.TrimEnd('\') + '\台账系统' } else { 'X:\台账系统' }
   $env:LEDGER_NAS_UPLOAD_PATH = '\\192.168.0.125\dataAnalysis\台账系统\00_上传区'
 } else {
   $env:LEDGER_INGEST_MODE = 'api'

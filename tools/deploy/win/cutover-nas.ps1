@@ -4,18 +4,22 @@ $ErrorActionPreference = 'Stop'
 [Console]::OutputEncoding = [Text.Encoding]::UTF8
 $Root = 'D:\ledger'
 $Share = '\\192.168.0.125\dataAnalysis'
-$NasRoot = 'X:\台账系统'
 $Marker = Join-Path $Root 'nas.enabled'
 
 $me = [Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()
 if (-not $me.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) { throw '请用管理员 PowerShell 运行' }
 
-Write-Output '请输入 NAS 账号 fwk 的密码。密码不会写入应用配置。'
-$credential = Get-Credential -UserName 'fwk' -Message 'NAS SMB 凭据'
-$mapping = Get-SmbGlobalMapping -LocalPath 'X:' -ErrorAction SilentlyContinue
+$mapping = Get-SmbGlobalMapping -ErrorAction SilentlyContinue |
+  Where-Object { $_.RemotePath.TrimEnd('\') -ieq $Share.TrimEnd('\') } |
+  Select-Object -First 1
 if (-not $mapping) {
+  Write-Output '请输入 NAS 账号 fwk 的密码。密码不会写入应用配置。'
+  $credential = Get-Credential -UserName 'fwk' -Message 'NAS SMB 凭据'
   New-SmbGlobalMapping -LocalPath 'X:' -RemotePath $Share -Credential $credential -Persistent $true | Out-Null
+  $mapping = Get-SmbGlobalMapping -LocalPath 'X:' -ErrorAction Stop
 }
+$NasRoot = $mapping.LocalPath.TrimEnd('\') + '\台账系统'
+Write-Output ('使用全局映射 ' + $mapping.LocalPath + ' -> ' + $mapping.RemotePath)
 if (-not (Test-Path -LiteralPath $NasRoot -PathType Container)) { throw "映射成功但看不到 $NasRoot" }
 
 $speed = (Get-NetAdapter -Physical | Where-Object Status -eq 'Up' |
