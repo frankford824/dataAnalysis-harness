@@ -97,8 +97,6 @@ if [ ! -f "$INDEXER_EXE" ]; then
   echo '  先用 Windows cargo build --release 构建 indexer/Cargo.toml。' >&2
   exit 1
 fi
-put "$INDEXER_EXE" "$ROOT_SCP/bin/LedgerIndexer.exe"
-echo '  bin\LedgerIndexer.exe'
 
 step '保住服务器上的模型配置'
 # 模型目录跟代码一起走 app\，而部署是整个删掉 app 再解包。可界面上登记店铺、
@@ -121,6 +119,10 @@ if ssh_ "sc query state= all >nul 2>&1 & schtasks /query /tn LedgerHarness >nul 
 else
   echo '  服务还没注册过，跳过停机'
 fi
+# LedgerIndexer.exe 在运行时被 Windows 锁住。必须在 stop.ps1 收掉计划任务和子进程
+# 之后再覆盖；放在前面的“传运维脚本”阶段会让第二次部署稳定失败。
+put "$INDEXER_EXE" "$ROOT_SCP/bin/LedgerIndexer.exe"
+echo '  bin\LedgerIndexer.exe'
 # 解包走独立脚本。多行 PowerShell 塞进 ssh 命令串没用——远端是 cmd.exe，
 # 它只会执行第一行，后面的静静地不跑，还什么都不报。
 pwsh_ unpack.ps1

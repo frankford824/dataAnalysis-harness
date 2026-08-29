@@ -31,7 +31,7 @@ use tantivy::schema::{
     TextOptions, Value as TantivyValue,
 };
 use tantivy::tokenizer::NgramTokenizer;
-use tantivy::{Index, IndexWriter, ReloadPolicy, Term, doc};
+use tantivy::{Index, IndexReader, IndexWriter, ReloadPolicy, Term, doc};
 use tokio::time;
 use walkdir::WalkDir;
 
@@ -144,6 +144,7 @@ enum Command {
 struct AppState {
     root: PathBuf,
     data: PathBuf,
+    search: Arc<SearchRuntime>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -391,6 +392,7 @@ fn data_ref_text(value: &DataRef<'_>) -> String {
     }
 }
 
+#[derive(Clone, Copy)]
 struct IndexFields {
     uid: tantivy::schema::Field,
     file_sha: tantivy::schema::Field,
@@ -403,6 +405,27 @@ struct IndexFields {
     authority: tantivy::schema::Field,
     all_text: tantivy::schema::Field,
     cells_json: tantivy::schema::Field,
+}
+
+struct SearchRuntime {
+    index: Index,
+    reader: IndexReader,
+    fields: IndexFields,
+}
+
+fn open_search_runtime(data: &Path) -> Result<SearchRuntime> {
+    let index = open_or_create_index(&data.join("tantivy"))?;
+    let fields = IndexFields::from_schema(&index.schema())?;
+    let reader = index
+        .reader_builder()
+        .reload_policy(ReloadPolicy::OnCommitWithDelay)
+        .try_into()?;
+    reader.reload()?;
+    Ok(SearchRuntime {
+        index,
+        reader,
+        fields,
+    })
 }
 
 impl IndexFields {
@@ -950,15 +973,25 @@ fn search_index(
     platform: Option<&str>,
     source: Option<&str>,
 ) -> Result<Vec<SearchHit>> {
-    let index = open_or_create_index(&data.join("tantivy"))?;
-    let fields = IndexFields::from_schema(&index.schema())?;
-    let reader = index
-        .reader_builder()
-        .reload_policy(ReloadPolicy::OnCommitWithDelay)
-        .try_into()?;
-    reader.reload()?;
-    let searcher = reader.searcher();
-    let query = QueryParser::for_index(&index, vec![fields.all_text]).parse_query(query_text)?;
+    let runtime = open_search_runtime(data)?;
+    search_runtime(
+        data, &runtime, query_text, limit, store_id, platform, source,
+    )
+}
+
+fn search_runtime(
+    data: &Path,
+    runtime: &SearchRuntime,
+    query_text: &str,
+    limit: usize,
+    store_id: Option<&str>,
+    platform: Option<&str>,
+    source: Option<&str>,
+) -> Result<Vec<SearchHit>> {
+    let fields = runtime.fields;
+    let searcher = runtime.reader.searcher();
+    let query =
+        QueryParser::for_index(&runtime.index, vec![fields.all_text]).parse_query(query_text)?;
     let candidate_limit = limit.saturating_mul(20).clamp(limit, 5000);
     let top = searcher.search(
         &query,
@@ -1079,7 +1112,8 @@ fn make_snippet(text: &str, query: &str) -> String {
 
 async fn serve(root: PathBuf, data: PathBuf, bind: SocketAddr) -> Result<()> {
     init_data_dir(&data)?;
-    let state = AppState { root, data };
+    let search = Arc::new(open_search_runtime(&data)?);
+    let state = AppState { root, data, search };
     let scan_state = state.clone();
     tokio::spawn(async move {
         let mut ticker = time::interval(Duration::from_secs(30));
@@ -1087,7 +1121,10 @@ async fn serve(root: PathBuf, data: PathBuf, bind: SocketAddr) -> Result<()> {
             ticker.tick().await;
             let root = scan_state.root.clone();
             let data = scan_state.data.clone();
-            let _ = tokio::task::spawn_blocking(move || scan_once(&root, &data)).await;
+            let result = tokio::task::spawn_blocking(move || scan_once(&root, &data)).await;
+            if result.is_ok() {
+                let _ = scan_state.search.reader.reload();
+            }
         }
     });
     let app = Router::new()
@@ -1133,8 +1170,9 @@ async fn search_handler(
     Query(args): Query<SearchArgs>,
 ) -> Json<Value> {
     let value = tokio::task::spawn_blocking(move || {
-        search_index(
+        search_runtime(
             &state.data,
+            &state.search,
             &args.q,
             args.limit.unwrap_or(50).min(1000),
             args.store_id.as_deref(),
