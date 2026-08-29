@@ -990,8 +990,11 @@ fn search_runtime(
 ) -> Result<Vec<SearchHit>> {
     let fields = runtime.fields;
     let searcher = runtime.reader.searcher();
-    let query =
-        QueryParser::for_index(&runtime.index, vec![fields.all_text]).parse_query(query_text)?;
+    let mut parser = QueryParser::for_index(&runtime.index, vec![fields.all_text]);
+    // Exact containment is validated below. Requiring every generated bigram avoids a very broad
+    // OR query for long order numbers and dramatically reduces candidate rows.
+    parser.set_conjunction_by_default();
+    let query = parser.parse_query(query_text)?;
     let candidate_limit = limit.saturating_mul(20).clamp(limit, 5000);
     let top = searcher.search(
         &query,
