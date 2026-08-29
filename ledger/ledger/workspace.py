@@ -490,9 +490,20 @@ class Workspace:
             ).fetchall()
         }
 
-    def forget(self, store_id: str, name: str) -> None:
+    def forget(self, store_id: str, name: str, by: str = "") -> None:
         """把一份表撤下来，不再参与计算。内容和历史都留着。"""
         with self.conn as conn:
+            row = conn.execute(
+                "select sha from slot where store_id=? and name=?", (store_id, name)
+            ).fetchone()
+            if row is None:
+                return
+            # 撤下也是一个新版本事件。否则结账后撤表不会亮stale，界面会误称
+            # 冻结快照仍是最新数据；sha保留被撤下的最后一版，原始字节仍可追溯。
+            conn.execute(
+                "insert into version (store_id, name, sha, at, by) values (?,?,?,?,?)",
+                (store_id, name, row["sha"], _now(), by),
+            )
             conn.execute("delete from slot where store_id=? and name=?", (store_id, name))
 
     # ------------------------------------------------------------------ #
@@ -606,10 +617,10 @@ class Workspace:
             "r.id as shown_id, r.result as shown_result, r.at as shown_at, "
             "r.engine as shown_engine, "
             "case when p.state=? and exists (select 1 from version nv "
-            "where nv.store_id=p.store_id and nv.id>p.at_version) then 1 else 0 end as stale "
+            "where nv.store_id in (p.store_id, ?) and nv.id>p.at_version) then 1 else 0 end as stale "
             "from run r left join period p on p.store_id=r.store_id and p.period=r.period "
             "where r.id=?",
-            (CLOSED, run_id),
+            (CLOSED, SHARED_STORE_ID, run_id),
         ).fetchone()
         return self._state_from_row(row) if row and row["store_id"] else None
 
@@ -645,7 +656,7 @@ class Workspace:
             "r.id as shown_id, r.result as shown_result, r.at as shown_at, "
             "r.engine as shown_engine, "
             "case when p.state=? and exists (select 1 from version nv "
-            "where nv.store_id=p.store_id and nv.id>p.at_version) then 1 else 0 end as stale "
+            "where nv.store_id in (p.store_id, ?) and nv.id>p.at_version) then 1 else 0 end as stale "
             "from period p left join run r on r.id = case "
             "when p.state=? and p.run_id is not null then p.run_id else "
             "(select lr.id from run lr where lr.store_id=p.store_id and lr.period=p.period "
@@ -653,7 +664,7 @@ class Workspace:
             + clause
             + " order by p.period desc, p.store_id"
         )
-        values: list[Any] = [CLOSED, CLOSED, *args]
+        values: list[Any] = [CLOSED, SHARED_STORE_ID, CLOSED, *args]
         if limit is not None:
             sql += " limit ?"
             values.append(limit)
@@ -701,7 +712,8 @@ class Workspace:
             raise WorkspaceError(f"{period} 结不了账：{why}")
         with self.conn as conn:
             version = conn.execute(
-                "select coalesce(max(id), 0) as v from version where store_id=?", (store_id,)
+                "select coalesce(max(id), 0) as v from version where store_id in (?,?)",
+                (store_id, SHARED_STORE_ID),
             ).fetchone()["v"]
             conn.execute(
                 "insert into period (store_id, period, state, changed_at, by, note, run_id, at_version) "

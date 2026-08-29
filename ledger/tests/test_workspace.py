@@ -276,6 +276,27 @@ def test_new_data_after_close_is_flagged_not_applied(ws):
     assert ws.state("s1", "2025-05").stale
 
 
+def test_shared_data_after_close_marks_every_store_stale(ws):
+    ws.keep("成本.xlsx", _blob("成本"), "s1")
+    ws.record("s1", "2025-05", _result(), ["a"])
+    ws.close_period("s1", "2025-05")
+    assert not ws.state("s1", "2025-05").stale
+
+    ws.keep("售后单.xlsx", _blob("售后"), "__shared__", exclusive=True)
+    assert ws.state("s1", "2025-05").stale
+
+
+def test_closing_after_shared_data_includes_the_shared_version_watermark(ws):
+    ws.keep("成本.xlsx", _blob("成本"), "s1")
+    ws.keep("售后单.xlsx", _blob("售后"), "__shared__", exclusive=True)
+    ws.record("s1", "2025-05", _result(), ["a"])
+    ws.close_period("s1", "2025-05")
+    assert not ws.state("s1", "2025-05").stale
+
+    ws.forget("__shared__", "售后单.xlsx")
+    assert ws.state("s1", "2025-05").stale
+
+
 def test_overview_covers_every_store_period(ws):
     ws.record("s1", "2025-05", _result(), ["a"])
     ws.record("s1", "2025-06", _result(False), ["a"])
