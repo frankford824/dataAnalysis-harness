@@ -148,6 +148,18 @@ function periods() {
   return currentDetail.value?.periods || []
 }
 
+function sortedPeriods(items) {
+  return [...items].sort((left, right) => {
+    const leftKnown = /^\d{4}-\d{2}$/.test(left.period || '')
+    const rightKnown = /^\d{4}-\d{2}$/.test(right.period || '')
+    if (leftKnown !== rightKnown) return leftKnown ? -1 : 1
+    return String(right.period).localeCompare(String(left.period))
+  })
+}
+
+const openPeriods = computed(() => sortedPeriods(periods().filter((item) => item.state !== 'closed')))
+const closedPeriods = computed(() => sortedPeriods(periods().filter((item) => item.state === 'closed')))
+
 function indexed(file) {
   return indexByFile.value.get(`${file.store_id}:${file.name}`) || null
 }
@@ -338,19 +350,45 @@ function open(period = '') {
       <template v-else-if="currentDetail">
         <!-- 点一下会跳到那个月的损益，所以长得像一排链接标签而不是标签页。带下划线的
              标签页表示「在本页换一个视图」，而这里是要离开这一页。 -->
-        <div v-if="periods().length" class="detail-periods">
-          <span class="detail-periods-label">算过的账期</span>
-          <button
-            v-for="period in periods()"
-            :key="period.period"
-            class="period-chip"
-            :class="[period.state, { on: period.period === app.period }]"
-            :title="`看 ${period.period} 的损益`"
-            @click="open(period.period)"
-          >
-            <i aria-hidden="true" />{{ period.period }}
-            <span>{{ period.state === 'closed' ? '已结' : '未结' }}</span>
-          </button>
+        <div v-if="periods().length" class="detail-period-groups">
+          <section class="detail-period-group open-group">
+            <div class="detail-periods-label">
+              <b>待确认结账</b><span>{{ openPeriods.length }} 期</span>
+            </div>
+            <div class="detail-periods">
+              <button
+                v-for="period in openPeriods"
+                :key="period.period"
+                class="period-chip open"
+                :class="[{ on: period.period === app.period, ready: period.can_close, blocked: period.can_close === false }]"
+                :title="`看 ${period.period} 的损益`"
+                @click="open(period.period)"
+              >
+                <i aria-hidden="true" />{{ period.period }}
+                <span>{{ period.can_close ? '待确认' : period.can_close === false ? '待完善' : '未结账' }}</span>
+              </button>
+              <span v-if="!openPeriods.length" class="xs muted">没有待确认账期</span>
+            </div>
+          </section>
+          <section class="detail-period-group closed-group">
+            <div class="detail-periods-label">
+              <b>已结账归档</b><span>{{ closedPeriods.length }} 期</span>
+            </div>
+            <div class="detail-periods">
+              <button
+                v-for="period in closedPeriods"
+                :key="period.period"
+                class="period-chip closed"
+                :class="{ on: period.period === app.period }"
+                :title="`查看已结账的 ${period.period}`"
+                @click="open(period.period)"
+              >
+                <i aria-hidden="true">✓</i>{{ period.period }}
+                <span>已结账</span>
+              </button>
+              <span v-if="!closedPeriods.length" class="xs muted">暂无已结账账期</span>
+            </div>
+          </section>
         </div>
 
         <h3 class="detail-files-title">文件</h3>

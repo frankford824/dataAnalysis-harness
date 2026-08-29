@@ -9,7 +9,7 @@
  * 是自己的——那部分单独一栏，想看再点。全摆在一起的话，下钻显示 -550,944 而
  * 报表写着 -20,294，人只会认为报表算错了。
  */
-import { computed, ref, watch } from 'vue'
+import { computed, defineAsyncComponent, ref, watch } from 'vue'
 
 import { api } from '../api'
 import { count, money } from '../format'
@@ -19,6 +19,10 @@ const props = defineProps({
   node: { type: String, required: true },
   title: { type: String, default: '' },
   only: { type: String, default: 'counted' },
+  storeId: { type: String, default: '' },
+  period: { type: String, default: '' },
+  platform: { type: String, default: '' },
+  liveIndex: { type: Boolean, default: false },
 })
 const emit = defineEmits(['close'])
 
@@ -26,6 +30,12 @@ const show = ref(true)
 const data = ref(null)
 const loading = ref(false)
 const failed = ref('')
+const FilePreviewPanel = defineAsyncComponent(() => import('./FilePreviewPanel.vue'))
+const indexLoading = ref(false)
+const indexError = ref('')
+const indexResult = ref(null)
+const previewing = ref(false)
+const previewTarget = ref(null)
 
 const page = ref(0)
 const size = 100
@@ -73,6 +83,8 @@ watch([() => props.runId, () => props.node, () => props.only], () => {
   file.value = ''
   term.value = ''
   appliedTerm.value = ''
+  indexResult.value = null
+  indexError.value = ''
 })
 
 watch(
@@ -96,6 +108,53 @@ function applyFilter() {
   appliedTerm.value = next
   page.value = 0
   if (!changed) load()
+  if (props.liveIndex && next) searchIndex()
+}
+async function searchIndex() {
+  const queries = terms.value.slice(0, 5)
+  if (!queries.length) return
+  indexLoading.value = true
+  indexError.value = ''
+  try {
+    const results = await Promise.all(queries.map((query) => api.search({
+      q: query,
+      store_id: props.storeId,
+      period: props.period,
+      platform: props.platform,
+      limit: 30,
+    })))
+    const hits = new Map()
+    for (const result of results) {
+      for (const hit of result.hits || []) {
+        hits.set(`${hit.sha256}:${hit.sheet}:${hit.row_no}`, hit)
+      }
+    }
+    indexResult.value = {
+      queries,
+      hits: [...hits.values()],
+      notes: [...new Set(results.flatMap((result) => result.notes || []))],
+    }
+  } catch (reason) {
+    indexError.value = reason.message
+  } finally {
+    indexLoading.value = false
+  }
+}
+function preview(hit) {
+  previewTarget.value = hit
+  previewing.value = true
+}
+function previewFact(row) {
+  if (!row.file_sha) return
+  previewTarget.value = {
+    sha256: row.file_sha,
+    file: row.file_name,
+    path: '',
+    sheet: row.sheet || '',
+    row_no: row.row_no,
+    matches: [],
+  }
+  previewing.value = true
 }
 function close() {
   show.value = false
@@ -137,7 +196,9 @@ function close() {
             :bordered="false"
             style="margin-top: var(--s3)"
           >
-            这次算账的留档还没有进账标记，下面是全部源记录，加起来对不上报表。重算一次就好了。
+            这次算账的留档还没有进账标记，下面是全部源记录，加起来可能对不上报表。
+            <template v-if="liveIndex">新文件索引稳定后会自动计算，不需要手工重算。</template>
+            <template v-else>重算一次即可刷新。</template>
           </n-alert>
 
           <div class="row wrap" style="margin: var(--s4) 0; gap: var(--s2)">
@@ -171,8 +232,40 @@ function close() {
               @keydown.enter.exact.prevent="applyFilter"
             />
             <span v-if="terms.length > 1" class="xs muted num">{{ terms.length }} 项</span>
-            <n-button size="small" @click="applyFilter">筛</n-button>
+            <n-button size="small" :loading="indexLoading" @click="applyFilter">
+              {{ liveIndex ? '筛当前账 + 实时搜原文件' : '筛' }}
+            </n-button>
           </div>
+
+          <n-alert v-if="indexError" type="error" :bordered="false" style="margin-bottom: var(--s3)">
+            实时索引搜索失败：{{ indexError }}
+          </n-alert>
+          <section v-if="liveIndex && indexResult" class="live-index-results">
+            <div class="spread" style="margin-bottom: var(--s2)">
+              <h3>实时原文件索引</h3>
+              <span class="xs muted">
+                搜索 {{ indexResult.queries.join('、') }} · 命中 {{ count(indexResult.hits.length) }} 行
+              </span>
+            </div>
+            <p v-for="note in indexResult.notes" :key="note" class="xs muted">{{ note }}</p>
+            <n-table v-if="indexResult.hits.length" size="small" :bordered="false">
+              <tbody>
+                <tr v-for="hit in indexResult.hits.slice(0, 30)" :key="`${hit.sha256}:${hit.sheet}:${hit.row_no}`">
+                  <td class="xs">
+                    <b>{{ hit.file }}</b><template v-if="hit.sheet"> · {{ hit.sheet }}</template>
+                    · 第 <span class="num">{{ hit.row_no }}</span> 行
+                    <div v-if="hit.matches?.length" class="muted">
+                      {{ hit.matches.map((item) => `${item.column_name}：${item.value}`).join('；') }}
+                    </div>
+                  </td>
+                  <td class="right nowrap">
+                    <n-button size="tiny" type="primary" @click="preview(hit)">预览附近行</n-button>
+                  </td>
+                </tr>
+              </tbody>
+            </n-table>
+            <n-empty v-else size="small" description="原文件索引没有命中" />
+          </section>
 
           <n-alert
             v-if="only === 'counted' && data.uncounted?.rows && data.kind === 'statement'"
@@ -265,6 +358,9 @@ function close() {
                 <td class="xs num">
                   {{ r.file_name }}<template v-if="r.sheet"> · {{ r.sheet }}</template> ·
                   第 {{ r.row_no }} 行
+                  <button v-if="liveIndex && r.file_sha" class="link" @click="previewFact(r)">
+                    预览 →
+                  </button>
                 </td>
               </tr>
             </tbody>
@@ -285,4 +381,9 @@ function close() {
       </n-spin>
     </n-drawer-content>
   </n-drawer>
+  <FilePreviewPanel
+    v-if="previewing"
+    v-model:show="previewing"
+    :target="previewTarget"
+  />
 </template>

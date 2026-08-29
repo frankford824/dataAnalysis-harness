@@ -17,6 +17,7 @@ import { count, money, prettyUnmatched } from '../format'
 const props = defineProps({
   storeId: { type: String, default: '' },
   period: { type: String, default: '' },
+  autoMode: { type: Boolean, default: false },
   //: 这个账期没认出来的科目。「口径不对」最常见的一种就是它，而且它是唯一
   //: 能直接指出「该补哪一条」的线索，所以摆在这儿而不是让人去别处找。
   unclassified: { type: Array, default: () => [] },
@@ -67,8 +68,12 @@ function recompute() {
     <section class="stack" style="margin-bottom: var(--s4)">
       <h3>第二步 · 判断是表的问题还是口径的问题</h3>
       <p class="small">
-        <b>表传错了、传漏了、传的是旧版本</b> —— 去「数据与店铺」把那份撤下来，改好再传一次。
-        撤下和重传都留痕：谁传的、什么时候、换掉了哪一版，都记着。
+        <b>表传错了、传漏了、传的是旧版本</b> ——
+        <template v-if="autoMode">
+          去「数据与店铺」查看原文件位置；新版本放进 NAS 上传区，撤下则从已接收目录移走。
+        </template>
+        <template v-else>去「数据与店铺」把那份撤下来，改好再传一次。</template>
+        新旧版本和原始字节都会留痕。
       </p>
       <p class="small">
         <b>表是对的，是系统没认出来</b> —— 分三种：科目字典里没有（下面列着）、
@@ -79,7 +84,9 @@ function recompute() {
         右栏「没进利润的钱」和「要看的」里写着为什么。
       </p>
       <div class="row" style="margin-top: var(--s2)">
-        <n-button size="small" @click="toStores">去撤表 / 重传 / 加别名</n-button>
+        <n-button size="small" @click="toStores">
+          {{ autoMode ? '去预览 / 替换 / 撤下' : '去撤表 / 重传 / 加别名' }}
+        </n-button>
       </div>
     </section>
 
@@ -113,13 +120,16 @@ function recompute() {
     </section>
 
     <section class="stack">
-      <h3>第三步 · 重算，然后结账</h3>
-      <p class="small">
-        表或口径动过之后要重算一次，账上的数才会跟着变。结账之后数字就定死了；
-        发现结错了可以反结账，但必须写清为什么——这条会记进账期历史，谁在什么时候
-        因为什么改回去的，一直留着。
+      <h3>第三步 · {{ autoMode ? '等待自动计算，然后确认结账' : '重算，然后结账' }}</h3>
+      <p v-if="autoMode" class="small">
+        NAS 索引到稳定的新版本后会自动计算，不需要手工点重算。确认损益、自检和来源证据都正确后，
+        只需要由人点击“结账”。结账后数字冻结；发现结错可以反结账，但必须留下理由。
       </p>
-      <div class="row" style="margin-top: var(--s2)">
+      <p v-else class="small">
+        表或口径动过之后要重算一次，账上的数才会跟着变。结账之后数字就定死了；
+        发现结错了可以反结账，但必须写清为什么——这条会记进账期历史。
+      </p>
+      <div v-if="!autoMode" class="row" style="margin-top: var(--s2)">
         <n-button size="small" type="primary" @click="recompute">重算这家店</n-button>
       </div>
     </section>

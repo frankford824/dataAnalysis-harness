@@ -213,7 +213,8 @@ watch(
         </div>
         <n-space>
           <n-button size="small" @click="fixing = true">数字不对？</n-button>
-          <n-button size="small" @click="recompute">重算</n-button>
+          <n-button v-if="app.ingestMode !== 'nas'" size="small" @click="recompute">重算</n-button>
+          <n-tag v-else size="small" type="info" :bordered="false">索引更新后自动计算</n-tag>
           <n-button v-if="!closed" size="small" type="primary" :disabled="!snap?.can_close" @click="close">
             结账
           </n-button>
@@ -514,7 +515,7 @@ watch(
       <p class="small muted" style="margin-bottom: var(--s3)">
         这个账期已经报出去了。写清为什么要改回去——这条会记在账期历史里。
       </p>
-      <n-input v-model:value="why" type="textarea" :rows="3" placeholder="比如：运费表交漏了一张，补传后重算" />
+      <n-input v-model:value="why" type="textarea" :rows="3" placeholder="比如：运费表交漏了一张，已补传并等待自动计算" />
     </n-modal>
 
     <FixPanel
@@ -522,6 +523,7 @@ watch(
       :store-id="props.id"
       :period="period"
       :unclassified="snap?.unclassified || []"
+      :auto-mode="app.ingestMode === 'nas'"
       @recompute="recompute"
     />
 
@@ -531,6 +533,10 @@ watch(
       :node="drill.node"
       :title="drill.name"
       :only="drill.only || 'counted'"
+      :store-id="props.id"
+      :period="period"
+      :platform="info.store?.platform || ''"
+      :live-index="app.ingestMode === 'nas'"
       @close="drill = null"
     />
   </n-spin>

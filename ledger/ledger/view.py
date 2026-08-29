@@ -641,7 +641,7 @@ def drill(facts: pl.DataFrame | str | Path, model: Model, node_id: str,
             *[c for c in (
                 "metric_id", "link_key", "linked", "counted", "contribution",
                 "amount", "subject", "minor", "classify_via",
-                "file_name", "sheet", "row_no",
+                "file_sha", "file_name", "sheet", "row_no",
             ) if c in picked.columns]
         )
         .sort(by, descending=descending)

@@ -134,10 +134,10 @@ def _facts(rows: list[dict]) -> pl.DataFrame:
     schema = {
         "metric_id": pl.Utf8, "amount": pl.Float64, "subject": pl.Utf8, "minor": pl.Utf8,
         "major": pl.Utf8, "link_key": pl.Utf8, "linked": pl.Boolean, "file_name": pl.Utf8,
-        "sheet": pl.Utf8, "row_no": pl.Int64,
+        "file_sha": pl.Utf8, "sheet": pl.Utf8, "row_no": pl.Int64,
     }
     base = {"subject": None, "minor": None, "major": None, "link_key": None, "linked": True,
-            "file_name": "x.xlsx", "sheet": "Sheet1", "row_no": 2}
+            "file_name": "x.xlsx", "file_sha": "a" * 64, "sheet": "Sheet1", "row_no": 2}
     return pl.DataFrame([{**base, **r} for r in rows], schema=schema)
 
 
@@ -240,6 +240,7 @@ def test_drill_carries_row_level_evidence():
     assert d["total"] == pytest.approx(-150.0)
     assert d["sample"][0]["row_no"] == 7, "金额大的排前面"
     assert d["sample"][0]["file_name"] == "x.xlsx"
+    assert d["sample"][0]["file_sha"] == "a" * 64
 
 
 def test_drill_ignores_other_metrics():
