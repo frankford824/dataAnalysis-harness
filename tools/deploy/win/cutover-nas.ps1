@@ -23,7 +23,8 @@ $speed = (Get-NetAdapter -Physical | Where-Object Status -eq 'Up' |
 Write-Output ('链路：' + $speed)
 if ($speed -notmatch '1 Gbps|2.5 Gbps|10 Gbps') { throw "链路不是千兆或更高：$speed" }
 
-Start-ScheduledTask -TaskName 'LedgerIndexer'
+$indexTask = Get-ScheduledTask -TaskName 'LedgerIndexer' -ErrorAction Stop
+if ($indexTask.State -ne 'Running') { Start-ScheduledTask -TaskName 'LedgerIndexer' }
 for ($i = 1; $i -le 120; $i++) {
   Start-Sleep -Seconds 1
   try {
