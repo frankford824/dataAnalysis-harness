@@ -6,6 +6,7 @@ $ProgressPreference = 'SilentlyContinue'
 $Root = 'D:\ledger'
 $Port = 8000
 $Task = 'LedgerHarness'
+$IndexTask = 'LedgerIndexer'
 
 Write-Output '== 计划任务 =='
 $t = Get-ScheduledTask -TaskName $Task -ErrorAction SilentlyContinue
@@ -14,6 +15,13 @@ if ($t) {
   Write-Output ('  状态: ' + $t.State)
   Write-Output ('  上次运行: ' + $i.LastRunTime + '  结果: ' + $i.LastTaskResult)
 } else { Write-Output '  没注册' }
+foreach ($name in @($IndexTask)) {
+  $task = Get-ScheduledTask -TaskName $name -ErrorAction SilentlyContinue
+  if ($task) {
+    $info = Get-ScheduledTaskInfo -TaskName $name
+    Write-Output ('  ' + $name + ': ' + $task.State + '，结果 ' + $info.LastTaskResult)
+  } else { Write-Output ('  ' + $name + ': 没注册') }
+}
 
 Write-Output ''
 Write-Output '== 端口与进程 =='
@@ -25,6 +33,11 @@ if ($c) {
                   ' pid=' + $p.Id + ' 内存 ' + [math]::Round($p.WorkingSet64/1MB) + 'MB')
   }
 } else { Write-Output ('  ' + $Port + ' 没人监听') }
+try {
+  $index = Invoke-RestMethod 'http://127.0.0.1:8765/status' -TimeoutSec 3
+  Write-Output ('  索引：ready=' + [int]($index.files.ready) + '，最后扫描 ' + $index.last_completed +
+                '，链路 ' + $index.link_speed_mbps + ' Mbps')
+} catch { Write-Output '  索引端口 8765 尚未就绪（未映射 NAS 时属正常）' }
 
 Write-Output ''
 Write-Output '== 本机自测 =='

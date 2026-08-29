@@ -12,6 +12,7 @@ $ErrorActionPreference = 'Stop'
 $Root = 'D:\ledger'
 $Port = 8000
 $Task = 'LedgerHarness'
+$IndexTask = 'LedgerIndexer'
 $Rule = 'Ledger 记账服务 8000'
 
 $me = [Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()
@@ -38,6 +39,14 @@ Register-ScheduledTask -TaskName $Task -Action $action -Trigger $trigger `
   -Principal $principal -Settings $settings `
   -Description '记账与核算服务。开机自启，进程崩溃由 serve.ps1 自行退避重启。' -Force | Out-Null
 Write-Output ('  已注册 ' + $Task + '（开机启动，身份 SYSTEM，无运行时长上限）')
+
+$indexAction = New-ScheduledTaskAction -Execute 'powershell.exe' `
+  -Argument ('-NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -File "' +
+             (Join-Path $Root 'bin\indexer.ps1') + '"')
+Register-ScheduledTask -TaskName $IndexTask -Action $indexAction -Trigger $trigger `
+  -Principal $principal -Settings $settings `
+  -Description 'NAS Excel 流式解析、Parquet 与 Tantivy 索引服务。' -Force | Out-Null
+Write-Output ('  已注册 ' + $IndexTask + '（开机启动，身份 SYSTEM）')
 
 Write-Output ''
 Write-Output '== 放行端口 =='

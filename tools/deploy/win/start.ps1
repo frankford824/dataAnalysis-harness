@@ -7,8 +7,13 @@
 $ErrorActionPreference = 'Continue'
 
 $Task = 'LedgerHarness'
+$IndexTask = 'LedgerIndexer'
 $Port = 8000
 
+if (Get-ScheduledTask -TaskName $IndexTask -ErrorAction SilentlyContinue) {
+  Start-ScheduledTask -TaskName $IndexTask
+  Write-Output '  已启动索引守护任务（NAS 未映射时只等待）'
+}
 Start-ScheduledTask -TaskName $Task
 Write-Output '  已下达启动指令'
 

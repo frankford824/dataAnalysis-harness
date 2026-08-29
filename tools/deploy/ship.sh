@@ -17,6 +17,7 @@ HOST=sxf@192.168.0.155
 REPO=/home/wsfwk/dataAnalysis
 ROOT_WIN='D:\ledger'
 ROOT_SCP='D:/ledger'
+INDEXER_EXE=${LEDGER_INDEXER_EXE:-/mnt/c/Users/wsfwk/AppData/Local/Temp/dataAnalysis-indexer-target/release/ledger-indexer.exe}
 
 step() { printf '\n\033[1m== %s ==\033[0m\n' "$1"; }
 ssh_() { ssh -o BatchMode=yes -o ConnectTimeout=10 -o ServerAliveInterval=15 \
@@ -84,13 +85,20 @@ fi
 
 step '建目录'
 # 这一步刻意不输出中文：它跑在 cmd 里，没机会先设 UTF-8 输出编码，中文会变乱码。
-ssh_ "powershell -NoProfile -Command \"foreach (\$d in @('$ROOT_WIN','$ROOT_WIN\\app','$ROOT_WIN\\bin','$ROOT_WIN\\home','$ROOT_WIN\\logs','$ROOT_WIN\\secrets')) { New-Item -ItemType Directory -Force -Path \$d | Out-Null }; Write-Output ('  ok: ' + \$d)\""
+ssh_ "powershell -NoProfile -Command \"foreach (\$d in @('$ROOT_WIN','$ROOT_WIN\\app','$ROOT_WIN\\bin','$ROOT_WIN\\home','$ROOT_WIN\\index','$ROOT_WIN\\logs','$ROOT_WIN\\secrets')) { New-Item -ItemType Directory -Force -Path \$d | Out-Null }; Write-Output ('  ok: ' + \$d)\""
 
 step '传运维脚本'
-for f in serve.ps1 install.ps1 register.ps1 status.ps1 unpack.ps1 preserve.ps1 stop.ps1 start.ps1 verify.ps1; do
+for f in serve.ps1 indexer.ps1 cutover-nas.ps1 install.ps1 register.ps1 status.ps1 unpack.ps1 preserve.ps1 stop.ps1 start.ps1 verify.ps1; do
   put_ps1 "$REPO/tools/deploy/win/$f" "$ROOT_SCP/bin/$f"
   echo "  bin\\$f"
 done
+if [ ! -f "$INDEXER_EXE" ]; then
+  echo "  找不到 Windows 索引器：$INDEXER_EXE" >&2
+  echo '  先用 Windows cargo build --release 构建 indexer/Cargo.toml。' >&2
+  exit 1
+fi
+put "$INDEXER_EXE" "$ROOT_SCP/bin/LedgerIndexer.exe"
+echo '  bin\LedgerIndexer.exe'
 
 step '保住服务器上的模型配置'
 # 模型目录跟代码一起走 app\，而部署是整个删掉 app 再解包。可界面上登记店铺、

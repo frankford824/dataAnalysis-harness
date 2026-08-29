@@ -7,6 +7,7 @@
 $ErrorActionPreference = 'Continue'
 
 $Task = 'LedgerHarness'
+$IndexTask = 'LedgerIndexer'
 $Port = 8000
 
 $t = Get-ScheduledTask -TaskName $Task -ErrorAction SilentlyContinue
@@ -14,6 +15,13 @@ if ($t) {
   Stop-ScheduledTask -TaskName $Task -ErrorAction SilentlyContinue
   Write-Output '  已停任务'
 }
+$it = Get-ScheduledTask -TaskName $IndexTask -ErrorAction SilentlyContinue
+if ($it) {
+  Stop-ScheduledTask -TaskName $IndexTask -ErrorAction SilentlyContinue
+  Write-Output '  已停索引任务'
+}
+Get-CimInstance Win32_Process -Filter "Name='LedgerIndexer.exe'" -ErrorAction SilentlyContinue |
+  ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
 
 # 兜底：按端口找监听进程收掉。任务停了但子进程漏下来的情况是存在的。
 for ($i = 1; $i -le 20; $i++) {
