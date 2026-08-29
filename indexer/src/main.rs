@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 use std::fs::{self, File};
-use std::io::{BufReader, Read};
+use std::io::{BufReader, Read, Write};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::process::Command as ProcessCommand;
@@ -13,7 +13,7 @@ use arrow_schema::{DataType, Field as ArrowField, Schema as ArrowSchema};
 use axum::extract::{Query, State};
 use axum::routing::get;
 use axum::{Json, Router};
-use calamine::{DataRef, Reader, Xlsx, open_workbook};
+use calamine::{Data, DataRef, Reader, Xlsx, open_workbook, open_workbook_auto};
 use chrono::Utc;
 use clap::{Parser, Subcommand};
 use encoding_rs::GBK;
@@ -25,13 +25,13 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use tantivy::collector::TopDocs;
-use tantivy::query::{Query as TantivyQuery, QueryParser, TermQuery};
+use tantivy::query::{BooleanQuery, Occur, Query as TantivyQuery, QueryParser, TermQuery};
 use tantivy::schema::{
     FAST, INDEXED, IndexRecordOption, STORED, STRING, Schema, TantivyDocument, TextFieldIndexing,
     TextOptions, Value as TantivyValue,
 };
 use tantivy::tokenizer::NgramTokenizer;
-use tantivy::{Index, IndexReader, IndexWriter, ReloadPolicy, Term, doc};
+use tantivy::{Index, IndexReader, IndexWriter, Order, ReloadPolicy, Term, doc};
 use tokio::time;
 use walkdir::WalkDir;
 
@@ -83,9 +83,17 @@ create table if not exists network_sample (
   at integer primary key,
   mbps integer not null
 );
+create table if not exists hot_cache (
+  sha256 text primary key,
+  path text not null,
+  size integer not null,
+  last_access integer not null
+);
 "#;
 
 const INDEX_DIR: &str = "tantivy-v2";
+const HOT_LIMIT_BYTES: u64 = 32 * 1024 * 1024 * 1024;
+const HOT_MAX_AGE_SECONDS: i64 = 30 * 86_400;
 
 #[derive(Parser)]
 #[command(
@@ -178,6 +186,14 @@ struct SearchArgs {
     source: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+struct PreviewArgs {
+    sha: String,
+    sheet: Option<String>,
+    offset: Option<usize>,
+    limit: Option<usize>,
+}
+
 #[derive(Debug, Serialize)]
 struct SearchHit {
     score: f32,
@@ -217,7 +233,7 @@ async fn main() -> Result<()> {
             println!(
                 "{}",
                 serde_json::to_string(&index_file(
-                    &data, &file, &platform, &store, &source, &authority, None,
+                    &data, &file, &file, &platform, &store, &source, &authority, None,
                 )?)?
             );
         }
@@ -350,6 +366,127 @@ fn modified_ns(metadata: &fs::Metadata) -> i64 {
         .unwrap_or_default()
 }
 
+fn cache_source(
+    data: &Path,
+    source: &Path,
+    expected_sha: Option<&str>,
+) -> Result<(String, PathBuf)> {
+    let conn = Connection::open(data.join("catalog.db"))?;
+    if let Some(expected) = expected_sha.filter(|value| !value.is_empty()) {
+        let cached = conn
+            .query_row(
+                "select path,size from hot_cache where sha256=?",
+                [expected],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
+            )
+            .ok();
+        if let Some((path, size)) = cached {
+            let path = PathBuf::from(path);
+            if path.is_file() && fs::metadata(&path)?.len() == size as u64 {
+                conn.execute(
+                    "update hot_cache set last_access=? where sha256=?",
+                    params![unix_seconds(), expected],
+                )?;
+                return Ok((expected.to_string(), path));
+            }
+        }
+    }
+
+    let before = fs::metadata(source)?;
+    let incoming = data.join("hot").join(format!(
+        ".incoming-{}-{}",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos(),
+    ));
+    let mut temporary = TemporaryArtifact {
+        path: incoming,
+        keep: false,
+    };
+    let mut reader = BufReader::new(File::open(source)?);
+    let mut writer = File::create(&temporary.path)?;
+    let mut digest = Sha256::new();
+    let mut buffer = vec![0u8; 1024 * 1024];
+    loop {
+        let read = reader.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        digest.update(&buffer[..read]);
+        writer.write_all(&buffer[..read])?;
+    }
+    writer.sync_all()?;
+    drop(writer);
+    let sha = hex::encode(digest.finalize());
+    if expected_sha.is_some_and(|expected| !expected.is_empty() && expected != sha) {
+        bail!("source content no longer matches its catalog SHA");
+    }
+    let after = fs::metadata(source)?;
+    if before.len() != after.len() || modified_ns(&before) != modified_ns(&after) {
+        bail!("source changed while filling the hot cache");
+    }
+    let extension = source
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or("bin")
+        .to_ascii_lowercase();
+    let target = data
+        .join("hot")
+        .join(&sha[..2])
+        .join(format!("{sha}.{extension}"));
+    if let Some(parent) = target.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    if target.exists() {
+        fs::remove_file(&temporary.path)?;
+    } else {
+        fs::rename(&temporary.path, &target)?;
+    }
+    temporary.keep = true;
+    conn.execute(
+        "insert into hot_cache(sha256,path,size,last_access) values(?,?,?,?) on conflict(sha256) do update set path=excluded.path,size=excluded.size,last_access=excluded.last_access",
+        params![sha, target.to_string_lossy(), before.len() as i64, unix_seconds()],
+    )?;
+    Ok((sha, target))
+}
+
+fn prune_hot_cache(data: &Path) -> Result<()> {
+    let root = fs::canonicalize(data.join("hot"))?;
+    let conn = Connection::open(data.join("catalog.db"))?;
+    let mut statement = conn
+        .prepare("select sha256,path,size,last_access from hot_cache order by last_access asc")?;
+    let rows = statement
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, i64>(2)?,
+                row.get::<_, i64>(3)?,
+            ))
+        })?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    let mut total = rows.iter().map(|row| row.2.max(0) as u64).sum::<u64>();
+    let cutoff = unix_seconds() - HOT_MAX_AGE_SECONDS;
+    for (sha, path, size, last_access) in rows {
+        if last_access >= cutoff && total <= HOT_LIMIT_BYTES {
+            continue;
+        }
+        let candidate = PathBuf::from(path);
+        let safe = candidate
+            .parent()
+            .and_then(|parent| fs::canonicalize(parent).ok())
+            .is_some_and(|parent| parent.starts_with(&root));
+        if safe {
+            let _ = fs::remove_file(&candidate);
+        }
+        conn.execute("delete from hot_cache where sha256=?", [sha])?;
+        total = total.saturating_sub(size.max(0) as u64);
+    }
+    Ok(())
+}
+
 fn arrow_schema() -> Arc<ArrowSchema> {
     Arc::new(ArrowSchema::new(vec![
         ArrowField::new("file_sha", DataType::Utf8, false),
@@ -400,6 +537,20 @@ fn data_ref_text(value: &DataRef<'_>) -> String {
         DataRef::DateTime(v) => v.to_string(),
         DataRef::DateTimeIso(v) | DataRef::DurationIso(v) => v.clone(),
         DataRef::Error(v) => format!("{v:?}"),
+    }
+}
+
+fn data_text(value: &Data) -> String {
+    match value {
+        Data::Empty => String::new(),
+        Data::Int(value) => value.to_string(),
+        Data::Float(value) if value.fract() == 0.0 => format!("{value:.0}"),
+        Data::Float(value) => value.to_string(),
+        Data::String(value) => value.clone(),
+        Data::Bool(value) => value.to_string(),
+        Data::DateTime(value) => value.to_string(),
+        Data::DateTimeIso(value) | Data::DurationIso(value) => value.clone(),
+        Data::Error(value) => format!("{value:?}"),
     }
 }
 
@@ -544,6 +695,7 @@ fn flush_row(
 fn index_file(
     data: &Path,
     path: &Path,
+    content_path: &Path,
     platform: &str,
     store: &str,
     source: &str,
@@ -577,14 +729,14 @@ fn index_file(
     let mut buffered = Vec::with_capacity(4096);
     let mut row_count = 0u64;
     let mut sheet_count = 0u64;
-    let extension = path
+    let extension = content_path
         .extension()
         .and_then(|s| s.to_str())
         .unwrap_or("")
         .to_ascii_lowercase();
     match extension.as_str() {
         "xlsx" | "xlsm" => {
-            let mut workbook: Xlsx<_> = open_workbook(path)?;
+            let mut workbook: Xlsx<_> = open_workbook(content_path)?;
             for sheet_name in workbook.sheet_names().to_vec() {
                 sheet_count += 1;
                 let mut reader = workbook.worksheet_cells_reader(&sheet_name)?;
@@ -648,7 +800,7 @@ fn index_file(
         }
         "csv" => {
             sheet_count = 1;
-            let decoded = decode_csv(path)?;
+            let decoded = decode_csv(content_path)?;
             let mut csv = csv::ReaderBuilder::new()
                 .flexible(true)
                 .from_reader(decoded.as_bytes());
@@ -691,6 +843,42 @@ fn index_file(
                 row_count += 1;
                 if buffered.len() >= 4096 {
                     write_batch(&mut parquet, &mut buffered)?;
+                }
+            }
+        }
+        "xls" | "xlsb" => {
+            if metadata.len() > 512 * 1024 * 1024 {
+                bail!("legacy workbook exceeds the 512 MiB buffered-parse safety limit");
+            }
+            let mut workbook = open_workbook_auto(content_path)?;
+            for sheet_name in workbook.sheet_names().to_vec() {
+                let range = workbook.worksheet_range(&sheet_name)?;
+                let (height, width) = range.get_size();
+                if height.saturating_mul(width) > 20_000_000 {
+                    bail!("legacy sheet exceeds the 20 million cell safety limit: {sheet_name}");
+                }
+                sheet_count += 1;
+                let start_row = range.start().map(|position| position.0 as u64).unwrap_or(0);
+                for (index, row) in range.rows().enumerate() {
+                    let mut cells = row.iter().map(data_text).collect::<Vec<_>>();
+                    flush_row(
+                        &sha,
+                        path,
+                        &sheet_name,
+                        start_row + index as u64 + 1,
+                        &mut cells,
+                        &mut buffered,
+                        &mut index_writer,
+                        &fields,
+                        platform,
+                        store,
+                        source,
+                        authority,
+                    )?;
+                    row_count += 1;
+                    if buffered.len() >= 4096 {
+                        write_batch(&mut parquet, &mut buffered)?;
+                    }
                 }
             }
         }
@@ -738,7 +926,7 @@ fn supported(path: &Path) -> bool {
             .and_then(|s| s.to_str())
             .map(str::to_ascii_lowercase)
             .as_deref(),
-        Some("xlsx" | "xlsm" | "csv")
+        Some("xlsx" | "xlsm" | "xls" | "xlsb" | "csv")
     ) && !path
         .file_name()
         .and_then(|s| s.to_str())
@@ -822,6 +1010,8 @@ fn scan_once(root: &Path, data: &Path) -> Result<Value> {
     let mut stabilizing = 0usize;
     let mut errors = Vec::new();
     let mut visibility_errors = Vec::new();
+    let mut hot_errors = Vec::new();
+    let mut warnings = Vec::new();
     for entry in WalkDir::new(root)
         .follow_links(false)
         .into_iter()
@@ -863,7 +1053,7 @@ fn scan_once(root: &Path, data: &Path) -> Result<Value> {
         let conn = Connection::open(data.join("catalog.db"))?;
         let existing = conn
             .query_row(
-                "select size,mtime_ns,state,last_changed from file_catalog where path=?",
+                "select size,mtime_ns,state,last_changed,sha256 from file_catalog where path=?",
                 [path.to_string_lossy().as_ref()],
                 |row| {
                     Ok((
@@ -871,11 +1061,12 @@ fn scan_once(root: &Path, data: &Path) -> Result<Value> {
                         row.get::<_, i64>(1)?,
                         row.get::<_, String>(2)?,
                         row.get::<_, i64>(3)?,
+                        row.get::<_, String>(4)?,
                     ))
                 },
             )
             .ok();
-        let metadata_unchanged = existing.as_ref().is_some_and(|(size, mtime, _, _)| {
+        let metadata_unchanged = existing.as_ref().is_some_and(|(size, mtime, _, _, _)| {
             *size == metadata.len() as i64 && *mtime == mtime_ns
         });
         if existing.is_none() {
@@ -895,18 +1086,23 @@ fn scan_once(root: &Path, data: &Path) -> Result<Value> {
         }
         let ready = existing
             .as_ref()
-            .is_some_and(|(_, _, state, _)| state == "ready")
+            .is_some_and(|(_, _, state, _, _)| state == "ready")
             && metadata_unchanged;
         let stable_since = if metadata_unchanged {
             existing
                 .as_ref()
-                .map(|(_, _, _, changed)| *changed)
+                .map(|(_, _, _, changed, _)| *changed)
                 .unwrap_or(now)
         } else {
             now
         };
         drop(conn);
         if ready {
+            if let Some((_, _, _, _, sha)) = existing.as_ref() {
+                if let Err(error) = cache_source(data, path, Some(sha)) {
+                    hot_errors.push(format!("{}: {error:#}", path.display()));
+                }
+            }
             skipped += 1;
             continue;
         }
@@ -915,7 +1111,7 @@ fn scan_once(root: &Path, data: &Path) -> Result<Value> {
             continue;
         }
         let (platform, store, source, authority) = infer_scope(root, path);
-        let known_sha = match hash_file(path) {
+        let (known_sha, cached_path) = match cache_source(data, path, None) {
             Ok(value) => value,
             Err(e) => {
                 errors.push(format!("{}: {e:#}", path.display()));
@@ -941,15 +1137,37 @@ fn scan_once(root: &Path, data: &Path) -> Result<Value> {
         match index_file(
             data,
             path,
+            &cached_path,
             &platform,
             &store,
             &source,
             &authority,
-            Some(known_sha),
+            Some(known_sha.clone()),
         ) {
             Ok(stats) => indexed.push(stats),
+            Err(error)
+                if matches!(
+                    path.extension()
+                        .and_then(|value| value.to_str())
+                        .map(str::to_ascii_lowercase)
+                        .as_deref(),
+                    Some("xls" | "xlsb")
+                ) =>
+            {
+                let message = format!("全文索引未生成，交给 Python 财务兼容解析：{error:#}");
+                let connection = Connection::open(data.join("catalog.db"))?;
+                connection.execute(
+                    "update file_catalog set sha256=?,platform=?,store_id=?,source=?,authority=?,state='finance_only',error=?,indexed_at=?,missing_scans=0,missing_since=null where path=?",
+                    params![known_sha, platform, store, source, authority, message,
+                        Utc::now().to_rfc3339(), path.to_string_lossy()],
+                )?;
+                warnings.push(format!("{}: {message}", path.display()));
+            }
             Err(e) => errors.push(format!("{}: {e:#}", path.display())),
         }
+    }
+    if let Err(error) = prune_hot_cache(data) {
+        hot_errors.push(error.to_string());
     }
     let conn = Connection::open(data.join("catalog.db"))?;
     if visibility_errors.is_empty() {
@@ -970,7 +1188,8 @@ fn scan_once(root: &Path, data: &Path) -> Result<Value> {
     }
     Ok(
         json!({"generation": generation, "indexed": indexed, "skipped": skipped,
-        "stabilizing": stabilizing, "errors": errors}),
+        "stabilizing": stabilizing, "errors": errors, "hot_errors": hot_errors,
+        "warnings": warnings}),
     )
 }
 
@@ -1102,6 +1321,60 @@ fn search_runtime(
     Ok(out)
 }
 
+fn preview_runtime(data: &Path, runtime: &SearchRuntime, args: &PreviewArgs) -> Result<Value> {
+    let fields = runtime.fields;
+    let mut clauses: Vec<(Occur, Box<dyn TantivyQuery>)> = vec![(
+        Occur::Must,
+        Box::new(TermQuery::new(
+            Term::from_field_text(fields.file_sha, &args.sha),
+            IndexRecordOption::Basic,
+        )),
+    )];
+    if let Some(sheet) = args.sheet.as_deref().filter(|value| !value.is_empty()) {
+        clauses.push((
+            Occur::Must,
+            Box::new(TermQuery::new(
+                Term::from_field_text(fields.sheet, sheet),
+                IndexRecordOption::Basic,
+            )),
+        ));
+    }
+    let query = BooleanQuery::new(clauses);
+    let offset = args.offset.unwrap_or(0).min(1_000_000);
+    let limit = args.limit.unwrap_or(30).clamp(1, 200);
+    let searcher = runtime.reader.searcher();
+    let top = searcher.search(
+        &query,
+        &TopDocs::with_limit(limit)
+            .and_offset(offset)
+            .order_by_u64_field("row_no", Order::Asc),
+    )?;
+    let mut rows = Vec::with_capacity(top.len());
+    for (_sort_value, address) in top {
+        let document = searcher.doc::<TantivyDocument>(address)?;
+        let cells_json = document
+            .get_first(fields.cells_json)
+            .and_then(|value| value.as_str())
+            .unwrap_or("[]");
+        rows.push(json!({
+            "sheet": get_text(&document, fields.sheet),
+            "row_no": document.get_first(fields.row_no).and_then(|value| value.as_u64()).unwrap_or(0),
+            "cells": serde_json::from_str::<Value>(cells_json).unwrap_or_else(|_| json!([])),
+        }));
+    }
+    let connection = Connection::open(data.join("catalog.db"))?;
+    let metadata = connection.query_row(
+        "select path,platform,store_id,source,authority,rows from file_catalog where sha256=? and state='ready' order by case authority when 'calculation' then 0 else 1 end,path limit 1",
+        [&args.sha],
+        |row| Ok(json!({
+            "path": row.get::<_, String>(0)?, "platform": row.get::<_, String>(1)?,
+            "store_id": row.get::<_, String>(2)?, "source": row.get::<_, String>(3)?,
+            "authority": row.get::<_, String>(4)?, "total_rows": row.get::<_, i64>(5)?,
+        })),
+    ).unwrap_or_else(|_| json!({}));
+    Ok(json!({"sha256":args.sha,"offset":offset,"limit":limit,"metadata":metadata,"rows":rows}))
+}
+
 fn catalog_scope(
     data: &Path,
     sha: &str,
@@ -1184,6 +1457,7 @@ async fn serve(root: PathBuf, data: PathBuf, bind: SocketAddr) -> Result<()> {
         .route("/errors", get(errors_handler))
         .route("/storage", get(storage_handler))
         .route("/search", get(search_handler))
+        .route("/preview", get(preview_handler))
         .with_state(state);
     axum::serve(tokio::net::TcpListener::bind(bind).await?, app).await?;
     Ok(())
@@ -1234,6 +1508,19 @@ async fn search_handler(
     .and_then(Result::ok)
     .map(|hits| json!({"hits":hits}))
     .unwrap_or_else(|| json!({"error":"search failed","hits":[]}));
+    Json(value)
+}
+
+async fn preview_handler(
+    State(state): State<AppState>,
+    Query(args): Query<PreviewArgs>,
+) -> Json<Value> {
+    let value =
+        tokio::task::spawn_blocking(move || preview_runtime(&state.data, &state.search, &args))
+            .await
+            .ok()
+            .and_then(Result::ok)
+            .unwrap_or_else(|| json!({"error":"preview failed","rows":[]}));
     Json(value)
 }
 
@@ -1290,12 +1577,22 @@ fn directory_bytes(path: &Path) -> u64 {
 }
 
 async fn storage_handler(State(state): State<AppState>) -> Json<Value> {
-    let value = tokio::task::spawn_blocking(move || json!({
-        "catalog_bytes": fs::metadata(state.data.join("catalog.db")).map(|v|v.len()).unwrap_or(0),
-        "tantivy_bytes": directory_bytes(&state.data.join(INDEX_DIR)),
-        "parquet_bytes": directory_bytes(&state.data.join("parquet")),
-        "hot_bytes": directory_bytes(&state.data.join("hot")),
-    })).await.unwrap_or_else(|_| json!({"error":"storage unavailable"}));
+    let value = tokio::task::spawn_blocking(move || {
+        let connection = Connection::open(state.data.join("catalog.db")).ok();
+        let hot_entries = connection.as_ref().and_then(|conn| conn.query_row(
+            "select count(*) from hot_cache", [], |row| row.get::<_, i64>(0),
+        ).ok()).unwrap_or(0);
+        json!({
+            "catalog_bytes": fs::metadata(state.data.join("catalog.db")).map(|v|v.len()).unwrap_or(0),
+            "tantivy_bytes": directory_bytes(&state.data.join(INDEX_DIR)),
+            "legacy_tantivy_bytes": directory_bytes(&state.data.join("tantivy")),
+            "parquet_bytes": directory_bytes(&state.data.join("parquet")),
+            "hot_bytes": directory_bytes(&state.data.join("hot")),
+            "hot_entries": hot_entries,
+            "hot_limit_bytes": HOT_LIMIT_BYTES,
+            "hot_max_age_days": 30,
+        })
+    }).await.unwrap_or_else(|_| json!({"error":"storage unavailable"}));
     Json(value)
 }
 
@@ -1317,6 +1614,8 @@ mod tests {
         assert!(!supported(Path::new("~$订单.xlsx")));
         assert!(!supported(Path::new("订单.xlsx.part")));
         assert!(supported(Path::new("订单.xlsx")));
+        assert!(supported(Path::new("历史订单.xls")));
+        assert!(supported(Path::new("历史订单.xlsb")));
     }
 
     #[test]

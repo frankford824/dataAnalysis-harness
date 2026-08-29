@@ -127,7 +127,7 @@ def reconcile_ready(ws: Workspace, model: Model, catalog: Path, nas_root: Path) 
     connection.executescript(APPLY_SCHEMA)
     rows = connection.execute(
         "select f.* from file_catalog f left join ledger_apply a on a.path=f.path and a.sha256=f.sha256 "
-        "where f.state='ready' and f.sha256<>'' and a.path is null order by f.indexed_at,f.path"
+        "where f.state in ('ready','finance_only') and f.sha256<>'' and a.path is null order by f.indexed_at,f.path"
     ).fetchall()
     applicable: list[sqlite3.Row] = []
     errors: list[str] = []
