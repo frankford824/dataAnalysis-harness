@@ -973,6 +973,21 @@ def index_storage() -> dict:
     return _index_proxy("/storage")
 
 
+@app.get("/api/index/preview")
+def index_preview(
+    sha: str, sheet: str = "", offset: int = 0, limit: int = 30,
+) -> dict:
+    if not re.fullmatch(r"[0-9a-f]{64}", sha):
+        raise HTTPException(400, "文件 SHA 不合法")
+    try:
+        return index_client.get("/preview", {
+            "sha": sha, "sheet": sheet, "offset": max(0, offset),
+            "limit": min(max(1, limit), 200),
+        }, timeout=10.0)
+    except index_client.IndexerUnavailable as exc:
+        raise HTTPException(503, str(exc)) from exc
+
+
 @app.get("/api/search")
 def search(q: str, store_id: str = "", period: str = "", platform: str = "",
            limit: int = search_mod.LIMIT) -> dict:
@@ -1028,6 +1043,7 @@ def _index_search(q: str, store_id: str, period: str, platform: str, limit: int)
         ]
         store = stores.get(hit.get("store_id", ""))
         hits.append({
+            "sha256": hit.get("file_sha", ""),
             "subject": hit.get("source") or "原始表格",
             "metric": hit.get("source") or "",
             "amount": None,

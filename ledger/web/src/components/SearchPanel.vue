@@ -5,7 +5,7 @@
  * 「它在哪个文件的哪一行」——所以每条结果都必须给到文件、工作表、行号，
  * 少一样都还得回去翻表。
  */
-import { computed, ref, watch } from 'vue'
+import { computed, defineAsyncComponent, ref, watch } from 'vue'
 
 import { api } from '../api'
 import { money } from '../format'
@@ -18,15 +18,23 @@ const props = defineProps({
 const emit = defineEmits(['update:show'])
 
 const app = useApp()
+const FilePreviewPanel = defineAsyncComponent(() => import('./FilePreviewPanel.vue'))
 const loading = ref(false)
 const error = ref('')
 const result = ref(null)
+const previewing = ref(false)
+const previewTarget = ref(null)
 
 const KIND = { order: '按订单号', amount: '按金额', text: '按文字' }
 
 const how = computed(() =>
   (result.value?.kinds || []).map((k) => KIND[k] || k).join('、'),
 )
+
+function preview(hit) {
+  previewTarget.value = hit
+  previewing.value = true
+}
 
 watch(
   () => [props.show, props.term],
@@ -130,6 +138,7 @@ watch(
                     <template v-if="h.sheet"> · {{ h.sheet }}</template>
                     · 第 {{ h.row_no }} 行
                     <div v-if="h.snippet" class="muted search-snippet">{{ h.snippet }}</div>
+                    <button v-if="h.sha256" class="link" @click="preview(h)">预览附近原始行</button>
                   </td>
                 </tr>
               </tbody>
@@ -147,4 +156,9 @@ watch(
       </n-spin>
     </n-drawer-content>
   </n-drawer>
+  <FilePreviewPanel
+    v-if="previewing"
+    v-model:show="previewing"
+    :target="previewTarget"
+  />
 </template>

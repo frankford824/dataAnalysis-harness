@@ -98,6 +98,11 @@ export const api = {
     }),
 
   search: (params) => call(`/api/search${query(params)}`),
+  indexStatus: () => call('/api/index/status'),
+  indexFiles: () => call('/api/index/files'),
+  indexErrors: () => call('/api/index/errors'),
+  indexStorage: () => call('/api/index/storage'),
+  indexPreview: (params) => call(`/api/index/preview${query(params)}`),
   drill: (runId, nodeId, params) =>
     call(`/api/runs/${runId}/drill/${encodeURIComponent(nodeId)}${query(params)}`),
 

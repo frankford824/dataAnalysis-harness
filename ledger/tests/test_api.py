@@ -134,6 +134,16 @@ class TestBootstrap:
         assert body["hits"][0]["file"] == "订单.csv"
         assert body["hits"][0]["matches"][0]["column_no"] == 4
 
+    def test_index_preview_validates_sha_and_proxies_rows(self, client, monkeypatch):
+        assert client.get("/api/index/preview", params={"sha": "bad"}).status_code == 400
+        monkeypatch.setattr(api.index_client, "get", lambda path, params=None, **_kwargs: {
+            "sha256": params["sha"], "rows": [{"sheet": "CSV", "row_no": 7, "cells": ["A1"]}],
+        })
+        sha = "a" * 64
+        body = client.get("/api/index/preview", params={"sha": sha, "sheet": "CSV"}).json()
+        assert body["sha256"] == sha
+        assert body["rows"][0]["row_no"] == 7
+
 
 class TestSearchCache:
     def test_same_revision_reuses_result_and_a_write_invalidates_it(

@@ -7,7 +7,7 @@
  * 后回来也不会盖住当前店铺的加载状态。
  */
 import { useDialog, useMessage } from 'naive-ui'
-import { computed, defineAsyncComponent, ref, watch } from 'vue'
+import { computed, defineAsyncComponent, onMounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 
 import { api } from '../api'
@@ -17,6 +17,7 @@ import { ago, bytes, count } from '../format'
 import { useApp } from '../store'
 
 const UploadPanel = defineAsyncComponent(() => import('../components/UploadPanel.vue'))
+const FilePreviewPanel = defineAsyncComponent(() => import('../components/FilePreviewPanel.vue'))
 
 const app = useApp()
 const message = useMessage()
@@ -28,6 +29,23 @@ const loadError = ref('')
 const adding = ref(false)
 const explaining = ref(false)
 const draft = ref({ name: '', platform: '' })
+const indexFiles = ref([])
+const indexStorage = ref(null)
+const indexErrors = ref([])
+const indexLoading = ref(false)
+const previewing = ref(false)
+const previewTarget = ref(null)
+const managing = ref(null)
+
+const indexByFile = computed(() => {
+  const map = new Map()
+  for (const file of indexFiles.value) map.set(`${file.store_id}:${file.path.split(/[\\/]/).pop()}`, file)
+  return map
+})
+const hotPercent = computed(() => {
+  if (!indexStorage.value?.hot_limit_bytes) return 0
+  return Math.min(100, (indexStorage.value.hot_bytes / indexStorage.value.hot_limit_bytes) * 100)
+})
 
 // 平台、每个平台上次看的店都记住。平台很多时来回切换，不该每次从第一家重新找。
 const activePlatform = app.noted('deliver.platform', '')
@@ -130,6 +148,42 @@ function periods() {
   return currentDetail.value?.periods || []
 }
 
+function indexed(file) {
+  return indexByFile.value.get(`${file.store_id}:${file.name}`) || null
+}
+
+async function loadIndexState() {
+  if (app.ingestMode !== 'nas') return
+  indexLoading.value = true
+  try {
+    const [filesResult, storageResult, errorsResult] = await Promise.all([
+      api.indexFiles(), api.indexStorage(), api.indexErrors(),
+    ])
+    indexFiles.value = filesResult.files || []
+    indexStorage.value = storageResult
+    indexErrors.value = errorsResult.files || []
+  } catch (reason) {
+    message.error(`索引状态读取失败：${reason.message}`, { duration: 6000 })
+  } finally {
+    indexLoading.value = false
+  }
+}
+
+function previewFile(file) {
+  const found = indexed(file)
+  if (!found?.sha256) return
+  previewTarget.value = {
+    ...found,
+    file: file.name,
+    name: file.name,
+    sha256: found.sha256,
+  }
+  previewing.value = true
+}
+
+onMounted(loadIndexState)
+watch(() => app.ingestMode, loadIndexState)
+
 function drop(storeId, name, shared = false) {
   dialog.warning({
     title: shared ? '撤下全公司共用表' : '撤下这张表',
@@ -210,6 +264,35 @@ function open(period = '') {
     </div>
     <n-button size="small" @click="adding = true">登记新店</n-button>
   </div>
+
+  <n-alert
+    v-if="app.ingestMode === 'nas'"
+    :type="indexErrors.length ? 'warning' : 'success'"
+    :bordered="false"
+    class="nas-index-status"
+  >
+    <div class="spread">
+      <div>
+        <b>NAS 自动索引</b>
+        <span class="small muted">
+          · {{ count(indexFiles.filter((file) => file.state === 'ready').length) }} 份已就绪
+          · 原文件热缓存 {{ bytes((indexStorage?.hot_bytes || 0) / 1024) }}
+          / {{ bytes((indexStorage?.hot_limit_bytes || 0) / 1024) }}
+          · {{ indexStorage?.hot_entries || 0 }} 个 SHA
+        </span>
+        <div class="hot-meter" :title="`热缓存使用 ${hotPercent.toFixed(1)}%`">
+          <i :style="{ width: `${hotPercent}%` }" />
+        </div>
+        <div v-if="indexErrors.length" class="xs" style="margin-top: var(--s2)">
+          {{ indexErrors.length }} 份需要处理：
+          <span v-for="item in indexErrors.slice(0, 3)" :key="item.path" class="neg">
+            {{ item.path.split(/[\\/]/).pop() }}{{ item.error ? `（${item.error}）` : '' }}
+          </span>
+        </div>
+      </div>
+      <n-button size="tiny" :loading="indexLoading" @click="loadIndexState">刷新状态</n-button>
+    </div>
+  </n-alert>
 
   <div class="deliver-layout">
     <StoreNavigator
@@ -301,7 +384,18 @@ function open(period = '') {
                 <td class="right xs num nowrap">{{ bytes(file.size / 1024) }}</td>
                 <td class="right xs muted nowrap">{{ ago(file.updated_at) || '—' }}</td>
                 <td class="right">
+                  <template v-if="app.ingestMode === 'nas'">
+                    <button
+                      class="f-drop"
+                      :disabled="!indexed(file)?.sha256"
+                      @click="previewFile(file)"
+                    >预览</button>
+                    <button class="f-drop" @click="managing = { ...file, index: indexed(file) }">
+                      替换/撤下
+                    </button>
+                  </template>
                   <button
+                    v-else
                     class="f-drop"
                     @click="drop(file.store_id || here.id, file.name, file.shared)"
                   >撤下</button>
@@ -345,4 +439,25 @@ function open(period = '') {
   </n-modal>
 
   <UploadPanel v-if="explaining && app.ingestMode !== 'nas'" v-model:show="explaining" />
+  <FilePreviewPanel
+    v-if="previewing"
+    v-model:show="previewing"
+    :target="previewTarget"
+  />
+
+  <n-modal v-model:show="managing" preset="card" title="在 NAS 中替换或撤下" style="max-width: 680px">
+    <template v-if="managing">
+      <p class="small"><b>{{ managing.name }}</b></p>
+      <p class="small muted preview-path">{{ managing.index?.path || '索引路径暂不可用' }}</p>
+      <n-alert type="info" :bordered="false" style="margin-top: var(--s3)">
+        <b>替换：</b>把新文件放进对应的 <span class="num">00_上传区</span> 目录。系统按内容生成新版本，旧字节仍保留。
+      </n-alert>
+      <n-alert type="warning" :bordered="false" style="margin-top: var(--s3)">
+        <b>撤下：</b>从 <span class="num">10_已接收</span> 移走或删除这份文件。只有 NAS 在线、连续三次扫描缺失并持续十分钟后才会撤表重算；已结账期只标记 stale，不自动反结账。
+      </n-alert>
+      <p class="xs muted" style="margin-top: var(--s3)">
+        不建议直接编辑“已接收”文件；请复制到上传区、编辑完成并关闭 Excel/WPS 后再投递。
+      </p>
+    </template>
+  </n-modal>
 </template>
