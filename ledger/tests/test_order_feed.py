@@ -99,14 +99,18 @@ class FakeClient:
                 "operation": "upsert", "order_store_id": "10", "order_id": "1",
                 "entity_href": "/api/integration/ledger/v1/entities/order/1",
             }]}
-        if path == "entities/order/1":
+        if path in {"entities/order/1", "orders/1"}:
             return {"order": {
                 "order_id": "1", "online_order_no": "ON1", "order_store_id": "10",
                 "order_time": "2026-06-02 10:00:00", "pay_time": "2026-06-02 10:01:00",
                 "order_status_raw": "Sent", "paid_amount": "21.00", "refund_amount": "0.00",
                 "tracking_no": "SF1",
-            }}
+            }, "items": []}
         raise AssertionError(path)
+
+    def get_href(self, href: str):
+        marker = "/api/integration/ledger/v1/"
+        return self.get(href.split(marker, 1)[-1] if marker in href else href.lstrip("/"))
 
 
 def test_snapshot_and_delta_become_normalized_engine_sources(tmp_path):
@@ -169,7 +173,7 @@ def test_replayed_upsert_whose_current_entity_is_gone_becomes_tombstone(tmp_path
 
     class MissingClient(FakeClient):
         def get(self, path, params=None):
-            if path == "entities/order/1":
+            if path in {"entities/order/1", "orders/1"}:
                 raise OrderFeedNotFound("gone")
             return super().get(path, params)
 

@@ -105,6 +105,15 @@ class Client:
         if params:
             query = urllib.parse.urlencode({k: v for k, v in params.items() if v is not None})
             url += "?" + query
+        return self._get_url(url)
+
+    def get_href(self, href: str) -> dict[str, Any]:
+        if not href.startswith("/"):
+            return self.get(href)
+        origin = self.base_url.split("/api/integration/", 1)[0]
+        return self._get_url(origin + href)
+
+    def _get_url(self, url: str) -> dict[str, Any]:
         headers = {"Accept": "application/json"}
         if self.token:
             headers["X-Integration-Token"] = self.token
@@ -213,29 +222,20 @@ class OrderFeed:
             if not changes:
                 result.caught_up = True
                 break
-            def fetch_entity(change: dict[str, Any]):
-                payload = None
-                effective = change
-                if effective.get("operation") != "delete":
-                    href = str(change.get("entity_href") or "")
-                    if not href:
-                        raise OrderFeedError(
-                            f"增量 {change.get('seq')} {change.get('entity_type')} 没有 entity_href"
-                        )
-                    marker = "/api/integration/ledger/v1/"
-                    endpoint = href.split(marker, 1)[-1] if marker in href else href.lstrip("/")
-                    try:
-                        payload = self.client.get(endpoint)
-                    except OrderFeedNotFound:
-                        # The feed exposes current entities, not historical payloads.  A past
-                        # upsert may legitimately be gone by replay time; current absence is a
-                        # tombstone, and a later event (if any) can still recreate it.
-                        effective = {**change, "operation": "delete"}
-                return effective, payload
-
             workers = max(1, int(os.environ.get("LEDGER_ORDER_FEED_FETCHERS", "8")))
+            hrefs = {self._fetch_href(change) for change in changes if change.get("operation") != "delete"}
+            fetched: dict[str, dict[str, Any] | None] = {}
+
+            def fetch_href(href: str):
+                try:
+                    return href, self.client.get_href(href)
+                except OrderFeedNotFound:
+                    return href, None
+
             with ThreadPoolExecutor(max_workers=workers) as pool:
-                entities = list(pool.map(fetch_entity, changes))
+                for href, payload in pool.map(fetch_href, sorted(hrefs)):
+                    fetched[href] = payload
+            entities = [self._entity_from_fetch(change, fetched) for change in changes]
             affected = self._commit_page(page, entities, health, int(revision["revision"]))
             result.affected_stores.update(affected)
             result.changes += len(changes)
@@ -244,6 +244,49 @@ class OrderFeed:
                 result.caught_up = True
                 break
         return result
+
+    @staticmethod
+    def _fetch_href(change: dict[str, Any]) -> str:
+        kind = str(change.get("entity_type") or "")
+        if kind in {"order", "order_item"} and change.get("order_href"):
+            return str(change["order_href"])
+        if kind == "order_cost" and change.get("order_id"):
+            return f"/api/orders/{urllib.parse.quote(str(change['order_id']), safe='')}/cost-history"
+        href = str(change.get("entity_href") or "")
+        if not href:
+            raise OrderFeedError(
+                f"增量 {change.get('seq')} {change.get('entity_type')} 没有 entity_href"
+            )
+        return href
+
+    def _entity_from_fetch(
+        self, change: dict[str, Any], fetched: dict[str, dict[str, Any] | None],
+    ) -> tuple[dict[str, Any], dict[str, Any] | None]:
+        if change.get("operation") == "delete":
+            return change, None
+        href = self._fetch_href(change)
+        got = fetched.get(href)
+        if got is None:
+            return {**change, "operation": "delete"}, None
+        kind = str(change.get("entity_type") or "")
+        if kind == "order":
+            record = got.get("order")
+            return (change, {"order": record}) if record else ({**change, "operation": "delete"}, None)
+        if kind == "order_item":
+            wanted = str(change.get("sub_order_id") or change.get("entity_id") or "")
+            record = next(
+                (row for row in got.get("items") or [] if str(row.get("sub_order_id") or "") == wanted),
+                None,
+            )
+            return (change, {"order_item": record}) if record else ({**change, "operation": "delete"}, None)
+        if kind == "order_cost":
+            wanted = str(change.get("sub_order_id") or change.get("entity_id") or "")
+            record = next(
+                (row for row in got.get("costs") or [] if str(row.get("sub_order_id") or "") == wanted),
+                None,
+            )
+            return (change, {"cost": record}) if record else ({**change, "operation": "delete"}, None)
+        return change, got
 
     def _validate_manifest(self, manifest: dict[str, Any], *, full: bool = True) -> None:
         if manifest.get("schema_version") != SCHEMA_VERSION:
