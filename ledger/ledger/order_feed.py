@@ -13,6 +13,7 @@ import json
 import os
 import sqlite3
 import threading
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -41,6 +42,9 @@ create table if not exists feed_state (
   snapshot_through_seq integer not null default 0,
   consumed_seq integer not null default 0,
   source_revision integer not null default 0,
+  source_latest_seq integer not null default 0,
+  revision_etag text not null default '',
+  stores_refreshed_at integer not null default 0,
   manifest_json text not null default '',
   health_json text not null default '',
   last_success text not null default '',
@@ -68,6 +72,12 @@ create table if not exists feed_entity (
 );
 create index if not exists feed_entity_store on feed_entity(order_store_id,entity_type);
 """
+
+_STATE_COLUMNS = {
+    "source_latest_seq": "integer not null default 0",
+    "revision_etag": "text not null default ''",
+    "stores_refreshed_at": "integer not null default 0",
+}
 
 
 class OrderFeedError(RuntimeError):
@@ -113,10 +123,35 @@ class Client:
         origin = self.base_url.split("/api/integration/", 1)[0]
         return self._get_url(origin + href)
 
-    def _get_url(self, url: str) -> dict[str, Any]:
+    def revision(self, etag: str = "") -> tuple[dict[str, Any] | None, str]:
+        """Cheap hot-path probe.  ``None`` means the source returned HTTP 304."""
+        url = self.base_url + "/revision"
+        headers = self._headers()
+        if etag:
+            headers["If-None-Match"] = etag
+        try:
+            with urllib.request.urlopen(
+                urllib.request.Request(url, headers=headers), timeout=self.timeout,
+            ) as response:
+                return (
+                    json.loads(response.read().decode("utf-8")),
+                    str(response.headers.get("ETag") or etag),
+                )
+        except urllib.error.HTTPError as exc:
+            if exc.code == 304:
+                return None, etag
+            raise OrderFeedError(f"订单台 revision 不可用：HTTP {exc.code}") from exc
+        except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
+            raise OrderFeedError(f"订单台 revision 不可用：{exc}") from exc
+
+    def _headers(self) -> dict[str, str]:
         headers = {"Accept": "application/json"}
         if self.token:
             headers["X-Integration-Token"] = self.token
+        return headers
+
+    def _get_url(self, url: str) -> dict[str, Any]:
+        headers = self._headers()
         try:
             with urllib.request.urlopen(urllib.request.Request(url, headers=headers), timeout=self.timeout) as response:
                 return json.loads(response.read().decode("utf-8"))
@@ -156,6 +191,10 @@ class OrderFeed:
         self.workspace_root.mkdir(parents=True, exist_ok=True)
         with self._connect() as conn:
             conn.executescript(_DB_SCHEMA)
+            have = {row["name"] for row in conn.execute("pragma table_info(feed_state)")}
+            for name, declaration in _STATE_COLUMNS.items():
+                if name not in have:
+                    conn.execute(f"alter table feed_state add column {name} {declaration}")
 
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.db_path, timeout=30)
@@ -191,30 +230,89 @@ class OrderFeed:
                 raise
 
     def _sync(self, *, max_pages: int, limit: int) -> SyncResult:
-        revision = self.client.get("revision")
-        health = self.client.get("health")
-        if revision.get("schema_version") != SCHEMA_VERSION:
-            raise OrderFeedError(f"订单台合同版本不是 {SCHEMA_VERSION}")
-        if not revision.get("healthy") or not health.get("healthy"):
-            raise OrderFeedError("订单台数据源未就绪：" + "、".join(health.get("degraded") or []))
-        manifest = self.client.get("snapshot")
         old = self.state()
-        changed = manifest.get("snapshot_id") != old.get("snapshot_id")
-        self._validate_manifest(manifest, full=changed)
-        stores = self.client.get("stores")
-        if changed:
-            self._install_snapshot(manifest, stores, health)
+        revision, revision_etag = self.client.revision(str(old.get("revision_etag") or ""))
+        source_revision = int(old.get("source_revision") or 0)
+        source_latest_seq = int(old.get("source_latest_seq") or 0)
+        consumed_seq = int(old.get("consumed_seq") or 0)
+        health = json.loads(old.get("health_json") or "{}")
+        changed = False
+        stores: dict[str, Any] | None = None
+
+        if revision is not None:
+            if revision.get("schema_version") != SCHEMA_VERSION:
+                raise OrderFeedError(f"订单台合同版本不是 {SCHEMA_VERSION}")
+            source_revision = int(revision.get("revision") or 0)
+            source_latest_seq = int(revision.get("latest_seq") or 0)
+            advanced = (
+                source_revision > int(old.get("source_revision") or 0)
+                or source_latest_seq > consumed_seq
+            )
+            self._record_revision_probe(source_revision, source_latest_seq, revision_etag)
         else:
-            self._refresh_health_stores(stores, health, int(revision["revision"]))
+            # A previous bounded replay may still have local backlog even though the
+            # source ETag has not moved.  Continue from the durable checkpoint.
+            advanced = consumed_seq < source_latest_seq
+
+        if not advanced:
+            if self._stores_due(old):
+                self._refresh_stores(self.client.get("stores"))
+            return SyncResult(
+                snapshot_id=str(old.get("snapshot_id") or ""),
+                consumed_seq=consumed_seq,
+                source_revision=source_revision,
+                caught_up=True,
+            )
+
+        if revision is not None:
+            health = self.client.get("health")
+            if not revision.get("healthy") or not health.get("healthy"):
+                self._refresh_health(
+                    health, source_revision, source_latest_seq, revision_etag,
+                )
+                raise OrderFeedError(
+                    "订单台数据源未就绪：" + "、".join(health.get("degraded") or [])
+                )
+            announced_snapshot = str(health.get("last_successful_snapshot") or "")
+            changed = not old.get("snapshot_id") or (
+                bool(announced_snapshot) and announced_snapshot != old.get("snapshot_id")
+            )
+            if changed:
+                manifest = self.client.get("snapshot")
+                self._validate_manifest(manifest, full=True)
+                stores = self.client.get("stores")
+                self._install_snapshot(
+                    manifest, stores, health,
+                    source_revision=source_revision,
+                    source_latest_seq=source_latest_seq,
+                    revision_etag=revision_etag,
+                )
+            else:
+                self._refresh_health(
+                    health, source_revision, source_latest_seq, revision_etag,
+                )
+        elif health and not health.get("healthy"):
+            raise OrderFeedError(
+                "订单台数据源未就绪：" + "、".join(health.get("degraded") or [])
+            )
+
+        current = self.state()
+        manifest = json.loads(current.get("manifest_json") or "{}")
+        if not manifest:
+            raise OrderFeedError("订单台快照尚未安装")
+        if not changed and self._stores_due(current):
+            self._refresh_stores(self.client.get("stores"))
+            current = self.state()
 
         result = SyncResult(
             snapshot_id=str(manifest["snapshot_id"]),
-            consumed_seq=int(self.state().get("consumed_seq") or 0),
-            source_revision=int(revision["revision"]),
+            consumed_seq=int(current.get("consumed_seq") or 0),
+            source_revision=source_revision,
             snapshot_changed=changed,
             warnings=[str(r.get("detail") or r.get("id")) for r in health.get("quality_risks") or []],
         )
         if changed:
+            assert stores is not None
             result.affected_stores.update(
                 str(s["ledger_store_id"])
                 for s in stores.get("stores") or []
@@ -240,7 +338,13 @@ class OrderFeed:
                 for href, payload in pool.map(fetch_href, sorted(hrefs)):
                     fetched[href] = payload
             entities = [self._entity_from_fetch(change, fetched) for change in changes]
-            affected = self._commit_page(page, entities, health, int(revision["revision"]))
+            if any(change.get("entity_type") == "store" for change in changes) or self._stores_due(
+                self.state()
+            ):
+                self._refresh_stores(self.client.get("stores"))
+            affected = self._commit_page(
+                page, entities, health, source_revision, source_latest_seq, revision_etag,
+            )
             result.affected_stores.update(affected)
             result.changes += len(changes)
             result.consumed_seq = int(page["to_seq"])
@@ -329,7 +433,14 @@ class OrderFeed:
                 raise OrderFeedError(f"快照对象行数不符：{name}")
 
     def _install_snapshot(
-        self, manifest: dict[str, Any], stores: dict[str, Any], health: dict[str, Any],
+        self,
+        manifest: dict[str, Any],
+        stores: dict[str, Any],
+        health: dict[str, Any],
+        *,
+        source_revision: int,
+        source_latest_seq: int,
+        revision_etag: str,
     ) -> None:
         confirmed = [s for s in stores.get("stores") or [] if s.get("mapping_status") == "confirmed"]
         if len(confirmed) != len(stores.get("stores") or []):
@@ -348,19 +459,53 @@ class OrderFeed:
             )
             conn.execute(
                 "update feed_state set schema_version=?,snapshot_id=?,snapshot_revision=?,"
-                "snapshot_through_seq=?,consumed_seq=?,source_revision=?,manifest_json=?,health_json=?,"
+                "snapshot_through_seq=?,consumed_seq=?,source_revision=?,source_latest_seq=?,"
+                "revision_etag=?,stores_refreshed_at=?,manifest_json=?,health_json=?,"
                 "last_success=?,last_error='' where id=1",
                 (
                     SCHEMA_VERSION, str(manifest["snapshot_id"]), int(manifest["revision"]),
                     int(manifest["through_seq"]), int(manifest["through_seq"]),
-                    int(manifest["revision"]), json.dumps(manifest, ensure_ascii=False),
+                    source_revision, source_latest_seq, revision_etag, int(time.time()),
+                    json.dumps(manifest, ensure_ascii=False),
                     json.dumps(health, ensure_ascii=False), _now(),
                 ),
             )
 
-    def _refresh_health_stores(
-        self, stores: dict[str, Any], health: dict[str, Any], source_revision: int,
+    @staticmethod
+    def _store_refresh_seconds() -> int:
+        configured = int(os.environ.get("LEDGER_ORDER_FEED_STORE_REFRESH_SECONDS", "600"))
+        return min(900, max(300, configured))
+
+    def _stores_due(self, state: dict[str, Any]) -> bool:
+        return time.time() - int(state.get("stores_refreshed_at") or 0) >= self._store_refresh_seconds()
+
+    def _record_revision_probe(
+        self, source_revision: int, source_latest_seq: int, revision_etag: str,
     ) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                "update feed_state set source_revision=?,source_latest_seq=?,revision_etag=? where id=1",
+                (source_revision, source_latest_seq, revision_etag),
+            )
+
+    def _refresh_health(
+        self,
+        health: dict[str, Any],
+        source_revision: int,
+        source_latest_seq: int,
+        revision_etag: str,
+    ) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                "update feed_state set source_revision=?,source_latest_seq=?,revision_etag=?,"
+                "health_json=?,last_success=?,last_error='' where id=1",
+                (
+                    source_revision, source_latest_seq, revision_etag,
+                    json.dumps(health, ensure_ascii=False), _now(),
+                ),
+            )
+
+    def _refresh_stores(self, stores: dict[str, Any]) -> None:
         confirmed = [s for s in stores.get("stores") or [] if s.get("mapping_status") == "confirmed"]
         if len(confirmed) != len(stores.get("stores") or []):
             raise OrderFeedError("订单台仍有未确认店铺映射")
@@ -376,8 +521,8 @@ class OrderFeed:
                 ],
             )
             conn.execute(
-                "update feed_state set source_revision=?,health_json=?,last_success=?,last_error='' where id=1",
-                (source_revision, json.dumps(health, ensure_ascii=False), _now()),
+                "update feed_state set stores_refreshed_at=?,last_success=?,last_error='' where id=1",
+                (int(time.time()), _now()),
             )
 
     def _commit_page(
@@ -386,6 +531,8 @@ class OrderFeed:
         entities: list[tuple[dict[str, Any], dict[str, Any] | None]],
         health: dict[str, Any],
         source_revision: int,
+        source_latest_seq: int,
+        revision_etag: str,
     ) -> set[str]:
         affected: set[str] = set()
         with self._connect() as conn:
@@ -414,8 +561,12 @@ class OrderFeed:
                     ),
                 )
             conn.execute(
-                "update feed_state set consumed_seq=?,source_revision=?,health_json=?,last_success=?,last_error='' where id=1",
-                (int(page["to_seq"]), source_revision, json.dumps(health, ensure_ascii=False), _now()),
+                "update feed_state set consumed_seq=?,source_revision=?,source_latest_seq=?,revision_etag=?,"
+                "health_json=?,last_success=?,last_error='' where id=1",
+                (
+                    int(page["to_seq"]), source_revision, source_latest_seq, revision_etag,
+                    json.dumps(health, ensure_ascii=False), _now(),
+                ),
             )
         return affected
 

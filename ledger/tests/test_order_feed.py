@@ -88,12 +88,30 @@ def _fixture(root: Path) -> dict:
 class FakeClient:
     def __init__(self, manifest: dict):
         self.manifest = manifest
+        self.calls: list[str] = []
+        self.etag = '"rev-11"'
+
+    def revision(self, etag: str = ""):
+        self.calls.append("revision")
+        if etag == self.etag:
+            return None, etag
+        return {
+            "schema_version": "ledger-feed.v1", "revision": 11,
+            "latest_seq": 11, "healthy": True,
+        }, self.etag
 
     def get(self, path: str, params=None):
+        self.calls.append(path)
         if path == "revision":
-            return {"schema_version": "ledger-feed.v1", "revision": 11, "healthy": True}
+            return {
+                "schema_version": "ledger-feed.v1", "revision": 11,
+                "latest_seq": 11, "healthy": True,
+            }
         if path == "health":
-            return {"healthy": True, "quality_risks": []}
+            return {
+                "healthy": True, "quality_risks": [],
+                "last_successful_snapshot": self.manifest["snapshot_id"],
+            }
         if path == "snapshot":
             return self.manifest
         if path == "stores":
@@ -153,6 +171,112 @@ def test_snapshot_and_delta_become_normalized_engine_sources(tmp_path):
     assert cost is not None and cost.row(0, named=True)["unit_cost"] == 3.5
     assert cost.row(0, named=True)["order_type"] == "销售订单"
     assert after is not None and after.row(0, named=True)["goods_status"] == "买家未收到货"
+
+
+def test_caught_up_304_hot_path_calls_only_revision(tmp_path):
+    root = tmp_path / "feed"
+    client = FakeClient(_fixture(root))
+    feed = OrderFeed(tmp_path / "workspace", client=client, feed_root=root)
+    feed.sync()
+    client.calls.clear()
+
+    result = feed.sync()
+
+    assert result.caught_up
+    assert client.calls == ["revision"]
+
+
+def test_304_store_fallback_refreshes_only_stores(tmp_path):
+    root = tmp_path / "feed"
+    client = FakeClient(_fixture(root))
+    feed = OrderFeed(tmp_path / "workspace", client=client, feed_root=root)
+    feed.sync()
+    with feed._connect() as conn:  # noqa: SLF001 - force the periodic fallback due
+        conn.execute("update feed_state set stores_refreshed_at=0 where id=1")
+    client.calls.clear()
+
+    feed.sync()
+
+    assert client.calls == ["revision", "stores"]
+
+
+def test_304_continues_local_backlog_without_health_or_stores(tmp_path):
+    root = tmp_path / "feed"
+    client = FakeClient(_fixture(root))
+    feed = OrderFeed(tmp_path / "workspace", client=client, feed_root=root)
+    feed.sync()
+    with feed._connect() as conn:  # noqa: SLF001 - emulate a bounded prior replay
+        conn.execute(
+            "update feed_state set consumed_seq=10,source_latest_seq=11 where id=1"
+        )
+    client.calls.clear()
+
+    result = feed.sync()
+
+    assert result.consumed_seq == 11
+    assert "health" not in client.calls
+    assert "snapshot" not in client.calls
+    assert "stores" not in client.calls
+    assert client.calls[:2] == ["revision", "changes"]
+
+
+def test_store_change_refreshes_mapping_without_polling_stores_every_round(tmp_path):
+    root = tmp_path / "feed"
+
+    class StoreChangeClient(FakeClient):
+        def revision(self, etag: str = ""):
+            self.calls.append("revision")
+            if etag == '"rev-11"':
+                return {
+                    "schema_version": "ledger-feed.v1", "revision": 12,
+                    "latest_seq": 12, "healthy": True,
+                }, '"rev-12"'
+            return super().revision(etag)
+
+        def get(self, path, params=None):
+            if path == "changes" and int((params or {}).get("after_seq", 0)) == 11:
+                self.calls.append(path)
+                return {"to_seq": 12, "has_more": False, "changes": [{
+                    "seq": 12, "revision": 12, "entity_type": "store",
+                    "entity_id": "10", "operation": "upsert", "order_store_id": "10",
+                    "entity_href": "/api/integration/ledger/v1/entities/store/10",
+                }]}
+            if path == "entities/store/10":
+                self.calls.append(path)
+                return {"store": {"order_store_id": "10"}}
+            return super().get(path, params)
+
+    client = StoreChangeClient(_fixture(root))
+    feed = OrderFeed(tmp_path / "workspace", client=client, feed_root=root)
+    feed.sync()
+    client.calls.clear()
+
+    result = feed.sync()
+
+    assert result.consumed_seq == 12
+    assert client.calls.count("stores") == 1
+    assert client.calls[:3] == ["revision", "health", "changes"]
+
+
+def test_304_backlog_never_bypasses_cached_unhealthy_state(tmp_path):
+    root = tmp_path / "feed"
+    client = FakeClient(_fixture(root))
+    feed = OrderFeed(tmp_path / "workspace", client=client, feed_root=root)
+    feed.sync()
+    with feed._connect() as conn:  # noqa: SLF001 - emulate a degraded prior probe
+        conn.execute(
+            "update feed_state set consumed_seq=10,source_latest_seq=11,health_json=? where id=1",
+            (json.dumps({"healthy": False, "degraded": ["cost_api_worker"]}),),
+        )
+    client.calls.clear()
+
+    try:
+        feed.sync()
+    except OrderFeedError as exc:
+        assert "cost_api_worker" in str(exc)
+    else:  # pragma: no cover
+        raise AssertionError("cached unhealthy state was bypassed")
+    assert client.calls == ["revision"]
 
 
 def test_snapshot_without_through_seq_is_rejected(tmp_path):
