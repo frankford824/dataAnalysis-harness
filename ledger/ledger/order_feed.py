@@ -338,9 +338,7 @@ class OrderFeed:
                 for href, payload in pool.map(fetch_href, sorted(hrefs)):
                     fetched[href] = payload
             entities = [self._entity_from_fetch(change, fetched) for change in changes]
-            if any(change.get("entity_type") == "store" for change in changes) or self._stores_due(
-                self.state()
-            ):
+            if self._store_changes_require_refresh(entities) or self._stores_due(self.state()):
                 self._refresh_stores(self.client.get("stores"))
             affected = self._commit_page(
                 page, entities, health, source_revision, source_latest_seq, revision_etag,
@@ -395,6 +393,42 @@ class OrderFeed:
             )
             return (change, {"cost": record}) if record else ({**change, "operation": "delete"}, None)
         return change, got
+
+    def _store_changes_require_refresh(
+        self, entities: list[tuple[dict[str, Any], dict[str, Any] | None]],
+    ) -> bool:
+        """Ignore noisy last-seen store events; refresh on identity/mapping changes.
+
+        Order Console currently emits one store pointer alongside ordinary order upserts.
+        Pulling the 17-second registry for those is equivalent to polling it every page.
+        The entity payload is enough to prove whether any mapping-significant field moved.
+        """
+        store_events = [pair for pair in entities if pair[0].get("entity_type") == "store"]
+        if not store_events:
+            return False
+        with self._connect() as conn:
+            current = {
+                str(row["order_store_id"]): json.loads(row["payload_json"])
+                for row in conn.execute(
+                    "select order_store_id,payload_json from feed_store"
+                )
+            }
+        identity_fields = (
+            "ledger_store_id", "mapping_status", "jst_shop_id", "shop_name",
+            "platform_code", "aliases", "active",
+        )
+        for change, payload in store_events:
+            order_store_id = str(change.get("order_store_id") or change.get("entity_id") or "")
+            if change.get("operation") == "delete" or order_store_id not in current:
+                return True
+            record = (payload or {}).get("store") or {}
+            existing = current[order_store_id]
+            if any(
+                field in record and record.get(field) != existing.get(field)
+                for field in identity_fields
+            ):
+                return True
+        return False
 
     def _validate_manifest(self, manifest: dict[str, Any], *, full: bool = True) -> None:
         if manifest.get("schema_version") != SCHEMA_VERSION:

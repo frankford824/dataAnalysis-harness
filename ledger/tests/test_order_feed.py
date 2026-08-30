@@ -243,7 +243,10 @@ def test_store_change_refreshes_mapping_without_polling_stores_every_round(tmp_p
                 }]}
             if path == "entities/store/10":
                 self.calls.append(path)
-                return {"store": {"order_store_id": "10"}}
+                return {"store": {
+                    "order_store_id": "10", "ledger_store_id": "taobao_changed",
+                    "mapping_status": "confirmed",
+                }}
             return super().get(path, params)
 
     client = StoreChangeClient(_fixture(root))
@@ -256,6 +259,45 @@ def test_store_change_refreshes_mapping_without_polling_stores_every_round(tmp_p
     assert result.consumed_seq == 12
     assert client.calls.count("stores") == 1
     assert client.calls[:3] == ["revision", "health", "changes"]
+
+
+def test_noisy_store_last_seen_event_does_not_pull_full_registry(tmp_path):
+    root = tmp_path / "feed"
+
+    class NoisyStoreClient(FakeClient):
+        def revision(self, etag: str = ""):
+            self.calls.append("revision")
+            if etag == '"rev-11"':
+                return {
+                    "schema_version": "ledger-feed.v1", "revision": 12,
+                    "latest_seq": 12, "healthy": True,
+                }, '"rev-12"'
+            return super().revision(etag)
+
+        def get(self, path, params=None):
+            if path == "changes" and int((params or {}).get("after_seq", 0)) == 11:
+                self.calls.append(path)
+                return {"to_seq": 12, "has_more": False, "changes": [{
+                    "seq": 12, "revision": 12, "entity_type": "store",
+                    "entity_id": "10", "operation": "upsert", "order_store_id": "10",
+                    "entity_href": "/api/integration/ledger/v1/entities/store/10",
+                }]}
+            if path == "entities/store/10":
+                self.calls.append(path)
+                return {"store": {
+                    "order_store_id": "10", "ledger_store_id": "taobao_test",
+                    "mapping_status": "confirmed", "last_seen_at": "later",
+                }}
+            return super().get(path, params)
+
+    client = NoisyStoreClient(_fixture(root))
+    feed = OrderFeed(tmp_path / "workspace", client=client, feed_root=root)
+    feed.sync()
+    client.calls.clear()
+
+    feed.sync()
+
+    assert "stores" not in client.calls
 
 
 def test_304_backlog_never_bypasses_cached_unhealthy_state(tmp_path):
