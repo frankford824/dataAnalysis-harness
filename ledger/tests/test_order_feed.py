@@ -6,8 +6,9 @@ from pathlib import Path
 
 import polars as pl
 
-from ledger.engine.runtime import Ingestion, run
+from ledger.engine.runtime import Ingested, Ingestion, run
 from ledger.engine.link import SPINE_PERIOD, SPINE_STORE
+from ledger.engine.types import FileRef, Recognition
 from ledger.model.repository import ModelRepository
 from ledger.model.schema import Store
 from ledger.order_feed import OrderFeed, OrderFeedError, OrderFeedNotFound
@@ -219,3 +220,33 @@ def test_feed_order_time_builds_a_real_month_slice(tmp_path):
     result = run(ingestion, store.platform)
     assert result.spine.get_column(SPINE_PERIOD).to_list() == ["2026-06"]
     assert result.spine.get_column(SPINE_STORE).to_list() == [store.name]
+
+
+def test_existing_certified_spine_is_enriched_not_duplicated(tmp_path):
+    root = tmp_path / "feed"
+    manifest = _fixture(root)
+    feed = OrderFeed(tmp_path / "workspace", client=FakeClient(manifest), feed_root=root)
+    feed.sync()
+    ref = FileRef("manual", "人工订单.xlsx", "订单")
+    template = feed._order_template()  # noqa: SLF001 - compatible normalized fixture
+    manual = Ingested(
+        ref=ref,
+        recognition=Recognition(
+            ref=ref, signature="manual", header_count=3,
+            template_id="manual_order", source_id="order_detail",
+        ),
+        rows=1,
+        frame=pl.DataFrame({
+            "order_id": ["ON1"], "sub_order_id": ["S1"],
+            "refund_status": ["没有申请退款"], "tracking_no": [None],
+        }),
+        template=template,
+    )
+    ingestion = Ingestion(model=None, items=[manual])  # type: ignore[arg-type]
+    feed.append_to(
+        ingestion, Store(id="taobao_test", name="淘宝测试店", platform="taobao")
+    )
+    existing, live_only = ingestion.frames_of("order_detail")
+    assert existing.frame.row(0, named=True)["refund_status"] == "退款成功"
+    assert existing.frame.row(0, named=True)["tracking_no"] == "SF1"
+    assert live_only.frame.is_empty()

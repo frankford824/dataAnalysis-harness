@@ -29,7 +29,7 @@ from .engine.types import ANCHOR_FILE, ANCHOR_ROW, ANCHOR_SHA, ANCHOR_SHEET, Fil
 from .model.schema import ColumnBinding, Model, Store, Template
 
 SCHEMA_VERSION = "ledger-feed.v1"
-REPLACED_SOURCES = frozenset({"order_detail", "order_cost", "after_sales"})
+REPLACED_SOURCES = frozenset({"order_cost", "after_sales"})
 _DB_SCHEMA = """
 pragma journal_mode=wal;
 pragma synchronous=full;
@@ -420,16 +420,88 @@ class OrderFeed:
         return f"order-feed:{state.get('snapshot_id','')}:{int(state.get('consumed_seq') or 0)}"
 
     def append_to(self, ingestion: Ingestion, store: Store) -> None:
-        """Replace the three operational spreadsheet sources from 2026-06 onward."""
+        """Overlay live facts while preserving human-certified platform identities.
+
+        Existing order exports keep their platform product/sub-order identifiers: those are
+        what settlement and promotion files link to.  Order Console enriches their mutable
+        status fields and contributes orders absent from the export.  Cost and after-sale
+        sources are replaced outright because the feed is the more current operational fact.
+        """
         state = self.state()
         if not state.get("snapshot_id") or not state.get("manifest_json"):
             raise OrderFeedError("订单台快照尚未同步")
         frames = self._frames(store, json.loads(state["manifest_json"]))
+        feed_order = next(item for item in frames if item.recognition.source_id == "order_detail")
+        self._enrich_existing_orders(ingestion, feed_order.frame)
+        assert feed_order.frame is not None
+        has_suborders = any(
+            item.frame is not None and "sub_order_id" in item.frame.columns
+            for item in ingestion.frames_of("order_detail")
+        )
+        key = "sub_order_id" if has_suborders else "order_id"
+        existing_keys: set[str] = set()
+        for item in ingestion.frames_of("order_detail"):
+            if item.frame is not None and key in item.frame.columns:
+                existing_keys.update(
+                    str(value) for value in item.frame.get_column(key).drop_nulls().cast(pl.Utf8).to_list()
+                )
+        if existing_keys and key in feed_order.frame.columns:
+            feed_order.frame = feed_order.frame.filter(
+                ~pl.col(key).cast(pl.Utf8).is_in(existing_keys)
+            )
+            feed_order.rows = feed_order.frame.height
         ingestion.items = [
             item for item in ingestion.items
             if item.recognition.source_id not in REPLACED_SOURCES
         ]
         ingestion.items.extend(frames)
+
+    @staticmethod
+    def _enrich_existing_orders(ingestion: Ingestion, feed: pl.DataFrame | None) -> None:
+        if feed is None or feed.is_empty():
+            return
+        candidates = {
+            "refund_status": "text", "tracking_no": "text", "order_state": "text",
+            "order_time": "time", "pay_time": "time", "order_date": "time", "pay_date": "time",
+        }
+        for item in ingestion.frames_of("order_detail"):
+            if item.frame is None or item.template is None:
+                continue
+            key = "sub_order_id" if "sub_order_id" in item.frame.columns else "order_id"
+            if key not in item.frame.columns or key not in feed.columns:
+                continue
+            columns = [name for name in candidates if name in feed.columns]
+            updates = feed.select(key, *columns).unique(subset=[key], maintain_order=True).rename(
+                {name: f"__feed_{name}" for name in columns}
+            )
+            frame = item.frame.join(updates, on=key, how="left")
+            expressions: list[pl.Expr] = []
+            for name in columns:
+                incoming = pl.col(f"__feed_{name}")
+                if name in frame.columns:
+                    # Mutable status comes from Order Console; timestamps preserve the
+                    # certified export and use the feed only to fill a gap.
+                    value = (
+                        pl.coalesce(incoming, pl.col(name))
+                        if name in {"refund_status", "tracking_no", "order_state"}
+                        else pl.coalesce(pl.col(name), incoming)
+                    )
+                else:
+                    value = incoming
+                expressions.append(value.alias(name))
+            item.frame = frame.with_columns(expressions).drop(
+                [f"__feed_{name}" for name in columns]
+            )
+            roles = {binding.role for binding in item.template.bindings}
+            extra = tuple(
+                ColumnBinding(role=name, columns=(name,), required=False, kind=kind)
+                for name, kind in candidates.items()
+                if name in item.frame.columns and name not in roles
+            )
+            if extra:
+                item.template = item.template.model_copy(
+                    update={"bindings": item.template.bindings + extra}
+                )
 
     def _frames(self, store: Store, manifest: dict[str, Any]) -> list[Ingested]:
         with self._connect() as conn:
