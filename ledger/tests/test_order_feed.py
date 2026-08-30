@@ -62,6 +62,12 @@ def _fixture(root: Path) -> dict:
         })),
         "order_relations.parquet": _write(root, "relations.parquet", pl.DataFrame({
             "relation_type": pl.Series([], dtype=pl.Utf8),
+            "source_order_id": pl.Series([], dtype=pl.Utf8),
+            "target_order_id": pl.Series([], dtype=pl.Utf8),
+            "source_sub_order_id": pl.Series([], dtype=pl.Utf8),
+            "target_sub_order_id": pl.Series([], dtype=pl.Utf8),
+            "source": pl.Series([], dtype=pl.Utf8),
+            "observed_at": pl.Series([], dtype=pl.Utf8),
         })),
         "controls.parquet": _write(root, "controls.parquet", pl.DataFrame({
             "order_store_id": ["10"], "day": ["2026-06-02"], "item_count": [1],
@@ -139,6 +145,7 @@ def test_snapshot_and_delta_become_normalized_engine_sources(tmp_path):
     assert order is not None and order.row(0, named=True)["order_id"] == "ON1"
     assert order.get_column("order_date").null_count() == 0
     assert cost is not None and cost.row(0, named=True)["unit_cost"] == 3.5
+    assert cost.row(0, named=True)["order_type"] == "销售订单"
     assert after is not None and after.row(0, named=True)["goods_status"] == "买家未收到货"
 
 

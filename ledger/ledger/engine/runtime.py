@@ -13,7 +13,7 @@ import os
 import shutil
 import threading
 import uuid
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from concurrent.futures import ThreadPoolExecutor
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
@@ -901,11 +901,12 @@ def _build_slice(
         if not spine_facts.is_empty()
         else spine_facts
     )
-    spine_rows = (
-        spine.filter((pl.col(SPINE_STORE) == store) & (pl.col(SPINE_PERIOD) == period)).height
+    own_spine = (
+        spine.filter((pl.col(SPINE_STORE) == store) & (pl.col(SPINE_PERIOD) == period))
         if not spine.is_empty() and {SPINE_STORE, SPINE_PERIOD} <= set(spine.columns)
-        else 0
+        else spine.clear()
     )
+    spine_rows = own_spine.height
     completeness = _completeness(
         model, ingestion, facts, scoped, scoped_spine, store, period, spine_rows,
         eval_errors or {},
@@ -920,12 +921,77 @@ def _build_slice(
     inapplicable = {m.id for m in model.metrics if m.for_platform(platform) is None}
     nodes = calc.evaluate_statement(model, totals, unavailable, inapplicable)
     own = classify_report.for_rows(_anchors_of(scoped))
-    result = audit(model, scoped, link_reports, own, completeness, nodes)
+    # Legacy spreadsheet baselines intentionally keep their historical report semantics.
+    # The scoped denominator is required only when a multi-month live feed is present;
+    # changing old frozen audit text during this integration would be unrelated drift.
+    live_feed = any(
+        item.template is not None and item.template.id.startswith("order_console_")
+        for item in ingestion.known
+    )
+    scoped_reports = (
+        _scoped_link_reports(model, scoped, own_spine, platform, link_reports)
+        if live_feed else link_reports
+    )
+    result = audit(model, scoped, scoped_reports, own, completeness, nodes)
     return Slice(
         store=store, period=period, nodes=nodes, facts=scoped,
         completeness=completeness, audit=result,
-        link_reports=link_reports, classify_report=own,
+        link_reports=scoped_reports, classify_report=own,
     )
+
+
+def _scoped_link_reports(
+    model: Model,
+    facts: pl.DataFrame,
+    spine_frame: pl.DataFrame,
+    platform: str,
+    reports: dict[str, LinkReport],
+) -> dict[str, LinkReport]:
+    """Rebase link coverage onto one store-period instead of the whole multi-month feed.
+
+    The file workflow happened to hand the engine mostly one-month exports.  A live feed is
+    intentionally multi-month, which exposed that global ``LinkReport`` denominators were
+    repeated on every month.  Money facts were already scoped correctly; only the audit ratio
+    needed the same boundary.
+    """
+    local_spine = Spine(spine_frame)
+    out: dict[str, LinkReport] = {}
+    for raw in model.metrics:
+        metric = raw.for_platform(platform)
+        if metric is None or metric.id not in reports:
+            continue
+        base = reports[metric.id]
+        report = replace(base, covered_keys=set())
+        rows = facts.filter(pl.col("metric_id") == metric.id) if not facts.is_empty() else facts
+        report.total_rows = rows.height
+        report.linked_rows = (
+            int(rows.select(pl.col("linked").fill_null(False).sum()).item())
+            if not rows.is_empty() and "linked" in rows.columns else 0
+        )
+        report.naturally_unlinked_rows = (
+            report.total_rows - report.linked_rows if metric.naturally_unlinked else 0
+        )
+        report.extract_failed_rows = 0
+        report.fallback_rows = 0
+        report.unlinked_amount = (
+            float(rows.filter(~pl.col("linked").fill_null(False)).get_column("amount").sum() or 0)
+            if not rows.is_empty() and {"linked", "amount"} <= set(rows.columns) else 0.0
+        )
+        role = target_role(metric.link.to) if metric.link else ""
+        if role:
+            known = local_spine.keys(role)
+            expected = local_spine.keys_where(role, metric.expect)
+            report.spine_keys_total = len(known)
+            report.spine_keys = len(expected)
+            report.expect_label = metric.expect_label if len(expected) != len(known) else ""
+            if not rows.is_empty() and {"linked", "link_key"} <= set(rows.columns):
+                hit = set(
+                    rows.filter(pl.col("linked").fill_null(False))
+                    .get_column("link_key").drop_nulls().unique().to_list()
+                )
+                report.covered_keys = hit & expected
+        out[metric.id] = report
+    return out
 
 
 def _anchors_of(scoped: pl.DataFrame) -> set[tuple[str, str, str]]:

@@ -461,6 +461,21 @@ class OrderFeed:
             pl.col("order_id").cast(pl.Utf8).is_in(order_ids)
         ).collect()
         costs = self._overlay(costs, deltas, "order_cost", "sub_order_id", lambda p: [p.get("cost") or p])
+        relations = pl.scan_parquet(path("order_relations.parquet")).filter(
+            pl.col("source_order_id").cast(pl.Utf8).is_in(order_ids)
+            | pl.col("target_order_id").cast(pl.Utf8).is_in(order_ids)
+        ).collect()
+        relation_records: list[dict[str, Any]] = []
+        for delta in deltas:
+            if delta["entity_type"] != "order_relation" or delta["operation"] == "delete":
+                continue
+            if delta["payload_json"]:
+                payload = json.loads(delta["payload_json"])
+                record = payload.get("order_relation") or payload
+                if record:
+                    relation_records.append(record)
+        if relation_records:
+            relations = self._append_records(relations, relation_records).unique(maintain_order=True)
         after = pl.scan_parquet(path("after_sales.parquet")).filter(
             pl.col("order_store_id").cast(pl.Utf8).is_in(order_store_ids)
         ).collect()
@@ -484,7 +499,7 @@ class OrderFeed:
 
         fingerprint = self.fingerprint()
         order_frame = self._order_frame(orders, items, after, store, fingerprint)
-        cost_frame = self._cost_frame(orders, items, costs, store, fingerprint)
+        cost_frame = self._cost_frame(orders, items, costs, relations, store, fingerprint)
         after_frame = self._after_frame(after, after_items, store, fingerprint)
         return [
             self._item("order_detail", "order_console_order_v1", "订单台实时订单", order_frame,
@@ -570,11 +585,18 @@ class OrderFeed:
 
     def _cost_frame(
         self, orders: pl.DataFrame, items: pl.DataFrame, costs: pl.DataFrame,
+        relations: pl.DataFrame,
         store: Store, fingerprint: str,
     ) -> pl.DataFrame:
         certified = costs.filter(
             (pl.col("cost_status") == "priced")
-            & pl.col("cost_source").is_in(["history", "mirror", "scrape"])
+            & pl.col("cost_source").is_in(["history", "mirror", "scrape", "unknown_evidence"])
+        )
+        reships = (
+            relations.filter(pl.col("relation_type") == "reship")
+            .get_column("target_order_id").cast(pl.Utf8).drop_nulls().unique().to_list()
+            if not relations.is_empty() and {"relation_type", "target_order_id"} <= set(relations.columns)
+            else []
         )
         frame = certified.join(
             orders.select("order_id", "online_order_no", "order_time", "order_status_raw", "tracking_no"),
@@ -594,7 +616,8 @@ class OrderFeed:
             pl.col("item_tracking_no").fill_null(pl.col("tracking_no")).cast(pl.Utf8).alias("tracking_no"),
             pl.col("order_status_raw").cast(pl.Utf8).alias("order_state"),
             self._dt("order_time").alias("order_time"),
-            pl.lit(None, dtype=pl.Utf8).alias("order_type"),
+            pl.when(pl.col("order_id").cast(pl.Utf8).is_in(reships))
+            .then(pl.lit("补发订单")).otherwise(pl.lit("销售订单")).alias("order_type"),
             pl.lit(store.name).alias("store_name"),
         ).with_columns(pl.col("order_time").alias("order_date"))
         return self._anchors(frame, fingerprint, "订单台日期时点成本")
