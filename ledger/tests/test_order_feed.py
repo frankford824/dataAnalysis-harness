@@ -41,7 +41,8 @@ def _fixture(root: Path) -> dict:
         })),
         "order_items.parquet": _write(root, "order_items.parquet", pl.DataFrame({
             "order_id": ["1"], "sub_order_id": ["11"], "online_order_no": ["ON1"],
-            "sku_id": ["SKU1"], "outer_sku": ["P1"], "product_name": ["商品"],
+            "sku_id": ["SKU1"], "merchant_sku": ["P1"], "outer_sku": ["S1"],
+            "product_name": ["商品"],
             "quantity": ["2"], "paid_amount": ["20.00"], "refund_amount": ["0.00"],
             "tracking_no": ["SF1"],
         })),
@@ -143,6 +144,8 @@ def test_snapshot_and_delta_become_normalized_engine_sources(tmp_path):
     cost = ingestion.frames_of("order_cost")[0].frame
     after = ingestion.frames_of("after_sales")[0].frame
     assert order is not None and order.row(0, named=True)["order_id"] == "ON1"
+    assert order.row(0, named=True)["sub_order_id"] == "S1"
+    assert order.row(0, named=True)["product_id"] == "P1"
     assert order.get_column("order_date").null_count() == 0
     assert order.row(0, named=True)["refund_status"] == "退款成功"
     assert cost is not None and cost.row(0, named=True)["unit_cost"] == 3.5
