@@ -144,6 +144,7 @@ def test_snapshot_and_delta_become_normalized_engine_sources(tmp_path):
     after = ingestion.frames_of("after_sales")[0].frame
     assert order is not None and order.row(0, named=True)["order_id"] == "ON1"
     assert order.get_column("order_date").null_count() == 0
+    assert order.row(0, named=True)["refund_status"] == "退款成功"
     assert cost is not None and cost.row(0, named=True)["unit_cost"] == 3.5
     assert cost.row(0, named=True)["order_type"] == "销售订单"
     assert after is not None and after.row(0, named=True)["goods_status"] == "买家未收到货"

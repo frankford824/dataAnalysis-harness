@@ -571,7 +571,7 @@ class OrderFeed:
             pl.col("quantity").cast(pl.Float64, strict=False),
             pl.col("paid_amount").cast(pl.Float64, strict=False).alias("buyer_paid"),
             pl.col("refund_amount").cast(pl.Float64, strict=False),
-            pl.col("refund_status").cast(pl.Utf8),
+            pl.col("refund_status").cast(pl.Utf8).fill_null("没有申请退款"),
             pl.col("tracking_no").fill_null(pl.col("tracking_no_order")).cast(pl.Utf8),
             pl.col("order_status_raw").cast(pl.Utf8).alias("order_state"),
             self._dt("order_time").alias("order_time"),
