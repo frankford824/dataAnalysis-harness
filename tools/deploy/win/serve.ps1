@@ -18,6 +18,11 @@ $LogDir = Join-Path $Root 'logs'
 $env:LEDGER_HOME      = Join-Path $Root 'home'
 $env:LEDGER_INDEXER_URL = 'http://127.0.0.1:8765'
 $env:LEDGER_INDEX_CATALOG = Join-Path $Root 'index\catalog.db'
+$env:LEDGER_ORDER_FEED_ENABLED = '1'
+$env:LEDGER_ORDER_FEED_URL = 'http://127.0.0.1:8001/api/integration/ledger/v1'
+$env:LEDGER_ORDER_FEED_ROOT = 'D:\order\exchange\ledger-feed'
+# 首次发布先只同步和试算；逐店核对通过后再明确打开自动重算。
+if (-not $env:LEDGER_ORDER_FEED_AUTO_RECOMPUTE) { $env:LEDGER_ORDER_FEED_AUTO_RECOMPUTE = '0' }
 if (Test-Path -LiteralPath (Join-Path $Root 'nas.enabled')) {
   $share = '\\192.168.0.125\dataAnalysis'
   $mapping = Get-SmbGlobalMapping -ErrorAction SilentlyContinue |

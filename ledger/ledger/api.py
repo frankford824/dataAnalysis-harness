@@ -31,7 +31,7 @@ from fastapi.responses import HTMLResponse, PlainTextResponse
 from starlette.middleware.gzip import GZipMiddleware
 from pydantic import BaseModel, ValidationError
 
-from . import assist, fees as fees_mod, gaps, index_client, nas_ingest, nas_status, onboard, overhead, ownership, progress, service, view
+from . import assist, fees as fees_mod, gaps, index_client, nas_ingest, nas_status, onboard, order_feed, overhead, ownership, progress, service, view
 from . import search as search_mod
 from .model import propose
 from .model.config import (
@@ -57,7 +57,7 @@ from .workspace import (
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
-    global _nas_worker
+    global _nas_worker, _order_feed_worker
     anyio.to_thread.current_default_thread_limiter().total_tokens = max(
         1, int(os.environ.get("LEDGER_THREAD_TOKENS", "16")),
     )
@@ -69,12 +69,24 @@ async def lifespan(_app: FastAPI):
             workspace, lambda: _snapshot().model, catalog, nas_status.nas_root(),
         )
         _nas_worker.start()
+    if order_feed.enabled():
+        feed = order_feed.OrderFeed(workspace().root)
+        auto_recompute = os.environ.get(
+            "LEDGER_ORDER_FEED_AUTO_RECOMPUTE", "",
+        ).strip().lower() in {"1", "true", "yes", "on"}
+        _order_feed_worker = order_feed.Worker(
+            feed, _apply_order_feed if auto_recompute else None,
+        )
+        _order_feed_worker.start()
     try:
         yield
     finally:
         if _nas_worker is not None:
             _nas_worker.stop()
             _nas_worker = None
+        if _order_feed_worker is not None:
+            _order_feed_worker.stop()
+            _order_feed_worker = None
 
 
 app = FastAPI(title="记账", docs_url="/api/docs", lifespan=lifespan)
@@ -110,6 +122,7 @@ _model_repo: ModelRepository | None = None
 _model_repo_root: Path | None = None
 _model_repo_guard = threading.Lock()
 _nas_worker: nas_ingest.NasIngestWorker | None = None
+_order_feed_worker: order_feed.Worker | None = None
 _read_cache_guard = threading.RLock()
 _overview_cache: OrderedDict[tuple, dict] = OrderedDict()
 _gap_cache: OrderedDict[tuple, dict | None] = OrderedDict()
@@ -213,6 +226,22 @@ def workspace() -> Workspace:
     return _ws
 
 
+def _apply_order_feed(store_ids: set[str], fingerprint: str) -> None:
+    """Turn one caught-up feed batch into stale flags and fresh open-period runs."""
+    ws = workspace()
+    snapshot = _snapshot()
+    for store_id in sorted(store_ids):
+        try:
+            store = snapshot.model.store(store_id)
+        except KeyError:
+            continue
+        ws.note_external_version(store_id, "__order_console__", fingerprint)
+        service.recompute(
+            ws, snapshot.model, store,
+            note=f"{store.name} · 订单台实时证据",
+        )
+
+
 def _periods_of_store(ws: Any, store_id: str) -> list[PeriodState]:
     """Use the scoped query while keeping small test/adapter workspaces compatible."""
     scoped = getattr(ws, "periods_of_store", None)
@@ -251,6 +280,14 @@ def health() -> dict:
     else:
         index_health = {"ok": False, "disabled": True}
         index_status = {}
+    feed_status: dict[str, Any]
+    if order_feed.enabled():
+        try:
+            feed_status = order_feed.OrderFeed(workspace().root).status()
+        except Exception as exc:  # noqa: BLE001 - health must report, not fail
+            feed_status = {"enabled": True, "last_error": str(exc)}
+    else:
+        feed_status = {"enabled": False}
     return {
         "ok": True,
         "service": "ledger",
@@ -258,7 +295,19 @@ def health() -> dict:
         "model_revision": _model_revision(),
         "ingest": local,
         "index": {**index_status, "health": index_health},
+        "order_feed": feed_status,
     }
+
+
+@app.get("/api/order-feed/status")
+def order_feed_status() -> dict:
+    if not order_feed.enabled():
+        return {"enabled": False}
+    status = order_feed.OrderFeed(workspace().root).status()
+    status["auto_recompute"] = os.environ.get(
+        "LEDGER_ORDER_FEED_AUTO_RECOMPUTE", "",
+    ).strip().lower() in {"1", "true", "yes", "on"}
+    return status
 
 
 @app.get("/api/version")

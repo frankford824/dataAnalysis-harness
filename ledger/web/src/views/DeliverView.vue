@@ -34,6 +34,7 @@ const indexFiles = ref([])
 const indexStorage = ref(null)
 const indexErrors = ref([])
 const indexLoading = ref(false)
+const orderFeed = ref(null)
 const previewing = ref(false)
 const previewTarget = ref(null)
 const managing = ref(null)
@@ -154,15 +155,20 @@ function indexed(file) {
 }
 
 async function loadIndexState() {
-  if (app.ingestMode !== 'nas') return
   indexLoading.value = true
   try {
-    const [filesResult, storageResult, errorsResult] = await Promise.all([
-      api.indexFiles(), api.indexStorage(), api.indexErrors(),
-    ])
-    indexFiles.value = filesResult.files || []
-    indexStorage.value = storageResult
-    indexErrors.value = errorsResult.files || []
+    const feedRequest = api.orderFeedStatus()
+    if (app.ingestMode === 'nas') {
+      const [filesResult, storageResult, errorsResult, feedResult] = await Promise.all([
+        api.indexFiles(), api.indexStorage(), api.indexErrors(), feedRequest,
+      ])
+      indexFiles.value = filesResult.files || []
+      indexStorage.value = storageResult
+      indexErrors.value = errorsResult.files || []
+      orderFeed.value = feedResult
+    } else {
+      orderFeed.value = await feedRequest
+    }
   } catch (reason) {
     message.error(`索引状态读取失败：${reason.message}`, { duration: 6000 })
   } finally {
@@ -289,6 +295,37 @@ function open(period = '') {
           <span v-for="item in indexErrors.slice(0, 3)" :key="item.path" class="neg">
             {{ item.path.split(/[\\/]/).pop() }}{{ item.error ? `（${item.error}）` : '' }}
           </span>
+        </div>
+      </div>
+      <n-button size="tiny" :loading="indexLoading" @click="loadIndexState">刷新状态</n-button>
+    </div>
+  </n-alert>
+
+  <n-alert
+    v-if="orderFeed?.enabled"
+    :type="orderFeed.last_error ? 'warning' : 'success'"
+    :bordered="false"
+    class="nas-index-status"
+  >
+    <div class="spread">
+      <div>
+        <b>订单台实时证据</b>
+        <span class="small muted num">
+          · 快照 {{ orderFeed.snapshot_id || '等待中' }}
+          · 已消费 seq {{ count(orderFeed.consumed_seq || 0) }}
+          / {{ count(orderFeed.health?.latest_seq || orderFeed.consumed_seq || 0) }}
+          · revision {{ count(orderFeed.source_revision || 0) }}
+        </span>
+        <div v-if="orderFeed.last_error" class="xs neg" style="margin-top: var(--s2)">
+          {{ orderFeed.last_error }}
+        </div>
+        <div v-else class="xs muted" style="margin-top: var(--s2)">
+          <template v-if="orderFeed.auto_recompute">
+            订单、商品、售后和日期时点成本自动进入未结账账期；已结账只标记有新证据，不会自动改数。
+          </template>
+          <template v-else>
+            已连接并持续同步，当前处于试算门禁；逐店核对通过前不会自动改动未结账结果。
+          </template>
         </div>
       </div>
       <n-button size="tiny" :loading="indexLoading" @click="loadIndexState">刷新状态</n-button>

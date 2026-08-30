@@ -102,6 +102,11 @@ function pickSubject(s) {
 function pickFile(f) {
   file.value = file.value === f ? '' : f
 }
+function orderFact(row) {
+  if (!row?.file_name?.startsWith('订单台') || !row.link_key) return ''
+  const field = (data.value?.key_label || '').includes('子订单') ? 'sub_order_id' : 'order_id'
+  return `http://192.168.0.155:8001/orders?${field}=${encodeURIComponent(row.link_key)}`
+}
 function applyFilter() {
   const next = term.value.trim()
   const changed = appliedTerm.value !== next || page.value !== 0
@@ -346,7 +351,16 @@ function close() {
             </thead>
             <tbody>
               <tr v-for="(r, i) in data.sample || []" :key="i">
-                <td class="xs num">{{ r.link_key || '—' }}</td>
+                <td class="xs num">
+                  {{ r.link_key || '—' }}
+                  <a
+                    v-if="orderFact(r)"
+                    class="link"
+                    :href="orderFact(r)"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                  >订单台 →</a>
+                </td>
                 <td class="xs">
                   {{ r.minor || r.subject || r.metric }}
                   <div v-if="r.classify_via" class="xs muted">{{ r.classify_via }}</div>

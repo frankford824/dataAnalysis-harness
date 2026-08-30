@@ -103,6 +103,7 @@ export const api = {
   indexErrors: () => call('/api/index/errors'),
   indexStorage: () => call('/api/index/storage'),
   indexPreview: (params) => call(`/api/index/preview${query(params)}`),
+  orderFeedStatus: () => call('/api/order-feed/status'),
   drill: (runId, nodeId, params) =>
     call(`/api/runs/${runId}/drill/${encodeURIComponent(nodeId)}${query(params)}`),
 

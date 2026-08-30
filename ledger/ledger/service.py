@@ -21,6 +21,7 @@ import polars as pl
 
 from . import commission as comm
 from . import progress
+from . import order_feed
 from .engine.runtime import Ingestion, RunResult, Slice, ingest, run
 from .model.schema import Model, Store
 from .view import commission_dict, slice_dict
@@ -287,7 +288,7 @@ def _recompute_locked(
     """
     out = Recomputed(store_id=store.id)
     files = ws.active_files(store.id)
-    if not files:
+    if not files and not order_feed.enabled():
         out.failure = {"store": store.name, "why": "这家店还没有任何数据"}
         return out
 
@@ -298,6 +299,12 @@ def _recompute_locked(
         each=lambda done, total: report(f"读表 · {where}", done, total),
         cache_root=ws.root / "cache" / "parse",
     )
+    if order_feed.enabled():
+        try:
+            order_feed.OrderFeed(ws.root).append_to(ing, store)
+        except order_feed.OrderFeedError as exc:
+            out.failure = {"store": store.name, "why": f"订单台证据未就绪：{exc}"}
+            return out
     out.unknown_tables = unknown_tables(ing, store)
     # 这一段说不出份数：挂钩、归类、核算是把全店的行放在一起算的，没有「第几份」
     # 可报。硬报个 0/9 会让人以为它卡在第零份上。
@@ -354,9 +361,11 @@ def simulate(ws: Workspace, model: Model, store: Store) -> list[dict[str, Any]]:
     就把数字改了——已结的账期虽然不会被覆盖，未结的会。所以试算走这条不落盘的路。
     """
     files = ws.active_files(store.id)
-    if not files:
+    if not files and not order_feed.enabled():
         return []
     ing = ingest(files, model, [store.name, *store.aliases])
+    if order_feed.enabled():
+        order_feed.OrderFeed(ws.root).append_to(ing, store)
     result = run(ing, store.platform)
     out = []
     for (_s, _period), sl in sorted(result.slices.items(), key=lambda kv: kv[0][1] or ""):

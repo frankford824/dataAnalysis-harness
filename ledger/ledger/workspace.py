@@ -514,6 +514,29 @@ class Workspace:
             )
             conn.execute("delete from slot where store_id=? and name=?", (store_id, name))
 
+    def note_external_version(
+        self, store_id: str, name: str, fingerprint: str, by: str = "system",
+    ) -> bool:
+        """Record one immutable external-evidence revision for stale detection.
+
+        External feeds do not occupy a file slot, but a closed period must still light up
+        when their facts change.  Reusing ``version`` keeps the close invariant singular:
+        ``period.at_version`` remains the only watermark and no reader has to race two clocks.
+        Consecutive identical fingerprints are idempotent.
+        """
+        with self.conn as conn:
+            row = conn.execute(
+                "select sha from version where store_id=? and name=? order by id desc limit 1",
+                (store_id, name),
+            ).fetchone()
+            if row is not None and row["sha"] == fingerprint:
+                return False
+            conn.execute(
+                "insert into version(store_id,name,sha,at,by) values(?,?,?,?,?)",
+                (store_id, name, fingerprint, _now(), by),
+            )
+            return True
+
     # ------------------------------------------------------------------ #
     # 快照
     # ------------------------------------------------------------------ #
