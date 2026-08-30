@@ -16,6 +16,7 @@ import threading
 import urllib.error
 import urllib.parse
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -73,6 +74,10 @@ class OrderFeedError(RuntimeError):
     """The feed cannot be consumed without weakening accounting evidence."""
 
 
+class OrderFeedNotFound(OrderFeedError):
+    """A pointer names an entity that is no longer present in current state."""
+
+
 def _now() -> str:
     return datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds")
 
@@ -106,6 +111,10 @@ class Client:
         try:
             with urllib.request.urlopen(urllib.request.Request(url, headers=headers), timeout=self.timeout) as response:
                 return json.loads(response.read().decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            if exc.code == 404:
+                raise OrderFeedNotFound(f"订单台实体已不存在：{url}") from exc
+            raise OrderFeedError(f"订单台接口不可用：HTTP {exc.code}") from exc
         except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
             raise OrderFeedError(f"订单台接口不可用：{exc}") from exc
 
@@ -204,10 +213,10 @@ class OrderFeed:
             if not changes:
                 result.caught_up = True
                 break
-            entities: list[tuple[dict[str, Any], dict[str, Any] | None]] = []
-            for change in changes:
+            def fetch_entity(change: dict[str, Any]):
                 payload = None
-                if change.get("operation") != "delete":
+                effective = change
+                if effective.get("operation") != "delete":
                     href = str(change.get("entity_href") or "")
                     if not href:
                         raise OrderFeedError(
@@ -215,8 +224,18 @@ class OrderFeed:
                         )
                     marker = "/api/integration/ledger/v1/"
                     endpoint = href.split(marker, 1)[-1] if marker in href else href.lstrip("/")
-                    payload = self.client.get(endpoint)
-                entities.append((change, payload))
+                    try:
+                        payload = self.client.get(endpoint)
+                    except OrderFeedNotFound:
+                        # The feed exposes current entities, not historical payloads.  A past
+                        # upsert may legitimately be gone by replay time; current absence is a
+                        # tombstone, and a later event (if any) can still recreate it.
+                        effective = {**change, "operation": "delete"}
+                return effective, payload
+
+            workers = max(1, int(os.environ.get("LEDGER_ORDER_FEED_FETCHERS", "8")))
+            with ThreadPoolExecutor(max_workers=workers) as pool:
+                entities = list(pool.map(fetch_entity, changes))
             affected = self._commit_page(page, entities, health, int(revision["revision"]))
             result.affected_stores.update(affected)
             result.changes += len(changes)
@@ -647,4 +666,7 @@ class Worker:
             self.stop_event.wait(self.interval)
 
 
-__all__ = ["Client", "OrderFeed", "OrderFeedError", "SyncResult", "Worker", "enabled"]
+__all__ = [
+    "Client", "OrderFeed", "OrderFeedError", "OrderFeedNotFound",
+    "SyncResult", "Worker", "enabled",
+]

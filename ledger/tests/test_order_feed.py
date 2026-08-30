@@ -8,7 +8,7 @@ import polars as pl
 
 from ledger.engine.runtime import Ingestion
 from ledger.model.schema import Store
-from ledger.order_feed import OrderFeed, OrderFeedError
+from ledger.order_feed import OrderFeed, OrderFeedError, OrderFeedNotFound
 from ledger.workspace import Workspace
 
 
@@ -161,3 +161,23 @@ def test_external_revision_marks_a_closed_period_stale_idempotently(tmp_path):
     assert not ws.note_external_version(
         "taobao_test", "__order_console__", "order-feed:s1:11",
     )
+
+
+def test_replayed_upsert_whose_current_entity_is_gone_becomes_tombstone(tmp_path):
+    root = tmp_path / "feed"
+    manifest = _fixture(root)
+
+    class MissingClient(FakeClient):
+        def get(self, path, params=None):
+            if path == "entities/order/1":
+                raise OrderFeedNotFound("gone")
+            return super().get(path, params)
+
+    feed = OrderFeed(tmp_path / "workspace", client=MissingClient(manifest), feed_root=root)
+    result = feed.sync()
+    assert result.consumed_seq == 11
+    with feed._connect() as conn:  # noqa: SLF001 - verifies durable replay semantics
+        row = conn.execute(
+            "select operation,payload_json from feed_entity where entity_type='order' and entity_id='1'"
+        ).fetchone()
+    assert tuple(row) == ("delete", None)
