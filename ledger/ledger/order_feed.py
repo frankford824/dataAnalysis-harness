@@ -168,6 +168,10 @@ class OrderFeed:
             row = conn.execute("select * from feed_state where id=1").fetchone()
         return dict(row) if row else {}
 
+    def record_error(self, message: str) -> None:
+        with self._connect() as conn:
+            conn.execute("update feed_state set last_error=? where id=1", (message[:2000],))
+
     def status(self) -> dict[str, Any]:
         state = self.state()
         for key in ("health_json", "manifest_json"):
@@ -814,9 +818,9 @@ class Worker:
                 if result.caught_up and self.pending_stores and self.on_stores:
                     self.on_stores(set(self.pending_stores), self.feed.fingerprint())
                     self.pending_stores.clear()
-            except Exception:
+            except Exception as exc:
                 # status() carries the exact failure; a transient source outage must not kill Ledger.
-                pass
+                self.feed.record_error(str(exc))
             self.stop_event.wait(self.interval)
 
 

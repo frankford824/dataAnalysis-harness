@@ -236,10 +236,14 @@ def _apply_order_feed(store_ids: set[str], fingerprint: str) -> None:
         except KeyError:
             continue
         ws.note_external_version(store_id, "__order_console__", fingerprint)
-        service.recompute(
+        result = service.recompute(
             ws, snapshot.model, store,
             note=f"{store.name} · 订单台实时证据",
         )
+        if result.failure:
+            raise order_feed.OrderFeedError(
+                f"{store.name} 自动重算失败：{result.failure.get('why') or result.failure}"
+            )
 
 
 def _periods_of_store(ws: Any, store_id: str) -> list[PeriodState]:

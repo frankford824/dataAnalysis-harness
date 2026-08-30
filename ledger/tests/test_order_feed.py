@@ -6,7 +6,7 @@ from pathlib import Path
 
 import polars as pl
 
-from ledger.engine.runtime import Ingested, Ingestion, _project_scoped_live, run
+from ledger.engine.runtime import Ingested, Ingestion, _project_scoped_live, _slice_keys, run
 from ledger.engine.link import Spine
 from ledger.engine.link import SPINE_PERIOD, SPINE_STORE
 from ledger.engine.types import FileRef, Recognition
@@ -276,3 +276,11 @@ def test_live_product_projection_never_spreads_money_across_months():
         projected.group_by("period").agg(pl.col("amount").sum()).iter_rows()
     }
     assert totals == {"2026-06": -100.0, "2026-07": -200.0}
+
+
+def test_live_rows_without_accounting_date_never_create_a_null_period():
+    facts = pl.DataFrame({
+        "store": ["淘宝店", "淘宝店", "(未知店铺)"],
+        "period": [None, "2026-06", "2026-06"],
+    })
+    assert _slice_keys(facts) == [("淘宝店", "2026-06")]

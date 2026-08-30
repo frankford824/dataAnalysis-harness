@@ -921,7 +921,12 @@ def _slice_keys(facts: pl.DataFrame) -> list[tuple[str, str]]:
     if facts.is_empty():
         return []
     pairs = (
-        facts.filter(pl.col("store") != "(未知店铺)")
+        facts.filter(
+            (pl.col("store") != "(未知店铺)")
+            & pl.col("period").is_not_null()
+            & (pl.col("period") != "")
+            & (pl.col("period") != "(未知账期)")
+        )
         .select("store", "period")
         .unique()
         .sort("store", "period")
