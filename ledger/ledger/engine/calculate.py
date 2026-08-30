@@ -128,7 +128,11 @@ def evaluate_metric(
         # matching product's order month would move July ad spend into June.
         period = (
             pl.coalesce(own_period, pl.col("__spine_period__"))
-            if "__live_period_scope__" in frame.columns
+            if (
+                "__live_period_scope__" in frame.columns
+                and metric.link is not None
+                and metric.link.grain == "product"
+            )
             else pl.coalesce(pl.col("__spine_period__"), own_period)
         )
     else:

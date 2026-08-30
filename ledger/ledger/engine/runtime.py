@@ -681,7 +681,11 @@ def run(ingestion: Ingestion, platform: str = "*") -> RunResult:
     for metric in metrics:
         if not (metric.link and metric.link.to):
             continue
-        proj = _project_scoped_live(facts, metric, spine) if live_feed else project(facts, metric, spine)
+        proj = (
+            _project_scoped_live(facts, metric, spine)
+            if live_feed and metric.link is not None and metric.link.grain == "product"
+            else project(facts, metric, spine)
+        )
         projections[metric.id] = proj
         notes.extend(proj.notes)
         if not proj.facts.is_empty():
