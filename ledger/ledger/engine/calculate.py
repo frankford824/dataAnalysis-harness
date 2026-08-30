@@ -122,11 +122,17 @@ def evaluate_metric(
         if slot in frame.columns
         else pl.lit(None, dtype=pl.Utf8)
     )
-    period = (
-        pl.coalesce(pl.col("__spine_period__"), own_period)
-        if "__spine_period__" in frame.columns
-        else own_period
-    )
+    if "__spine_period__" in frame.columns:
+        # A multi-month live spine contains the same product in many periods.  The
+        # metric's declared time basis remains authoritative; inheriting the first
+        # matching product's order month would move July ad spend into June.
+        period = (
+            pl.coalesce(own_period, pl.col("__spine_period__"))
+            if "__live_period_scope__" in frame.columns
+            else pl.coalesce(pl.col("__spine_period__"), own_period)
+        )
+    else:
+        period = own_period
     period = pl.coalesce(period, pl.lit(period_hint or None, dtype=pl.Utf8))
 
     own_store = _own_store(frame, store_names or {}, notes if not shared_table else None)

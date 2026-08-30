@@ -6,7 +6,8 @@ from pathlib import Path
 
 import polars as pl
 
-from ledger.engine.runtime import Ingested, Ingestion, run
+from ledger.engine.runtime import Ingested, Ingestion, _project_scoped_live, run
+from ledger.engine.link import Spine
 from ledger.engine.link import SPINE_PERIOD, SPINE_STORE
 from ledger.engine.types import FileRef, Recognition
 from ledger.model.repository import ModelRepository
@@ -250,3 +251,28 @@ def test_existing_certified_spine_is_enriched_not_duplicated(tmp_path):
     assert existing.frame.row(0, named=True)["refund_status"] == "退款成功"
     assert existing.frame.row(0, named=True)["tracking_no"] == "SF1"
     assert live_only.frame.is_empty()
+
+
+def test_live_product_projection_never_spreads_money_across_months():
+    model = ModelRepository(
+        Path(__file__).resolve().parents[2] / "models" / "cn-ecommerce"
+    ).get().model
+    metric = model.metric("ad_cost")
+    facts = pl.DataFrame({
+        "metric_id": ["ad_cost", "ad_cost"],
+        "link_key": ["P1", "P1"],
+        "amount": [-100.0, -200.0],
+        "store": ["淘宝店", "淘宝店"],
+        "period": ["2026-06", "2026-07"],
+    })
+    spine = Spine(pl.DataFrame({
+        "product_id": ["P1", "P1"],
+        SPINE_STORE: ["淘宝店", "淘宝店"],
+        SPINE_PERIOD: ["2026-06", "2026-07"],
+    }))
+    projected = _project_scoped_live(facts, metric, spine).facts
+    totals = {
+        period: amount for period, amount in
+        projected.group_by("period").agg(pl.col("amount").sum()).iter_rows()
+    }
+    assert totals == {"2026-06": -100.0, "2026-07": -200.0}

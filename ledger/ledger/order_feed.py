@@ -455,6 +455,9 @@ class OrderFeed:
             if item.recognition.source_id not in REPLACED_SOURCES
         ]
         ingestion.items.extend(frames)
+        for item in ingestion.known:
+            assert item.frame is not None
+            item.frame = item.frame.with_columns(pl.lit(True).alias("__live_period_scope__"))
 
     @staticmethod
     def _enrich_existing_orders(ingestion: Ingestion, feed: pl.DataFrame | None) -> None:

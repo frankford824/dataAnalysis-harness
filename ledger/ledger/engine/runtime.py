@@ -23,6 +23,7 @@ from pathlib import Path
 import polars as pl
 
 from ..model.schema import Metric, Model, ParseOptions, Template
+from ..money import decimal_amount, money_float
 from ..version import engine_version
 from . import calculate as calc
 from .audit import AuditResult, audit
@@ -590,6 +591,10 @@ def run(ingestion: Ingestion, platform: str = "*") -> RunResult:
     """挂钩 → 归类 → 核算 → 自检。"""
     model = ingestion.model
     notes: list[str] = []
+    live_feed = any(
+        item.template is not None and item.template.id.startswith("order_console_")
+        for item in ingestion.known
+    )
     # 店铺档案里的每种写法 → 正名。核算时用来把表格自己报的店名归到登记的那家店，
     # 认不出来的当没报，见 `calc._own_store`。脊柱也要用同一份：订单明细里写的是
     # 旧名或别名，不换成正名，切片就会按旧名建一份、按正名再建一份，账裂成两半。
@@ -676,7 +681,7 @@ def run(ingestion: Ingestion, platform: str = "*") -> RunResult:
     for metric in metrics:
         if not (metric.link and metric.link.to):
             continue
-        proj = project(facts, metric, spine)
+        proj = _project_scoped_live(facts, metric, spine) if live_feed else project(facts, metric, spine)
         projections[metric.id] = proj
         notes.extend(proj.notes)
         if not proj.facts.is_empty():
@@ -699,6 +704,45 @@ def run(ingestion: Ingestion, platform: str = "*") -> RunResult:
             link_reports, classify_report, platform, eval_errors,
         )
     return result
+
+
+def _project_scoped_live(
+    source_facts: pl.DataFrame, metric: Metric, spine: Spine,
+) -> Projection:
+    """Project a live multi-month feed inside each accounting store-period.
+
+    Platform exports were historically one-month files.  With a multi-month spine, projecting
+    only by product/order key lets a June source row spread over July and August occurrences of
+    the same product.  The model's time basis has already assigned every source fact a period;
+    use that boundary for both the source and its eligible spine rows.
+    """
+    rows = source_facts.filter(claims(metric)) if not source_facts.is_empty() else source_facts
+    if rows.is_empty() or not {"store", "period"} <= set(rows.columns):
+        return project(source_facts, metric, spine)
+    pairs = [
+        (str(store or ""), str(period or ""))
+        for store, period in rows.select("store", "period").unique().iter_rows()
+        if store and period and period != "(未知账期)"
+    ]
+    if not pairs:
+        return project(source_facts, metric, spine)
+    parts: list[Projection] = []
+    for store, period in pairs:
+        scoped_source = source_facts.filter(
+            (pl.col("store") == store) & (pl.col("period") == period)
+        )
+        scoped_spine = spine.frame.filter(
+            (pl.col(SPINE_STORE) == store) & (pl.col(SPINE_PERIOD) == period)
+        )
+        parts.append(project(scoped_source, metric, Spine(scoped_spine)))
+    frames = [part.facts for part in parts if not part.facts.is_empty()]
+    return Projection(
+        facts=pl.concat(frames, how="vertical_relaxed") if frames else parts[0].facts,
+        orphan_amount=money_float(sum(decimal_amount(part.orphan_amount) for part in parts)),
+        orphan_keys=sum(part.orphan_keys for part in parts),
+        uncovered_rows=sum(part.uncovered_rows for part in parts),
+        notes=[note for part in parts for note in part.notes],
+    )
 
 
 def _exclude_linked(
