@@ -562,6 +562,9 @@ class OrderFeed:
             self._dt("order_time").alias("order_time"),
             self._dt("pay_time").alias("pay_time"),
             pl.lit(store.name).alias("store_name"),
+        ).with_columns(
+            pl.col("order_time").alias("order_date"),
+            pl.col("pay_time").alias("pay_date"),
         )
         return self._anchors(frame, fingerprint, "订单台实时订单")
 
@@ -593,7 +596,7 @@ class OrderFeed:
             self._dt("order_time").alias("order_time"),
             pl.lit(None, dtype=pl.Utf8).alias("order_type"),
             pl.lit(store.name).alias("store_name"),
-        )
+        ).with_columns(pl.col("order_time").alias("order_date"))
         return self._anchors(frame, fingerprint, "订单台日期时点成本")
 
     def _after_frame(

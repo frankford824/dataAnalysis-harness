@@ -6,7 +6,9 @@ from pathlib import Path
 
 import polars as pl
 
-from ledger.engine.runtime import Ingestion
+from ledger.engine.runtime import Ingestion, run
+from ledger.engine.link import SPINE_PERIOD, SPINE_STORE
+from ledger.model.repository import ModelRepository
 from ledger.model.schema import Store
 from ledger.order_feed import OrderFeed, OrderFeedError, OrderFeedNotFound
 from ledger.workspace import Workspace
@@ -135,6 +137,7 @@ def test_snapshot_and_delta_become_normalized_engine_sources(tmp_path):
     cost = ingestion.frames_of("order_cost")[0].frame
     after = ingestion.frames_of("after_sales")[0].frame
     assert order is not None and order.row(0, named=True)["order_id"] == "ON1"
+    assert order.get_column("order_date").null_count() == 0
     assert cost is not None and cost.row(0, named=True)["unit_cost"] == 3.5
     assert after is not None and after.row(0, named=True)["goods_status"] == "买家未收到货"
 
@@ -185,3 +188,23 @@ def test_replayed_upsert_whose_current_entity_is_gone_becomes_tombstone(tmp_path
             "select operation,payload_json from feed_entity where entity_type='order' and entity_id='1'"
         ).fetchone()
     assert tuple(row) == ("delete", None)
+
+
+def test_feed_order_time_builds_a_real_month_slice(tmp_path):
+    root = tmp_path / "feed"
+    manifest = _fixture(root)
+    feed = OrderFeed(tmp_path / "workspace", client=FakeClient(manifest), feed_root=root)
+    feed.sync()
+    model = ModelRepository(
+        Path(__file__).resolve().parents[2] / "models" / "cn-ecommerce"
+    ).get().model
+    store = model.store("taobao_msy387nx")
+    with feed._connect() as conn:  # noqa: SLF001 - fixture remaps one synthetic shop
+        conn.execute(
+            "update feed_store set ledger_store_id=? where order_store_id='10'", (store.id,)
+        )
+    ingestion = Ingestion(model=model)
+    feed.append_to(ingestion, store)
+    result = run(ingestion, store.platform)
+    assert result.spine.get_column(SPINE_PERIOD).to_list() == ["2026-06"]
+    assert result.spine.get_column(SPINE_STORE).to_list() == [store.name]
