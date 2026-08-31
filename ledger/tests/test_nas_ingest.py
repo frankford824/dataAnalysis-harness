@@ -1,12 +1,18 @@
 from __future__ import annotations
 
 import hashlib
+import shutil
 import sqlite3
 import time
 from pathlib import Path
 
 from ledger.model import load_model
-from ledger.nas_ingest import APPLY_SCHEMA, reconcile_missing, reconcile_ready
+from ledger.nas_ingest import (
+    APPLY_SCHEMA,
+    _extract_store_name,
+    reconcile_missing,
+    reconcile_ready,
+)
 from ledger.workspace import Workspace
 
 
@@ -29,18 +35,64 @@ insert into scan_meta values(1,1,'now','now',1,'');
 """
 
 
-def add_catalog(catalog: Path, path: Path, *, authority="calculation", missing=0, missing_since=None):
+def add_catalog(
+    catalog: Path,
+    path: Path,
+    *,
+    authority="calculation",
+    missing=0,
+    missing_since=None,
+    platform="淘宝天猫",
+    store_id="taobao_xibishun",
+    source="运费",
+    catalog_path: Path | None = None,
+):
     sha = hashlib.sha256(path.read_bytes()).hexdigest()
+    recorded = str(catalog_path or path)
     connection = sqlite3.connect(catalog)
     connection.execute(
         "insert into file_catalog(path,sha256,size,mtime_ns,platform,store_id,source,authority,state,rows,sheets,parquet_path,error,indexed_at,missing_scans,missing_since) "
         "values(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-        (str(path), sha, path.stat().st_size, 1, "淘宝天猫", "taobao_xibishun", "运费",
+        (recorded, sha, path.stat().st_size, 1, platform, store_id, source,
          authority, "ready", 1, 1, "", "", "now", missing, missing_since),
     )
     connection.commit()
     connection.close()
     return sha
+
+
+def write_feed(workspace_root: Path, ledger_store_id: str) -> None:
+    connection = sqlite3.connect(workspace_root / "order-feed.db")
+    connection.execute(
+        "create table if not exists feed_store ("
+        " order_store_id text primary key,"
+        " ledger_store_id text not null,"
+        " mapping_status text not null,"
+        " payload_json text not null)"
+    )
+    connection.execute(
+        "insert into feed_store(order_store_id,ledger_store_id,mapping_status,payload_json) "
+        "values(?,?,?,?)",
+        ("999001", ledger_store_id, "confirmed", "{}"),
+    )
+    connection.commit()
+    connection.close()
+
+
+def apply_states(catalog: Path) -> dict[str, str]:
+    return dict(sqlite3.connect(catalog).execute("select name,state from ledger_apply"))
+
+
+def test_extract_store_name_strips_source_and_dates():
+    labels = ("聚水潭成本", "订单明细", "运费", "对账（资金流水）", "权益保险（保费支出）")
+    assert _extract_store_name(
+        "蔡果-抖音喜品-聚水潭成本_20260831115536_188931298_1.xlsx", labels,
+    ) == "蔡果-抖音喜品"
+    assert _extract_store_name(
+        "蔡果-抖音喜品-保单明细-2026-08-27 20_12_21.csv", labels,
+    ) == "蔡果-抖音喜品"
+    assert _extract_store_name("运费-淘宝喜必顺.csv", labels) == "淘宝喜必顺"
+    assert _extract_store_name("订单明细-PddLucky惊喜派对.xlsx", labels) == "PddLucky惊喜派对"
 
 
 def test_ready_file_is_applied_and_search_only_is_not(tmp_path):
@@ -64,7 +116,7 @@ def test_ready_file_is_applied_and_search_only_is_not(tmp_path):
     assert not result["errors"]
     assert any(row["name"] == active.name for row in workspace.submissions())
     assert all(row["name"] != manual.name for row in workspace.submissions())
-    states = dict(sqlite3.connect(catalog).execute("select name,state from ledger_apply"))
+    states = apply_states(catalog)
     assert states[active.name] == "applied"
     assert states[manual.name] == "search_only"
 
@@ -94,3 +146,167 @@ def test_missing_requires_guard_then_forgets(tmp_path):
     result = reconcile_missing(workspace, load_model(MODEL), catalog)
     assert result["removed"] == 1
     assert not workspace.submissions("taobao_xibishun")
+
+
+def test_unrecognized_filename_learns_alias_and_applies(tmp_path):
+    model_dir = tmp_path / "model"
+    shutil.copytree(MODEL, model_dir)
+    root = tmp_path / "台账系统"
+    uploaded = (
+        root / "00_上传区" / "淘宝天猫" / "汪学成-天猫喜必顺旗舰店 [taobao_xibishun]" / "运费"
+    )
+    uploaded.mkdir(parents=True)
+    file = uploaded / "运费-喜必顺旗舰店.csv"
+    file.write_text("运单号,金额\nA1,1\n", encoding="utf-8")
+    catalog = tmp_path / "catalog.db"
+    sqlite3.connect(catalog).executescript(CATALOG).connection.close()
+    add_catalog(catalog, file)
+
+    workspace = Workspace(tmp_path / "workspace")
+    result = reconcile_ready(
+        workspace, load_model(model_dir), catalog, root, model_dir=model_dir,
+    )
+    assert not result["errors"]
+    assert any("自动学习别名：喜必顺旗舰店" in item for item in result["audits"])
+    assert apply_states(catalog)[file.name] == "applied"
+    store = load_model(model_dir).store("taobao_xibishun")
+    assert "喜必顺旗舰店" in store.aliases
+    accepted = (
+        root / "10_已接收" / "淘宝天猫" / "汪学成-天猫喜必顺旗舰店 [taobao_xibishun]"
+        / "运费" / file.name
+    )
+    assert accepted.is_file()
+    assert not file.exists()
+
+
+def test_filename_matching_other_store_is_still_quarantined(tmp_path):
+    model_dir = tmp_path / "model"
+    shutil.copytree(MODEL, model_dir)
+    root = tmp_path / "台账系统"
+    uploaded = (
+        root / "00_上传区" / "淘宝天猫" / "汪学成-天猫喜必顺旗舰店 [taobao_xibishun]" / "运费"
+    )
+    uploaded.mkdir(parents=True)
+    file = uploaded / "运费-京东皇莉诗.csv"
+    file.write_text("运单号,金额\nA1,1\n", encoding="utf-8")
+    catalog = tmp_path / "catalog.db"
+    sqlite3.connect(catalog).executescript(CATALOG).connection.close()
+    add_catalog(catalog, file)
+
+    workspace = Workspace(tmp_path / "workspace")
+    result = reconcile_ready(
+        workspace, load_model(model_dir), catalog, root, model_dir=model_dir,
+    )
+    assert result["errors"]
+    assert "冲突" in result["errors"][0]
+    assert apply_states(catalog)[file.name] == "quarantined"
+    assert (root / "20_需修正" / "淘宝天猫" / "汪学成-天猫喜必顺旗舰店 [taobao_xibishun]"
+            / "运费" / file.name).is_file()
+    assert "京东皇莉诗" not in load_model(model_dir).store("taobao_xibishun").aliases
+
+
+def test_unknown_store_registers_when_order_feed_confirms(tmp_path):
+    model_dir = tmp_path / "model"
+    shutil.copytree(MODEL, model_dir)
+    root = tmp_path / "台账系统"
+    uploaded = (
+        root / "00_上传区" / "快手" / "蔡果-快手自动测 [kuaishou_autotest]" / "运费"
+    )
+    uploaded.mkdir(parents=True)
+    file = uploaded / "运费-蔡果-快手自动测.csv"
+    file.write_text("运单号,金额\nA1,1\n", encoding="utf-8")
+    catalog = tmp_path / "catalog.db"
+    sqlite3.connect(catalog).executescript(CATALOG).connection.close()
+    add_catalog(catalog, file, platform="快手", store_id="kuaishou_autotest")
+    workspace = Workspace(tmp_path / "workspace")
+    write_feed(workspace.root, "kuaishou_autotest")
+
+    result = reconcile_ready(
+        workspace, load_model(model_dir), catalog, root, model_dir=model_dir,
+    )
+    assert not result["errors"]
+    assert any("自动登记店铺：kuaishou_autotest" in item for item in result["audits"])
+    store = load_model(model_dir).store("kuaishou_autotest")
+    assert store.name == "蔡果-快手自动测"
+    assert store.platform == "kuaishou"
+    assert apply_states(catalog)[file.name] == "applied"
+    assert any(row["name"] == file.name for row in workspace.submissions("kuaishou_autotest"))
+
+
+def test_unknown_store_without_feed_is_skipped_not_quarantined(tmp_path):
+    model_dir = tmp_path / "model"
+    shutil.copytree(MODEL, model_dir)
+    root = tmp_path / "台账系统"
+    uploaded = root / "00_上传区" / "快手" / "幽灵店 [ghost_shop]" / "运费"
+    uploaded.mkdir(parents=True)
+    file = uploaded / "运费-幽灵店.csv"
+    file.write_text("运单号,金额\nA1,1\n", encoding="utf-8")
+    catalog = tmp_path / "catalog.db"
+    sqlite3.connect(catalog).executescript(CATALOG).connection.close()
+    add_catalog(catalog, file, platform="快手", store_id="ghost_shop")
+
+    workspace = Workspace(tmp_path / "workspace")
+    result = reconcile_ready(
+        workspace, load_model(model_dir), catalog, root, model_dir=model_dir,
+    )
+    assert result["errors"]
+    assert "不在订单台映射中" in result["errors"][0]
+    assert file.is_file()
+    assert not list((root / "20_需修正").rglob("*.csv")) if (root / "20_需修正").exists() else True
+    assert apply_states(catalog) == {}
+    assert "ghost_shop" not in {store.id for store in load_model(model_dir).stores}
+
+
+def test_quarantined_file_is_rescued_after_alias_learning(tmp_path):
+    model_dir = tmp_path / "model"
+    shutil.copytree(MODEL, model_dir)
+    root = tmp_path / "台账系统"
+    original = (
+        root / "00_上传区" / "抖音" / "蔡果-抖店喜品 [douyin_mt9sbkne]" / "运费"
+        / "蔡果-抖音喜品-运费.csv"
+    )
+    quarantined = (
+        root / "20_需修正" / "抖音" / "蔡果-抖店喜品 [douyin_mt9sbkne]" / "运费"
+        / "蔡果-抖音喜品-运费.csv"
+    )
+    quarantined.parent.mkdir(parents=True)
+    quarantined.write_text("运单号,金额\nA1,1\n", encoding="utf-8")
+    catalog = tmp_path / "catalog.db"
+    sqlite3.connect(catalog).executescript(CATALOG).connection.close()
+    sha = add_catalog(
+        catalog, quarantined,
+        catalog_path=original,
+        platform="抖音",
+        store_id="douyin_mt9sbkne",
+    )
+    connection = sqlite3.connect(catalog)
+    connection.executescript(APPLY_SCHEMA)
+    connection.execute(
+        "insert into ledger_apply(path,sha256,store_id,name,state,applied_at,error) "
+        "values(?,?,?,?,?,?,?)",
+        (str(original), sha, "douyin_mt9sbkne", original.name, "quarantined", "now",
+         "文件名无法识别店铺；目录登记为 douyin_mt9sbkne"),
+    )
+    connection.commit()
+    connection.close()
+
+    workspace = Workspace(tmp_path / "workspace")
+    result = reconcile_ready(
+        workspace, load_model(model_dir), catalog, root, model_dir=model_dir,
+    )
+    assert not result["errors"]
+    assert "蔡果-抖音喜品" in load_model(model_dir).store("douyin_mt9sbkne").aliases
+    accepted = (
+        root / "10_已接收" / "抖音" / "蔡果-抖店喜品 [douyin_mt9sbkne]" / "运费"
+        / original.name
+    )
+    assert accepted.is_file()
+    assert not quarantined.exists()
+    states = dict(sqlite3.connect(catalog).execute("select path,state from ledger_apply"))
+    assert states[str(accepted)] == "applied"
+    catalog_path, missing = sqlite3.connect(catalog).execute(
+        "select path,missing_scans from file_catalog"
+    ).fetchone()
+    assert catalog_path == str(accepted)
+    assert missing == 0
+    assert any(row["name"] == original.name for row in workspace.submissions("douyin_mt9sbkne"))
