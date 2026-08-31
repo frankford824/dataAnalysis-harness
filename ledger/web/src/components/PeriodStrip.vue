@@ -1,15 +1,8 @@
 <script setup>
 /* 一家店的账期切换。
  *
- * 摆法照日历来：翻页键在最左，后面是当前月份；选择区分成「年份」和「月份」两级。
- * 年份放在可滚动的窄栏里，一次只展开一年的十二个月，避免几十个账期继续横向平铺。
- * 月份仍按一到十二排——倒序是列表逻辑，不是日历逻辑。
- *
- * 没算过的月份留在原位、点不动。这样一年里哪几个月还没账，扫一眼就知道；
- * 只列算过的那几个月，缺口就看不见了。
- *
- * 每个月都显示状态，但用绿/蓝/红/橙四种固定语义，并在下方给图例。当前月份再用
- * 深色选中态强调，避免「正在看哪个月」和「这个月是否已结」混成同一件事。
+ * 用年份横向标签 + 月份网格的方式展现。年份用标签切换，月份按日历排列成 4×3
+ * 网格。每个月的状态用颜色和文字双重表达。
  */
 import { computed, ref, watch } from 'vue'
 
@@ -21,7 +14,6 @@ const props = defineProps({
 
 const emit = defineEmits(['update:modelValue'])
 
-//: 认不出年月的账期（「(未知账期)」）归到这一档，不能让它挤进某一年的十二格里。
 const OTHER = '其他'
 
 function yearOf(period) {
@@ -147,50 +139,44 @@ const yearCounts = computed(() => {
       </div>
     </div>
 
-    <div class="period-levels">
-      <div class="year-level">
-        <div class="level-title">年份</div>
-        <div class="years" role="listbox" aria-label="选择年份">
-          <button
-            v-for="y in years"
-            :key="y"
-            type="button"
-            :class="{ on: y === shownYear }"
-            :aria-selected="y === shownYear"
-            @click="pickYear(y)"
-          >
-            <span>{{ y }}</span><small>{{ yearCounts.get(y) }} 期</small>
-          </button>
-        </div>
+    <div class="strip-card">
+      <div class="year-tabs" role="tablist" aria-label="选择年份">
+        <button
+          v-for="y in years"
+          :key="y"
+          type="button"
+          role="tab"
+          :class="{ on: y === shownYear }"
+          :aria-selected="y === shownYear"
+          @click="pickYear(y)"
+        >
+          {{ y }}<small>{{ yearCounts.get(y) }}期</small>
+        </button>
       </div>
-      <div class="month-level">
-        <div class="level-title month-title">
-          <span>{{ shownYear === OTHER ? '其他账期' : `${shownYear} 年` }}</span>
-          <small>{{ shownYear === OTHER ? '按原始名称选择' : '选择月份' }}</small>
-        </div>
-        <div class="months" :class="{ free: shownYear === OTHER }" role="listbox" aria-label="选择月份">
-          <button
-            v-for="m in months"
-            :key="m.key"
-            type="button"
-            :class="[m.status?.mark, { on: m.period === modelValue, off: !m.has }]"
-            :disabled="!m.has"
-            :aria-selected="m.period === modelValue"
-            :title="m.has ? `${pretty(m.period)} · ${statusOf(byPeriod.get(m.period)).text}` : '这个月还没算过'"
-            @click="go(m.period)"
-          >
-            <span class="month-number">{{ m.label }}<em v-if="shownYear !== OTHER">月</em></span>
-            <small>{{ m.has ? statusOf(byPeriod.get(m.period)).text : '暂无' }}</small>
-            <i v-if="m.has" class="month-state" />
-          </button>
-        </div>
+
+      <div class="month-grid" :class="{ free: shownYear === OTHER }" role="listbox" aria-label="选择月份">
+        <button
+          v-for="m in months"
+          :key="m.key"
+          type="button"
+          class="m-cell"
+          :class="[m.status?.mark, { on: m.period === modelValue, off: !m.has }]"
+          :disabled="!m.has"
+          :aria-selected="m.period === modelValue"
+          :title="m.has ? `${pretty(m.period)} · ${statusOf(byPeriod.get(m.period)).text}` : '这个月还没算过'"
+          @click="go(m.period)"
+        >
+          <span class="m-num">{{ m.label }}<em v-if="shownYear !== OTHER">月</em></span>
+          <span class="m-status">{{ m.has ? statusOf(byPeriod.get(m.period)).text : '' }}</span>
+        </button>
       </div>
-    </div>
-    <div class="legend">
-      <span class="closed"><i />已结账 {{ statusCounts.closed }}</span>
-      <span class="ready"><i />可确认 {{ statusCounts.ready }}</span>
-      <span class="pending"><i />待补证据 {{ statusCounts.pending }}</span>
-      <span class="evidence"><i />有新证据 {{ statusCounts.evidence }}</span>
+
+      <div class="legend">
+        <span class="closed"><i />已结账 {{ statusCounts.closed }}</span>
+        <span class="ready"><i />可确认 {{ statusCounts.ready }}</span>
+        <span class="pending"><i />待补证据 {{ statusCounts.pending }}</span>
+        <span class="evidence"><i />有新证据 {{ statusCounts.evidence }}</span>
+      </div>
     </div>
   </div>
 </template>
@@ -203,23 +189,24 @@ const yearCounts = computed(() => {
 }
 .periods.compact { margin-top: var(--s4); }
 
+/* 顶部导航行 */
 .head {
   display: flex;
   align-items: center;
   gap: var(--s3);
-  margin-bottom: var(--s3);
+  margin-bottom: var(--s4);
 }
 
 .pager { display: flex; gap: var(--s1); }
 .pager button {
-  width: 28px;
-  height: 28px;
+  width: 30px;
+  height: 30px;
   padding: 0;
   border: 1px solid var(--n3);
   border-radius: var(--r-sm);
   background: var(--n0);
   color: var(--n6);
-  font-size: 17px;
+  font-size: 18px;
   line-height: 1;
   cursor: pointer;
   transition: color .15s, border-color .15s;
@@ -241,13 +228,13 @@ const yearCounts = computed(() => {
   gap: 6px;
   font-size: var(--t-sm);
   color: var(--n6);
-  padding: 3px 9px;
+  padding: 3px 10px;
   border-radius: 999px;
   background: var(--n2);
 }
 .state i {
-  width: 6px;
-  height: 6px;
+  width: 7px;
+  height: 7px;
   border-radius: 50%;
   background: currentColor;
 }
@@ -256,115 +243,154 @@ const yearCounts = computed(() => {
 .state.pending { color: var(--warn); background: var(--warn-bg); }
 .state.evidence { color: var(--ok); background: var(--ok-bg); }
 
-.period-levels {
-  display: grid;
-  grid-template-columns: 112px minmax(0, 1fr);
-  min-height: 178px;
+/* 主容器 */
+.strip-card {
+  border: 1px solid var(--n3);
+  border-radius: var(--r-lg);
+  background: var(--n0);
   overflow: hidden;
+}
+
+/* 年份标签行 */
+.year-tabs {
+  display: flex;
+  gap: 0;
+  padding: 0 var(--s3);
+  border-bottom: 1px solid var(--n3);
+  background: var(--n1);
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+.year-tabs::-webkit-scrollbar { display: none; }
+.year-tabs button {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+  padding: 10px 16px;
+  border: none;
+  border-bottom: 2px solid transparent;
+  background: none;
+  font: 500 var(--t-sm)/1.4 var(--num);
+  color: var(--n5);
+  white-space: nowrap;
+  cursor: pointer;
+  transition: color .12s, border-color .12s;
+  margin-bottom: -1px;
+}
+.year-tabs button:hover { color: var(--n8); }
+.year-tabs button.on {
+  color: var(--n9);
+  font-weight: 640;
+  border-bottom-color: var(--n9);
+}
+.year-tabs button small {
+  font-family: var(--font);
+  font-size: 10px;
+  font-weight: 400;
+  color: var(--n4);
+}
+.year-tabs button.on small { color: var(--n6); }
+
+/* 月份网格 */
+.month-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+  padding: 16px 20px;
+}
+.month-grid.free { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+
+.m-cell {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 3px;
+  min-height: 56px;
+  padding: 10px 14px;
   border: 1px solid var(--n3);
   border-radius: var(--r-md);
   background: var(--n0);
+  text-align: left;
+  cursor: pointer;
+  transition: all .12s;
 }
-.year-level {
-  min-width: 0;
-  padding: var(--s2);
-  border-right: 1px solid var(--n3);
+.m-cell:hover:not(:disabled):not(.on) {
+  border-color: var(--n5);
   background: var(--n1);
 }
-.month-level { min-width: 0; padding: var(--s2) var(--s3) var(--s3); }
-.level-title {
-  padding: 4px 7px 7px;
-  color: var(--n5);
-  font-size: var(--t-xs);
-  font-weight: 560;
-  letter-spacing: .04em;
-}
-.month-title { display: flex; align-items: baseline; justify-content: space-between; }
-.month-title span { color: var(--n8); font-family: var(--num); font-size: var(--t-sm); }
-.month-title small { color: var(--n5); font-weight: 400; letter-spacing: 0; }
 
-.years {
-  display: grid;
-  gap: 3px;
-  max-height: 140px;
-  overflow-y: auto;
-  scrollbar-width: thin;
-}
-.months { display: grid; grid-template-columns: repeat(4, minmax(76px, 1fr)); gap: 6px; }
-.months.free { grid-template-columns: repeat(2, minmax(110px, 1fr)); }
-
-.years button,
-.months button {
-  border: 1px solid transparent;
-  background: transparent;
-  color: var(--n6);
-  font: inherit;
-  line-height: 1;
-  cursor: pointer;
-  border-radius: var(--r-sm);
-  transition: color .12s, background .12s;
-}
-.years button {
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
+.m-num {
   font-family: var(--num);
+  font-size: var(--t-base);
+  font-weight: 640;
+  line-height: 1.2;
+  color: var(--n8);
+}
+.m-num em {
+  margin-left: 1px;
+  font-family: var(--font);
   font-size: var(--t-xs);
-  padding: 7px 8px;
-  text-align: left;
+  font-style: normal;
+  font-weight: 400;
+  color: var(--n5);
 }
-.years button small { color: var(--n5); font-family: var(--font); font-size: 10px; }
-.months button {
-  display: grid;
-  grid-template-columns: 1fr auto;
-  align-items: center;
-  min-width: 0;
-  min-height: 42px;
-  padding: 6px 9px;
-  border-color: var(--n3);
-  text-align: left;
-  position: relative;
+.m-status {
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 1;
+  color: var(--n5);
 }
-.months.free button {
-  min-height: 36px;
-}
-.years button:hover,
-.months button:hover:not(:disabled) { color: var(--n9); border-color: var(--n5); background: var(--n1); }
 
-.years button.on { color: var(--n0); background: var(--n8); font-weight: 560; }
-.years button.on small { color: var(--n3); }
-.months button.on { color: var(--n0); border-color: var(--n8); background: var(--n8); font-weight: 560; }
-.months button.closed { color: var(--ok); background: var(--ok-bg); }
-.months button.ready { color: var(--accent); background: var(--accent-bg); }
-.months button.pending { color: var(--warn); background: var(--warn-bg); }
-.months button.evidence { color: var(--ok); background: var(--ok-bg); }
-.months button.on { color: var(--n0); background: var(--n8); }
-.month-number { font-family: var(--num); font-size: var(--t-sm); font-weight: 600; }
-.month-number em { margin-left: 2px; font-family: var(--font); font-size: 10px; font-style: normal; font-weight: 400; }
-.months button small { color: currentColor; font-size: 10px; opacity: .75; }
-.month-state {
-  position: absolute;
-  right: 5px;
-  top: 5px;
-  width: 4px;
-  height: 4px;
-  border-radius: 50%;
-  background: currentColor;
-}
-/* 没算过的月份：淡到不像能点，但位置还占着——缺哪个月是要看见的。 */
-.months button.off { color: var(--n4); cursor: default; }
+/* 状态色 */
+.m-cell.closed { border-color: #c8e6d4; background: var(--ok-bg); }
+.m-cell.closed .m-num { color: var(--ok); }
+.m-cell.closed .m-status { color: var(--ok); }
 
+.m-cell.ready { border-color: #c2d4f7; background: var(--accent-bg); }
+.m-cell.ready .m-num { color: var(--accent); }
+.m-cell.ready .m-status { color: var(--accent); }
+
+.m-cell.pending { border-color: #f0d8a8; background: var(--warn-bg); }
+.m-cell.pending .m-num { color: var(--warn); }
+.m-cell.pending .m-status { color: var(--warn); }
+
+.m-cell.evidence { border-color: #c8e6d4; background: var(--ok-bg); }
+.m-cell.evidence .m-num { color: var(--ok); }
+.m-cell.evidence .m-status { color: var(--ok); }
+
+/* 选中态：深色边框 + 底色，保留状态色文字 */
+.m-cell.on {
+  border-color: var(--n8);
+  background: var(--n8);
+  box-shadow: 0 1px 4px rgba(0,0,0,.15);
+}
+.m-cell.on .m-num,
+.m-cell.on .m-status,
+.m-cell.on .m-num em { color: var(--n0); }
+
+/* 空月份 */
+.m-cell.off {
+  border-color: var(--n2);
+  background: var(--n1);
+  cursor: default;
+}
+.m-cell.off .m-num { color: var(--n4); }
+.m-cell.off .m-num em { color: var(--n3); }
+
+/* 图例 */
 .legend {
   display: flex;
   flex-wrap: wrap;
   gap: var(--s3);
-  margin-top: var(--s2);
-  padding-left: 124px;
+  padding: 10px 20px 12px;
+  border-top: 1px solid var(--n3);
+  background: var(--n1);
   color: var(--n6);
   font-size: var(--t-xs);
 }
 .legend span { display: inline-flex; align-items: center; gap: 5px; }
-.legend i { width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+.legend i { width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
 .legend .closed { color: var(--ok); }
 .legend .ready { color: var(--accent); }
 .legend .pending { color: var(--warn); }
@@ -372,12 +398,9 @@ const yearCounts = computed(() => {
 
 @media (max-width: 640px) {
   .head { flex-wrap: wrap; }
-  .period-levels { grid-template-columns: minmax(0, 1fr); }
-  .year-level { border-right: 0; border-bottom: 1px solid var(--n3); }
-  .years { display: flex; overflow-x: auto; overflow-y: hidden; max-height: none; }
-  .years button { min-width: 92px; gap: var(--s2); }
-  .months { grid-template-columns: repeat(3, minmax(72px, 1fr)); }
-  .months.free { grid-template-columns: minmax(0, 1fr); }
-  .legend { padding-left: 0; gap: var(--s2); }
+  .month-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px; padding: 12px; }
+  .month-grid.free { grid-template-columns: minmax(0, 1fr); }
+  .m-cell { min-height: 48px; padding: 8px 10px; }
+  .legend { padding: 8px 12px; gap: var(--s2); }
 }
 </style>
