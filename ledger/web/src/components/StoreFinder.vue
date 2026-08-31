@@ -56,13 +56,7 @@ function dot(store) {
       </template>
     </n-input>
 
-    <div class="store-legend">
-      <span class="open"><i />有未结账</span>
-      <span class="closed"><i />最近已结账</span>
-      <span class="none"><i />暂无账期</span>
-    </div>
-
-    <div v-if="!query.trim()" class="platform-finder">
+    <div v-if="!query.trim()" class="platform-tags">
       <button
         v-for="item in platformRows"
         :key="item.id"
@@ -70,7 +64,7 @@ function dot(store) {
         :class="{ on: platform === item.id }"
         @click="platform = platform === item.id ? '' : item.id"
       >
-        <span>{{ item.name }}</span><span class="num">{{ item.count }}</span>
+        {{ item.name }} <span class="num">{{ item.count }}</span>
       </button>
     </div>
 
@@ -101,37 +95,59 @@ function dot(store) {
 <style scoped>
 .store-finder {
   min-width: 0;
-  padding: 18px 16px 12px;
+  padding: 16px 14px 12px;
   background: var(--n0);
   border: 1px solid var(--n3);
   border-radius: var(--r-lg);
 }
-.store-finder h3 { margin-bottom: 12px; font-size: var(--t-md); }
+.store-finder h3 { margin-bottom: 10px; font-size: var(--t-sm); font-weight: 620; color: var(--n7); }
 .store-finder :deep(.n-input__prefix) { margin-right: 6px; }
 .store-finder :deep(.n-input__prefix) svg { width: 15px; height: 15px; fill: none; stroke: currentColor; stroke-width: 1.8; }
-.store-legend { display: flex; flex-wrap: wrap; gap: 7px 10px; margin: 12px 0; color: var(--n6); font-size: 11.5px; }
-.store-legend span { display: inline-flex; align-items: center; gap: 5px; }
-.store-legend i, .store-finder-results i { width: 7px; height: 7px; border-radius: 50%; background: var(--n4); }
-.store-legend .open i, .store-finder-results i.open { background: var(--warn); }
-.store-legend .closed i, .store-finder-results i.closed { background: var(--ok); }
-.store-legend .none i, .store-finder-results i.none { background: var(--n0); border: 1px solid var(--n4); }
-.platform-finder { border: 1px solid var(--n3); border-radius: var(--r-md); overflow: hidden; }
-.platform-finder button {
-  display: flex; justify-content: space-between; gap: 8px; width: 100%; padding: 8px 10px;
-  border: 0; border-bottom: 1px solid var(--n3); background: var(--n0); color: var(--n7);
-  font: var(--t-sm)/1.4 var(--sans); text-align: left;
+
+.platform-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  margin: 10px 0;
 }
-.platform-finder button:last-child { border-bottom: 0; }
-.platform-finder button:hover, .platform-finder button.on { background: var(--n1); color: var(--accent); }
-.store-finder-results { max-height: 270px; overflow: auto; margin-top: 10px; }
+.platform-tags button {
+  border: 1px solid var(--n3);
+  border-radius: 999px;
+  padding: 3px 10px;
+  background: var(--n0);
+  color: var(--n7);
+  font: 560 11.5px/1.5 var(--sans);
+  white-space: nowrap;
+  transition: all .12s;
+}
+.platform-tags button:hover { background: var(--n1); border-color: var(--n4); }
+.platform-tags button.on { color: var(--accent); border-color: var(--accent); background: var(--accent-bg); }
+.platform-tags .num { margin-left: 2px; opacity: .65; }
+.platform-tags button.on .num { opacity: 1; }
+
+.store-finder-results { max-height: 320px; overflow: auto; margin-top: 4px; }
+.store-finder-results i { width: 7px; height: 7px; border-radius: 50%; background: var(--n4); flex-shrink: 0; }
+.store-finder-results i.open { background: var(--warn); }
+.store-finder-results i.closed { background: var(--ok); }
+.store-finder-results i.none { background: var(--n0); border: 1.5px solid var(--n4); }
 .store-finder-results button {
-  display: grid; grid-template-columns: 8px minmax(0, 1fr) 16px; align-items: center; gap: 8px;
-  width: 100%; padding: 8px 9px; border: 0; border-radius: var(--r-sm); background: none;
-  color: var(--n7); font: var(--t-sm)/1.35 var(--sans); text-align: left;
+  display: grid;
+  grid-template-columns: 8px minmax(0, 1fr) 16px;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 7px 8px;
+  border: 0;
+  border-radius: var(--r-sm);
+  background: none;
+  color: var(--n7);
+  font: var(--t-xs)/1.4 var(--sans);
+  text-align: left;
+  transition: background .1s;
 }
 .store-finder-results button:hover { background: var(--n1); }
 .store-finder-results button.selected { color: var(--accent); background: var(--accent-bg); font-weight: 620; }
 .store-finder-results button span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .store-finder-results svg { width: 15px; fill: none; stroke: currentColor; stroke-width: 2; }
-.store-finder footer { display: flex; justify-content: space-between; margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--n3); color: var(--n5); font-size: var(--t-xs); }
+.store-finder footer { display: flex; justify-content: space-between; margin-top: 10px; padding-top: 8px; border-top: 1px solid var(--n3); color: var(--n5); font-size: var(--t-xs); }
 </style>
