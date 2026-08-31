@@ -1,10 +1,14 @@
 <script setup>
-/* 一家店的账期切换。
+/* iOS 风格滑动选择器：年份 | 月份 两列联动。
  *
- * 用年份横向标签 + 月份网格的方式展现。年份用标签切换，月份按日历排列成 4×3
- * 网格。每个月的状态用颜色和文字双重表达。
+ * 年份列滚动后更新月份列的数据状态；月份列滚动到有数据的月份时触发导航。
+ * 视觉上用渐变遮罩 + 中央高亮带模拟 iOS UIPickerView 的观感。
  */
-import { computed, ref, watch } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
+
+const ITEM_H = 40
+const VISIBLE = 5
+const PAD = Math.floor(VISIBLE / 2) * ITEM_H
 
 const props = defineProps({
   periods: { type: Array, default: () => [] },
@@ -16,75 +20,46 @@ const emit = defineEmits(['update:modelValue'])
 
 const OTHER = '其他'
 
-function yearOf(period) {
-  return /^\d{4}-\d{2}$/.test(period || '') ? period.slice(0, 4) : OTHER
-}
-
-function pretty(period) {
-  const m = /^(\d{4})-(\d{2})$/.exec(period || '')
-  return m ? `${m[1]} 年 ${Number(m[2])} 月` : period || ''
-}
+function yearOf(p) { return /^\d{4}-\d{2}$/.test(p || '') ? p.slice(0, 4) : OTHER }
+function monthIdx(p) { const m = /^\d{4}-(\d{2})$/.exec(p || ''); return m ? Number(m[1]) - 1 : 0 }
+function pretty(p) { const m = /^(\d{4})-(\d{2})$/.exec(p || ''); return m ? `${m[1]} 年 ${Number(m[2])} 月` : p || '' }
 
 const list = computed(() =>
   [...(props.periods || [])].sort((a, b) => String(b.period).localeCompare(String(a.period))),
 )
-
 const index = computed(() => list.value.findIndex((p) => p.period === props.modelValue))
 const current = computed(() => list.value[index.value] || null)
 const byPeriod = computed(() => new Map(list.value.map((p) => [p.period, p])))
 
 const years = computed(() => {
   const out = []
-  for (const p of list.value) {
-    const y = yearOf(p.period)
-    if (!out.includes(y)) out.push(y)
-  }
+  for (const p of list.value) { const y = yearOf(p.period); if (!out.includes(y)) out.push(y) }
   return out
 })
 
 const shownYear = ref('')
-
-watch(
-  () => [props.modelValue, years.value],
-  () => {
-    const y = yearOf(props.modelValue)
-    if (years.value.includes(y)) shownYear.value = y
-    else if (!years.value.includes(shownYear.value)) shownYear.value = years.value[0] || ''
-  },
-  { immediate: true },
-)
+function syncYear() {
+  const y = yearOf(props.modelValue)
+  if (years.value.includes(y)) shownYear.value = y
+  else if (!years.value.includes(shownYear.value)) shownYear.value = years.value[0] || ''
+}
+watch(() => [props.modelValue, years.value], syncYear, { immediate: true })
 
 const months = computed(() => {
   if (shownYear.value === OTHER) {
     return list.value
       .filter((p) => yearOf(p.period) === OTHER)
-      .map((p) => ({
-        key: p.period, label: p.period || '未知', period: p.period, has: true,
-        status: statusOf(p),
-      }))
+      .map((p) => ({ key: p.period, label: p.period || '未知', period: p.period, has: true, status: statusOf(p) }))
   }
   return Array.from({ length: 12 }, (_, i) => {
     const period = `${shownYear.value}-${String(i + 1).padStart(2, '0')}`
     const item = byPeriod.value.get(period)
-    return {
-      key: period, label: `${i + 1}`, period, has: !!item,
-      status: statusOf(item),
-    }
+    return { key: period, label: `${i + 1}`, period, has: !!item, status: statusOf(item) }
   })
 })
 
-function go(p) {
-  if (p && p !== props.modelValue) emit('update:modelValue', p)
-}
-
-function step(dir) {
-  const next = list.value[index.value + dir]
-  if (next) go(next.period)
-}
-
-function pickYear(year) {
-  shownYear.value = year
-}
+function go(p) { if (p && p !== props.modelValue) emit('update:modelValue', p) }
+function step(dir) { const next = list.value[index.value + dir]; if (next) go(next.period) }
 
 function statusOf(p) {
   if (!p) return { mark: '', text: '' }
@@ -96,87 +71,116 @@ function statusOf(p) {
 
 const status = computed(() => statusOf(current.value))
 const statusCounts = computed(() => {
-  const counts = { closed: 0, ready: 0, pending: 0, evidence: 0 }
-  for (const item of list.value) counts[statusOf(item).mark || 'pending'] += 1
-  return counts
+  const c = { closed: 0, ready: 0, pending: 0, evidence: 0 }
+  for (const item of list.value) c[statusOf(item).mark || 'pending'] += 1
+  return c
 })
 const yearCounts = computed(() => {
-  const counts = new Map()
-  for (const item of list.value) {
-    const year = yearOf(item.period)
-    counts.set(year, (counts.get(year) || 0) + 1)
-  }
-  return counts
+  const m = new Map()
+  for (const item of list.value) { const y = yearOf(item.period); m.set(y, (m.get(y) || 0) + 1) }
+  return m
 })
+
+const yearCol = ref(null)
+const monthCol = ref(null)
+let ytimer = null
+let mtimer = null
+let suppress = false
+
+function scrollCol(el, idx, smooth = true) {
+  if (!el) return
+  el.scrollTo({ top: Math.max(0, idx) * ITEM_H, behavior: smooth ? 'smooth' : 'instant' })
+}
+
+function onYearScroll() {
+  if (suppress) return
+  clearTimeout(ytimer)
+  ytimer = setTimeout(() => {
+    if (!yearCol.value) return
+    const idx = Math.round(yearCol.value.scrollTop / ITEM_H)
+    const yr = years.value[Math.max(0, Math.min(years.value.length - 1, idx))]
+    if (yr && yr !== shownYear.value) {
+      shownYear.value = yr
+      nextTick(() => {
+        const mi = Math.round((monthCol.value?.scrollTop || 0) / ITEM_H)
+        const m = months.value[Math.max(0, Math.min(months.value.length - 1, mi))]
+        if (m?.has) go(m.period)
+      })
+    }
+  }, 80)
+}
+
+function onMonthScroll() {
+  if (suppress) return
+  clearTimeout(mtimer)
+  mtimer = setTimeout(() => {
+    if (!monthCol.value) return
+    const idx = Math.round(monthCol.value.scrollTop / ITEM_H)
+    const m = months.value[Math.max(0, Math.min(months.value.length - 1, idx))]
+    if (m?.has) go(m.period)
+  }, 80)
+}
+
+function scrollToSelection(smooth = true) {
+  suppress = true
+  const yi = years.value.indexOf(shownYear.value)
+  if (yi >= 0) scrollCol(yearCol.value, yi, smooth)
+  scrollCol(monthCol.value, monthIdx(props.modelValue), smooth)
+  setTimeout(() => (suppress = false), smooth ? 400 : 60)
+}
+
+watch(() => props.modelValue, (v, o) => {
+  if (!v || v === o) return
+  syncYear()
+  nextTick(() => scrollToSelection(true))
+})
+
+onMounted(() => nextTick(() => scrollToSelection(false)))
+onUnmounted(() => { clearTimeout(ytimer); clearTimeout(mtimer) })
 </script>
 
 <template>
   <div v-if="list.length" class="periods" :class="{ compact }">
     <div class="head">
       <div class="pager">
-        <button
-          type="button"
-          :disabled="index <= 0"
-          title="较新的一个月"
-          aria-label="较新的一个月"
-          @click="step(-1)"
-        >
-          ‹
-        </button>
-        <button
-          type="button"
-          :disabled="index < 0 || index >= list.length - 1"
-          title="更早的一个月"
-          aria-label="更早的一个月"
-          @click="step(1)"
-        >
-          ›
-        </button>
+        <button type="button" :disabled="index <= 0" title="较新的一个月" @click="step(-1)">‹</button>
+        <button type="button" :disabled="index < 0 || index >= list.length - 1" title="更早的一个月" @click="step(1)">›</button>
       </div>
       <div class="when">{{ pretty(modelValue) }}</div>
-      <div v-if="status.text" class="state" :class="status.mark">
-        <i />{{ status.text }}
+      <div v-if="status.text" class="state" :class="status.mark"><i />{{ status.text }}</div>
+    </div>
+
+    <div class="picker" :style="{ height: `${ITEM_H * VISIBLE}px` }">
+      <div class="picker-band" :style="{ top: `${PAD}px`, height: `${ITEM_H}px` }" />
+      <div class="picker-fade top" :style="{ height: `${PAD}px` }" />
+      <div class="picker-fade btm" :style="{ bottom: 0, height: `${PAD}px` }" />
+
+      <div ref="yearCol" class="picker-col year-col" @scroll.passive="onYearScroll">
+        <div class="picker-pad" :style="{ height: `${PAD}px` }" />
+        <div v-for="y in years" :key="y" class="picker-cell" :style="{ height: `${ITEM_H}px` }">
+          <span class="cell-main">{{ y }}</span>
+          <span class="cell-sub">{{ yearCounts.get(y) }}期</span>
+        </div>
+        <div class="picker-pad" :style="{ height: `${PAD}px` }" />
+      </div>
+
+      <div class="picker-sep" />
+
+      <div ref="monthCol" class="picker-col month-col" @scroll.passive="onMonthScroll">
+        <div class="picker-pad" :style="{ height: `${PAD}px` }" />
+        <div v-for="m in months" :key="m.key" class="picker-cell" :class="{ off: !m.has }" :style="{ height: `${ITEM_H}px` }">
+          <span class="cell-main">{{ m.label }}<em v-if="shownYear !== OTHER">月</em></span>
+          <span v-if="m.has" class="cell-status" :class="m.status.mark">{{ m.status.text }}</span>
+        </div>
+        <div class="picker-pad" :style="{ height: `${PAD}px` }" />
       </div>
     </div>
 
-    <div class="strip-card">
-      <div class="year-tabs" role="tablist" aria-label="选择年份">
-        <button
-          v-for="y in years"
-          :key="y"
-          type="button"
-          role="tab"
-          :class="{ on: y === shownYear }"
-          :aria-selected="y === shownYear"
-          @click="pickYear(y)"
-        >
-          {{ y }}<small>{{ yearCounts.get(y) }}期</small>
-        </button>
-      </div>
-
-      <div class="month-grid" :class="{ free: shownYear === OTHER }" role="listbox" aria-label="选择月份">
-        <button
-          v-for="m in months"
-          :key="m.key"
-          type="button"
-          class="m-cell"
-          :class="[m.status?.mark, { on: m.period === modelValue, off: !m.has }]"
-          :disabled="!m.has"
-          :aria-selected="m.period === modelValue"
-          :title="m.has ? `${pretty(m.period)} · ${statusOf(byPeriod.get(m.period)).text}` : '这个月还没算过'"
-          @click="go(m.period)"
-        >
-          <span class="m-num">{{ m.label }}<em v-if="shownYear !== OTHER">月</em></span>
-          <span class="m-status">{{ m.has ? statusOf(byPeriod.get(m.period)).text : '' }}</span>
-        </button>
-      </div>
-
-      <div class="legend">
-        <span class="closed"><i />已结账 {{ statusCounts.closed }}</span>
-        <span class="ready"><i />可确认 {{ statusCounts.ready }}</span>
-        <span class="pending"><i />待补证据 {{ statusCounts.pending }}</span>
-        <span class="evidence"><i />有新证据 {{ statusCounts.evidence }}</span>
-      </div>
+    <div class="legend">
+      <span class="closed"><i />已结账 {{ statusCounts.closed }}</span>
+      <span class="ready"><i />可确认 {{ statusCounts.ready }}</span>
+      <span class="pending"><i />待补证据 {{ statusCounts.pending }}</span>
+      <span class="evidence"><i />有新证据 {{ statusCounts.evidence }}</span>
     </div>
   </div>
 </template>
@@ -189,205 +193,127 @@ const yearCounts = computed(() => {
 }
 .periods.compact { margin-top: var(--s4); }
 
-/* 顶部导航行 */
 .head {
   display: flex;
   align-items: center;
   gap: var(--s3);
   margin-bottom: var(--s4);
 }
-
 .pager { display: flex; gap: var(--s1); }
 .pager button {
-  width: 30px;
-  height: 30px;
-  padding: 0;
-  border: 1px solid var(--n3);
-  border-radius: var(--r-sm);
-  background: var(--n0);
-  color: var(--n6);
-  font-size: 18px;
-  line-height: 1;
-  cursor: pointer;
+  width: 30px; height: 30px; padding: 0;
+  border: 1px solid var(--n3); border-radius: var(--r-sm);
+  background: var(--n0); color: var(--n6);
+  font-size: 18px; line-height: 1; cursor: pointer;
   transition: color .15s, border-color .15s;
 }
 .pager button:hover:not(:disabled) { color: var(--n9); border-color: var(--n5); }
 .pager button:disabled { opacity: .35; cursor: default; }
 
 .when {
-  font-family: var(--num);
-  font-size: var(--t-xl);
-  font-weight: 620;
-  letter-spacing: -.01em;
-  line-height: 1.2;
+  font-family: var(--num); font-size: var(--t-xl);
+  font-weight: 620; letter-spacing: -.01em; line-height: 1.2;
 }
-
 .state {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  font-size: var(--t-sm);
-  color: var(--n6);
-  padding: 3px 10px;
-  border-radius: 999px;
-  background: var(--n2);
+  display: flex; align-items: center; gap: 6px;
+  font-size: var(--t-sm); color: var(--n6);
+  padding: 3px 10px; border-radius: 999px; background: var(--n2);
 }
-.state i {
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
-  background: currentColor;
-}
+.state i { width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
 .state.closed { color: var(--ok); background: var(--ok-bg); }
 .state.ready { color: var(--accent); background: var(--accent-bg); }
 .state.pending { color: var(--warn); background: var(--warn-bg); }
 .state.evidence { color: var(--ok); background: var(--ok-bg); }
 
-/* 主容器 */
-.strip-card {
+/* ---- iOS 风格滚轮选择器 ---- */
+.picker {
+  position: relative;
+  display: flex;
+  max-width: 400px;
   border: 1px solid var(--n3);
   border-radius: var(--r-lg);
   background: var(--n0);
   overflow: hidden;
+  user-select: none;
+  -webkit-user-select: none;
 }
 
-/* 年份标签行 */
-.year-tabs {
-  display: flex;
-  gap: 0;
-  padding: 0 var(--s3);
+.picker-band {
+  position: absolute; left: 0; right: 0;
+  background: rgba(0, 0, 0, .04);
+  border-top: 1px solid var(--n3);
   border-bottom: 1px solid var(--n3);
-  background: var(--n1);
-  overflow-x: auto;
+  pointer-events: none; z-index: 1;
+}
+
+.picker-fade {
+  position: absolute; left: 0; right: 0;
+  pointer-events: none; z-index: 2;
+}
+.picker-fade.top { top: 0; background: linear-gradient(to bottom, var(--n0) 10%, transparent); }
+.picker-fade.btm { background: linear-gradient(to top, var(--n0) 10%, transparent); }
+
+.picker-sep {
+  width: 1px; flex-shrink: 0;
+  background: var(--n3);
+  z-index: 3;
+}
+
+.picker-col {
+  flex: 1; min-width: 0;
+  overflow-y: auto;
+  scroll-snap-type: y mandatory;
+  overscroll-behavior: contain;
+  -webkit-overflow-scrolling: touch;
   scrollbar-width: none;
+  -ms-overflow-style: none;
 }
-.year-tabs::-webkit-scrollbar { display: none; }
-.year-tabs button {
-  display: inline-flex;
-  align-items: baseline;
-  gap: 6px;
-  padding: 10px 16px;
-  border: none;
-  border-bottom: 2px solid transparent;
-  background: none;
-  font: 500 var(--t-sm)/1.4 var(--num);
-  color: var(--n5);
-  white-space: nowrap;
-  cursor: pointer;
-  transition: color .12s, border-color .12s;
-  margin-bottom: -1px;
-}
-.year-tabs button:hover { color: var(--n8); }
-.year-tabs button.on {
-  color: var(--n9);
-  font-weight: 640;
-  border-bottom-color: var(--n9);
-}
-.year-tabs button small {
-  font-family: var(--font);
-  font-size: 10px;
-  font-weight: 400;
-  color: var(--n4);
-}
-.year-tabs button.on small { color: var(--n6); }
+.picker-col::-webkit-scrollbar { display: none; }
 
-/* 月份网格 */
-.month-grid {
-  display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 8px;
-  padding: 16px 20px;
-}
-.month-grid.free { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.picker-pad { flex-shrink: 0; }
 
-.m-cell {
-  position: relative;
-  display: flex;
-  flex-direction: column;
-  align-items: flex-start;
-  gap: 3px;
-  min-height: 56px;
-  padding: 10px 14px;
-  border: 1px solid var(--n3);
-  border-radius: var(--r-md);
-  background: var(--n0);
-  text-align: left;
-  cursor: pointer;
-  transition: all .12s;
-}
-.m-cell:hover:not(:disabled):not(.on) {
-  border-color: var(--n5);
-  background: var(--n1);
-}
-
-.m-num {
-  font-family: var(--num);
-  font-size: var(--t-base);
-  font-weight: 640;
-  line-height: 1.2;
+.picker-cell {
+  display: flex; align-items: center; justify-content: center; gap: 8px;
+  scroll-snap-align: center;
+  flex-shrink: 0;
+  font-size: var(--t-sm);
   color: var(--n8);
+  transition: color .15s;
 }
-.m-num em {
-  margin-left: 1px;
-  font-family: var(--font);
-  font-size: var(--t-xs);
-  font-style: normal;
-  font-weight: 400;
-  color: var(--n5);
+.picker-cell.off { color: var(--n4); }
+
+.year-col { max-width: 140px; }
+.month-col { flex: 1; }
+
+.cell-main {
+  font-family: var(--num); font-weight: 600;
+  font-size: var(--t-base);
 }
-.m-status {
-  font-size: 11px;
-  font-weight: 500;
-  line-height: 1;
-  color: var(--n5);
+.cell-main em {
+  font-style: normal; font-family: var(--font);
+  font-size: var(--t-xs); font-weight: 400;
+  margin-left: 1px; color: var(--n5);
+}
+.picker-cell.off .cell-main em { color: var(--n3); }
+
+.cell-sub {
+  font-size: 11px; font-weight: 400; color: var(--n5);
 }
 
-/* 状态色 */
-.m-cell.closed { border-color: #c8e6d4; background: var(--ok-bg); }
-.m-cell.closed .m-num { color: var(--ok); }
-.m-cell.closed .m-status { color: var(--ok); }
-
-.m-cell.ready { border-color: #c2d4f7; background: var(--accent-bg); }
-.m-cell.ready .m-num { color: var(--accent); }
-.m-cell.ready .m-status { color: var(--accent); }
-
-.m-cell.pending { border-color: #f0d8a8; background: var(--warn-bg); }
-.m-cell.pending .m-num { color: var(--warn); }
-.m-cell.pending .m-status { color: var(--warn); }
-
-.m-cell.evidence { border-color: #c8e6d4; background: var(--ok-bg); }
-.m-cell.evidence .m-num { color: var(--ok); }
-.m-cell.evidence .m-status { color: var(--ok); }
-
-/* 选中态：深色边框 + 底色，保留状态色文字 */
-.m-cell.on {
-  border-color: var(--n8);
-  background: var(--n8);
-  box-shadow: 0 1px 4px rgba(0,0,0,.15);
+.cell-status {
+  font-size: 11px; font-weight: 500;
+  padding: 1px 6px; border-radius: 999px;
 }
-.m-cell.on .m-num,
-.m-cell.on .m-status,
-.m-cell.on .m-num em { color: var(--n0); }
-
-/* 空月份 */
-.m-cell.off {
-  border-color: var(--n2);
-  background: var(--n1);
-  cursor: default;
-}
-.m-cell.off .m-num { color: var(--n4); }
-.m-cell.off .m-num em { color: var(--n3); }
+.cell-status.closed { color: var(--ok); background: var(--ok-bg); }
+.cell-status.ready { color: var(--accent); background: var(--accent-bg); }
+.cell-status.pending { color: var(--warn); background: var(--warn-bg); }
+.cell-status.evidence { color: var(--ok); background: var(--ok-bg); }
 
 /* 图例 */
 .legend {
-  display: flex;
-  flex-wrap: wrap;
-  gap: var(--s3);
-  padding: 10px 20px 12px;
-  border-top: 1px solid var(--n3);
-  background: var(--n1);
-  color: var(--n6);
-  font-size: var(--t-xs);
+  display: flex; flex-wrap: wrap; gap: var(--s3);
+  margin-top: var(--s3);
+  color: var(--n6); font-size: var(--t-xs);
 }
 .legend span { display: inline-flex; align-items: center; gap: 5px; }
 .legend i { width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
@@ -398,9 +324,6 @@ const yearCounts = computed(() => {
 
 @media (max-width: 640px) {
   .head { flex-wrap: wrap; }
-  .month-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px; padding: 12px; }
-  .month-grid.free { grid-template-columns: minmax(0, 1fr); }
-  .m-cell { min-height: 48px; padding: 8px 10px; }
-  .legend { padding: 8px 12px; gap: var(--s2); }
+  .picker { max-width: none; }
 }
 </style>
