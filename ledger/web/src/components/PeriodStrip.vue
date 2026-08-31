@@ -96,16 +96,16 @@ function pickYear(year) {
 
 function statusOf(p) {
   if (!p) return { mark: '', text: '' }
+  if (p.state === 'closed' && p.stale) return { mark: 'evidence', text: '有新证据' }
   if (p.state === 'closed') return { mark: 'closed', text: '已结账' }
-  if (p.can_close === false) return { mark: 'bad', text: '结不了' }
-  if (p.can_close) return { mark: 'ready', text: '可结账' }
-  return { mark: 'idle', text: '未结账' }
+  if (p.can_close) return { mark: 'ready', text: '可确认' }
+  return { mark: 'pending', text: '待补证据' }
 }
 
 const status = computed(() => statusOf(current.value))
 const statusCounts = computed(() => {
-  const counts = { closed: 0, ready: 0, bad: 0, idle: 0 }
-  for (const item of list.value) counts[statusOf(item).mark || 'idle'] += 1
+  const counts = { closed: 0, ready: 0, pending: 0, evidence: 0 }
+  for (const item of list.value) counts[statusOf(item).mark || 'pending'] += 1
   return counts
 })
 const yearCounts = computed(() => {
@@ -189,8 +189,8 @@ const yearCounts = computed(() => {
     <div class="legend">
       <span class="closed"><i />已结账 {{ statusCounts.closed }}</span>
       <span class="ready"><i />可确认 {{ statusCounts.ready }}</span>
-      <span class="bad"><i />待完善 {{ statusCounts.bad }}</span>
-      <span class="idle"><i />未结账 {{ statusCounts.idle }}</span>
+      <span class="pending"><i />待补证据 {{ statusCounts.pending }}</span>
+      <span class="evidence"><i />有新证据 {{ statusCounts.evidence }}</span>
     </div>
   </div>
 </template>
@@ -253,8 +253,8 @@ const yearCounts = computed(() => {
 }
 .state.closed { color: var(--ok); background: var(--ok-bg); }
 .state.ready { color: var(--accent); background: var(--accent-bg); }
-.state.bad { color: var(--bad); background: var(--bad-bg); }
-.state.idle { color: var(--n5); }
+.state.pending { color: var(--warn); background: var(--warn-bg); }
+.state.evidence { color: var(--ok); background: var(--ok-bg); }
 
 .period-levels {
   display: grid;
@@ -336,8 +336,8 @@ const yearCounts = computed(() => {
 .months button.on { color: var(--n0); border-color: var(--n8); background: var(--n8); font-weight: 560; }
 .months button.closed { color: var(--ok); background: var(--ok-bg); }
 .months button.ready { color: var(--accent); background: var(--accent-bg); }
-.months button.bad { color: var(--bad); background: var(--bad-bg); }
-.months button.idle { color: var(--warn); background: var(--warn-bg); }
+.months button.pending { color: var(--warn); background: var(--warn-bg); }
+.months button.evidence { color: var(--ok); background: var(--ok-bg); }
 .months button.on { color: var(--n0); background: var(--n8); }
 .month-number { font-family: var(--num); font-size: var(--t-sm); font-weight: 600; }
 .month-number em { margin-left: 2px; font-family: var(--font); font-size: 10px; font-style: normal; font-weight: 400; }
@@ -367,8 +367,8 @@ const yearCounts = computed(() => {
 .legend i { width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
 .legend .closed { color: var(--ok); }
 .legend .ready { color: var(--accent); }
-.legend .bad { color: var(--bad); }
-.legend .idle { color: var(--warn); }
+.legend .pending { color: var(--warn); }
+.legend .evidence { color: var(--ok); }
 
 @media (max-width: 640px) {
   .head { flex-wrap: wrap; }
