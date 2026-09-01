@@ -94,6 +94,11 @@ export function periodToTs(period) {
   return new Date(y, m - 1, 1).getTime()
 }
 
+export function prettyPeriod(period) {
+  const match = /^(\d{4})-(\d{2})$/.exec(period || '')
+  return match ? `${match[1]}年${Number(match[2])}月` : period || ''
+}
+
 export function tsToPeriod(ts) {
   if (!ts) return ''
   const d = new Date(ts)

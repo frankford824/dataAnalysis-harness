@@ -31,6 +31,13 @@
   font-weight: 640;
   padding: 0 var(--s3) var(--s4);
 }
+.brand-scope {
+  margin-top: 3px;
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--n6);
+  letter-spacing: 0;
+}
 
 .navlink {
   display: flex;
@@ -68,6 +75,95 @@
 }
 /* 筛选条占满，上传按钮永远贴在最右边——每一页的同一个位置。 */
 .topbar > :first-child { flex: 1; min-width: 0; }
+
+/* 平台 › 店铺 › 账期。标签在上，值在下，扫一眼就知道自己在哪一层。 */
+.locator {
+  display: flex;
+  align-items: flex-end;
+  flex-wrap: wrap;
+  gap: 6px 10px;
+  min-width: 0;
+}
+.locator-back { margin-bottom: 1px; }
+.locator-field,
+.locator-search {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+.locator-field.platform { width: 148px; }
+.locator-field.store { flex: 1 1 196px; max-width: 280px; }
+.locator-field.period { width: 132px; }
+.locator-search {
+  flex: 1 1 220px;
+  min-width: 200px;
+  max-width: 320px;
+  margin-left: auto;
+}
+.locator-field :deep(.n-select),
+.locator-search :deep(.n-input) { width: 100%; }
+.locator-label {
+  font-size: 11px;
+  font-weight: 560;
+  color: var(--n6);
+  letter-spacing: .06em;
+  line-height: 1;
+}
+.locator-sep {
+  color: var(--n4);
+  font-size: 15px;
+  line-height: 32px;
+  padding: 0 2px 1px;
+}
+
+.page-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--s4);
+  margin-bottom: var(--s4);
+}
+.page-head-kicker {
+  margin-bottom: 2px;
+  font-size: var(--t-xs);
+  font-weight: 560;
+  color: var(--n6);
+  letter-spacing: .06em;
+}
+.page-head h1 {
+  font-size: var(--t-xl);
+  letter-spacing: -.015em;
+}
+.page-head-scope {
+  margin-top: 4px;
+  font-size: var(--t-sm);
+  color: var(--n6);
+}
+.page-head-dot {
+  margin: 0 6px;
+  color: var(--n4);
+}
+.page-head-hint {
+  margin-top: 4px;
+  max-width: 44em;
+  font-size: var(--t-sm);
+  color: var(--n6);
+}
+.page-head-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--s2);
+  flex-shrink: 0;
+}
+
+.kpi.tap { cursor: pointer; }
+.kpi.tap:hover { border-color: var(--n4); }
+.board-row { cursor: pointer; }
+.board-row:hover td { background: var(--n1); }
+.board-row .go { color: var(--accent); }
 
 /* 内容居中，两侧留白对称。
  *

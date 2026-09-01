@@ -4,12 +4,16 @@
  * 这条要一直横在顶上，所有页面共用一套选择。上一版每页各管各的，从展板点进一家店
  * 再切到数据交付，选中的店就没了——多店铺时每切一次页要重选一次，等于不能用。
  *
+ * 三个下拉必须带标签：光看「淘宝天猫 / 天猫皇莉诗 / 2026-06」分不清哪个是平台、
+ * 哪个是店、哪个是账期。中间的 › 是级联，不是装饰。
+ *
  * 检索在这里而不是单开一页：人要查一个订单号的时候，手上正开着某一页，不该被
  * 赶去另一个地方再回来。
  */
 import { computed, defineAsyncComponent, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 
+import { prettyPeriod } from '../format'
 import { canBack } from '../router'
 import { useApp } from '../store'
 
@@ -39,7 +43,7 @@ const storeOptions = computed(() => [
 const periodOptions = computed(() => [
   { label: '全部账期', value: '' },
   ...app.periods.map((p) => ({
-    label: /^\d{4}-\d{2}$/.test(p) ? p : p || '未知账期',
+    label: prettyPeriod(p) || p || '未知账期',
     value: p,
   })),
 ])
@@ -74,54 +78,64 @@ function submit() {
 </script>
 
 <template>
-  <div class="row wrap" style="gap: var(--s2)">
+  <div class="locator">
     <n-button
       v-if="backable"
       size="small"
       quaternary
+      class="locator-back"
       title="回到上一页，还停在你刚才看的位置"
       @click="router.back()"
     >
       ← 返回
     </n-button>
-    <n-select
-      :value="app.platform"
-      :options="platformOptions"
-      size="small"
-      style="width: 132px"
-      @update:value="(v) => app.pick({ platform: v })"
-    />
-    <n-select
-      :value="app.storeId"
-      :options="storeOptions"
-      size="small"
-      filterable
-      style="width: 180px"
-      @update:value="onStore"
-    />
-    <!-- 账期清单不是预先建好的月份表，是「有数据的月份」。人会问「怎么没有 7 月、
-         怎么不能先把明年的月份建出来」，答案得挂在这个下拉框本身上——不然只能
-         去别处找，或者以为是漏了。 -->
-    <n-select
-      :value="app.period"
-      :options="periodOptions"
-      size="small"
-      style="width: 132px"
-      title="有数据的月份才会出现在这儿。账期不用预先建：表一交上来，它落在哪个月，哪个月就自己出现了。"
-      @update:value="onPeriod"
-    />
 
-    <div class="grow" />
+    <label class="locator-field platform">
+      <span class="locator-label">平台</span>
+      <n-select
+        :value="app.platform"
+        :options="platformOptions"
+        size="small"
+        @update:value="(v) => app.pick({ platform: v })"
+      />
+    </label>
+    <span class="locator-sep" aria-hidden="true">›</span>
+    <label class="locator-field store">
+      <span class="locator-label">店铺</span>
+      <n-select
+        :value="app.storeId"
+        :options="storeOptions"
+        size="small"
+        filterable
+        @update:value="onStore"
+      />
+    </label>
+    <span class="locator-sep" aria-hidden="true">›</span>
+    <label class="locator-field period">
+      <span class="locator-label">账期</span>
+      <n-select
+        :value="app.period"
+        :options="periodOptions"
+        size="small"
+        title="有数据的月份才会出现在这儿。账期不用预先建：表一交上来，它落在哪个月，哪个月就自己出现了。"
+        @update:value="onPeriod"
+      />
+    </label>
 
-    <n-input
-      v-model:value="term"
-      size="small"
-      placeholder="订单号、金额、科目、文件名"
-      style="width: 260px"
-      clearable
-      @keyup.enter="submit"
-    />
-    <n-button size="small" :disabled="!term.trim()" @click="submit">查</n-button>
+    <div class="locator-search">
+      <span class="locator-label">检索</span>
+      <n-input
+        v-model:value="term"
+        size="small"
+        placeholder="订单号、金额、科目、文件名"
+        clearable
+        @keyup.enter="submit"
+      >
+        <template #suffix>
+          <n-button text size="tiny" :disabled="!term.trim()" @click="submit">查</n-button>
+        </template>
+      </n-input>
+    </div>
 
     <SearchPanel v-if="searching" v-model:show="searching" :term="term" />
   </div>

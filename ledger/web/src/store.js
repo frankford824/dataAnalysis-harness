@@ -12,6 +12,7 @@ import { defineStore } from 'pinia'
 import { computed, ref, watch } from 'vue'
 
 import { api } from './api'
+import { prettyPeriod } from './format'
 
 //: 刷新之后还该记得的东西存这儿。只存「人选到哪儿了」，不存数据本身——数据要
 //: 是也缓存下来，账重算过之后界面会拿旧数骗人。
@@ -258,6 +259,17 @@ export const useApp = defineStore('app', () => {
     () => stores.value.find((s) => s.id === storeId.value) || null,
   )
 
+  const platformName = computed(() => {
+    if (!platform.value) return '全部平台'
+    return platforms.value.find((p) => p.id === platform.value)?.name || platform.value
+  })
+  const periodLabel = computed(() => prettyPeriod(period.value) || '全部账期')
+  const scopeParts = computed(() => [
+    platformName.value,
+    currentStore.value?.name || '全部店铺',
+    periodLabel.value,
+  ])
+
   function pick({ platform: p, store: s, period: t }) {
     if (p !== undefined) platform.value = p || ''
     if (s !== undefined) storeId.value = s || ''
@@ -291,7 +303,8 @@ export const useApp = defineStore('app', () => {
   return {
     navigation, boot, overview, storeDetails, loading, error,
     platform, storeId, period, busy, intake, memo, showIntake,
-    stores, platforms, visibleStores, periods, currentStore, ingestMode, nasUploadPath,
+    stores, platforms, visibleStores, periods, currentStore,
+    platformName, periodLabel, scopeParts, ingestMode, nasUploadPath,
     load, loadNavigation, loadModel, loadOverview, loadStoreDetail,
     invalidate, run, upload, submit, pick, noted,
   }

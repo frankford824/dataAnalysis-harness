@@ -17,6 +17,7 @@ import DrillDrawer from '../components/DrillDrawer.vue'
 import DropZone from '../components/DropZone.vue'
 import FixPanel from '../components/FixPanel.vue'
 import GapList from '../components/GapList.vue'
+import PageHead from '../components/PageHead.vue'
 import PeriodStrip from '../components/PeriodStrip.vue'
 import { count, money, percent, stamp } from '../format'
 import { useApp } from '../store'
@@ -210,25 +211,28 @@ watch(
     <n-alert v-if="failed" type="error" :bordered="false">{{ failed }}</n-alert>
 
     <template v-else-if="info">
-      <div class="spread" style="margin-bottom: var(--s4)">
-        <div>
-          <h1>{{ info.store?.name }}</h1>
-          <div class="small muted">
-            {{ platformName }}
-            <template v-if="info.store?.entity"> · {{ info.store.entity }}</template>
-            · 已收 {{ count(info.files?.length || 0) }} 张表
-          </div>
-        </div>
-        <n-space>
+      <PageHead
+        kicker="店铺账期"
+        :title="info.store?.name || ''"
+        :scope="[platformName, period, info.store?.entity].filter(Boolean)"
+        :hint="`已收 ${count(info.files?.length || 0)} 张表`"
+      >
+        <template #actions>
           <n-button size="small" @click="fixing = true">数字不对？</n-button>
           <n-button v-if="app.ingestMode !== 'nas'" size="small" @click="recompute">重算</n-button>
           <n-tag v-else size="small" type="info" :bordered="false">索引更新后自动计算</n-tag>
-          <n-button v-if="!closed" size="small" type="primary" :disabled="!snap?.can_close" @click="close">
-            结账
+          <n-button
+            v-if="!closed"
+            type="primary"
+            :disabled="!snap?.can_close"
+            :title="snap?.can_close ? `结账 ${period}` : (blockers[0]?.name || '还不能结账')"
+            @click="close"
+          >
+            结账 {{ period }}
           </n-button>
           <n-button v-else size="small" @click="asking = true">反结账</n-button>
-        </n-space>
-      </div>
+        </template>
+      </PageHead>
 
       <PeriodStrip
         :periods="info.periods || []"

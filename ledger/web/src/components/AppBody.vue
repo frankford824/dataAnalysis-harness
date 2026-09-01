@@ -35,8 +35,8 @@ function preloadDeliver() {
   import('../views/DeliverView.vue').catch(() => {})
 }
 
-const openCount = computed(
-  () => (app.overview?.cells || []).filter((c) => c.state === 'open').length,
+const readyCount = computed(
+  () => (app.overview?.cells || []).filter((c) => c.can_close && c.state !== 'closed').length,
 )
 
 // 上传要多久取决于表有多大，淘宝一个月的表能跑十几秒。不显示已用秒数的话，人会
@@ -97,9 +97,17 @@ defineExpose({ take })
 <template>
   <div class="shell">
     <nav class="side">
-      <div class="brand">记账</div>
-      <router-link class="navlink" :class="{ on: $route.name === 'board' }" to="/">
-        总览<span v-if="openCount" class="count">{{ openCount }}</span>
+      <div class="brand">
+        记账
+        <div class="brand-scope">{{ app.periodLabel }}</div>
+      </div>
+      <router-link
+        class="navlink"
+        :class="{ on: $route.name === 'board' }"
+        to="/"
+        :title="readyCount ? `${readyCount} 个店期可以结账` : '总览'"
+      >
+        总览<span v-if="readyCount" class="count">{{ readyCount }}</span>
       </router-link>
       <router-link
         class="navlink"
@@ -135,7 +143,7 @@ defineExpose({ take })
         <n-button v-if="app.ingestMode !== 'nas'" size="small" type="primary" @click="explaining = true">
           上传表格
         </n-button>
-        <n-tag v-else size="small" type="success" :bordered="false">
+        <n-tag v-else size="small" :bordered="false">
           NAS 自动接收
         </n-tag>
       </header>

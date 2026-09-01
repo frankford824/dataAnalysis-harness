@@ -75,7 +75,7 @@ body {
   margin: 0;
   background: var(--n1);
   color: var(--n9);
-  font: var(--t-base)/1.6 var(--sans);
+  font: var(--t-base)/1.7 var(--sans);
   -webkit-font-smoothing: antialiased;
 }
 

@@ -13,10 +13,11 @@ import { computed, onMounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 
 import { api } from '../api'
-import { count, money, percent, signed, signedPct } from '../format'
+import { count, money, percent, prettyPeriod, signed, signedPct } from '../format'
 import { useApp } from '../store'
 import DropZone from '../components/DropZone.vue'
 import GapList from '../components/GapList.vue'
+import PageHead from '../components/PageHead.vue'
 
 const app = useApp()
 const router = useRouter()
@@ -28,9 +29,11 @@ const period = computed(
 )
 
 const cells = computed(() =>
-  (app.overview?.cells || []).filter(
-    (c) => !app.platform || c.platform === app.platform,
-  ),
+  (app.overview?.cells || []).filter((c) => {
+    if (app.platform && c.platform !== app.platform) return false
+    if (app.storeId && c.store_id !== app.storeId) return false
+    return true
+  }),
 )
 
 const here = computed(() => cells.value.filter((c) => c.period === period.value))
@@ -39,14 +42,35 @@ const totals = computed(() => {
   const rows = here.value.filter((c) => c.revenue !== null && c.profit !== null)
   const revenue = rows.reduce((a, c) => a + c.revenue, 0)
   const profit = rows.reduce((a, c) => a + c.profit, 0)
+  const ready = rows.length
   return {
-    revenue,
-    profit,
-    margin: revenue ? profit / revenue : null,
+    revenue: ready ? revenue : null,
+    profit: ready ? profit : null,
+    margin: ready && revenue ? profit / revenue : null,
     closed: here.value.filter((c) => c.state === 'closed').length,
     stuck: here.value.filter((c) => c.state !== 'closed' && !c.can_close).length,
-    incomplete: here.value.length - rows.length,
+    incomplete: here.value.length - ready,
+    ready,
   }
+})
+
+const blankMonth = computed(
+  () => here.value.length > 0 && totals.value.ready === 0,
+)
+
+const lastNumbered = computed(() => {
+  for (const p of app.periods) {
+    const ready = cells.value.some(
+      (c) => c.period === p && c.revenue !== null && c.profit !== null,
+    )
+    if (ready) return p
+  }
+  return ''
+})
+
+const boardTitle = computed(() => {
+  if (app.currentStore) return app.currentStore.name
+  return prettyPeriod(period.value) || app.platformName
 })
 
 /** 按平台分组，组内按利润从低到高——要人管的都在上面。 */
@@ -358,32 +382,78 @@ watch([() => app.storeId, () => app.platform], () => {
     </div>
 
     <template v-else>
+      <PageHead
+        kicker="总览"
+        :title="boardTitle"
+        :scope="app.scopeParts"
+      >
+        <template #actions>
+          <n-button
+            v-if="blankMonth && lastNumbered && lastNumbered !== period"
+            @click="app.pick({ period: lastNumbered })"
+          >
+            看 {{ prettyPeriod(lastNumbered) }}
+          </n-button>
+          <n-button
+            v-if="app.storeId && here[0]"
+            type="primary"
+            @click="open(here[0])"
+          >
+            打开 {{ prettyPeriod(period) }}
+          </n-button>
+        </template>
+      </PageHead>
+
+      <div v-if="blankMonth" class="banner warn" style="margin-bottom: var(--s4)">
+        <strong>{{ prettyPeriod(period) }} 还没有算出损益</strong>
+        上面的销售收入和利润是破折号，不是这个月赚了 0。
+        {{ here.length }} 家店都还没算出数。
+      </div>
+
+      <div v-if="!here.length" class="card">
+        <n-empty :description="`${app.currentStore?.name || '当前筛选'} 在 ${period || '这个账期'} 还没有账`">
+          <template #extra>
+            <p class="small muted" style="max-width: 420px; margin-bottom: var(--s3)">
+              换一个账期，或到「数据与店铺」看有没有表进来。
+            </p>
+            <n-button size="small" @click="router.push('/deliver')">去数据与店铺</n-button>
+          </template>
+        </n-empty>
+      </div>
+
+      <template v-else>
       <div class="board-kpis">
         <div class="kpi">
           <div class="label">销售收入</div>
           <div class="value">{{ money(totals.revenue) }}</div>
-          <div class="foot">{{ period }} · {{ here.length }} 家店</div>
+          <div class="foot">
+            <template v-if="blankMonth">还不知道，不是 0</template>
+            <template v-else>
+              {{ prettyPeriod(period) }}
+              <template v-if="!app.storeId"> · {{ totals.ready }}/{{ here.length }} 家已算出</template>
+            </template>
+          </div>
         </div>
         <div class="kpi">
           <div class="label">利润</div>
           <div class="value" :class="{ neg: totals.profit < 0 }">{{ money(totals.profit) }}</div>
-          <div class="foot">利润率 {{ percent(totals.margin) }}</div>
+          <div class="foot">{{ blankMonth ? '还不知道，不是 0' : `利润率 ${percent(totals.margin)}` }}</div>
         </div>
         <div class="kpi">
           <div class="label">已结账</div>
           <div class="value">{{ totals.closed }} / {{ here.length }}</div>
           <div class="foot">{{ totals.incomplete ? `${totals.incomplete} 家还没算出数` : '都算出数了' }}</div>
         </div>
-        <div class="kpi">
+        <div class="kpi tap" title="打开要看的" @click="tab = 'gaps'">
           <div class="label">结不了</div>
           <div class="value" :class="{ neg: totals.stuck > 0 }">{{ totals.stuck }}</div>
-          <div class="foot">{{ totals.stuck ? '点开看卡在哪' : '没有卡住的' }}</div>
+          <div class="foot">{{ totals.stuck ? '点这里看卡在哪' : '没有卡住的' }}</div>
         </div>
       </div>
 
       <div class="card" style="margin-top: var(--s4)">
         <n-tabs v-model:value="tab" type="line" size="small">
-          <n-tab-pane name="here" :tab="`${period} 各店（${here.length}）`">
+          <n-tab-pane name="here" :tab="`${prettyPeriod(period)} 各店（${here.length}）`">
             <div class="scroll tall">
               <n-table size="small" :bordered="false" :single-line="false">
                 <thead>
@@ -394,16 +464,17 @@ watch([() => app.storeId, () => app.platform], () => {
                     <th class="right">利润率</th>
                     <th>要看的</th>
                     <th>状态</th>
+                    <th></th>
                   </tr>
                 </thead>
                 <tbody>
                   <template v-for="r in rows">
                     <tr v-if="r.head" :key="`h-${r.head}`" class="quiet">
-                      <td colspan="6" class="xs muted" style="padding-top: var(--s3)">
+                      <td colspan="7" class="xs muted" style="padding-top: var(--s3)">
                         {{ r.head }} · {{ r.size }} 家店
                       </td>
                     </tr>
-                    <tr v-else :key="r.store_id" style="cursor: pointer" @click="open(r)">
+                    <tr v-else :key="r.store_id" class="board-row" @click="open(r)">
                       <td>{{ r.store }}</td>
                       <td class="right num">{{ money(r.revenue) }}</td>
                       <td class="right num" :class="{ neg: r.profit < 0 }">{{ money(r.profit) }}</td>
@@ -430,6 +501,7 @@ watch([() => app.storeId, () => app.platform], () => {
                           {{ label(r) }}
                         </n-tag>
                       </td>
+                      <td class="right xs go nowrap">打开</td>
                     </tr>
                   </template>
                 </tbody>
@@ -561,6 +633,7 @@ watch([() => app.storeId, () => app.platform], () => {
           </n-tab-pane>
         </n-tabs>
       </div>
+      </template>
     </template>
 
     <!-- 一个月的细账。主页面只放一行一个月，细节都收在这里。 -->

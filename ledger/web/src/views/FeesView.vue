@@ -15,6 +15,7 @@ import { useRoute } from 'vue-router'
 import { api } from '../api'
 import { count, money, prettyUnmatched, stamp } from '../format'
 import { useApp } from '../store'
+import PageHead from '../components/PageHead.vue'
 
 const app = useApp()
 const route = useRoute()
@@ -339,20 +340,18 @@ async function apply() {
     {{ failed }}
   </n-alert>
 
-  <div class="spread" style="margin-bottom: var(--s4)">
-    <div>
-      <h1>费项</h1>
-      <div class="small muted">
-        把到账里的业务描述、备注归到对应费项。尚未归属的新费项会在这里列出来。
-      </div>
-    </div>
-    <div class="row">
+  <PageHead
+    title="费项"
+    :scope="app.scopeParts"
+    hint="把到账里的业务描述、备注归到对应费项。尚未归属的新费项会在这里列出来。"
+  >
+    <template #actions>
       <n-button size="small" :disabled="!dirty" @click="runPreview">试算当前店</n-button>
-      <n-button size="small" type="primary" :disabled="!dirty || !preview" @click="apply">
+      <n-button type="primary" :disabled="!dirty || !preview" @click="apply">
         落库并重算
       </n-button>
-    </div>
-  </div>
+    </template>
+  </PageHead>
 
   <n-spin :show="loading">
     <div class="card">

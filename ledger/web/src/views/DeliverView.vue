@@ -4,6 +4,7 @@ import { computed, defineAsyncComponent, onMounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 
 import { api } from '../api'
+import PageHead from '../components/PageHead.vue'
 import SystemStatusLine from '../components/SystemStatusLine.vue'
 import { ago, bytes, count } from '../format'
 import { useApp } from '../store'
@@ -370,13 +371,15 @@ onMounted(() => {
 </script>
 
 <template>
-  <header class="workbench-heading">
-    <div>
-      <h1>数据与店铺</h1>
-      <p>从顶部选择平台、店铺和账期，查看对应的证据和处理状态。</p>
-    </div>
-    <n-button size="small" quaternary @click="adding = true">登记新店</n-button>
-  </header>
+  <PageHead
+    title="数据与店铺"
+    :scope="app.storeId ? app.scopeParts : []"
+    :hint="app.storeId ? '' : '先在顶栏选店铺和账期。没选店时，下面是全公司还没结完的账。'"
+  >
+    <template #actions>
+      <n-button size="small" quaternary @click="adding = true">登记新店</n-button>
+    </template>
+  </PageHead>
 
   <SystemStatusLine :feed="orderFeed" :index-errors="indexErrors" @details="systemOpen = true" />
 

@@ -24,6 +24,7 @@ import { useRouter } from 'vue-router'
 import { api } from '../api'
 import { count, money, percent } from '../format'
 import { useApp } from '../store'
+import PageHead from '../components/PageHead.vue'
 
 const app = useApp()
 const message = useMessage()
@@ -429,26 +430,22 @@ function open(id) {
     {{ failed }}
   </n-alert>
 
-  <div class="spread" style="margin-bottom: var(--s4)">
-    <div>
-      <h1>提成</h1>
-      <div class="small muted">
-        {{ period }} · 按{{ pay?.base_name || '利润' }}算
-        <template v-if="pay?.base_mixed"> · 各店口径不一样</template>
-      </div>
-    </div>
-    <div class="row">
+  <PageHead
+    title="提成"
+    :scope="app.scopeParts"
+    :hint="`按${pay?.base_name || '利润'}算${pay?.base_mixed ? ' · 各店口径不一样' : ''}`"
+  >
+    <template #actions>
       <span class="small muted num">合计 {{ money(payTotal) }}</span>
       <n-button
         v-if="tab !== 'config'"
-        size="small"
         type="primary"
         @click="goTab('config')"
       >
         配提成
       </n-button>
-    </div>
-  </div>
+    </template>
+  </PageHead>
 
   <div class="card">
     <n-tabs :value="tab" type="line" size="small" @update:value="goTab">
