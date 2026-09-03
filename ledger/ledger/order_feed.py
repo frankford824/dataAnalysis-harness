@@ -188,6 +188,7 @@ class OrderFeed:
         self.client = client or Client()
         self.db_path = self.workspace_root / "order-feed.db"
         self._guard = threading.RLock()
+        self._unpriced_cost_rows = 0
         self.workspace_root.mkdir(parents=True, exist_ok=True)
         with self._connect() as conn:
             conn.executescript(_DB_SCHEMA)
@@ -613,14 +614,32 @@ class OrderFeed:
 
         Existing order exports keep their platform product/sub-order identifiers: those are
         what settlement and promotion files link to.  Order Console enriches their mutable
-        status fields and contributes orders absent from the export.  Cost and after-sale
-        sources are replaced outright because the feed is the more current operational fact.
+        status fields and contributes orders absent from the export.  Cost is replaced
+        outright because the feed is the more current operational fact.  After-sales from
+        the feed are added next to the uploaded 聚水潭售后单 rather than replacing it: the
+        cost rule is per-product and the feed names at most one product per after-sale.
         """
         state = self.state()
         if not state.get("snapshot_id") or not state.get("manifest_json"):
             raise OrderFeedError("订单台快照尚未同步")
         frames = self._frames(store, json.loads(state["manifest_json"]))
+        if not frames:
+            raise OrderFeedError(f"订单台没有 {store.name} 的已确认店铺映射")
         feed_order = next(item for item in frames if item.recognition.source_id == "order_detail")
+        feed_after = next(item for item in frames if item.recognition.source_id == "after_sales")
+        feed_cost = next(item for item in frames if item.recognition.source_id == "order_cost")
+        # 订单台售后和上传的聚水潭售后单并用，不替换。订单台一张售后只挂一个商品，
+        # 多商品单整单退款时它只说得出「实付最大的那一行」，而聚水潭导出是逐商品一行；
+        # 成本排除按键取并集，同一售后两边都有不会多扣，少了哪边都会漏扣。
+        replaced = set(REPLACED_SOURCES) - {"after_sales"}
+        named, total = self._product_coverage(feed_after.frame, feed_cost.frame)
+        kept = [item.ref.label() for item in ingestion.frames_of("after_sales")]
+        feed_after.notes.append(
+            f"订单台售后里对着本店成本行的 {total:,} 行有 {named:,} 行带商品编码，"
+            "只有这些能逐商品判定；"
+            + (f"上传的售后单一并参与判定：{'、'.join(kept)}" if kept
+               else "本店没有上传聚水潭售后单，其余售后的成本规则暂无依据")
+        )
         self._enrich_existing_orders(ingestion, feed_order.frame)
         assert feed_order.frame is not None
         has_suborders = any(
@@ -641,12 +660,30 @@ class OrderFeed:
             feed_order.rows = feed_order.frame.height
         ingestion.items = [
             item for item in ingestion.items
-            if item.recognition.source_id not in REPLACED_SOURCES
+            if item.recognition.source_id not in replaced
         ]
         ingestion.items.extend(frames)
         for item in ingestion.known:
             assert item.frame is not None
             item.frame = item.frame.with_columns(pl.lit(True).alias("__live_period_scope__"))
+
+    @staticmethod
+    def _product_coverage(
+        after: pl.DataFrame | None, cost: pl.DataFrame | None,
+    ) -> tuple[int, int]:
+        """(rows naming a 商品编码, rows) among after-sales that sit on an order with cost rows.
+
+        After-sales on orders the console has no cost for cannot affect the statement,
+        so they neither count for nor against the feed's ability to serve the rule.
+        """
+        if after is None or after.is_empty() or "sku" not in after.columns:
+            return 0, 0
+        relevant = after
+        if cost is not None and not cost.is_empty() and "internal_order_id" in cost.columns:
+            costed = cost.get_column("internal_order_id").cast(pl.Utf8).drop_nulls().unique()
+            relevant = after.filter(pl.col("internal_order_id").cast(pl.Utf8).is_in(costed.implode()))
+        named = relevant.get_column("sku").cast(pl.Utf8).fill_null("").str.strip_chars().ne("")
+        return int(named.sum()), relevant.height
 
     @staticmethod
     def _enrich_existing_orders(ingestion: Ingestion, feed: pl.DataFrame | None) -> None:
@@ -764,12 +801,18 @@ class OrderFeed:
         fingerprint = self.fingerprint()
         order_frame = self._order_frame(orders, items, after, store, fingerprint)
         cost_frame = self._cost_frame(orders, items, costs, relations, store, fingerprint)
-        after_frame = self._after_frame(after, after_items, store, fingerprint)
+        after_frame = self._after_frame(after, after_items, items, store, fingerprint)
+        cost_item = self._item("order_cost", "order_console_cost_v1", "订单台日期时点成本", cost_frame,
+                               self._cost_template(), fingerprint)
+        if self._unpriced_cost_rows:
+            cost_item.notes.append(
+                f"订单台成本里 {self._unpriced_cost_rows:,} 行成本价 ≤ 0，按缺价处理不计成本；"
+                "这些订单会落在「订单拿到商品成本」的覆盖率里"
+            )
         return [
             self._item("order_detail", "order_console_order_v1", "订单台实时订单", order_frame,
                        self._order_template(), fingerprint),
-            self._item("order_cost", "order_console_cost_v1", "订单台日期时点成本", cost_frame,
-                       self._cost_template(), fingerprint),
+            cost_item,
             self._item("after_sales", "order_console_after_sale_v1", "订单台实时售后", after_frame,
                        self._after_template(), fingerprint),
         ]
@@ -855,6 +898,19 @@ class OrderFeed:
             pl.col("order_time").alias("order_date"),
             pl.col("pay_time").alias("pay_date"),
         )
+        # 和千牛人工表同一套：子订单净实付 / 主订单合计。不写这一列的话，
+        # 和带「收入分配率」的千牛明细拼成脊柱后列在、值空，分摊按 0，
+        # 对账挂得上、销售收入却是 0.00。
+        paid = pl.col("buyer_paid").fill_null(0.0)
+        refund = pl.col("refund_amount").fill_null(0.0)
+        net = pl.max_horizontal(paid - refund, pl.lit(0.0))
+        total = net.sum().over("order_id")
+        frame = frame.with_columns(
+            pl.when(total == 0)
+            .then(1.0 / pl.len().over("order_id"))
+            .otherwise(net / total)
+            .alias("alloc_ratio")
+        )
         return self._anchors(frame, fingerprint, "订单台实时订单")
 
     def _cost_frame(
@@ -866,6 +922,21 @@ class OrderFeed:
             (pl.col("cost_status") == "priced")
             & pl.col("cost_source").is_in(["history", "mirror", "scrape", "unknown_evidence"])
         )
+        # ERP 把「没价」写成 0，移动平均被退货打穿会出负数；两者都不是成交成本。
+        # 订单台 2026-09-03 起已把 ≤0 改判缺价，这里再守一道：关账月冻结的旧行、
+        # 以及任何后续回归都不能把负成本算进利润。明确的赠品 0 价保留。
+        unit = pl.col("unit_cost").cast(pl.Float64, strict=False)
+        gift_flags = (
+            items.select(pl.col("order_id", "sub_order_id").cast(pl.Utf8), pl.col("is_gift").cast(pl.Boolean, strict=False))
+            if "is_gift" in items.columns
+            else items.select(pl.col("order_id", "sub_order_id").cast(pl.Utf8)).with_columns(pl.lit(False).alias("is_gift"))
+        )
+        certified = certified.with_columns(pl.col("order_id", "sub_order_id").cast(pl.Utf8)).join(
+            gift_flags, on=["order_id", "sub_order_id"], how="left",
+        ).with_columns(pl.col("is_gift").fill_null(False))
+        unpriced = ((unit <= 0) | unit.is_null()) & ~((unit == 0) & pl.col("is_gift"))
+        self._unpriced_cost_rows = int(certified.select(unpriced.sum()).item() or 0)
+        certified = certified.filter(~unpriced).drop("is_gift")
         reships = (
             relations.filter(pl.col("relation_type") == "reship")
             .get_column("target_order_id").cast(pl.Utf8).drop_nulls().unique().to_list()
@@ -897,9 +968,22 @@ class OrderFeed:
         return self._anchors(frame, fingerprint, "订单台日期时点成本")
 
     def _after_frame(
-        self, after: pl.DataFrame, items: pl.DataFrame, store: Store, fingerprint: str,
+        self, after: pl.DataFrame, items: pl.DataFrame, order_items: pl.DataFrame,
+        store: Store, fingerprint: str,
     ) -> pl.DataFrame:
-        frame = after.join(items, on="after_sale_id", how="left", suffix="_item").select(
+        # 成本帧的 sub_order_id 是平台子订单号（outer_sku），售后行要走同一把钥匙，
+        # 否则「内部单号 + 子订单号 + 商品编码」三键永远对不上，规则形同虚设。
+        keyed = items.select("after_sale_id", "order_id", "sub_order_id", "sku_id", "quantity").with_columns(
+            pl.col("order_id", "sub_order_id").cast(pl.Utf8)
+        ).join(
+            order_items.select("order_id", "sub_order_id", "outer_sku").cast(pl.Utf8),
+            on=["order_id", "sub_order_id"], how="left",
+        ).select(
+            "after_sale_id",
+            pl.col("outer_sku").fill_null(pl.col("sub_order_id")).alias("sub_order_id"),
+            "sku_id", "quantity",
+        )
+        frame = after.join(keyed, on="after_sale_id", how="left", suffix="_item").select(
             pl.col("after_sale_id").cast(pl.Utf8),
             pl.col("order_id").cast(pl.Utf8).alias("internal_order_id"),
             pl.col("online_order_no").cast(pl.Utf8).alias("order_id"),
@@ -929,7 +1013,8 @@ class OrderFeed:
         return cls._template("order_console_order_v1", "order_detail", [
             ("order_id", "text"), ("sub_order_id", "text"), ("product_id", "text"),
             ("product_name", "text"), ("quantity", "number"), ("buyer_paid", "number"),
-            ("refund_amount", "number"), ("refund_status", "text"), ("tracking_no", "text"),
+            ("refund_amount", "number"), ("alloc_ratio", "number"),
+            ("refund_status", "text"), ("tracking_no", "text"),
             ("order_state", "text"), ("order_time", "time"), ("pay_time", "time"),
             ("store_name", "text"),
         ])

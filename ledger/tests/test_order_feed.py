@@ -5,8 +5,10 @@ import json
 from pathlib import Path
 
 import polars as pl
+import pytest
+from conftest import write_xlsx
 
-from ledger.engine.runtime import Ingested, Ingestion, _project_scoped_live, _slice_keys, run
+from ledger.engine.runtime import Ingested, Ingestion, _project_scoped_live, _slice_keys, ingest, run
 from ledger.engine.link import Spine
 from ledger.engine.link import SPINE_PERIOD, SPINE_STORE
 from ledger.engine.types import FileRef, Recognition
@@ -29,7 +31,16 @@ def _write(root: Path, name: str, frame: pl.DataFrame) -> dict:
     }
 
 
-def _fixture(root: Path) -> dict:
+def _fixture(root: Path, after_sku: str | None = "SKU1", second_unnamed: bool = False) -> dict:
+    """One order, one item, one after-sale.
+
+    ``second_unnamed`` adds a second item/cost/after-sale on the same order whose
+    after-sale row carries no 商品编码 — the shape the console exports for multi-item orders.
+    """
+    n = 2 if second_unnamed else 1
+    sub = ["11", "12"][:n]
+    outer = ["S1", "S2"][:n]
+    sku = ["SKU1", "SKU2"][:n]
     objects = {
         "stores.parquet": _write(root, "stores.parquet", pl.DataFrame({
             "order_store_id": ["10"], "ledger_store_id": ["taobao_test"],
@@ -42,26 +53,27 @@ def _fixture(root: Path) -> dict:
             "refund_amount": ["0.00"], "tracking_no": ["SF1"],
         })),
         "order_items.parquet": _write(root, "order_items.parquet", pl.DataFrame({
-            "order_id": ["1"], "sub_order_id": ["11"], "online_order_no": ["ON1"],
-            "sku_id": ["SKU1"], "merchant_sku": ["P1"], "outer_sku": ["S1"],
-            "product_name": ["商品"],
-            "quantity": ["2"], "paid_amount": ["20.00"], "refund_amount": ["0.00"],
-            "tracking_no": ["SF1"],
+            "order_id": ["1"] * n, "sub_order_id": sub, "online_order_no": ["ON1"] * n,
+            "sku_id": sku, "merchant_sku": ["P1", "P2"][:n], "outer_sku": outer,
+            "product_name": ["商品"] * n,
+            "quantity": ["2"] * n, "paid_amount": ["20.00", "10.00"][:n], "refund_amount": ["0.00"] * n,
+            "tracking_no": ["SF1"] * n,
         })),
         "after_sales.parquet": _write(root, "after_sales.parquet", pl.DataFrame({
-            "after_sale_id": ["A1"], "order_id": ["1"], "online_order_no": ["ON1"],
-            "sub_order_id": ["11"], "order_store_id": ["10"],
-            "goods_status_raw": ["买家未收到货"], "online_status_raw": ["退款成功"],
-            "refund_status_raw": ["退款成功"],
+            "after_sale_id": ["A1", "A2"][:n], "order_id": ["1"] * n, "online_order_no": ["ON1"] * n,
+            "sub_order_id": sub, "order_store_id": ["10"] * n,
+            "goods_status_raw": ["买家未收到货"] * n, "online_status_raw": ["退款成功"] * n,
+            "refund_status_raw": ["退款成功"] * n,
         })),
         "after_sale_items.parquet": _write(root, "after_sale_items.parquet", pl.DataFrame({
-            "after_sale_id": ["A1"], "order_id": ["1"], "sub_order_id": ["11"],
-            "sku_id": ["SKU1"], "quantity": ["2"],
+            "after_sale_id": ["A1", "A2"][:n], "order_id": ["1"] * n,
+            "sub_order_id": pl.Series(["11", None][:n], dtype=pl.Utf8),
+            "sku_id": pl.Series([after_sku, None][:n], dtype=pl.Utf8), "quantity": ["2"] * n,
         })),
         "order_costs.parquet": _write(root, "order_costs.parquet", pl.DataFrame({
-            "order_id": ["1"], "sub_order_id": ["11"], "sku_id": ["SKU1"],
-            "quantity": ["2"], "unit_cost": ["3.50"], "cost_amount": ["7.00"],
-            "cost_source": ["history"], "cost_status": ["priced"],
+            "order_id": ["1"] * n, "sub_order_id": sub, "sku_id": sku,
+            "quantity": ["2"] * n, "unit_cost": ["3.50", "1.00"][:n], "cost_amount": ["7.00", "2.00"][:n],
+            "cost_source": ["history"] * n, "cost_status": ["priced"] * n,
         })),
         "order_relations.parquet": _write(root, "relations.parquet", pl.DataFrame({
             "relation_type": pl.Series([], dtype=pl.Utf8),
@@ -168,9 +180,183 @@ def test_snapshot_and_delta_become_normalized_engine_sources(tmp_path):
     assert order.row(0, named=True)["product_id"] == "P1"
     assert order.get_column("order_date").null_count() == 0
     assert order.row(0, named=True)["refund_status"] == "退款成功"
+    assert order.row(0, named=True)["alloc_ratio"] == 1.0
     assert cost is not None and cost.row(0, named=True)["unit_cost"] == 3.5
     assert cost.row(0, named=True)["order_type"] == "销售订单"
     assert after is not None and after.row(0, named=True)["goods_status"] == "买家未收到货"
+    # 售后行和成本行用同一把钥匙：平台子订单号 + 商品编码，规则才对得上。
+    assert after.row(0, named=True)["sub_order_id"] == cost.row(0, named=True)["sub_order_id"] == "S1"
+    assert after.row(0, named=True)["sku"] == cost.row(0, named=True)["sku"] == "SKU1"
+
+
+AFTER_SALES_HEADER = [
+    "售后单号", "内部订单号", "店铺名称", "线上订单号", "状态", "线上状态",
+    "货物状态", "商品编码", "线上子订单编号", "申请数量",
+]
+
+
+def _uploaded_after_sales(tmp_path: Path, model, store: Store, *rows: tuple[str, str]) -> Ingestion:
+    """A JST 售后单 export naming exact products (子订单号, 商品编码) of the feed's cost rows."""
+    rows = rows or (("S1", "SKU1"),)
+    path = write_xlsx(
+        tmp_path / "售后单_样本.xlsx",
+        [AFTER_SALES_HEADER, *[
+            [f"AS{i}", "1", store.name, "ON1", "已确认", "退款成功", "买家未收到货", sku, sub, 2]
+            for i, (sub, sku) in enumerate(rows, 1)
+        ]],
+    )
+    return ingest([path], model, [store.name])
+
+
+def _model_and_store(feed: OrderFeed):
+    model = ModelRepository(
+        Path(__file__).resolve().parents[2] / "models" / "cn-ecommerce"
+    ).get().model
+    store = model.store("taobao_msy387nx")
+    with feed._connect() as conn:  # noqa: SLF001 - fixture remaps one synthetic shop
+        conn.execute(
+            "update feed_store set ledger_store_id=? where order_store_id='10'", (store.id,)
+        )
+    return model, store
+
+
+def test_feed_after_sales_without_sku_keeps_the_uploaded_export_in_force(tmp_path):
+    root = tmp_path / "feed"
+    manifest = _fixture(root, after_sku=None)
+    feed = OrderFeed(tmp_path / "workspace", client=FakeClient(manifest), feed_root=root)
+    feed.sync()
+    model, store = _model_and_store(feed)
+    ingestion = _uploaded_after_sales(tmp_path, model, store)
+    feed.append_to(ingestion, store)
+
+    labels = [item.ref.label() for item in ingestion.frames_of("after_sales")]
+    assert any("售后单_样本" in label for label in labels)
+    live = next(item for item in ingestion.frames_of("after_sales") if "订单台" in item.ref.label())
+    assert any("有 0 行带商品编码" in note and "售后单_样本" in note for note in live.notes)
+
+    result = run(ingestion, store.platform)
+    goods = result.facts.filter(pl.col("metric_id") == "goods_cost")
+    assert goods.is_empty(), "买家未收到货 + 退款成功 的商品成本必须归零"
+    assert any("逐商品排除 1 行" in note for note in result.notes)
+
+
+def test_partially_named_feed_after_sales_and_the_upload_work_together(tmp_path):
+    """The console names the product only on single-item orders; the upload covers the rest."""
+    root = tmp_path / "feed"
+    manifest = _fixture(root, second_unnamed=True)
+    feed = OrderFeed(tmp_path / "workspace", client=FakeClient(manifest), feed_root=root)
+    feed.sync()
+    model, store = _model_and_store(feed)
+    # The upload knows about the second product only; the feed knows about the first.
+    ingestion = _uploaded_after_sales(tmp_path, model, store, ("S2", "SKU2"))
+    feed.append_to(ingestion, store)
+
+    assert len(ingestion.frames_of("after_sales")) == 2
+    live = next(item for item in ingestion.frames_of("after_sales") if "订单台" in item.ref.label())
+    assert any("2 行有 1 行带商品编码" in note for note in live.notes)
+
+    result = run(ingestion, store.platform)
+    assert result.facts.filter(pl.col("metric_id") == "goods_cost").is_empty()
+    assert any("逐商品排除 2 行" in note for note in result.notes)
+
+
+def test_a_fully_named_feed_does_not_double_count_the_same_after_sale(tmp_path):
+    root = tmp_path / "feed"
+    manifest = _fixture(root, second_unnamed=True)
+    feed = OrderFeed(tmp_path / "workspace", client=FakeClient(manifest), feed_root=root)
+    feed.sync()
+    model, store = _model_and_store(feed)
+    # Upload and feed both name the first product; the upload alone names the second.
+    ingestion = _uploaded_after_sales(tmp_path, model, store, ("S1", "SKU1"), ("S2", "SKU2"))
+    feed.append_to(ingestion, store)
+    result = run(ingestion, store.platform)
+    assert result.facts.filter(pl.col("metric_id") == "goods_cost").is_empty()
+    assert any("逐商品排除 2 行" in note for note in result.notes)
+
+
+def test_feed_after_sales_naming_the_product_zeroes_cost_without_any_upload(tmp_path):
+    root = tmp_path / "feed"
+    manifest = _fixture(root)
+    feed = OrderFeed(tmp_path / "workspace", client=FakeClient(manifest), feed_root=root)
+    feed.sync()
+    model, store = _model_and_store(feed)
+    ingestion = Ingestion(model=model)
+    feed.append_to(ingestion, store)
+
+    labels = [item.ref.label() for item in ingestion.frames_of("after_sales")]
+    assert labels == ["订单台实时售后 · 订单台"]
+    result = run(ingestion, store.platform)
+    assert result.facts.filter(pl.col("metric_id") == "goods_cost").is_empty()
+    assert any("逐商品排除 1 行" in note for note in result.notes)
+
+
+def test_the_upload_stays_next_to_a_fully_named_feed(tmp_path):
+    """One feed after-sale names one product; a whole-order refund on a multi-item
+    order is only fully described by the per-product 聚水潭 export."""
+    root = tmp_path / "feed"
+    manifest = _fixture(root)
+    feed = OrderFeed(tmp_path / "workspace", client=FakeClient(manifest), feed_root=root)
+    feed.sync()
+    model, store = _model_and_store(feed)
+    ingestion = _uploaded_after_sales(tmp_path, model, store)
+    feed.append_to(ingestion, store)
+    labels = sorted(item.ref.label() for item in ingestion.frames_of("after_sales"))
+    assert len(labels) == 2 and any("售后单_样本" in label for label in labels)
+    live = next(item for item in ingestion.frames_of("after_sales") if "订单台" in item.ref.label())
+    assert any("1 行有 1 行带商品编码" in note for note in live.notes)
+
+
+def test_non_positive_unit_costs_are_unpriced_unless_the_item_is_a_gift(tmp_path):
+    """ERP writes 0 for 'no price' and moving averages go negative after returns;
+    neither is a cost of goods sold. A declared gift at 0 is a real price."""
+    root = tmp_path / "feed"
+    manifest = _fixture(root)
+    objects = manifest["objects"]
+    objects["order_items.parquet"] = _write(root, "order_items.parquet", pl.DataFrame({
+        "order_id": ["1"] * 4, "sub_order_id": ["11", "12", "13", "14"], "online_order_no": ["ON1"] * 4,
+        "sku_id": ["SKU1", "SKU2", "SKU3", "GIFT"], "merchant_sku": ["P1", "P2", "P3", "P4"],
+        "outer_sku": ["S1", "S2", "S3", "S4"], "product_name": ["商品"] * 4,
+        "quantity": ["1"] * 4, "paid_amount": ["20.00", "10.00", "5.00", "0.00"], "refund_amount": ["0.00"] * 4,
+        "tracking_no": ["SF1"] * 4, "is_gift": [False, False, False, True],
+    }))
+    objects["order_costs.parquet"] = _write(root, "order_costs.parquet", pl.DataFrame({
+        "order_id": ["1"] * 4, "sub_order_id": ["11", "12", "13", "14"], "sku_id": ["SKU1", "SKU2", "SKU3", "GIFT"],
+        "quantity": ["1"] * 4, "unit_cost": ["3.50", "-1.27", "0", "0"], "cost_amount": ["3.50", "-1.27", "0", "0"],
+        "cost_source": ["history", "scrape", "mirror", "history"], "cost_status": ["priced"] * 4,
+    }))
+    (root / "current" / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+    feed = OrderFeed(tmp_path / "workspace", client=FakeClient(manifest), feed_root=root)
+    feed.sync()
+    ingestion = Ingestion(model=None)  # type: ignore[arg-type]
+    feed.append_to(ingestion, Store(id="taobao_test", name="淘宝测试店", platform="taobao"))
+    cost = ingestion.frames_of("order_cost")[0]
+    assert sorted(cost.frame.get_column("sku").to_list()) == ["GIFT", "SKU1"]
+    assert cost.frame.get_column("unit_cost").min() >= 0
+    assert any("2 行成本价 ≤ 0" in note for note in cost.notes)
+
+
+def test_unmapped_store_is_a_feed_error_not_a_crash(tmp_path):
+    root = tmp_path / "feed"
+    manifest = _fixture(root)
+    feed = OrderFeed(tmp_path / "workspace", client=FakeClient(manifest), feed_root=root)
+    feed.sync()
+    with pytest.raises(OrderFeedError, match="已确认店铺映射"):
+        feed.append_to(
+            Ingestion(model=None),  # type: ignore[arg-type]
+            Store(id="pdd_nobody", name="没映射的店", platform="pdd"),
+        )
+
+
+def test_feed_without_sku_and_without_upload_says_so(tmp_path):
+    root = tmp_path / "feed"
+    manifest = _fixture(root, after_sku=None)
+    feed = OrderFeed(tmp_path / "workspace", client=FakeClient(manifest), feed_root=root)
+    feed.sync()
+    ingestion = Ingestion(model=None)  # type: ignore[arg-type]
+    feed.append_to(ingestion, Store(id="taobao_test", name="淘宝测试店", platform="taobao"))
+    live = ingestion.frames_of("after_sales")[0]
+    assert any("没有上传聚水潭售后单" in note for note in live.notes)
+    assert any("有 0 行带商品编码" in note for note in live.notes)
 
 
 def test_caught_up_304_hot_path_calls_only_revision(tmp_path):
