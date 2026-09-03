@@ -19,7 +19,7 @@ from ledger.engine.classify import COL_MAJOR, COL_MINOR, classify
 from ledger.engine.normalize import normalize
 from ledger.engine.parse import parse
 from ledger.engine.recognize import recognize
-from ledger.engine.runtime import ingest
+from ledger.engine.runtime import ingest, run
 from ledger.model.loader import load_model
 
 
@@ -547,3 +547,73 @@ class TestPddJinbaoHasAMarketingMetric:
         assert out.get_column(COL_MAJOR).to_list() == ["marketing_fee"]
         assert out.get_column(COL_MINOR).to_list() == ["多多进宝"]
         assert report.unmatched == {}
+
+
+PDD_ORDER_HEADER = [
+    "商品", "订单号", "订单状态", "商品总价(元)", "邮费(元)", "店铺优惠折扣(元)",
+    "平台优惠折扣(元)", "多多支付立减金额(元)", "用户实付金额(元)", "商家实收金额(元)",
+    "商品数量(件)", "发货时间", "确认收货时间", "商品id", "商品规格", "样式ID",
+    "商家编码-规格维度", "商家编码-商品维度", "商家备注", "售后状态", "快递单号",
+    "快递公司", "订单成交时间",
+]
+
+
+class TestGenericFilenameKeepsTheOwningStore:
+    """店目录里的文件经常叫「订单明细.xlsx」，文件名里没有店名。
+
+    算账时文件已经是这家店槽位里的。提示店名必须用这家店，不能只靠文件名。
+    否则订单明细进不了这家店的脊柱切片：对账单挂得上（全店脊柱能找到号），
+    销售收入却全在没进账。PDD 意大利本土 2026-06：对账单 5,699 个 6 月订单
+    在订单明细里 100% 对得上，进账只有 6 笔。
+    """
+
+    STORE = "宋永康-PDD意大利本土"
+    ORDER = "260609-018696128123287"
+
+    def _order_row(self) -> list:
+        row = [""] * len(PDD_ORDER_HEADER)
+        row[0] = "气球"
+        row[1] = self.ORDER
+        row[2] = "已收货"
+        row[8] = "28.9"
+        row[9] = "28.9"
+        row[10] = "1"
+        row[13] = "123"
+        row[20] = "SF123"
+        row[22] = "2026-06-09 12:00:00"
+        return row
+
+    def test_order_detail_named_generically_gets_the_store(self, tmp_path, model):
+        path = write_xlsx(tmp_path / "订单明细.xlsx", [PDD_ORDER_HEADER, self._order_row()])
+        item = ingest([path], model, [self.STORE], default_store=self.STORE).known[0]
+        assert item.frame is not None
+        assert item.frame.get_column("__hint_store__").to_list() == [self.STORE]
+
+    def test_without_default_the_hint_is_empty(self, tmp_path, model):
+        path = write_xlsx(tmp_path / "订单明细.xlsx", [PDD_ORDER_HEADER, self._order_row()])
+        item = ingest([path], model, [self.STORE]).known[0]
+        assert item.frame is not None
+        assert item.frame.get_column("__hint_store__").to_list() == [None]
+
+    def test_june_settlement_counts_when_detail_has_no_store_in_filename(self, tmp_path, model):
+        order = write_xlsx(tmp_path / "订单明细.xlsx", [PDD_ORDER_HEADER, self._order_row()])
+        settle = write_xlsx(tmp_path / "6月份对账单.xlsx", [
+            ["拼多多店铺账务明细查询"],
+            [""],
+            ["起始时间：2026-06-01 00:00:00  终止时间：2026-06-30 23:59:59"],
+            ["----------交易记录明细列表---------"],
+            ["商户订单号", "发生时间", "收入金额（+元）", "支出金额（-元）",
+             "账务类型", "备注", "业务描述"],
+            [self.ORDER, "2026-06-09 12:00:00", "28.9", "0",
+             "交易收入", "-", "0010002|交易收入-订单收入"],
+        ])
+        ing = ingest([order, settle], model, [self.STORE], default_store=self.STORE)
+        result = run(ing, "pdd")
+        sl = result.slices.get((self.STORE, "2026-06"))
+        assert sl is not None, list(result.slices)
+        rec = sl.nodes.get("n_receipt")
+        assert rec is not None and rec.value == pytest.approx(28.9)
+        import polars as pl
+
+        receipt = sl.facts.filter(pl.col("metric_id") == "trade_receipt_pdd")
+        assert receipt.get_column("counted").to_list() == [True]

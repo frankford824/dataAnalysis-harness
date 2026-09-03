@@ -245,7 +245,7 @@ def cmd_run(args: argparse.Namespace) -> int:
     total_slices = 0
     for store_id, store_files in grouped.items():
         store = model.store(store_id)
-        ing = ingest(list(store_files), model, [store.name, *store.aliases])
+        ing = ingest(list(store_files), model, [store.name, *store.aliases], default_store=store.name)
         result = run(ing, store.platform)
 
         if not result.slices:

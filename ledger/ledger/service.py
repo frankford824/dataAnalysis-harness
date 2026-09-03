@@ -298,6 +298,7 @@ def _recompute_locked(
         files, model, [store.name, *store.aliases],
         each=lambda done, total: report(f"读表 · {where}", done, total),
         cache_root=ws.root / "cache" / "parse",
+        default_store=store.name,
     )
     if order_feed.enabled():
         try:
@@ -363,7 +364,7 @@ def simulate(ws: Workspace, model: Model, store: Store) -> list[dict[str, Any]]:
     files = ws.active_files(store.id)
     if not files and not order_feed.enabled():
         return []
-    ing = ingest(files, model, [store.name, *store.aliases])
+    ing = ingest(files, model, [store.name, *store.aliases], default_store=store.name)
     if order_feed.enabled():
         order_feed.OrderFeed(ws.root).append_to(ing, store)
     result = run(ing, store.platform)

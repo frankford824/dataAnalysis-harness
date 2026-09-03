@@ -181,6 +181,7 @@ def ingest(
     known_stores: list[str] | None = None,
     each: Callable[[int, int], None] | None = None,
     cache_root: str | Path | None = None,
+    default_store: str | None = None,
 ) -> Ingestion:
     """识别 + 解析 + 归一。一个文件里的每张工作表单独处理。
 
@@ -199,6 +200,9 @@ def ingest(
     `each(读完几份, 一共几份)` 是给界面报进度的。这一段是交表里最慢的一截，几十秒
     里界面一个数都不动的话，人分不出它是在读表还是已经死了。并行下报的是「读完
     第几份」而不是「正在读哪一份」——同时有四份在读，说哪一份都是错的。
+
+    `default_store` 是算账时已经选定的那家店。文件名对不上任何登记名时用它
+    （「订单明细.xlsx」这种），对得上时仍以文件名为准。
     """
     result = Ingestion(model=model)
     work = [Path(p) for p in paths]
@@ -211,7 +215,9 @@ def ingest(
     cache = Path(cache_root) if cache_root is not None else None
 
     def one(p: Path) -> list[Ingested]:
-        got = _ingest_file_cached(p, model, stores, candidates, cache, model_key)
+        got = _ingest_file_cached(
+            p, model, stores, candidates, cache, model_key, default_store,
+        )
         if each:
             # count() 的自增是原子的（CPython 里由 C 层做完），几个读线程同时报
             # 也不会数错。
@@ -237,10 +243,11 @@ def _ingest_file_cached(
     candidates: list[int],
     cache_root: Path | None,
     model_key: str,
+    default_store: str | None = None,
 ) -> list[Ingested]:
     """Cache recognition/parse/normalisation; filename-derived hints stay live."""
     if cache_root is None:
-        return _ingest_file(path, model, known_stores, candidates)
+        return _ingest_file(path, model, known_stores, candidates, default_store=default_store)
     file_sha = digest(path)
     # The parser dispatches by suffix, so equal bytes under a different file
     # type cannot safely share an entry.  Filename/store/period are not in the
@@ -252,13 +259,16 @@ def _ingest_file_cached(
     with _parse_cache_lock(key):
         if target.exists():
             try:
-                return _load_ingest_cache(target, path, model, known_stores)
+                return _load_ingest_cache(
+                    target, path, model, known_stores, default_store=default_store,
+                )
             except Exception:
                 # Cache is derived and content-addressed.  A partial/corrupt
                 # entry is never evidence; discard it and parse the source.
                 shutil.rmtree(target, ignore_errors=True)
         items = _ingest_file(
             path, model, known_stores, candidates, file_sha=file_sha,
+            default_store=default_store,
         )
         try:
             _save_ingest_cache(target, items)
@@ -311,11 +321,11 @@ def _save_ingest_cache(target: Path, items: list[Ingested]) -> None:
 
 def _load_ingest_cache(
     target: Path, path: Path, model: Model, known_stores: list[str],
+    default_store: str | None = None,
 ) -> list[Ingested]:
     payload = json.loads((target / "meta.json").read_text(encoding="utf-8"))
     file_sha = digest(path)
-    owner = model.store_of(path.name)
-    hint_store = owner.name if owner else infer_store(path.name, known_stores)
+    hint_store = _hint_store(path.name, model, known_stores, default_store)
     hint_period = infer_period(path.name)
     out: list[Ingested] = []
     for raw in payload:
@@ -370,7 +380,7 @@ _HEADER_SCAN_ROWS = 20
 
 def _ingest_file(
     path: Path, model: Model, known_stores: list[str], candidates: list[int],
-    *, file_sha: str = "",
+    *, file_sha: str = "", default_store: str | None = None,
 ) -> list[Ingested]:
     """一个文件读出来的全部表。不碰任何共享状态，才能并行跑。"""
     items: list[Ingested] = []
@@ -378,8 +388,7 @@ def _ingest_file(
     hint_period = infer_period(path.name)
     # 文件名对上哪家店，提示就用那家的登记名。店改过名之后文件名还是旧名，
     # 只在 known_stores 里找登记名会找不到，账会落到一个对不上切片的店名上。
-    owner = model.store_of(path.name)
-    hint_store = owner.name if owner else infer_store(path.name, known_stores)
+    hint_store = _hint_store(path.name, model, known_stores, default_store)
     try:
         tables = parse(path)
     except ParseError as exc:
@@ -572,6 +581,27 @@ def _recognize_any_header_row(
 
 def _needs_reparse(p: ParseOptions) -> bool:
     return bool(p.sheet) or p.header_row != 0 or p.skip_after_header != 0 or bool(p.delimiter)
+
+
+def _hint_store(
+    filename: str,
+    model: Model,
+    known_stores: list[str],
+    default_store: str | None,
+) -> str | None:
+    """这家店的文件，提示店名用哪一个。
+
+    文件名能对上登记名或别名，用对上的那家——店改过名之后文件名还是旧名，
+    只在 known_stores 里找登记名会找不到。文件名对不上时（「订单明细.xlsx」
+    「6月份对账单.xlsx」这种通用名），用算账时已经选定的那家店。不算这家店
+    槽位里的文件的话，订单明细进不了脊柱切片：对账单挂得上号，销售收入却
+    全在没进账。PDD 意大利本土 2026-06 就是这样，对账单 5699 个 6 月订单
+    在订单明细里 100% 对得上，进账只有 6 笔。
+    """
+    owner = model.store_of(filename)
+    if owner is not None:
+        return owner.name
+    return infer_store(filename, known_stores) or default_store
 
 
 def _attach_hints(frame: pl.DataFrame, store: str | None, period: str | None) -> pl.DataFrame:

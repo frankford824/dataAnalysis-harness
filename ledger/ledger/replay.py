@@ -188,7 +188,7 @@ def snapshot(model: Model, corpus: Path, store_ids: Iterable[str] | None = None)
         files = [p for p in found if p.name in mine]
         if not files:
             continue
-        result = run(ingest([str(p) for p in files], model, [store.name, *store.aliases]), store.platform)
+        result = run(ingest([str(p) for p in files], model, [store.name, *store.aliases], default_store=store.name), store.platform)
         # 账期可能是空的：订单明细里那一列时间整列空着，就会出现一个没有账期的店期。
         # 这种店期照样要进基线——它代表着一批算不进任何月份的订单，数量变了必须有人
         # 知道。键排序时得先把空的换成一个字符串，否则 sorted 拿 None 和 str 比大小
