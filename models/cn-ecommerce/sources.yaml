@@ -27,6 +27,15 @@
   required_for_close: true
   provides: [trade_receipt, trade_refund, software_fee, trade_compensation, marketing_fee,
              logistics_fee, cross_border_fee]
+  # 对账单会交好几份、账期还会重叠：订单的钱错月甚至更久才到账，店长导出时
+  # 就把区间拉宽（5–6 月一份、6–7 月一份）。同一笔流水在两份里都有，
+  # 直接拼接就算两遍。1688 星泽 2026-06 销售收入 73,809.68，实际只有 3.7 万，
+  # 就是这样翻的倍。
+  #
+  # 引擎只用所有已交文件都有的那几列比。1688 收款/付款是两张模板，共有的是
+  # 账单编号+关联订单号+时间+科目；拼多多没有流水号，就靠订单号+时间+科目+两个
+  # 金额列。一份文件自己内部的重复行不动。
+  dedupe_key: [txn_id, base_order_id, settle_time, subject, income, outgo]
   note: >
     平台资金账户的逐笔流水，销售收入与各项平台费用都出自这里。
     淘宝有支付宝和微信两个资金渠道，是两张表头不同的表，都要交。

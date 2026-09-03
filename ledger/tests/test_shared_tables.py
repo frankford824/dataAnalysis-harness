@@ -51,6 +51,63 @@ class TestTheFourSharedTablesAreDeclared:
                 assert not missing, f"{name}的去重键 {missing} 在模板 {template.id} 上没有绑定"
 
 
+class TestOverlappingSettlementFilesCountOnce:
+    """对账单会交好几份、区间重叠：钱错月到账，店长导出时把区间拉宽。
+
+    1688 星泽交了「5–6 月」和「6–7 月」两份收款明细，6 月那部分两边都有。
+    没有去重键时直接拼接，2026-06 销售收入 73,809.68，实际 3.7 万——每一笔
+    都算了两遍，而且翻倍不报错。
+    """
+
+    STORE = "姜惠卉-1688义乌星泽天成供应链管理有限公司"
+    HEADER = [
+        "账单编号", "账单创建时间", "应收金额(元)", "已收金额(元)", "账单状态",
+        "账单类型", "场景类型", "场景明细", "关联订单号",
+    ]
+
+    @staticmethod
+    def _row(txn, order, amount, when):
+        return [txn, when, amount, amount, "已结清", "收款", "订单收入", "订单收入", order]
+
+    def _ingest(self, tmp_path, model, files):
+        from conftest import write_xlsx
+
+        from ledger.engine.runtime import ingest
+
+        paths = [
+            write_xlsx(tmp_path / name, [["#1688收入账单明细查询"], self.HEADER, *rows])
+            for name, rows in files
+        ]
+        return ingest(paths, model, [self.STORE], default_store=self.STORE)
+
+    def test_the_source_declares_a_key_every_settlement_template_can_serve(self, model):
+        key = model.source("settlement").dedupe_key
+        assert key
+        for template in model.templates_of("settlement"):
+            roles = {b.role for b in template.bindings}
+            assert {"base_order_id", "settle_time", "subject"} <= roles & set(key), template.id
+
+    def test_the_overlap_is_dropped_from_the_second_file(self, tmp_path, model):
+        may = self._row("B1", "3308001", 100.0, "2026-05-30 10:00:00")
+        june = self._row("B2", "3308002", 1459.5, "2026-06-05 10:00:00")
+        july = self._row("B3", "3308003", 50.0, "2026-07-02 10:00:00")
+        ing = self._ingest(tmp_path, model, [
+            ("对账-5-6月.xlsx", [may, june]),
+            ("对账-6-7月.xlsx", [june, july]),
+        ])
+        frames = [i.frame for i in ing.frames_of("settlement")]
+        assert [f.height for f in frames] == [2, 1]
+        total = sum(float(f.get_column("income").sum()) for f in frames)
+        assert total == pytest.approx(100.0 + 1459.5 + 50.0)
+        assert any("去重" in n for n in ing.frames_of("settlement")[1].notes)
+
+    def test_repeats_inside_one_file_are_left_alone(self, tmp_path, model):
+        """一份文件里两行一模一样，是两笔钱，不是重复上报。"""
+        row = self._row("B9", "3308009", 9.9, "2026-06-05 10:00:00")
+        ing = self._ingest(tmp_path, model, [("对账.xlsx", [row, row])])
+        assert ing.frames_of("settlement")[0].frame.height == 2
+
+
 class TestHitRateIsNotScoredForSharedTables:
     """公司级主表不评命中率，改为不出数。见 view._quality。"""
 
