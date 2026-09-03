@@ -221,6 +221,34 @@ class TestRatioAllocation:
         assert got == [70.0, 30.0]
         assert any("买家实付" in n for n in proj.notes)
 
+    def test_all_null_ratio_column_falls_back_like_missing(self):
+        """列在、整单都空：订单台拼进千牛脊柱后就是这样。按 0 会让收入整项消失。"""
+        spine = _spine([
+            {"order_id": "A", "alloc_ratio": None, "buyer_paid": 70.0,
+             "store": "s", "period": "p"},
+            {"order_id": "A", "alloc_ratio": None, "buyer_paid": 30.0,
+             "store": "s", "period": "p"},
+        ])
+        metric = _metric(Allocation(mode="ratio", by="alloc_ratio"))
+        proj = project(_facts([("A", 100.0)]), metric, spine)
+        got = [round(x, 2) for x in proj.facts.get_column("amount").to_list()]
+        assert got == [70.0, 30.0]
+        assert any("没有收入分配率" in n for n in proj.notes)
+
+    def test_partial_null_on_same_order_stays_zero(self):
+        """同一单里千牛写了占比、订单台多出来的行是空，空的仍按 0，避免叠出 > 1。"""
+        spine = _spine([
+            {"order_id": "A", "alloc_ratio": 1.0, "buyer_paid": 70.0,
+             "store": "s", "period": "p"},
+            {"order_id": "A", "alloc_ratio": None, "buyer_paid": 30.0,
+             "store": "s", "period": "p"},
+        ])
+        metric = _metric(Allocation(mode="ratio", by="alloc_ratio"))
+        proj = project(_facts([("A", 100.0)]), metric, spine)
+        got = [round(x, 2) for x in proj.facts.get_column("amount").to_list()]
+        # 分到 0 的脊柱行不会留下，合计仍是这一单的全额。
+        assert got == [100.0]
+
 
 class TestDerivedRatioFollowsTheManualDefinition:
     """自己推分配率时，口径照财务表来：子订单收入 = 买家实付 - 退款金额。

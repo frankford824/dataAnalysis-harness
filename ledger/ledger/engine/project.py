@@ -286,14 +286,51 @@ def _even() -> pl.Expr:
     return 1.0 / pl.len().over("link_key").cast(pl.Float64)
 
 
+def _paid_share(keyed: pl.DataFrame) -> pl.Expr:
+    """按买家实付（扣退款）推收入分配率。和千牛人工表的公式同一套。"""
+    paid = pl.col("buyer_paid").cast(pl.Float64, strict=False).fill_null(0.0)
+    if "refund_amount" in keyed.columns:
+        refund = pl.col("refund_amount").cast(pl.Float64, strict=False).fill_null(0.0)
+        net = pl.max_horizontal(paid - refund, pl.lit(0.0))
+    else:
+        net = paid
+    total = net.sum().over("link_key")
+    # 一单全退到分母为 0 时没有可比的收入了，退回笔数均摊。人工表这里
+    # 分配率算成 0、费用整块丢掉，但钱是真花出去的，账上得留着。
+    return pl.when(total == 0).then(_even()).otherwise(net / total)
+
+
+def _derived_share(keyed: pl.DataFrame) -> pl.Expr:
+    if "buyer_paid" in keyed.columns:
+        return _paid_share(keyed)
+    return _even()
+
+
+def _vacant_ratio(keyed: pl.DataFrame, role: str) -> pl.Expr:
+    """这一单的分配率是不是全空。
+
+    列在、值空，和列不在，不是一回事：千牛明细带「收入分配率」时列在脊柱上，
+    订单台补进来的行没有这一列，拼表之后是空。按 0 填的后果是挂钩成功、
+    覆盖率看起来很高，损益表销售收入却是 0.00——天猫喜必顺 2026-06 就是这样。
+    整单都空才回退；同一单里有的有、有的空，空的仍按 0，避免和千牛已写的占比叠出 > 1。
+    """
+    return pl.col(role).cast(pl.Float64, strict=False).is_null().all().over("link_key")
+
+
 def _factor(keyed: pl.DataFrame, metric: Metric) -> pl.Expr:
     """每条脊柱行拿到的比例。"""
     alloc = metric.allocate
     if alloc is None:
         return pl.lit(1.0)
     if alloc.mode == "ratio":
+        derived = _derived_share(keyed)
         if alloc.by in keyed.columns:
-            return pl.col(alloc.by).cast(pl.Float64, strict=False).fill_null(0.0)
+            declared = pl.col(alloc.by).cast(pl.Float64, strict=False)
+            return (
+                pl.when(_vacant_ratio(keyed, alloc.by))
+                .then(derived)
+                .otherwise(declared.fill_null(0.0))
+            )
         # 天猫千牛导出经常没有「收入分配率」这一列。绝不能按 1 填——
         # 一个主订单有几个子订单，钱就会被记几遍，利润凭空翻倍。
         #
@@ -302,28 +339,28 @@ def _factor(keyed: pl.DataFrame, metric: Metric) -> pl.Expr:
         # 负数计 0），主订单收入 = 按主订单编号汇总子订单收入，收入分配率 = 两者相除。
         # 退款金额那一格常填「无退款申请」，转数值后是空，正好落回买家实付。
         # 全退的子订单权重为 0，费用不该摊到它头上。
-        if "buyer_paid" in keyed.columns:
-            paid = pl.col("buyer_paid").cast(pl.Float64, strict=False).fill_null(0.0)
-            if "refund_amount" in keyed.columns:
-                refund = pl.col("refund_amount").cast(pl.Float64, strict=False).fill_null(0.0)
-                net = pl.max_horizontal(paid - refund, pl.lit(0.0))
-            else:
-                net = paid
-            total = net.sum().over("link_key")
-            # 一单全退到分母为 0 时没有可比的收入了，退回笔数均摊。人工表这里
-            # 分配率算成 0、费用整块丢掉，但钱是真花出去的，账上得留着。
-            return pl.when(total == 0).then(_even()).otherwise(net / total)
-        return _even()
+        return derived
     return _even()
 
 
 def _ratio_fallback_notes(keyed: pl.DataFrame, metric: Metric) -> list[str]:
     alloc = metric.allocate
-    if alloc is None or alloc.mode != "ratio" or alloc.by in keyed.columns:
+    if alloc is None or alloc.mode != "ratio":
         return []
+    vacant = False
+    if alloc.by in keyed.columns:
+        vacant = bool(
+            keyed.select(_vacant_ratio(keyed, alloc.by).alias("v")).get_column("v").any()
+        )
+        if not vacant:
+            return []
     if "buyer_paid" in keyed.columns:
         basis = "买家实付金额扣退款后" if "refund_amount" in keyed.columns else "买家实付金额"
+        if vacant:
+            return [f"{metric.name}：部分订单没有收入分配率，已按{basis}占比分摊"]
         return [f"{metric.name}：订单明细没有收入分配率，已按{basis}占比分摊"]
+    if vacant:
+        return [f"{metric.name}：部分订单没有收入分配率，已按子订单笔数均摊"]
     return [f"{metric.name}：订单明细没有收入分配率，已按子订单笔数均摊"]
 
 
@@ -338,10 +375,12 @@ def ratio_health(keyed: pl.DataFrame, metric: Metric) -> list[str]:
     if alloc is None or alloc.mode != "ratio" or alloc.by not in keyed.columns:
         return []
     col = pl.col(alloc.by).cast(pl.Float64, strict=False)
+    # 整单全空的那些已经回退到买家实付，不算「按 0 计」。
+    leftover_null = col.is_null() & ~_vacant_ratio(keyed, alloc.by)
     stats = keyed.select(
         (col < 0).sum().alias("neg"),
         (col > 1).sum().alias("over"),
-        col.is_null().sum().alias("null"),
+        leftover_null.sum().alias("null"),
     ).row(0, named=True)
     notes = []
     if stats["neg"] or stats["over"]:
