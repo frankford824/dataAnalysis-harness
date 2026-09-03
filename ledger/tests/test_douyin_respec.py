@@ -252,3 +252,48 @@ class TestTheEntityNameIsNotBoundAsAStoreName:
             "绑成店名会让挂不上订单的 1,606 行落进一个不存在的店期，"
             "既不进损益表也不进未归属清单"
         )
+
+
+class TestSettlementOrderIdBacktickPrefix:
+    """抖音对账单把订单号写成文本时，格子里带着反引号。
+
+    线上浅花涧 / 喜品 2026-06、2026-07 的对账（xlsx 和 csv 都是）每一行订单号
+    都是 `` `6953… ``，订单台和订单明细里没有这个前缀。挂钩原先只剥 `@`，
+    命中率直接掉到 0，损益表销售收入是 0.00，钱全在「没进账」。
+    烘焙那份没有反引号，所以能挂上——不是店的问题，是导出写法。
+    """
+
+    ORDER = "6953149768301877000"
+
+    def test_backtick_is_the_same_key(self) -> None:
+        import polars as pl
+        from ledger.engine.link import normalize_key
+        from ledger.engine.rules import _norm, norm_expr
+
+        raw = f"`{self.ORDER}"
+        assert _norm(raw) == self.ORDER
+        assert normalize_key(raw) == self.ORDER
+        assert _norm(self.ORDER) == self.ORDER
+        got = pl.DataFrame({"k": [raw, f"｀{self.ORDER}", self.ORDER]}).select(
+            norm_expr(pl.col("k"))
+        ).to_series()
+        assert got.to_list() == [self.ORDER, self.ORDER, self.ORDER]
+
+    def test_it_links_to_the_spine(self, model) -> None:
+        import polars as pl
+        from ledger.engine.link import Spine, link
+
+        metric = model.metric("trade_receipt_douyin").for_platform("douyin")
+        spine = Spine(frame=pl.DataFrame({
+            "order_id": [self.ORDER],
+            "sub_order_id": [self.ORDER + "A00"],
+            "store": "店",
+            "period": "2026-06",
+        }))
+        frame, report = link(
+            pl.DataFrame({"base_order_id": [f"`{self.ORDER}"], "income": [16.32]}),
+            metric,
+            spine,
+        )
+        assert report.linked_rows == 1
+        assert frame.get_column("__link_key__").to_list() == [self.ORDER]

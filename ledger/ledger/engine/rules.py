@@ -312,12 +312,15 @@ def _describe(spec: FieldMatch | None) -> str:
 
 
 _NOISE = re.compile(r"[\s\u3000'\"]+")
+#: Excel / 平台导出让长数字保持文本时加的前缀。`@` 是聚水潭快递单号，
+#: 反引号是抖音对账单（xlsx 和 csv 都带），全角反引号偶尔跟着出现。
+_TEXT_PREFIX = "@`｀"
 
 
 def _norm(value: object) -> str:
     if value is None:
         return ""
-    s = _NOISE.sub("", str(value)).lstrip("@")
+    s = _NOISE.sub("", str(value)).lstrip(_TEXT_PREFIX)
     if s.endswith(".0") and s[:-2].isdigit():
         s = s[:-2]
     return s
@@ -330,10 +333,15 @@ def norm_expr(col: pl.Expr) -> pl.Expr:
     读出来是 `12345.0`，和另一张表里的 `12345` 挂不上。只有纯数字才砍，
     否则会把 `V1.0` 这种真名字砍成 `V1`。
 
-    开头的 `@` 是另一个 Excel 痕迹：长数字被标成文本时，格子里会留下 `@435…`。
-    支付宝备注抠出的运单号没有这个前缀，聚水潭快递单号有，不折掉就回查不上。
+    开头的 `@` / `` ` `` 是另一个痕迹：长数字被标成文本时格子里会留下前缀。
+    支付宝备注抠出的运单号没有 `@`，聚水潭快递单号有；抖音对账单的订单号
+    带反引号，订单台/订单明细里没有。不折掉就一行都挂不上。
     """
-    s = col.fill_null("").str.replace_all(r"[\s\u3000'\"]+", "").str.strip_chars_start("@")
+    s = (
+        col.fill_null("")
+        .str.replace_all(r"[\s\u3000'\"]+", "")
+        .str.strip_chars_start(_TEXT_PREFIX)
+    )
     stem = s.str.strip_suffix(".0")
     return pl.when(stem.str.contains(r"^\d+$")).then(stem).otherwise(s)
 
