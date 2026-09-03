@@ -31,6 +31,10 @@ from .model.schema import ColumnBinding, Model, Store, Template
 
 SCHEMA_VERSION = "ledger-feed.v1"
 REPLACED_SOURCES = frozenset({"order_cost", "after_sales"})
+# 一行商品成本超过该行售价这么多倍、且金额超过这个门槛，视为数量或成本写错，不计。
+# 正常亏本引流是 1 分钱卖 1 块成本的东西，绝对金额小；5 倍 + 100 元把它们都放过。
+IMPLAUSIBLE_COST_TO_PRICE = 5.0
+IMPLAUSIBLE_COST_FLOOR = 100.0
 _DB_SCHEMA = """
 pragma journal_mode=wal;
 pragma synchronous=full;
@@ -189,6 +193,7 @@ class OrderFeed:
         self.db_path = self.workspace_root / "order-feed.db"
         self._guard = threading.RLock()
         self._unpriced_cost_rows = 0
+        self._implausible_cost: tuple[int, float] = (0, 0.0)
         self.workspace_root.mkdir(parents=True, exist_ok=True)
         with self._connect() as conn:
             conn.executescript(_DB_SCHEMA)
@@ -809,6 +814,13 @@ class OrderFeed:
                 f"订单台成本里 {self._unpriced_cost_rows:,} 行成本价 ≤ 0，按缺价处理不计成本；"
                 "这些订单会落在「订单拿到商品成本」的覆盖率里"
             )
+        rows, amount = self._implausible_cost
+        if rows:
+            cost_item.notes.append(
+                f"订单台成本里 {rows:,} 行一行成本超过售价 {IMPLAUSIBLE_COST_TO_PRICE:g} 倍"
+                f"（合计 {amount:,.2f} 元），多半是商品数量写错，按存疑不计；"
+                "等订单台修正数量后重算即恢复"
+            )
         return [
             self._item("order_detail", "order_console_order_v1", "订单台实时订单", order_frame,
                        self._order_template(), fingerprint),
@@ -937,6 +949,34 @@ class OrderFeed:
         unpriced = ((unit <= 0) | unit.is_null()) & ~((unit == 0) & pl.col("is_gift"))
         self._unpriced_cost_rows = int(certified.select(unpriced.sum()).item() or 0)
         certified = certified.filter(~unpriced).drop("is_gift")
+        # 商品行数量写错时成本会被放大几十倍（2026-09-03 见拼多多「定制配件」行数量 2043、
+        # 实付 0.03，一行成本 3 万；同批还有 4086、8172 这类 2043 的整数倍）。一行成本
+        # 超过它自己售价的若干倍、且绝对金额不小，就不是正常的亏本促销而是数据错了：
+        # 按存疑不计，让它落进覆盖率缺口等订单台修正。
+        # 售价拿「行金额」和「整单实付」里大的那个：聚水潭拆金额时整单钱常压在一行、其余行
+        # 近乎 0；拼多多又有近三成订单整单实付是 0.03 的占位。两个都为 0 的行没法比，不动。
+        def _amount(frame: pl.DataFrame, keys: list[str], column: str) -> pl.DataFrame:
+            picked = frame.select(pl.col(*keys).cast(pl.Utf8), *(
+                [pl.col(column).cast(pl.Float64, strict=False)] if column in frame.columns
+                else [pl.lit(None, dtype=pl.Float64).alias(column)]
+            ))
+            return picked.unique(subset=keys, keep="first")
+
+        total = pl.col("cost_amount").cast(pl.Float64, strict=False)
+        certified = certified.join(
+            _amount(items, ["order_id", "sub_order_id"], "line_amount"), on=["order_id", "sub_order_id"], how="left",
+        ).join(
+            _amount(orders, ["order_id"], "paid_amount").rename({"paid_amount": "order_paid"}), on="order_id", how="left",
+        )
+        price = pl.max_horizontal(pl.col("line_amount").fill_null(0.0), pl.col("order_paid").fill_null(0.0))
+        implausible = (
+            (total > IMPLAUSIBLE_COST_FLOOR)
+            & (price > 0)
+            & (total > IMPLAUSIBLE_COST_TO_PRICE * price)
+        ).fill_null(False)
+        flagged = certified.filter(implausible)
+        self._implausible_cost = (flagged.height, float(flagged.select(total.sum()).item() or 0.0))
+        certified = certified.filter(~implausible).drop("line_amount", "order_paid")
         reships = (
             relations.filter(pl.col("relation_type") == "reship")
             .get_column("target_order_id").cast(pl.Utf8).drop_nulls().unique().to_list()

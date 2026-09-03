@@ -335,6 +335,48 @@ def test_non_positive_unit_costs_are_unpriced_unless_the_item_is_a_gift(tmp_path
     assert any("2 行成本价 ≤ 0" in note for note in cost.notes)
 
 
+def test_a_line_costing_many_times_its_price_is_a_data_error_not_a_cost(tmp_path):
+    """A 0.21-yuan custom accessory shipped 2043 times on a 0.03-yuan order is a
+    quantity glitch; its 30,000-yuan cost must not reach the statement. A one-cent
+    loss leader costing 1 yuan is real and stays, and so does a 300-piece line whose
+    JST line amount is ~0 because the whole order's money sits on a sibling line."""
+    root = tmp_path / "feed"
+    manifest = _fixture(root)
+    objects = manifest["objects"]
+    objects["orders.parquet"] = _write(root, "orders.parquet", pl.DataFrame({
+        "order_id": ["1", "2"], "online_order_no": ["ON1", "ON2"], "order_store_id": ["10", "10"],
+        "order_time": ["2026-06-02 10:00:00"] * 2, "pay_time": ["2026-06-02 10:01:00"] * 2,
+        "order_status_raw": ["Sent"] * 2, "paid_amount": ["0.03", "1459.50"],
+        "refund_amount": ["0.00"] * 2, "tracking_no": ["SF1", "SF2"],
+    }))
+    objects["order_items.parquet"] = _write(root, "order_items.parquet", pl.DataFrame({
+        "order_id": ["1", "1", "1", "2", "2"], "sub_order_id": ["11", "12", "13", "21", "22"],
+        "online_order_no": ["ON1"] * 3 + ["ON2"] * 2,
+        "sku_id": ["SKU1", "GLITCH", "LEADER", "BULK", "MAIN"], "merchant_sku": ["P1", "P2", "P3", "P4", "P5"],
+        "outer_sku": ["S1", "S2", "S3", "S4", "S5"], "product_name": ["商品", "定制配件", "引流品", "圆盘水晶夹", "主商品"],
+        "quantity": ["1", "2043", "2", "300", "1"], "unit_price": ["20.00", "0.21", "0.01", "0.0006", "1459.32"],
+        "line_amount": ["20.00", "429.03", "0.02", "0.18", "1459.32"],
+        "paid_amount": ["20.00", None, "0.02", None, None], "refund_amount": ["0.00"] * 5,
+        "tracking_no": ["SF1"] * 3 + ["SF2"] * 2, "is_gift": [False] * 5,
+    }))
+    objects["order_costs.parquet"] = _write(root, "order_costs.parquet", pl.DataFrame({
+        "order_id": ["1", "1", "1", "2"], "sub_order_id": ["11", "12", "13", "21"],
+        "sku_id": ["SKU1", "GLITCH", "LEADER", "BULK"],
+        "quantity": ["1", "2043", "2", "300"], "unit_cost": ["3.50", "15.00", "1.00", "1.0945"],
+        "cost_amount": ["3.50", "30645.00", "2.00", "328.35"],
+        "cost_source": ["history", "mirror", "history", "scrape"], "cost_status": ["priced"] * 4,
+    }))
+    (root / "current" / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+    feed = OrderFeed(tmp_path / "workspace", client=FakeClient(manifest), feed_root=root)
+    feed.sync()
+    ingestion = Ingestion(model=None)  # type: ignore[arg-type]
+    feed.append_to(ingestion, Store(id="taobao_test", name="淘宝测试店", platform="taobao"))
+    cost = ingestion.frames_of("order_cost")[0]
+    assert sorted(cost.frame.get_column("sku").to_list()) == ["BULK", "LEADER", "SKU1"]
+    assert cost.frame.get_column("total_cost").sum() == pytest.approx(333.85)
+    assert any("1 行一行成本超过售价 5 倍（合计 30,645.00 元）" in note for note in cost.notes)
+
+
 def test_unmapped_store_is_a_feed_error_not_a_crash(tmp_path):
     root = tmp_path / "feed"
     manifest = _fixture(root)
