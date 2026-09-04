@@ -494,6 +494,34 @@ class TestPddPromotionTotalRow:
         assert hosted.height == 1
         assert hosted.get_column("amount").item() == pytest.approx(-90.0)
 
+    def test_regular_and_store_wide_promotion_use_the_same_uploaded_spine(self, model):
+        """仅在订单台补出的商品不能混进公式左边的“订单明细已算推广”。"""
+        from ledger.engine.link import SPINE_ORIGIN, SPINE_PERIOD, SPINE_PRODUCT, SPINE_STORE, Spine
+        from ledger.engine.project import project
+
+        source = pl.DataFrame({
+            "metric_id": ["ad_cost", "ad_cost", "ad_cost"],
+            "link_key": ["SKU1", "SKU-LIVE", "__store_wide__"],
+            "amount": [-10.0, -30.0, -100.0],
+            "store": ["店"] * 3,
+            "period": ["2026-06"] * 3,
+            "file_name": ["推广-店.xlsx"] * 3,
+            "sheet": ["商品_汇总数据_20260601至20260630"] * 3,
+        })
+        spine = Spine(pl.DataFrame({
+            SPINE_STORE: ["店"] * 3,
+            SPINE_PERIOD: ["2026-06"] * 3,
+            SPINE_PRODUCT: ["SKU1", "SKU2", "SKU-LIVE"],
+            SPINE_ORIGIN: ["order_detail_file", "order_detail_file", "order_console"],
+        }))
+        metric = next(m for m in model.metrics if m.id == "ad_cost")
+        projected = project(source, metric, spine).facts
+        regular = projected.filter(pl.col("link_key") != "__store_wide__")
+        hosted = projected.filter(pl.col("link_key") == "__store_wide__")
+        assert regular.get_column("amount").sum() == pytest.approx(-10.0)
+        assert hosted.get_column("amount").to_list() == [pytest.approx(-45.0)] * 2
+        assert projected.get_column("amount").sum() == pytest.approx(-100.0)
+
     def test_summary_export_without_date_still_spreads_hosting(self, tmp_path, model):
         """商品汇总没有「日期」列，合计写在商品ID 上，全店托管格子是「-」。"""
         from ledger.engine.normalize import STORE_WIDE_PRODUCT

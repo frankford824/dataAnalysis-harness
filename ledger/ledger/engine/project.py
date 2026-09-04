@@ -118,6 +118,13 @@ def project(
     keyed = spine_frame.with_columns(
         norm_expr(pl.col(role).cast(pl.Utf8)).alias("link_key")
     ).with_row_index("spine_row")
+    # 有全店托管控制总数时，普通推广和全店托管两列都按同一张原始订单明细计算。
+    # 否则普通推广先分到“文件 + 订单台补充”的合并行，全店托管却只除文件行，
+    # 两列加起来就不再等于推广表总计。
+    if not wide.is_empty() and SPINE_ORIGIN in keyed.columns:
+        from_file = keyed.filter(pl.col(SPINE_ORIGIN) == "order_detail_file")
+        if not from_file.is_empty():
+            keyed = from_file
     by_key = by_key.with_columns(norm_expr(pl.col("link_key")).alias("link_key"))
 
     factor = _factor(keyed, metric)

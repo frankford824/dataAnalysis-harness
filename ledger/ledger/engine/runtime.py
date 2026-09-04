@@ -765,6 +765,11 @@ def _project_scoped_live(
     )
     rest = rows.filter(~wide_mask)
     wide = rows.filter(wide_mask)
+    projection_spine = spine.frame
+    if not wide.is_empty() and SPINE_ORIGIN in projection_spine.columns:
+        from_file = projection_spine.filter(pl.col(SPINE_ORIGIN) == "order_detail_file")
+        if not from_file.is_empty():
+            projection_spine = from_file
     pairs = [
         (str(store or ""), str(period or ""))
         for store, period in rest.select("store", "period").unique().iter_rows()
@@ -778,7 +783,7 @@ def _project_scoped_live(
             (pl.col("store") == store) & (pl.col("period") == period)
             & ~wide_mask
         )
-        scoped_spine = spine.frame.filter(
+        scoped_spine = projection_spine.filter(
             (pl.col(SPINE_STORE) == store) & (pl.col(SPINE_PERIOD) == period)
         )
         parts.append(project(scoped_source, metric, Spine(scoped_spine)))
@@ -788,7 +793,9 @@ def _project_scoped_live(
             pl.concat(calculated_parts, how="vertical_relaxed")
             if calculated_parts else _empty_spine_facts()
         )
-        parts.append(project(wide, metric, spine, store_wide_facts=calculated))
+        parts.append(
+            project(wide, metric, Spine(projection_spine), store_wide_facts=calculated)
+        )
     frames = [part.facts for part in parts if not part.facts.is_empty()]
     return Projection(
         facts=pl.concat(frames, how="vertical_relaxed") if frames else parts[0].facts,
