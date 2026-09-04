@@ -178,10 +178,11 @@ def _note_total_gap(
 def _store_wide_residual(
     total_rows: pl.DataFrame, kept: pl.DataFrame, template: Template, notes: list[str],
 ) -> pl.DataFrame | None:
-    """把推广表「总计 − 各商品之和」做成一行，按订单明细条数均摊。
+    """把推广表最下方的总花费保成一条控制事实。
 
-    拼多多「全店托管」不给单个商品花费，格子是「-」。差额 = 表底总花费 − 有数的
-    商品行之和。人工表的算法是这笔钱除以本期订单明细行数，每条订单摊到一样多。
+    全店托管不能在这里用「总计 − 推广表商品行」提前计算。业务口径的减数是订单
+    明细真正算进去的推广费用；商品 ID 挂不上、跨月范围或空商品 ID 都会让两者不同。
+    因此这里只保存总计，等投影到订单脊柱后再算差额和分母。
     """
     if "spend" not in kept.columns or "product_id" not in kept.columns:
         return None
@@ -189,23 +190,21 @@ def _store_wide_residual(
         return None
     declared = total_rows.select(_number_expr("spend", total_rows.schema["spend"]).sum()).item()
     detail = kept.select(_number_expr("spend", kept.schema["spend"]).sum()).item()
-    if declared is None or detail is None:
-        return None
-    gap = float(declared) - float(detail)
-    if abs(gap) < 0.005:
+    if declared is None:
         return None
     row = {name: [None] for name in kept.columns}
     row["product_id"] = [STORE_WIDE_PRODUCT]
-    row["spend"] = [f"{gap:.6f}"]
+    row["spend"] = [f"{float(declared):.6f}"]
     if "product_name" in row:
-        row["product_name"] = ["全店托管"]
+        row["product_name"] = ["全店托管推广"]
     if total_rows.height:
         for col in (ANCHOR_SHA, ANCHOR_FILE, ANCHOR_SHEET, ANCHOR_ROW):
             if col in total_rows.columns:
                 row[col] = [total_rows.get_column(col)[0]]
+    detail_amount = float(detail or 0.0)
     notes.append(
-        f"全店托管差额 {gap:,.2f} 元按本期订单明细条数均摊"
-        "（总花费 − 有商品花费的行；全店托管格子是「-」，平台不给单品数据）"
+        f"保留推广表总花费 {float(declared):,.2f} 元作为全店托管控制总数"
+        f"（推广表商品行合计 {detail_amount:,.2f} 元；最终差额按订单明细实际算入金额计算）"
     )
     return pl.DataFrame(row).cast(kept.schema, strict=False)
 

@@ -1192,7 +1192,9 @@ def fees_export(run_id: int) -> PlainTextResponse:
     state = workspace().state_by_run(run_id)
     store = (state.store_id if state else "store") or "store"
     period = (state.period if state else "period") or "period"
-    body = view.fees_csv(facts, _model())
+    # Excel 在 Windows 上双击 CSV 时不会可靠遵守 HTTP charset，而是靠文件头判断。
+    # UTF-8 BOM 只影响编码识别，不会成为第一列表头的一部分（utf-8-sig 会剥掉）。
+    body = "\ufeff" + view.fees_csv(facts, _model())
     filename = f"{store}-{period}-费项明细.csv"
     ascii_name = f"{store}-{period}-fees.csv"
     return PlainTextResponse(

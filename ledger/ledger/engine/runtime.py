@@ -44,7 +44,7 @@ from .normalize import STORE_WIDE_PRODUCT, NormalizeError, normalize
 from .predicate import PredicateError, compile_where
 from .rules import norm_expr
 from .parse import ParseError, digest, parse
-from .recognize import infer_period, infer_store, match_headers
+from .recognize import infer_period, infer_period_range, infer_store, match_headers
 from .types import (
     ClassifyReport,
     Completeness,
@@ -475,7 +475,12 @@ def _ingest_file(
         item.controls = verify_controls(table, frame, template)
         if item.controls:
             item.notes.append(summarize_controls(item.controls))
-        frame = _attach_hints(frame, hint_store, hint_period)
+        # 拼多多汇总导出的文件名通常只有店铺，账期写在 Sheet 名
+        # `商品_汇总数据_20260601至20260630`。源事实也要带上这个月，否则
+        # 全店托管虽然进了损益，费项导出却因账期是「未知」找不到它。
+        sheet_periods = infer_period_range(table.ref.sheet or "")
+        sheet_period = sheet_periods[0] if sheet_periods else None
+        frame = _attach_hints(frame, hint_store, hint_period or sheet_period)
         item.frame = frame
         items.append(item)
     return items
@@ -777,7 +782,12 @@ def _project_scoped_live(
         )
         parts.append(project(scoped_source, metric, Spine(scoped_spine)))
     if not wide.is_empty():
-        parts.append(project(wide, metric, spine))
+        calculated_parts = [part.facts for part in parts if not part.facts.is_empty()]
+        calculated = (
+            pl.concat(calculated_parts, how="vertical_relaxed")
+            if calculated_parts else _empty_spine_facts()
+        )
+        parts.append(project(wide, metric, spine, store_wide_facts=calculated))
     frames = [part.facts for part in parts if not part.facts.is_empty()]
     return Projection(
         facts=pl.concat(frames, how="vertical_relaxed") if frames else parts[0].facts,

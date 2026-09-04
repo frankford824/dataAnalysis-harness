@@ -17,7 +17,7 @@ from ..model.schema import Metric, Model, NodeExpr, Predicate, Template, ValueEx
 from ..money import decimal_amount, money_float, sum_amounts
 from .classify import COL_COUNT_WITHOUT_ORDER, COL_MAJOR, COL_MINOR, COL_VIA
 from .link import LINK_KEY, LINK_SPLIT, LINKED
-from .normalize import PARENT_FIRST, is_parent_only
+from .normalize import PARENT_FIRST, STORE_WIDE_PRODUCT, is_parent_only
 from .predicate import PredicateError, compile_where
 from .types import ANCHOR_FILE, ANCHOR_ROW, ANCHOR_SHA, ANCHOR_SHEET
 
@@ -159,7 +159,19 @@ def evaluate_metric(
         (pl.col(LINK_KEY) if LINK_KEY in frame.columns else pl.lit(None, dtype=pl.Utf8)).alias("link_key"),
         (pl.col(LINKED) if LINKED in frame.columns else pl.lit(True)).alias("linked"),
         pl.col(AMOUNT).alias("amount"),
-        (pl.col("subject").cast(pl.Utf8) if "subject" in frame.columns else pl.lit(None, dtype=pl.Utf8)).alias("subject"),
+        (
+            pl.when(pl.col(LINK_KEY) == STORE_WIDE_PRODUCT)
+            .then(pl.lit("全店托管推广"))
+            .otherwise(
+                pl.col("subject").cast(pl.Utf8)
+                if "subject" in frame.columns else pl.lit(None, dtype=pl.Utf8)
+            )
+            if LINK_KEY in frame.columns
+            else (
+                pl.col("subject").cast(pl.Utf8)
+                if "subject" in frame.columns else pl.lit(None, dtype=pl.Utf8)
+            )
+        ).alias("subject"),
         (pl.col(COL_MAJOR) if COL_MAJOR in frame.columns else pl.lit(None, dtype=pl.Utf8)).alias("major"),
         (pl.col(COL_MINOR) if COL_MINOR in frame.columns else pl.lit(None, dtype=pl.Utf8)).alias("minor"),
         (

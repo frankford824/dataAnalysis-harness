@@ -365,11 +365,15 @@ class TestPddPromotionTotalRow:
         return ingest([path], model, [s.name for s in model.stores])
 
     def test_the_total_row_is_dropped(self, tmp_path, model):
+        from ledger.engine.normalize import STORE_WIDE_PRODUCT
         result = self._sheet(tmp_path, model)
         frames = [i.frame for i in result.items if i.frame is not None]
         assert len(frames) == 1
-        assert frames[0].height == 2
-        assert frames[0].get_column("spend").sum() == pytest.approx(182.12)
+        detail = frames[0].filter(pl.col("product_id") != STORE_WIDE_PRODUCT)
+        control = frames[0].filter(pl.col("product_id") == STORE_WIDE_PRODUCT)
+        assert detail.height == 2
+        assert detail.get_column("spend").sum() == pytest.approx(182.12)
+        assert control.get_column("spend").item() == pytest.approx(182.12)
 
     def test_a_total_that_disagrees_with_the_rows_is_reported(self, tmp_path, model):
         """总计大于明细之和是拼多多的全店托管，平台不给单个商品的花费。
@@ -394,7 +398,8 @@ class TestPddPromotionTotalRow:
         frame = next(i.frame for i in result.items if i.frame is not None)
         assert STORE_WIDE_PRODUCT in frame.get_column("product_id").to_list()
         hosted = frame.filter(pl.col("product_id") == STORE_WIDE_PRODUCT)
-        assert hosted.get_column("spend").item() == pytest.approx(397.88)
+        assert hosted.get_column("spend").item() == pytest.approx(500.0)
+        assert hosted.get_column("product_name").item() == "全店托管推广"
 
     def test_store_hosting_is_spread_across_order_lines(self, tmp_path, model):
         """总花费 − 稳定成本推广 = 全店托管，再按订单明细条数均摊。"""
@@ -407,7 +412,7 @@ class TestPddPromotionTotalRow:
              "", "", "", "30", "40", "1", "30", "1", "1"],
             ["总计", "-", "-", "全店托管", "-", "-", "-", "-", "100", "60",
              "1", "100", "2", "2"],
-        ])
+        ], sheet="商品_汇总数据_20260601至20260630")
         orders = write_xlsx(tmp_path / "订单明细-pdd快乐节庆.xlsx", [
             TestPddOrdersWithNoTimeAtAll.HEADER,
             ["2026-06-02 10:00:00", "甲", "260602-1", "已收货", "20", "0", "0", "0", "0",
@@ -424,6 +429,53 @@ class TestPddPromotionTotalRow:
         hosted = ads.filter(pl.col("link_key") == "__store_wide__")
         assert hosted.height == 2
         assert hosted.get_column("amount").to_list() == [pytest.approx(-30.0), pytest.approx(-30.0)]
+
+    def test_store_hosting_subtracts_what_order_rows_actually_received(self, tmp_path, model):
+        """减数是订单明细已算推广，不是推广表商品行之和；空商品 ID 不进分母。"""
+        promo = write_xlsx(tmp_path / "推广-pdd快乐节庆.xlsx", [
+            ["名称：推广"],
+            self.HEADER,
+            ["2026-06-02", "SKU1", "商品甲", "稳定成本推广", "甲",
+             "", "", "", "10", "20", "2", "10", "1", "1"],
+            # 这 30 元的商品不在订单明细里，因此订单侧实际算入金额只有 10 元。
+            ["2026-06-02", "SKU-X", "商品未匹配", "稳定成本推广", "乙",
+             "", "", "", "30", "40", "1", "30", "1", "1"],
+            ["总计", "-", "-", "全店托管", "-", "-", "-", "-", "100", "60",
+             "1", "100", "2", "2"],
+        ], sheet="商品_汇总数据_20260601至20260630")
+        orders = write_xlsx(tmp_path / "订单明细-pdd快乐节庆.xlsx", [
+            TestPddOrdersWithNoTimeAtAll.HEADER,
+            ["2026-06-02 10:00:00", "甲", "260602-1", "已收货", "20", "0", "0", "0", "0",
+             "20", "20", "1", "", "", "SKU1", "无规格", "", "", "", "",
+             "无售后或售后取消", "SF1", "申通快递"],
+            ["2026-06-02 11:00:00", "乙", "260602-2", "已收货", "30", "0", "0", "0", "0",
+             "30", "30", "1", "", "", "SKU2", "无规格", "", "", "", "",
+             "无售后或售后取消", "SF2", "申通快递"],
+            ["2026-06-02 12:00:00", "无ID", "260602-3", "已收货", "40", "0", "0", "0", "0",
+             "40", "40", "1", "", "", "", "无规格", "", "", "", "",
+             "无售后或售后取消", "SF3", "申通快递"],
+            ["2026-07-02 12:00:00", "七月", "260702-1", "已收货", "40", "0", "0", "0", "0",
+             "40", "40", "1", "", "", "SKU3", "无规格", "", "", "", "",
+             "无售后或售后取消", "SF4", "申通快递"],
+        ])
+        store = next(s for s in model.stores if "快乐节庆" in s.name)
+        result = run(
+            ingest([str(promo), str(orders)], model, [store.name], default_store=store.name),
+            store.platform,
+        )
+        ads = result.spine_facts.filter(pl.col("metric_id") == "ad_cost")
+        regular = ads.filter(pl.col("link_key") != "__store_wide__")
+        hosted = ads.filter(pl.col("link_key") == "__store_wide__")
+        assert regular.get_column("amount").sum() == pytest.approx(-10.0)
+        assert hosted.height == 2, "空商品 ID 和推广表账期外的订单都不能进入均摊分母"
+        assert hosted.get_column("amount").to_list() == [pytest.approx(-45.0)] * 2
+        assert ads.get_column("amount").sum() == pytest.approx(-100.0)
+        control = result.facts.filter(pl.col("link_key") == "__store_wide__")
+        assert control.get_column("subject").item() == "全店托管推广"
+        assert control.get_column("contribution").item() == pytest.approx(-90.0), (
+            control.select("store", "period", "link_key", "amount", "contribution").to_dicts(),
+            hosted.select("store", "period", "link_key", "amount", "factor").to_dicts(),
+        )
 
     def test_summary_export_without_date_still_spreads_hosting(self, tmp_path, model):
         """商品汇总没有「日期」列，合计写在商品ID 上，全店托管格子是「-」。"""
@@ -442,7 +494,7 @@ class TestPddPromotionTotalRow:
         frame = next(i.frame for i in result.items if i.frame is not None)
         assert STORE_WIDE_PRODUCT in frame.get_column("product_id").to_list()
         hosted = frame.filter(pl.col("product_id") == STORE_WIDE_PRODUCT)
-        assert hosted.get_column("spend").item() == pytest.approx(60.0)
+        assert hosted.get_column("spend").item() == pytest.approx(70.0)
 
     def test_filename_range_covers_both_months(self):
         from ledger.engine.recognize import infer_period_range

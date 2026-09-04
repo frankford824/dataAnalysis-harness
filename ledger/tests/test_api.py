@@ -16,6 +16,7 @@ import shutil
 from pathlib import Path
 
 import openpyxl
+import polars as pl
 import pytest
 from fastapi.testclient import TestClient
 
@@ -514,6 +515,28 @@ class TestDrill:
         res = client.get("/api/runs/9999/drill/profit")
         assert res.status_code == 404
         assert "重算" in res.json()["detail"]
+
+    def test_fee_export_starts_with_utf8_bom_for_excel(self, client, monkeypatch, tmp_path):
+        """HTTP charset 不足以让 Windows Excel 识别 UTF-8，正文必须带 BOM。"""
+        facts = tmp_path / "facts.parquet"
+        pl.DataFrame({
+            "metric_id": ["software_fee"], "link_key": ["O1"], "amount": [-1.0],
+            "contribution": [-1.0], "counted": [True], "linked": [True],
+            "file_name": ["对账.csv"], "row_no": [2],
+        }).write_parquet(facts)
+
+        class FakeWorkspace:
+            def facts_path(self, _run_id):
+                return facts
+
+            def state_by_run(self, _run_id):
+                return PeriodState(store_id="pdd_test", period="2026-08", run_id=1)
+
+        monkeypatch.setattr(api, "workspace", lambda: FakeWorkspace())
+        response = client.get("/api/runs/1/fees.csv")
+        assert response.status_code == 200
+        assert response.content.startswith(b"\xef\xbb\xbf")
+        assert response.content.decode("utf-8-sig").startswith("订单号,科目,")
 
 
 # --------------------------------------------------------------------------- #

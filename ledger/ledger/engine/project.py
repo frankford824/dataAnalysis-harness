@@ -21,7 +21,7 @@ import polars as pl
 
 from ..model.schema import Metric
 from ..money import decimal_amount, money_float, sum_amounts
-from .link import SPINE_PERIOD, SPINE_STORE, Spine, target_role
+from .link import SPINE_PERIOD, SPINE_PRODUCT, SPINE_STORE, Spine, target_role
 from .normalize import STORE_WIDE_PRODUCT
 from .recognize import infer_period_range
 from .rules import norm_expr
@@ -87,6 +87,7 @@ def project(
     source_facts: pl.DataFrame,
     metric: Metric,
     spine: Spine,
+    store_wide_facts: pl.DataFrame | None = None,
 ) -> Projection:
     """把一个指标的源金额投影到脊柱行。"""
     role = target_role(metric.link.to) if metric.link else ""
@@ -179,9 +180,24 @@ def project(
     extra = _orderless_spine_facts(source_facts, metric, orderless_keys, by_key)
     if not extra.is_empty():
         out = pl.concat([out, extra], how="diagonal_relaxed")
-    wide_amount = float(wide.get_column("amount").sum()) if not wide.is_empty() else 0.0
-    hosted = _store_wide_spine_facts(
-        keyed, metric, wide_amount, _store_wide_periods(source_facts),
+    declared_amount = float(wide.get_column("amount").sum()) if not wide.is_empty() else 0.0
+    wide_periods = _store_wide_periods(source_facts)
+    calculated_rows = store_wide_facts if store_wide_facts is not None else out
+    if wide_periods and SPINE_PERIOD in calculated_rows.columns:
+        calculated_rows = calculated_rows.filter(pl.col(SPINE_PERIOD).is_in(list(wide_periods)))
+    calculated_amount = (
+        float(calculated_rows.get_column("amount").sum() or 0.0)
+        if not calculated_rows.is_empty() else 0.0
+    )
+    # 业务确认口径：全店托管推广 = 推广表最下方总花费 − 订单明细已经算进去的
+    # 推广费用。不能减推广表自身商品行合计；只要有一个商品 ID 没挂上订单，两者
+    # 就不相等，旧算法会把这部分费用静默留在账外。
+    wide_amount = declared_amount - calculated_amount if not wide.is_empty() else 0.0
+    hosted = (
+        _store_wide_spine_facts(
+            keyed, metric, wide_amount, declared_amount, wide_periods,
+        )
+        if not wide.is_empty() else _empty()
     )
     if not hosted.is_empty():
         out = pl.concat([out, hosted], how="diagonal_relaxed")
@@ -200,7 +216,10 @@ def project(
         )
     if not hosted.is_empty():
         proj.notes.append(
-            f"{metric.name}：全店托管 {wide_amount:,.2f} 元按 {hosted.height:,} 条订单明细均摊"
+            f"{metric.name}：推广表总花费 {abs(declared_amount):,.2f} 元 − "
+            f"订单明细已算推广 {abs(calculated_amount):,.2f} 元 = "
+            f"全店托管推广 {abs(wide_amount):,.2f} 元，按 {hosted.height:,} 条有商品 ID 的"
+            "订单明细均摊"
         )
     return proj
 
@@ -300,30 +319,46 @@ def _orderless_spine_facts(
 
 
 def _store_wide_periods(source_facts: pl.DataFrame) -> tuple[str, ...]:
-    """全店托管只摊到推广表文件名覆盖的那些月。"""
-    if source_facts.is_empty() or "file_name" not in source_facts.columns:
+    """全店托管只摊到推广表文件名或工作表名覆盖的那些月。
+
+    平台真实导出文件常只叫「推广-店铺.xlsx」，日期范围写在 Sheet 名
+    `商品_汇总数据_20260601至20260630` 里；只看文件名会把六月控制总数摊到
+    六月以后的全部订单。
+    """
+    if source_facts.is_empty():
         return ()
     months: list[str] = []
     seen: set[str] = set()
-    for name in source_facts.get_column("file_name").drop_nulls().unique().to_list():
-        for period in infer_period_range(str(name)):
-            if period not in seen:
-                seen.add(period)
-                months.append(period)
+    for column in ("file_name", "sheet"):
+        if column not in source_facts.columns:
+            continue
+        for name in source_facts.get_column(column).drop_nulls().unique().to_list():
+            for period in infer_period_range(str(name)):
+                if period not in seen:
+                    seen.add(period)
+                    months.append(period)
     return tuple(months)
 
 
 def _store_wide_spine_facts(
     keyed: pl.DataFrame, metric: Metric, amount: float,
+    declared_amount: float,
     periods: tuple[str, ...] = (),
 ) -> pl.DataFrame:
-    """全店托管没有商品键，按覆盖账期的脊柱行数均摊，每条订单明细摊到一样多。"""
+    """全店托管按有商品 ID 的订单明细行数均摊，空 ID 不进分母。"""
     if periods and SPINE_PERIOD in keyed.columns:
         keyed = keyed.filter(pl.col(SPINE_PERIOD).is_in(list(periods)))
+    if SPINE_PRODUCT not in keyed.columns:
+        return _empty()
+    keyed = keyed.filter(norm_expr(pl.col(SPINE_PRODUCT).cast(pl.Utf8)) != "")
     n = keyed.height
-    if n == 0 or abs(amount) < 0.005:
+    if n == 0:
         return _empty()
     each = amount / n
+    # 源事实保存的是推广表控制总数，进账贡献只能是计算后的差额。factor 的总和
+    # 因此是 residual / declared，而不是固定 1；这样下钻与导出里的「进账」合计
+    # 会和损益表完全一致。
+    share = (amount / declared_amount / n) if abs(declared_amount) >= 0.005 else 0.0
     return keyed.select(
         pl.lit(metric.id).alias("metric_id"),
         pl.lit(metric.source).alias("source_id"),
@@ -333,7 +368,7 @@ def _store_wide_spine_facts(
         else pl.lit(None, dtype=pl.Utf8).alias("period"),
         pl.lit(STORE_WIDE_PRODUCT).alias("link_key"),
         pl.lit(each).alias("amount"),
-        pl.lit(1.0 / n).alias("factor"),
+        pl.lit(share).alias("factor"),
         pl.col("spine_row"),
     )
 
