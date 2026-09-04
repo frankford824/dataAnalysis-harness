@@ -1182,6 +1182,24 @@ def drill(run_id: int, node_id: str, limit: int = view.DRILL_LIMIT,
         raise HTTPException(404, f"这次算账的明细读不了，重算一次就有了：{exc}") from exc
 
 
+@app.get("/api/runs/{run_id}/fees.csv")
+def fees_export(run_id: int) -> PlainTextResponse:
+    """这个账期按订单号列出所有费项，用来和手工表对差异。"""
+    facts = workspace().facts_path(run_id)
+    if not facts.exists():
+        raise HTTPException(404, "这次算账没留明细，重算一次就有了")
+    state = workspace().state_by_run(run_id)
+    store = (state.store_id if state else "store") or "store"
+    period = (state.period if state else "period") or "period"
+    body = view.fees_csv(facts, _model())
+    filename = f"{store}-{period}-费项明细.csv"
+    return PlainTextResponse(
+        body,
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
 def _node_value(run_id: int, node_id: str) -> float | None:
     """报表上那个数。从快照里取，而不是让下钻自己再算一遍。
 

@@ -551,11 +551,19 @@ def reconcile_missing(ws: Workspace, model: Model, catalog: Path) -> dict:
     rows = connection.execute(
         "select f.path,f.sha256,f.missing_scans,f.missing_since,a.store_id,a.name "
         "from file_catalog f join ledger_apply a on a.path=f.path and a.sha256=f.sha256 "
-        "where a.state='applied' and a.removed_at='' and f.missing_scans>=3 and f.missing_since<=? "
-        "and not exists(select 1 from file_catalog live where live.sha256=f.sha256 and live.state='ready' "
-        "and live.missing_scans=0 and live.path<>f.path)",
+        "where a.state='applied' and a.removed_at='' and f.missing_scans>=3 and f.missing_since<=?",
         (cutoff,),
     ).fetchall()
+    # 同一份内容换了文件名再传：旧路径 missing，新路径 ready、哈希相同。
+    # 以前「哈希还活着就不动」会让旧名永远赖在店铺文件清单上，界面上就像
+    # 「替换不下来」。只有同名还在别的路径上（00_上传区搬到 10_已接收）才留下。
+    live_names = {
+        Path(str(r[0])).name
+        for r in connection.execute(
+            "select path from file_catalog where state='ready' and missing_scans=0"
+        )
+    }
+    rows = [row for row in rows if row["name"] not in live_names]
     touched: set[str] = set()
     shared = False
     errors: list[str] = []

@@ -148,6 +148,73 @@ def test_missing_requires_guard_then_forgets(tmp_path):
     assert not workspace.submissions("taobao_xibishun")
 
 
+def test_renamed_same_content_forgets_the_old_name(tmp_path):
+    """删掉 6月对账单.csv 再传带店名的同一份：旧名必须从店铺清单里拿掉。"""
+    root = tmp_path / "台账系统"
+    old = root / "10_已接收" / "拼多多" / "store" / "对账" / "6月对账单.csv"
+    new = root / "10_已接收" / "拼多多" / "store" / "对账" / "宋永康-PDD国风-6月对账单.csv"
+    old.parent.mkdir(parents=True)
+    old.write_text("订单号,金额\nA1,1\n", encoding="utf-8")
+    catalog = tmp_path / "catalog.db"
+    sqlite3.connect(catalog).executescript(CATALOG).connection.close()
+    sha = add_catalog(catalog, old, missing=3, missing_since=int(time.time()) - 700)
+    new.write_bytes(old.read_bytes())
+    add_catalog(catalog, new)
+    workspace = Workspace(tmp_path / "workspace")
+    workspace.keep(old.name, old, "pdd_mt9sojk5")
+    workspace.keep(new.name, new, "pdd_mt9sojk5")
+    connection = sqlite3.connect(catalog)
+    connection.executescript(APPLY_SCHEMA)
+    connection.executemany(
+        "insert into ledger_apply(path,sha256,store_id,name,state,applied_at) values(?,?,?,?,?,?)",
+        [
+            (str(old), sha, "pdd_mt9sojk5", old.name, "applied", "now"),
+            (str(new), sha, "pdd_mt9sojk5", new.name, "applied", "now"),
+        ],
+    )
+    connection.commit()
+    connection.close()
+    old.unlink()
+
+    result = reconcile_missing(workspace, load_model(MODEL), catalog)
+    assert result["removed"] == 1
+    names = {f["name"] for f in workspace.submissions("pdd_mt9sojk5")}
+    assert old.name not in names
+    assert new.name in names
+
+
+def test_relocated_same_name_is_kept(tmp_path):
+    """同一文件从上传区搬到已接收，名字没变：不能当成删除。"""
+    root = tmp_path / "台账系统"
+    uploaded = root / "00_上传区" / "淘宝天猫" / "store" / "运费" / "运费-淘宝喜必顺.csv"
+    accepted = root / "10_已接收" / "淘宝天猫" / "store" / "运费" / "运费-淘宝喜必顺.csv"
+    uploaded.parent.mkdir(parents=True)
+    accepted.parent.mkdir(parents=True)
+    uploaded.write_text("运单号,金额\nA1,1\n", encoding="utf-8")
+    accepted.write_bytes(uploaded.read_bytes())
+    catalog = tmp_path / "catalog.db"
+    sqlite3.connect(catalog).executescript(CATALOG).connection.close()
+    sha = add_catalog(
+        catalog, uploaded, missing=3, missing_since=int(time.time()) - 700,
+    )
+    add_catalog(catalog, accepted)
+    workspace = Workspace(tmp_path / "workspace")
+    workspace.keep(accepted.name, accepted, "taobao_xibishun")
+    connection = sqlite3.connect(catalog)
+    connection.executescript(APPLY_SCHEMA)
+    connection.execute(
+        "insert into ledger_apply(path,sha256,store_id,name,state,applied_at) values(?,?,?,?,?,?)",
+        (str(uploaded), sha, "taobao_xibishun", uploaded.name, "applied", "now"),
+    )
+    connection.commit()
+    connection.close()
+    uploaded.unlink()
+
+    result = reconcile_missing(workspace, load_model(MODEL), catalog)
+    assert result["removed"] == 0
+    assert workspace.submissions("taobao_xibishun")
+
+
 def test_unrecognized_filename_learns_alias_and_applies(tmp_path):
     model_dir = tmp_path / "model"
     shutil.copytree(MODEL, model_dir)

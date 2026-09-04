@@ -22,6 +22,7 @@ import polars as pl
 from ..model.schema import Metric
 from ..money import decimal_amount, money_float, sum_amounts
 from .link import SPINE_PERIOD, SPINE_STORE, Spine, target_role
+from .normalize import STORE_WIDE_PRODUCT
 from .rules import norm_expr
 
 #: 脊柱事实的列。
@@ -92,6 +93,12 @@ def project(
         return Projection(facts=_empty(), notes=[f"指标 {metric.name} 没有可投影的脊柱"])
 
     by_key = aggregate_by_key(source_facts, metric)
+    wide = (
+        by_key.filter(pl.col("link_key") == STORE_WIDE_PRODUCT)
+        if not by_key.is_empty() else by_key
+    )
+    if not wide.is_empty():
+        by_key = by_key.filter(pl.col("link_key") != STORE_WIDE_PRODUCT)
     spine_frame = spine.frame
     if role not in spine_frame.columns:
         return Projection(
@@ -171,6 +178,10 @@ def project(
     extra = _orderless_spine_facts(source_facts, metric, orderless_keys, by_key)
     if not extra.is_empty():
         out = pl.concat([out, extra], how="diagonal_relaxed")
+    wide_amount = float(wide.get_column("amount").sum()) if not wide.is_empty() else 0.0
+    hosted = _store_wide_spine_facts(keyed, metric, wide_amount)
+    if not hosted.is_empty():
+        out = pl.concat([out, hosted], how="diagonal_relaxed")
 
     proj = Projection(
         facts=out,
@@ -183,6 +194,10 @@ def project(
         proj.notes.append(
             f"{metric.name}：源表里有 {len(orphan_keys):,} 个键、{orphan_amount:,.2f} 元"
             f"在脊柱上找不到对应订单，这部分没进利润"
+        )
+    if not hosted.is_empty():
+        proj.notes.append(
+            f"{metric.name}：全店托管 {wide_amount:,.2f} 元按 {hosted.height:,} 条订单明细均摊"
         )
     return proj
 
@@ -278,6 +293,28 @@ def _orderless_spine_facts(
         pl.col("amount"),
         pl.lit(1.0).alias("factor"),
         pl.lit(None, dtype=pl.UInt32).alias("spine_row"),
+    )
+
+
+def _store_wide_spine_facts(
+    keyed: pl.DataFrame, metric: Metric, amount: float,
+) -> pl.DataFrame:
+    """全店托管没有商品键，按本期脊柱行数均摊，每条订单明细摊到一样多。"""
+    n = keyed.height
+    if n == 0 or abs(amount) < 0.005:
+        return _empty()
+    each = amount / n
+    return keyed.select(
+        pl.lit(metric.id).alias("metric_id"),
+        pl.lit(metric.source).alias("source_id"),
+        pl.col(SPINE_STORE).alias("store") if SPINE_STORE in keyed.columns
+        else pl.lit(None, dtype=pl.Utf8).alias("store"),
+        pl.col(SPINE_PERIOD).alias("period") if SPINE_PERIOD in keyed.columns
+        else pl.lit(None, dtype=pl.Utf8).alias("period"),
+        pl.lit(STORE_WIDE_PRODUCT).alias("link_key"),
+        pl.lit(each).alias("amount"),
+        pl.lit(1.0 / n).alias("factor"),
+        pl.col("spine_row"),
     )
 
 

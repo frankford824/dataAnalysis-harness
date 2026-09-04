@@ -28,6 +28,7 @@ from .fees import humanize_via, pretty_unmatched_label
 from .model.loader import ModelError
 from .model.propose import Draft, role_facts
 from .model.schema import Model, Store
+from .model.config import csv_cell
 from .money import money_float
 
 if TYPE_CHECKING:  # 只为类型标注；运行时导入会让 view 依赖向导层，方向反了
@@ -910,10 +911,47 @@ def dryrun_dict(run: "DryRun") -> dict[str, Any]:
     }
 
 
+def fees_csv(facts: Path | pl.DataFrame, model: Model) -> str:
+    """按订单号列出本期每条费项，方便和手工表对差异。
+
+    一行为源表里的一条记录：订单号（或商品 ID）、科目、金额、进没进账、文件和行号。
+    没进账的行也留下，否则对不上的那一截在导出里消失，核账的人只能再回系统点。
+    """
+    if isinstance(facts, (str, Path)):
+        facts = pl.read_parquet(facts)
+    names = {m.id: m.name for m in model.metrics}
+    cols = [
+        c for c in (
+            "link_key", "metric_id", "subject", "amount", "contribution",
+            "counted", "linked", "file_name", "sheet", "row_no",
+        )
+        if c in facts.columns
+    ]
+    if not cols or facts.is_empty():
+        return "订单号,科目,金额,进账,是否进账,文件,行号\n"
+    frame = facts.select(cols)
+    lines = ["订单号,科目,原始科目,金额,进账,是否进账,已挂钩,文件,工作表,行号"]
+    for row in frame.iter_rows(named=True):
+        lines.append(",".join((
+            csv_cell(row.get("link_key")),
+            csv_cell(names.get(row.get("metric_id") or "", row.get("metric_id"))),
+            csv_cell(row.get("subject")),
+            csv_cell(f"{float(row.get('amount') or 0):.4f}"),
+            csv_cell(f"{float(row.get('contribution') or 0):.4f}"),
+            csv_cell("是" if row.get("counted") else "否"),
+            csv_cell("是" if row.get("linked") else "否"),
+            csv_cell(row.get("file_name")),
+            csv_cell(row.get("sheet")),
+            csv_cell(row.get("row_no")),
+        )))
+    return "\n".join(lines) + "\n"
+
+
 __all__ = [
     "DRILL_LIMIT",
     "draft_dict",
     "drill",
+    "fees_csv",
     "dryrun_dict",
     "platform_options",
     "reorder_statement",

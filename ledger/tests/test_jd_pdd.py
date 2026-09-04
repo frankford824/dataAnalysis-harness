@@ -12,6 +12,7 @@
 
 from __future__ import annotations
 
+import polars as pl
 import pytest
 from conftest import MODELS, write_xlsx
 
@@ -373,8 +374,10 @@ class TestPddPromotionTotalRow:
     def test_a_total_that_disagrees_with_the_rows_is_reported(self, tmp_path, model):
         """总计大于明细之和是拼多多的全店托管，平台不给单个商品的花费。
 
-        眼下不摊，但差额必须有人看得见——无声扔掉是最坏的选择。
+        差额做成一行 __store_wide__，投影时按订单明细条数均摊。没订单明细时
+        这行挂不上脊柱，但差额必须有人看得见——无声扔掉是最坏的选择。
         """
+        from ledger.engine.normalize import STORE_WIDE_PRODUCT
         path = write_xlsx(tmp_path / "推广-pdd快乐节庆.xlsx", [
             ["名称：推广"],
             self.HEADER,
@@ -388,6 +391,39 @@ class TestPddPromotionTotalRow:
         notes = " ".join(n for i in result.items for n in i.notes)
         assert "合计行的 spend 说 500.00" in notes
         assert "397.88" in notes
+        frame = next(i.frame for i in result.items if i.frame is not None)
+        assert STORE_WIDE_PRODUCT in frame.get_column("product_id").to_list()
+        hosted = frame.filter(pl.col("product_id") == STORE_WIDE_PRODUCT)
+        assert hosted.get_column("spend").item() == pytest.approx(397.88)
+
+    def test_store_hosting_is_spread_across_order_lines(self, tmp_path, model):
+        """总花费 − 稳定成本推广 = 全店托管，再按订单明细条数均摊。"""
+        promo = write_xlsx(tmp_path / "推广-pdd快乐节庆.xlsx", [
+            ["名称：推广"],
+            self.HEADER,
+            ["2026-06-02", "SKU1", "商品甲", "稳定成本推广", "甲",
+             "", "", "", "10", "20", "2", "10", "1", "1"],
+            ["2026-06-02", "SKU2", "商品乙", "稳定成本推广", "乙",
+             "", "", "", "30", "40", "1", "30", "1", "1"],
+            ["总计", "-", "-", "全店托管", "-", "-", "-", "-", "100", "60",
+             "1", "100", "2", "2"],
+        ])
+        orders = write_xlsx(tmp_path / "订单明细-pdd快乐节庆.xlsx", [
+            TestPddOrdersWithNoTimeAtAll.HEADER,
+            ["2026-06-02 10:00:00", "甲", "260602-1", "已收货", "20", "0", "0", "0", "0",
+             "20", "20", "1", "", "", "SKU1", "无规格", "", "", "", "",
+             "无售后或售后取消", "SF1", "申通快递"],
+            ["2026-06-02 11:00:00", "乙", "260602-2", "已收货", "30", "0", "0", "0", "0",
+             "30", "30", "1", "", "", "SKU2", "无规格", "", "", "", "",
+             "无售后或售后取消", "SF2", "申通快递"],
+        ])
+        store = next(s for s in model.stores if "快乐节庆" in s.name)
+        result = run(ingest([str(promo), str(orders)], model, [store.name], default_store=store.name), store.platform)
+        ads = result.spine_facts.filter(pl.col("metric_id") == "ad_cost")
+        assert ads.get_column("amount").sum() == pytest.approx(-100.0)
+        hosted = ads.filter(pl.col("link_key") == "__store_wide__")
+        assert hosted.height == 2
+        assert hosted.get_column("amount").to_list() == [pytest.approx(-30.0), pytest.approx(-30.0)]
 
     def test_a_variant_without_scene_still_matches(self, tmp_path, model):
         """平台改版少一列「推广场景」时仍应认成推广表，不能甩去接表向导。"""

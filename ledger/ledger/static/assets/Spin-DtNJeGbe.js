@@ -1,4 +1,4 @@
-import{E as S,G as h,H as p,bx as C,a6 as f,I as x,J as r,bE as T,aS as $,M as k,N as v,aa as w,aE as O,z as m,A as R,bF as _,P,O as j,b5 as B}from"./index-1mGxygw5.js";function E(e){const{opacityDisabled:a,heightTiny:t,heightSmall:s,heightMedium:l,heightLarge:n,heightHuge:c,primaryColor:o,fontSize:i}=e;return{fontSize:i,textColor:o,sizeTiny:t,sizeSmall:s,sizeMedium:l,sizeLarge:n,sizeHuge:c,color:o,opacitySpinning:a}}const H={common:S,self:E},I=h([h("@keyframes spin-rotate",`
+import{E as S,G as h,H as p,bx as C,a6 as f,I as x,J as r,bE as T,aS as $,M as k,N as v,aa as w,aE as O,z as m,A as R,bF as _,P,O as j,b5 as B}from"./index-DM7GKOPI.js";function E(e){const{opacityDisabled:a,heightTiny:t,heightSmall:s,heightMedium:l,heightLarge:n,heightHuge:c,primaryColor:o,fontSize:i}=e;return{fontSize:i,textColor:o,sizeTiny:t,sizeSmall:s,sizeMedium:l,sizeLarge:n,sizeHuge:c,color:o,opacitySpinning:a}}const H={common:S,self:E},I=h([h("@keyframes spin-rotate",`
  from {
  transform: rotate(0);
  }

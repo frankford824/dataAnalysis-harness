@@ -302,6 +302,14 @@ watch(
             <header>
               <h2>损益表</h2>
               <span class="sub">点任意一行看它是怎么来的</span>
+              <a
+                v-if="snap.run_id"
+                class="sub"
+                :href="`/api/runs/${snap.run_id}/fees.csv`"
+                download
+                style="margin-left: auto"
+                @click.stop
+              >导出订单费项</a>
             </header>
             <div class="statement">
               <div

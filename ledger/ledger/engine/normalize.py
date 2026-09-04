@@ -27,6 +27,10 @@ import polars as pl
 from ..model.schema import Template, TimeSlot, normalize_header
 from .types import ANCHOR_FILE, ANCHOR_ROW, ANCHOR_SHA, ANCHOR_SHEET, RawTable
 
+#: 拼多多推广表合计含「全店托管」，平台不给单个商品的花费。这一行是把差额
+#: 摊到本期全部订单明细上用的合成键，不是平台商品。
+STORE_WIDE_PRODUCT = "__store_wide__"
+
 #: 标记同一去重键内的首行。父级字段只在首行计入，避免重复计算。
 PARENT_FIRST = "__parent_first__"
 
@@ -118,7 +122,11 @@ def _drop_total_rows(frame: pl.DataFrame, template: Template, notes: list[str]) 
     dropped = frame.height - kept.height
     if dropped:
         notes.append(f"丢掉 {dropped} 行合计行（{marker} 为空或写着合计）")
-        _note_total_gap(frame.filter(~keep), kept, template, notes)
+        leftover = frame.filter(~keep)
+        _note_total_gap(leftover, kept, template, notes)
+        hosted = _store_wide_residual(leftover, kept, template, notes)
+        if hosted is not None:
+            kept = pl.concat([kept, hosted], how="diagonal_relaxed")
     return kept
 
 
@@ -143,6 +151,37 @@ def _note_total_gap(
             f"合计行的 {role} 说 {declared:,.2f}，明细行加起来 {detail:,.2f}，"
             f"差 {declared - detail:+,.2f}"
         )
+
+
+def _store_wide_residual(
+    total_rows: pl.DataFrame, kept: pl.DataFrame, template: Template, notes: list[str],
+) -> pl.DataFrame | None:
+    """把推广表「总计 − 各商品之和」做成一行，按订单明细条数均摊。
+
+    拼多多「全店托管」不给单个商品花费，格子是「-」。差额 = 表底总花费 − 有数的
+    商品行之和。人工表的算法是这笔钱除以本期订单明细行数，每条订单摊到一样多。
+    """
+    if "spend" not in kept.columns or "product_id" not in kept.columns:
+        return None
+    if template.source != "promotion":
+        return None
+    declared = total_rows.select(_number_expr("spend", total_rows.schema["spend"]).sum()).item()
+    detail = kept.select(_number_expr("spend", kept.schema["spend"]).sum()).item()
+    if declared is None or detail is None:
+        return None
+    gap = float(declared) - float(detail)
+    if abs(gap) < 0.005:
+        return None
+    row = {name: [None] for name in kept.columns}
+    row["product_id"] = [STORE_WIDE_PRODUCT]
+    row["spend"] = [f"{gap:.6f}"]
+    if "product_name" in row:
+        row["product_name"] = ["全店托管"]
+    notes.append(
+        f"全店托管差额 {gap:,.2f} 元按本期订单明细条数均摊"
+        "（总花费 − 有商品花费的行；全店托管格子是「-」，平台不给单品数据）"
+    )
+    return pl.DataFrame(row).cast(kept.schema, strict=False)
 
 
 # --------------------------------------------------------------------------- #

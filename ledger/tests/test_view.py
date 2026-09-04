@@ -11,7 +11,7 @@ import pytest
 
 from ledger.model.loader import load_model
 from ledger.model.schema import Metric, Model, SourceContract, StatementNode, ValueExpr
-from ledger.view import _finding_lines, drill, node_metrics, oneline, statement_order
+from ledger.view import _finding_lines, drill, fees_csv, node_metrics, oneline, statement_order
 
 
 @pytest.fixture(scope="module")
@@ -403,6 +403,19 @@ def test_fee_drill_still_says_order_id(real):
     d = drill(_facts([{"metric_id": "software_fee", "amount": -1.0, "major": "software_fee"}]),
               real, "n_software")
     assert d["key_label"] == "订单号"
+
+
+def test_fees_csv_keeps_uncounted_rows(real):
+    """没进账的行也要在导出里，否则对不上的那一截只能再回系统点。"""
+    text = fees_csv(_facts([
+        {"metric_id": "software_fee", "link_key": "O1", "amount": -1.0,
+         "contribution": -1.0, "counted": True, "file_name": "对账.csv", "row_no": 2},
+        {"metric_id": "software_fee", "link_key": "O2", "amount": -2.0,
+         "contribution": 0.0, "counted": False, "file_name": "对账.csv", "row_no": 3},
+    ]), real)
+    assert "O1" in text and "O2" in text
+    assert "否" in text and "是" in text
+    assert "平台服务费" in text
 
 
 def test_keyword_is_taken_literally():
