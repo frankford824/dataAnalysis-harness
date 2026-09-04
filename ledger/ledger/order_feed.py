@@ -848,10 +848,21 @@ class OrderFeed:
         if ids and key in base.columns:
             base = base.filter(~pl.col(key).cast(pl.Utf8).is_in(ids))
         records: list[dict[str, Any]] = []
+        # 增量的正文只带实体自己的字段：成本行正文里没有 order_id，商品行正文里也
+        # 可能没有。父键在增量事件头上（order_id / sub_order_id / sku_id / order_store_id），
+        # 不补进去的话这一行拼回主表后挂不到订单，等于被静默删掉——2026-09-04
+        # 美食专家 6 月 1,811 单成本就是这样在两次重算之间消失的。
+        parent_keys = [k for k in ("order_store_id", "order_id", "sub_order_id", "sku_id") if k in base.columns]
         for delta in selected:
             if delta["operation"] == "delete" or not delta["payload_json"]:
                 continue
-            records.extend(extract(json.loads(delta["payload_json"])))
+            for record in extract(json.loads(delta["payload_json"])):
+                if not record:
+                    continue
+                for k in parent_keys:
+                    if record.get(k) in (None, "") and delta.get(k) not in (None, ""):
+                        record[k] = str(delta[k])
+                records.append(record)
         return OrderFeed._append_records(base, records)
 
     @staticmethod

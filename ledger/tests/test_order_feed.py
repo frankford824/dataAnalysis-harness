@@ -377,6 +377,43 @@ def test_a_line_costing_many_times_its_price_is_a_data_error_not_a_cost(tmp_path
     assert any("1 行一行成本超过售价 5 倍（合计 30,645.00 元）" in note for note in cost.notes)
 
 
+def test_a_cost_delta_without_order_id_in_its_body_still_lands_on_the_order(tmp_path):
+    """/cost-history rows carry sub_order_id but no order_id. The parent key sits on
+    the change event; if it is not copied onto the row, the overlay removes the old
+    row and appends an orphan, and the order silently loses its cost."""
+
+    class CostDeltaClient(FakeClient):
+        def get(self, path: str, params=None):
+            if path == "changes":
+                after = int((params or {}).get("after_seq", 0))
+                if after >= 12:
+                    return {"to_seq": after, "has_more": False, "changes": []}
+                return {"to_seq": 12, "has_more": False, "changes": [{
+                    "seq": 12, "revision": 12, "entity_type": "order_cost", "entity_id": "11",
+                    "operation": "upsert", "order_store_id": "10", "order_id": "1", "sub_order_id": "11",
+                    "sku_id": "SKU1",
+                }]}
+            if path.endswith("orders/1/cost-history"):
+                return {"costs": [{
+                    "sub_order_id": "11", "sku_id": "SKU1", "quantity": "1", "unit_cost": "4.25",
+                    "cost_amount": "4.25", "cost_source": "scrape", "cost_status": "priced",
+                }]}
+            return super().get(path, params)
+
+    root = tmp_path / "feed"
+    manifest = _fixture(root)
+    feed = OrderFeed(tmp_path / "workspace", client=CostDeltaClient(manifest), feed_root=root)
+    feed.sync()
+    ingestion = Ingestion(model=None)  # type: ignore[arg-type]
+    feed.append_to(ingestion, Store(id="taobao_test", name="淘宝测试店", platform="taobao"))
+    cost = ingestion.frames_of("order_cost")[0].frame
+    row = cost.filter(pl.col("sku") == "SKU1")
+    assert row.height == 1
+    assert row.row(0, named=True)["internal_order_id"] == "1"
+    assert row.row(0, named=True)["order_id"] == "ON1"
+    assert row.row(0, named=True)["unit_cost"] == pytest.approx(4.25)
+
+
 def test_rows_the_console_marks_suspect_carry_no_cost(tmp_path):
     """is_suspect means the console kept the source row but distrusts its amount
     and quantity. Cost is price x quantity, so it goes too - even when the ratio
