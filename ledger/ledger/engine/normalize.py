@@ -106,22 +106,44 @@ def normalize(table: RawTable, template: Template) -> tuple[pl.DataFrame, list[s
     return frame, notes
 
 
+_TOTAL_LABELS = ("合计", "总计", "小计", "汇总")
+
+
 def _drop_total_rows(frame: pl.DataFrame, template: Template, notes: list[str]) -> pl.DataFrame:
     """丢掉表底的合计行。
 
     人手维护的表格底部常有一行合计。它的关联键为空但金额列有值，混进去会让每一列
     金额刚好翻倍——实测订单明细表就是这样，不处理的话利润直接翻倍。
+
+    拼多多推广有两种导出：日明细的合计写在「日期」格，商品汇总没有日期列、合计
+    写在「商品ID」格。只认模板声明的那一列，汇总表的总计行会留下来，全店托管
+    差额也就做不出来。
     """
-    marker = template.total_row_marker
-    if not marker or marker not in frame.columns or frame.is_empty():
+    if frame.is_empty():
         return frame
-    keep = pl.col(marker).is_not_null() & ~pl.col(marker).cast(pl.Utf8).str.strip_chars().is_in(
-        ["", "合计", "总计", "小计", "汇总"]
-    )
+    marker = template.total_row_marker
+    is_total = pl.lit(False)
+    used = ""
+    if marker and marker in frame.columns:
+        is_total = is_total | (
+            pl.col(marker).is_null()
+            | pl.col(marker).cast(pl.Utf8).str.strip_chars().is_in(["", *_TOTAL_LABELS])
+        )
+        used = marker
+    if template.source == "promotion":
+        for extra in ("product_id", "product_name"):
+            if extra in frame.columns:
+                is_total = is_total | (
+                    pl.col(extra).cast(pl.Utf8).str.strip_chars().is_in(list(_TOTAL_LABELS))
+                )
+                used = used or extra
+    if not used:
+        return frame
+    keep = ~is_total
     kept = frame.filter(keep)
     dropped = frame.height - kept.height
     if dropped:
-        notes.append(f"丢掉 {dropped} 行合计行（{marker} 为空或写着合计）")
+        notes.append(f"丢掉 {dropped} 行合计行（{used} 为空或写着合计）")
         leftover = frame.filter(~keep)
         _note_total_gap(leftover, kept, template, notes)
         hosted = _store_wide_residual(leftover, kept, template, notes)
@@ -177,6 +199,10 @@ def _store_wide_residual(
     row["spend"] = [f"{gap:.6f}"]
     if "product_name" in row:
         row["product_name"] = ["全店托管"]
+    if total_rows.height:
+        for col in (ANCHOR_SHA, ANCHOR_FILE, ANCHOR_SHEET, ANCHOR_ROW):
+            if col in total_rows.columns:
+                row[col] = [total_rows.get_column(col)[0]]
     notes.append(
         f"全店托管差额 {gap:,.2f} 元按本期订单明细条数均摊"
         "（总花费 − 有商品花费的行；全店托管格子是「-」，平台不给单品数据）"

@@ -425,6 +425,32 @@ class TestPddPromotionTotalRow:
         assert hosted.height == 2
         assert hosted.get_column("amount").to_list() == [pytest.approx(-30.0), pytest.approx(-30.0)]
 
+    def test_summary_export_without_date_still_spreads_hosting(self, tmp_path, model):
+        """商品汇总没有「日期」列，合计写在商品ID 上，全店托管格子是「-」。"""
+        from ledger.engine.normalize import STORE_WIDE_PRODUCT
+        header = [c for c in self.HEADER if c != "日期"]
+        path = write_xlsx(tmp_path / "商品推广_汇总数据_20260601至20260630.xlsx", [
+            ["名称：推广"],
+            header,
+            ["SKU1", "商品甲", "稳定成本推广", "甲",
+             "", "", "", "10", "20", "2", "10", "1", "1"],
+            ["SKU2", "商品乙", "全店托管", "乙",
+             "-", "", "", "-", "0", "-", "-", "0", "0"],
+            ["总计", "-", "-", "-", "-", "-", "-", "70", "20", "1", "70", "2", "2"],
+        ])
+        result = ingest([path], model, [s.name for s in model.stores])
+        frame = next(i.frame for i in result.items if i.frame is not None)
+        assert STORE_WIDE_PRODUCT in frame.get_column("product_id").to_list()
+        hosted = frame.filter(pl.col("product_id") == STORE_WIDE_PRODUCT)
+        assert hosted.get_column("spend").item() == pytest.approx(60.0)
+
+    def test_filename_range_covers_both_months(self):
+        from ledger.engine.recognize import infer_period_range
+        assert infer_period_range("商品推广_汇总数据_20260601至20260630.xlsx") == ("2026-06",)
+        assert infer_period_range("商品推广_汇总数据_20260601至20260731(6月和7月).xlsx") == (
+            "2026-06", "2026-07",
+        )
+
     def test_a_variant_without_scene_still_matches(self, tmp_path, model):
         """平台改版少一列「推广场景」时仍应认成推广表，不能甩去接表向导。"""
         header = [c for c in self.HEADER if c != "推广场景"]

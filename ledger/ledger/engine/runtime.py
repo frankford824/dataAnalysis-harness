@@ -40,7 +40,7 @@ from .link import (
     normalize_key,
     target_role,
 )
-from .normalize import NormalizeError, normalize
+from .normalize import STORE_WIDE_PRODUCT, NormalizeError, normalize
 from .predicate import PredicateError, compile_where
 from .rules import norm_expr
 from .parse import ParseError, digest, parse
@@ -753,22 +753,31 @@ def _project_scoped_live(
     rows = source_facts.filter(claims(metric)) if not source_facts.is_empty() else source_facts
     if rows.is_empty() or not {"store", "period"} <= set(rows.columns):
         return project(source_facts, metric, spine)
+    wide_mask = (
+        pl.col("link_key") == STORE_WIDE_PRODUCT
+        if "link_key" in rows.columns else pl.lit(False)
+    )
+    rest = rows.filter(~wide_mask)
+    wide = rows.filter(wide_mask)
     pairs = [
         (str(store or ""), str(period or ""))
-        for store, period in rows.select("store", "period").unique().iter_rows()
+        for store, period in rest.select("store", "period").unique().iter_rows()
         if store and period and period != "(未知账期)"
-    ]
-    if not pairs:
+    ] if not rest.is_empty() else []
+    if not pairs and wide.is_empty():
         return project(source_facts, metric, spine)
     parts: list[Projection] = []
     for store, period in pairs:
         scoped_source = source_facts.filter(
             (pl.col("store") == store) & (pl.col("period") == period)
+            & ~wide_mask
         )
         scoped_spine = spine.frame.filter(
             (pl.col(SPINE_STORE) == store) & (pl.col(SPINE_PERIOD) == period)
         )
         parts.append(project(scoped_source, metric, Spine(scoped_spine)))
+    if not wide.is_empty():
+        parts.append(project(wide, metric, spine))
     frames = [part.facts for part in parts if not part.facts.is_empty()]
     return Projection(
         facts=pl.concat(frames, how="vertical_relaxed") if frames else parts[0].facts,

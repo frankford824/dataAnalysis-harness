@@ -17,6 +17,7 @@ import os
 import ntpath
 import threading
 import uuid
+from urllib.parse import quote
 from collections import Counter, OrderedDict
 from contextlib import asynccontextmanager
 from datetime import datetime
@@ -1193,10 +1194,16 @@ def fees_export(run_id: int) -> PlainTextResponse:
     period = (state.period if state else "period") or "period"
     body = view.fees_csv(facts, _model())
     filename = f"{store}-{period}-费项明细.csv"
+    ascii_name = f"{store}-{period}-fees.csv"
     return PlainTextResponse(
         body,
         media_type="text/csv; charset=utf-8",
-        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        headers={
+            "Content-Disposition": (
+                f'attachment; filename="{ascii_name}"; '
+                f"filename*=UTF-8''{quote(filename)}"
+            )
+        },
     )
 
 

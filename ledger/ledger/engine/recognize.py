@@ -138,6 +138,11 @@ _PERIOD_PATTERNS = (
 )
 
 
+_PERIOD_RANGE = re.compile(
+    r"(20\d{2})(1[0-2]|0[1-9])\d{0,2}\s*至\s*(20\d{2})?(1[0-2]|0[1-9])"
+)
+
+
 def infer_period(text: str) -> str | None:
     """从文件名推断账期，返回 YYYY-MM。用户不该被要求手选月份。"""
     for i, pattern in enumerate(_PERIOD_PATTERNS):
@@ -148,6 +153,30 @@ def infer_period(text: str) -> str | None:
             if 2000 <= int(year) <= 2099:
                 return f"{year}-{int(month):02d}"
     return None
+
+
+def infer_period_range(text: str) -> tuple[str, ...]:
+    """文件名里的账期范围。`20260601至20260731` 是两个月，不能只取开头那个 6 月。
+
+    拼多多商品汇总经常把两个月导在一张表里。全店托管差额若只摊到文件名里
+    第一个月，第二个月的订单就摊不到，第一个月会吃下整段区间的钱。
+    """
+    if m := _PERIOD_RANGE.search(text or ""):
+        year1, month1 = int(m.group(1)), int(m.group(2))
+        year2 = int(m.group(3) or m.group(1))
+        month2 = int(m.group(4))
+        if (year2, month2) < (year1, month1):
+            year1, month1, year2, month2 = year2, month2, year1, month1
+        out: list[str] = []
+        year, month = year1, month1
+        while (year, month) <= (year2, month2) and len(out) < 24:
+            out.append(f"{year}-{month:02d}")
+            month += 1
+            if month == 13:
+                year, month = year + 1, 1
+        return tuple(out)
+    period = infer_period(text)
+    return (period,) if period else ()
 
 
 def infer_store(text: str, known_stores: list[str]) -> str | None:

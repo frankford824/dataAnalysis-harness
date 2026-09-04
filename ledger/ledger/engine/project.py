@@ -23,6 +23,7 @@ from ..model.schema import Metric
 from ..money import decimal_amount, money_float, sum_amounts
 from .link import SPINE_PERIOD, SPINE_STORE, Spine, target_role
 from .normalize import STORE_WIDE_PRODUCT
+from .recognize import infer_period_range
 from .rules import norm_expr
 
 #: 脊柱事实的列。
@@ -179,7 +180,9 @@ def project(
     if not extra.is_empty():
         out = pl.concat([out, extra], how="diagonal_relaxed")
     wide_amount = float(wide.get_column("amount").sum()) if not wide.is_empty() else 0.0
-    hosted = _store_wide_spine_facts(keyed, metric, wide_amount)
+    hosted = _store_wide_spine_facts(
+        keyed, metric, wide_amount, _store_wide_periods(source_facts),
+    )
     if not hosted.is_empty():
         out = pl.concat([out, hosted], how="diagonal_relaxed")
 
@@ -296,10 +299,27 @@ def _orderless_spine_facts(
     )
 
 
+def _store_wide_periods(source_facts: pl.DataFrame) -> tuple[str, ...]:
+    """全店托管只摊到推广表文件名覆盖的那些月。"""
+    if source_facts.is_empty() or "file_name" not in source_facts.columns:
+        return ()
+    months: list[str] = []
+    seen: set[str] = set()
+    for name in source_facts.get_column("file_name").drop_nulls().unique().to_list():
+        for period in infer_period_range(str(name)):
+            if period not in seen:
+                seen.add(period)
+                months.append(period)
+    return tuple(months)
+
+
 def _store_wide_spine_facts(
     keyed: pl.DataFrame, metric: Metric, amount: float,
+    periods: tuple[str, ...] = (),
 ) -> pl.DataFrame:
-    """全店托管没有商品键，按本期脊柱行数均摊，每条订单明细摊到一样多。"""
+    """全店托管没有商品键，按覆盖账期的脊柱行数均摊，每条订单明细摊到一样多。"""
+    if periods and SPINE_PERIOD in keyed.columns:
+        keyed = keyed.filter(pl.col(SPINE_PERIOD).is_in(list(periods)))
     n = keyed.height
     if n == 0 or abs(amount) < 0.005:
         return _empty()
