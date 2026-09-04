@@ -121,8 +121,14 @@ else
 fi
 # LedgerIndexer.exe 在运行时被 Windows 锁住。必须在 stop.ps1 收掉计划任务和子进程
 # 之后再覆盖；放在前面的“传运维脚本”阶段会让第二次部署稳定失败。
-put "$INDEXER_EXE" "$ROOT_SCP/bin/LedgerIndexer.exe"
-echo '  bin\LedgerIndexer.exe'
+local_indexer_sha=$(sha256sum "$INDEXER_EXE" | cut -d' ' -f1)
+remote_indexer_sha=$(ssh_ "powershell -NoProfile -Command \"if (Test-Path '$ROOT_WIN\\bin\\LedgerIndexer.exe') { (Get-FileHash -LiteralPath '$ROOT_WIN\\bin\\LedgerIndexer.exe' -Algorithm SHA256).Hash.ToLowerInvariant() }\"" | tr -d '\r')
+if [ "$local_indexer_sha" = "$remote_indexer_sha" ]; then
+  echo '  bin\LedgerIndexer.exe 没变化，跳过覆盖'
+else
+  put "$INDEXER_EXE" "$ROOT_SCP/bin/LedgerIndexer.exe"
+  echo '  bin\LedgerIndexer.exe'
+fi
 # 解包走独立脚本。多行 PowerShell 塞进 ssh 命令串没用——远端是 cmd.exe，
 # 它只会执行第一行，后面的静静地不跑，还什么都不报。
 pwsh_ unpack.ps1
