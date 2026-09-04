@@ -282,8 +282,10 @@ class OrderFeed:
                     "订单台数据源未就绪：" + "、".join(health.get("degraded") or [])
                 )
             announced_snapshot = str(health.get("last_successful_snapshot") or "")
-            # 出快照后 health 有时还停在旧 id，磁盘 current/ 和 GET snapshot 已经切过去了。
-            # 以磁盘为准，装的时候仍走接口拿清单并做 SHA/行数校验。
+            # 快照刚切完时库和盘忙，/health 要扫 integration_outbox，容易超时；
+            # 超时这次不会写下新 id，客户端就一直攥着上次成功的结果。
+            # 磁盘 current/ 已经指向新快照，先跟它走；装的时候仍拉接口做 SHA/行数校验。
+            # 下一轮 /health 成功后 last_successful_snapshot 会对齐。
             disk = self.feed_root / "current" / "manifest.json"
             if disk.is_file():
                 try:
