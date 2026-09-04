@@ -107,11 +107,12 @@ def _root() -> Path:
 
 
 class Client:
-    def __init__(self, base_url: str | None = None, timeout: float = 30.0):
+    def __init__(self, base_url: str | None = None, timeout: float | None = None):
         self.base_url = (base_url or os.environ.get(
             "LEDGER_ORDER_FEED_URL", "http://127.0.0.1:8001/api/integration/ledger/v1",
         )).rstrip("/")
-        self.timeout = timeout
+        # 出新快照时 8001 的 revision/health 会卡过 30 秒，默认太短会让台账一直停在旧快照上。
+        self.timeout = float(timeout if timeout is not None else os.environ.get("LEDGER_ORDER_FEED_TIMEOUT", "120"))
         self.token = os.environ.get("LEDGER_ORDER_FEED_TOKEN", "")
 
     def get(self, path: str, params: dict[str, object] | None = None) -> dict[str, Any]:
