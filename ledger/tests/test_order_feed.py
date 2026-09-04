@@ -781,6 +781,34 @@ def test_live_product_projection_never_spreads_money_across_months():
     assert totals == {"2026-06": -100.0, "2026-07": -200.0}
 
 
+def test_live_order_projection_never_halves_a_later_month_receipt():
+    """同一主订单跨两个月各有一行时，7月收款不能一半分回6月。
+
+    生产实例 6927467973411634881 的 71.37 元曾因此只进 35.685 元。
+    """
+    model = ModelRepository(
+        Path(__file__).resolve().parents[2] / "models" / "cn-ecommerce"
+    ).get().model
+    metric = model.metric("trade_receipt_douyin")
+    facts = pl.DataFrame({
+        "metric_id": ["trade_receipt_douyin"],
+        "major": ["trade_receipt"],
+        "link_key": ["6927467973411634881"],
+        "amount": [71.37],
+        "store": ["抖音浅花涧节日装饰"],
+        "period": ["2026-07"],
+    })
+    spine = Spine(pl.DataFrame({
+        "order_id": ["6927467973411634881", "6927467973411634881"],
+        SPINE_STORE: ["抖音浅花涧节日装饰", "抖音浅花涧节日装饰"],
+        SPINE_PERIOD: ["2026-06", "2026-07"],
+    }))
+    projected = _project_scoped_live(facts, metric, spine).facts
+    assert projected.select("period", "amount").to_dicts() == [
+        {"period": "2026-07", "amount": 71.37},
+    ]
+
+
 def test_live_rows_without_accounting_date_never_create_a_null_period():
     facts = pl.DataFrame({
         "store": ["淘宝店", "淘宝店", "(未知店铺)"],

@@ -719,7 +719,7 @@ def run(ingestion: Ingestion, platform: str = "*") -> RunResult:
             continue
         proj = (
             _project_scoped_live(facts, metric, spine)
-            if live_feed and metric.link is not None and metric.link.grain == "product"
+            if live_feed and metric.link is not None
             else project(facts, metric, spine)
         )
         projections[metric.id] = proj
@@ -751,10 +751,11 @@ def _project_scoped_live(
 ) -> Projection:
     """Project a live multi-month feed inside each accounting store-period.
 
-    Platform exports were historically one-month files.  With a multi-month spine, projecting
+    Platform exports were historically one-month files. With a multi-month spine, projecting
     only by product/order key lets a June source row spread over July and August occurrences of
-    the same product.  The model's time basis has already assigned every source fact a period;
-    use that boundary for both the source and its eligible spine rows.
+    the same key. This is not limited to product-level metrics: Order Console can contain the
+    same main order in two months after replacements or supplements. The model has already
+    assigned every source fact a period; use that boundary for both source and eligible spine.
     """
     rows = source_facts.filter(claims(metric)) if not source_facts.is_empty() else source_facts
     if rows.is_empty() or not {"store", "period"} <= set(rows.columns):
