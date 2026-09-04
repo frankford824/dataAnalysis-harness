@@ -809,6 +809,83 @@ def test_live_order_projection_never_halves_a_later_month_receipt():
     ]
 
 
+def test_reship_target_cannot_receive_sales_money_but_still_receives_reship_cost(tmp_path):
+    """补发单复用原线上订单号时，只承接补发成本，不能冒充原销售订单。"""
+    from ledger.engine.link import LINKED, link
+    from ledger.engine.runtime import _spine_frame
+
+    feed = OrderFeed(tmp_path / "workspace")
+    orders = pl.DataFrame({
+        "order_id": ["15545141"], "online_order_no": ["6926682603205983993"],
+        "order_time": ["2026-06-25 09:25:37"], "pay_time": ["2026-06-25 09:25:37"],
+        "order_status_raw": ["Sent"], "paid_amount": ["0.00"],
+        "refund_amount": ["0.00"], "tracking_no": ["321211088703818"],
+    })
+    items = pl.DataFrame({
+        "order_id": ["15545141"], "sub_order_id": ["50017304"],
+        "online_order_no": ["6926682603205983993"], "sku_id": ["HSC34648"],
+        "merchant_sku": ["3816860347843871377"], "outer_sku": ["$Asr-1022109179"],
+        "product_name": ["商品"], "paid_amount": [None], "refund_amount": ["0.00"],
+        "tracking_no": ["321211088703818"],
+    })
+    after = pl.DataFrame(schema={"order_id": pl.Utf8, "online_status_raw": pl.Utf8})
+    relations = pl.DataFrame({
+        "relation_type": ["reship"], "source_order_id": ["15188247"],
+        "target_order_id": ["15545141"],
+    })
+    store = Store(id="douyin_test", name="抖音测试店", platform="douyin")
+    order_frame = feed._order_frame(  # noqa: SLF001 - verify the normalized contract
+        orders, items, after, relations, store, "fingerprint",
+    )
+    assert order_frame.get_column("order_type").to_list() == ["补发订单"]
+
+    spine = Spine(_spine_frame(order_frame, feed._order_template()))  # noqa: SLF001
+    model = ModelRepository(
+        Path(__file__).resolve().parents[2] / "models" / "cn-ecommerce"
+    ).get().model
+    receipt = model.metric("trade_receipt_douyin")
+    receipt_rows, _ = link(
+        pl.DataFrame({"base_order_id": ["6926682603205983993"]}), receipt, spine,
+    )
+    assert receipt_rows.get_column(LINKED).to_list() == [False]
+
+    reshipment = model.metric("reshipment_cost")
+    cost_rows, _ = link(
+        pl.DataFrame({"original_order_id": ["6926682603205983993"]}), reshipment, spine,
+    )
+    assert cost_rows.get_column(LINKED).to_list() == [True]
+
+
+def test_a_real_sale_wins_when_a_reship_reuses_the_same_online_and_suborder(tmp_path):
+    """原销售单仍在6月范围内时，不能因为随后补发而把真实货款一起排除。"""
+    feed = OrderFeed(tmp_path / "workspace")
+    orders = pl.DataFrame({
+        "order_id": ["source", "target"], "online_order_no": ["ON1", "ON1"],
+        "order_time": ["2026-06-20 09:00:00", "2026-06-25 09:00:00"],
+        "pay_time": ["2026-06-20 09:01:00", "2026-06-25 09:01:00"],
+        "order_status_raw": ["Sent", "Sent"], "paid_amount": ["20.00", "0.00"],
+        "refund_amount": ["0.00", "0.00"], "tracking_no": ["SF1", "SF2"],
+    })
+    items = pl.DataFrame({
+        "order_id": ["source", "target"], "sub_order_id": ["1", "2"],
+        "online_order_no": ["ON1", "ON1"], "sku_id": ["A", "A"],
+        "merchant_sku": ["P1", "P1"], "outer_sku": ["SAME", "SAME"],
+        "product_name": ["商品", "商品"], "paid_amount": ["20.00", None],
+        "refund_amount": ["0.00", "0.00"], "tracking_no": ["SF1", "SF2"],
+    })
+    after = pl.DataFrame(schema={"order_id": pl.Utf8, "online_status_raw": pl.Utf8})
+    relations = pl.DataFrame({
+        "relation_type": ["reship"], "source_order_id": ["source"],
+        "target_order_id": ["target"],
+    })
+    store = Store(id="douyin_test", name="抖音测试店", platform="douyin")
+    frame = feed._order_frame(  # noqa: SLF001
+        orders, items, after, relations, store, "fingerprint",
+    )
+    assert frame.height == 1
+    assert frame.get_column("order_type").item() == "销售订单"
+
+
 def test_live_rows_without_accounting_date_never_create_a_null_period():
     facts = pl.DataFrame({
         "store": ["淘宝店", "淘宝店", "(未知店铺)"],

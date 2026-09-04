@@ -515,6 +515,9 @@ class LinkRule(Base):
     extract: str | None = None
     #: 关联目标。形如 `order.sub_order_id`。
     to: str | None = None
+    #: 关联目标本身还要满足的条件。例如补发目标单可以承接补发成本，但不能承接
+    #: 原销售订单的收款；这个过滤必须同时用于挂钩和投影，避免“显示未挂、金额却进账”。
+    spine_where: tuple[Predicate, ...] = ()
     #: `to` 挂不上时依次再试的角色。命中后把键换算成 `to` 那个角色的值，
     #: 归集层级不变。
     #:

@@ -90,6 +90,8 @@ def project(
     store_wide_facts: pl.DataFrame | None = None,
 ) -> Projection:
     """把一个指标的源金额投影到脊柱行。"""
+    if metric.link is not None:
+        spine = spine.filtered(metric.link.spine_where)
     role = target_role(metric.link.to) if metric.link else ""
     if not role or spine.frame.is_empty():
         return Projection(facts=_empty(), notes=[f"指标 {metric.name} 没有可投影的脊柱"])

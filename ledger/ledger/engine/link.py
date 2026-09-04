@@ -87,6 +87,12 @@ class Spine:
         self.build(role)
         return set(self.indexes[role])
 
+    def filtered(self, where: tuple[Predicate, ...]) -> "Spine":
+        """按指标声明收窄可关联脊柱；旧表缺少判定列时保持兼容。"""
+        if not where or self.frame.is_empty() or missing_fields(where, self.frame):
+            return self
+        return Spine(self.frame.filter(compile_where(where, self.frame)))
+
     def keys_where(self, role: str, where: tuple[Predicate, ...]) -> set[str]:
         """脊柱上满足条件的那些键。
 
@@ -186,6 +192,8 @@ def link(
             linked_rows=frame.height,
         )
         return _without_link(frame), report
+
+    spine = spine.filtered(rule.spine_where)
 
     report = LinkReport(metric_id=metric.id, key_role=rule.key, grain=rule.grain, total_rows=frame.height)
 

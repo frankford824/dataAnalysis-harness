@@ -818,7 +818,7 @@ class OrderFeed:
         after_items = self._append_records(after_items, child_records)
 
         fingerprint = self.fingerprint()
-        order_frame = self._order_frame(orders, items, after, store, fingerprint)
+        order_frame = self._order_frame(orders, items, after, relations, store, fingerprint)
         cost_frame = self._cost_frame(orders, items, costs, relations, store, fingerprint)
         after_frame = self._after_frame(after, after_items, items, store, fingerprint)
         cost_item = self._item("order_cost", "order_console_cost_v1", "订单台日期时点成本", cost_frame,
@@ -905,8 +905,15 @@ class OrderFeed:
 
     def _order_frame(
         self, orders: pl.DataFrame, items: pl.DataFrame, after: pl.DataFrame,
+        relations: pl.DataFrame,
         store: Store, fingerprint: str,
     ) -> pl.DataFrame:
+        reships = (
+            relations.filter(pl.col("relation_type") == "reship")
+            .get_column("target_order_id").cast(pl.Utf8).drop_nulls().unique().to_list()
+            if not relations.is_empty() and {"relation_type", "target_order_id"} <= set(relations.columns)
+            else []
+        )
         refund = after.group_by("order_id").agg(
             pl.col("online_status_raw").drop_nulls().last().alias("refund_status")
         ) if not after.is_empty() else pl.DataFrame(schema={"order_id": pl.Utf8, "refund_status": pl.Utf8})
@@ -922,6 +929,8 @@ class OrderFeed:
             pl.col("refund_status").cast(pl.Utf8).fill_null("没有申请退款"),
             pl.col("tracking_no").fill_null(pl.col("tracking_no_order")).cast(pl.Utf8),
             pl.col("order_status_raw").cast(pl.Utf8).alias("order_state"),
+            pl.when(pl.col("order_id").cast(pl.Utf8).is_in(reships))
+            .then(pl.lit("补发订单")).otherwise(pl.lit("销售订单")).alias("order_type"),
             self._dt("order_time").alias("order_time"),
             self._dt("pay_time").alias("pay_time"),
         ).group_by("order_id", "sub_order_id", maintain_order=True).agg(
@@ -933,6 +942,8 @@ class OrderFeed:
             pl.col("refund_status").drop_nulls().last(),
             pl.col("tracking_no").drop_nulls().first(),
             pl.col("order_state").drop_nulls().first(),
+            pl.when((pl.col("order_type") == "销售订单").any())
+            .then(pl.lit("销售订单")).otherwise(pl.lit("补发订单")).alias("order_type"),
             pl.col("order_time").drop_nulls().first(),
             pl.col("pay_time").drop_nulls().first(),
         ).with_columns(
@@ -1094,7 +1105,8 @@ class OrderFeed:
             ("product_name", "text"), ("quantity", "number"), ("buyer_paid", "number"),
             ("refund_amount", "number"), ("alloc_ratio", "number"),
             ("refund_status", "text"), ("tracking_no", "text"),
-            ("order_state", "text"), ("order_time", "time"), ("pay_time", "time"),
+            ("order_state", "text"), ("order_type", "text"),
+            ("order_time", "time"), ("pay_time", "time"),
             ("store_name", "text"),
         ])
 

@@ -677,7 +677,7 @@
   value: {op: sum, of: [income]}
   sign: as_is
   time_basis: settle_date
-  link: {key: base_order_id, to: order.order_id, grain: order}
+  link: {key: base_order_id, to: order.order_id, grain: order, spine_where: [{field: order_type, op: not_in, value: [补发订单], include_null: true}]}
   allocate: {mode: even}
   note: >
     动账金额自带符号，不取反。挂主订单号、组内均分。
@@ -697,7 +697,7 @@
   value: {op: sum, of: [income]}
   sign: as_is
   time_basis: settle_date
-  link: {key: base_order_id, to: order.order_id, grain: order}
+  link: {key: base_order_id, to: order.order_id, grain: order, spine_where: [{field: order_type, op: not_in, value: [补发订单], include_null: true}]}
   allocate: {mode: even}
 
 - id: software_fee_douyin
@@ -709,7 +709,7 @@
   value: {op: sum, of: [income]}
   sign: as_is
   time_basis: settle_date
-  link: {key: base_order_id, to: order.order_id, grain: order}
+  link: {key: base_order_id, to: order.order_id, grain: order, spine_where: [{field: order_type, op: not_in, value: [补发订单], include_null: true}]}
   allocate: {mode: even}
   note: 偏远地区物流服务、上门取件运费、权益保险（运费险）三个动账场景。
 
@@ -722,7 +722,7 @@
   value: {op: sum, of: [income]}
   sign: as_is
   time_basis: settle_date
-  link: {key: base_order_id, to: order.order_id, grain: order}
+  link: {key: base_order_id, to: order.order_id, grain: order, spine_where: [{field: order_type, op: not_in, value: [补发订单], include_null: true}]}
   allocate: {mode: even}
 
 - id: cross_border_fee_douyin
@@ -734,7 +734,7 @@
   value: {op: sum, of: [income]}
   sign: as_is
   time_basis: settle_date
-  link: {key: base_order_id, to: order.order_id, grain: order}
+  link: {key: base_order_id, to: order.order_id, grain: order, spine_where: [{field: order_type, op: not_in, value: [补发订单], include_null: true}]}
   allocate: {mode: even}
 
 - id: trade_compensation_douyin
@@ -746,7 +746,7 @@
   value: {op: sum, of: [income]}
   sign: as_is
   time_basis: settle_date
-  link: {key: base_order_id, to: order.order_id, grain: order}
+  link: {key: base_order_id, to: order.order_id, grain: order, spine_where: [{field: order_type, op: not_in, value: [补发订单], include_null: true}]}
   allocate: {mode: even}
   note: 消费者赔付、拦截费、欠票扣款、评价有礼那两项、其他费用。
 
