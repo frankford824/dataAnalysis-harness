@@ -282,6 +282,16 @@ class OrderFeed:
                     "订单台数据源未就绪：" + "、".join(health.get("degraded") or [])
                 )
             announced_snapshot = str(health.get("last_successful_snapshot") or "")
+            # 出快照后 health 有时还停在旧 id，磁盘 current/ 和 GET snapshot 已经切过去了。
+            # 以磁盘为准，装的时候仍走接口拿清单并做 SHA/行数校验。
+            disk = self.feed_root / "current" / "manifest.json"
+            if disk.is_file():
+                try:
+                    disk_id = str(json.loads(disk.read_text(encoding="utf-8")).get("snapshot_id") or "")
+                except (OSError, json.JSONDecodeError, TypeError):
+                    disk_id = ""
+                if disk_id:
+                    announced_snapshot = disk_id
             changed = not old.get("snapshot_id") or (
                 bool(announced_snapshot) and announced_snapshot != old.get("snapshot_id")
             )

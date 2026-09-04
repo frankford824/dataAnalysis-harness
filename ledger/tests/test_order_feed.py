@@ -468,6 +468,48 @@ def test_feed_without_sku_and_without_upload_says_so(tmp_path):
     assert any("有 0 行带商品编码" in note for note in live.notes)
 
 
+def test_disk_current_snapshot_wins_over_stale_health_announce(tmp_path):
+    """8001 health can still name the old snapshot after current/ and GET snapshot
+    have moved. Ledger must follow the disk pointer, not wait for health."""
+    root = tmp_path / "feed"
+    old = _fixture(root)
+    feed = OrderFeed(tmp_path / "workspace", client=FakeClient(old), feed_root=root)
+    feed.sync()
+    assert feed.state()["snapshot_id"] == "s1"
+
+    newer = {**old, "snapshot_id": "s2", "revision": 12}
+    (root / "current" / "manifest.json").write_text(json.dumps(newer), encoding="utf-8")
+
+    class StaleHealth(FakeClient):
+        def revision(self, etag: str = ""):
+            self.calls.append("revision")
+            if etag == '"rev-11"':
+                return {
+                    "schema_version": "ledger-feed.v1", "revision": 12,
+                    "latest_seq": 12, "healthy": True,
+                }, '"rev-12"'
+            return super().revision(etag)
+
+        def get(self, path, params=None):
+            if path == "health":
+                self.calls.append(path)
+                return {
+                    "healthy": True, "quality_risks": [],
+                    "last_successful_snapshot": "s1",
+                }
+            if path == "changes":
+                self.calls.append(path)
+                after = int((params or {}).get("after_seq", 0))
+                return {"to_seq": after, "has_more": False, "changes": []}
+            return super().get(path, params)
+
+    feed.client = StaleHealth(newer)
+    result = feed.sync()
+    assert result.snapshot_changed
+    assert result.snapshot_id == "s2"
+    assert feed.state()["snapshot_id"] == "s2"
+
+
 def test_caught_up_304_hot_path_calls_only_revision(tmp_path):
     root = tmp_path / "feed"
     client = FakeClient(_fixture(root))
