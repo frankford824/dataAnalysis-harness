@@ -167,6 +167,8 @@
   name: 蔡果-抖店喜品
   platform: douyin
   commission_on_loss: deduct
+  aliases:
+  - 蔡果-抖音喜品
   note: 2026-08-26 从 finance 上同步回来的：界面上登记的店，仓库里没有，不写进来下一次部署会把它盖掉。字段照线上 /api/stores 原样抄，id 和 name 不动。
 - id: taobao_mt9sc10p
   name: 陈慨-淘宝拾梦小屋99
@@ -237,6 +239,11 @@
   name: 宋永康-PDD国风新潮礼品店
   platform: pdd
   commission_on_loss: deduct
+  aliases:
+  - 6月对账单
+  - 7月对账单
+  - 商品推广_汇总数据_20260601至20260630
+  - 订单明细（国风）
   note: 2026-08-26 从 finance 上同步回来的：界面上登记的店，仓库里没有，不写进来下一次部署会把它盖掉。字段照线上 /api/stores 原样抄，id 和 name 不动。
 - id: other_yongbo
   name: 永箔
@@ -284,6 +291,10 @@
   name: 宋永康-PDD意大利本土
   platform: pdd
   commission_on_loss: deduct
+  aliases:
+  - 6月份对账单
+  - 商品推广_汇总数据_20260601至20260731(6月和7月)
+  - 7月份对账单
   note: ERP shop_id 12211544。
 - id: taobao_xifeimiao
   name: 徐芹-天猫喜菲喵旗舰店
@@ -378,6 +389,11 @@
   name: 汪学成-抖店喜必顺
   platform: douyin
   commission_on_loss: deduct
+  aliases:
+  - 抖音-喜必顺-聚水潭-成本
+  - 汪学成-抖音喜必顺-6-7-保费明细-空
+  - 汪学成-抖音喜必顺-推广 6-7-8月全域数据_商品列表
+  - 汪学成-抖音喜必顺-补单6-7-8月
   note: ERP shop_id 19204641。ERP 侧平台写「头条放心购」，对应台账的 douyin。
 - id: kuaishou_moqianyi
   name: 蔡果-快手茉茜伊
