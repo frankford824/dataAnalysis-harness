@@ -30,3 +30,4 @@ before,taobao,remark,contains,淘宝新客礼金技术服务费,marketing_fee,�
 before,taobao,remark,contains,淘宝新品礼金技术服务费,marketing_fee,淘宝新品礼金,,,和上一条同一回事，拆成两条是因为业务小类不同，一条规则只能带一个细项。生产上淘宝美食专家 2026-06 有 4946 行 -7111.35 元走这条。,,2026-08-26T17:59:03+08:00
 before,taobao,remark,contains,淘宝物流轨迹超时红包/卖家延迟发货赔付红包/淘宝物流轨迹异常红包/淘宝缺货赔付红包/淘宝虚假发货赔付红包/淘宝卖家服务态度差补偿红包/补寄未履行补偿红包/淘宝消费者保证金/淘宝特色服务赔付红包/基金代发任务,trade_compensation,,,,,,2026-08-25T17:24:39+08:00
 before,taobao,remark,contains,超过消费券封顶金额的平台出资合作费用/品牌新享淘宝闪降礼金软件服务费,software_fee,,,,,,2026-08-25T17:24:39+08:00
+before,douyin,subject,contains,退款-结算后退款-退用户,trade_compensation,,,,,,2026-09-04T15:54:15+08:00
