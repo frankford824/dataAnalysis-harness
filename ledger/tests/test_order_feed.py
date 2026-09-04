@@ -377,6 +377,36 @@ def test_a_line_costing_many_times_its_price_is_a_data_error_not_a_cost(tmp_path
     assert any("1 行一行成本超过售价 5 倍（合计 30,645.00 元）" in note for note in cost.notes)
 
 
+def test_rows_the_console_marks_suspect_carry_no_cost(tmp_path):
+    """is_suspect means the console kept the source row but distrusts its amount
+    and quantity. Cost is price x quantity, so it goes too - even when the ratio
+    guard alone would have let the row through."""
+    root = tmp_path / "feed"
+    manifest = _fixture(root)
+    objects = manifest["objects"]
+    objects["order_items.parquet"] = _write(root, "order_items.parquet", pl.DataFrame({
+        "order_id": ["1"] * 2, "sub_order_id": ["11", "12"], "online_order_no": ["ON1"] * 2,
+        "sku_id": ["SKU1", "SUS"], "merchant_sku": ["P1", "P2"], "outer_sku": ["S1", "S2"],
+        "product_name": ["商品", "配件"], "quantity": ["1", "2043"], "unit_price": ["20.00", "9999.00"],
+        "line_amount": ["20.00", "20437957.00"], "paid_amount": ["20.00", None], "refund_amount": ["0.00"] * 2,
+        "tracking_no": ["SF1"] * 2, "is_gift": [False, False], "is_suspect": [False, True],
+    }))
+    objects["order_costs.parquet"] = _write(root, "order_costs.parquet", pl.DataFrame({
+        "order_id": ["1"] * 2, "sub_order_id": ["11", "12"], "sku_id": ["SKU1", "SUS"],
+        "quantity": ["1", "2043"], "unit_cost": ["3.50", "0.50"], "cost_amount": ["3.50", "1021.50"],
+        "cost_source": ["history", "mirror"], "cost_status": ["priced"] * 2,
+    }))
+    (root / "current" / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+    feed = OrderFeed(tmp_path / "workspace", client=FakeClient(manifest), feed_root=root)
+    feed.sync()
+    ingestion = Ingestion(model=None)  # type: ignore[arg-type]
+    feed.append_to(ingestion, Store(id="taobao_test", name="淘宝测试店", platform="taobao"))
+    cost = ingestion.frames_of("order_cost")[0]
+    assert cost.frame.get_column("sku").to_list() == ["SKU1"]
+    assert any("is_suspect 的商品行 1 行" in note for note in cost.notes)
+    assert not any("成本超过售价" in note for note in cost.notes)
+
+
 def test_unmapped_store_is_a_feed_error_not_a_crash(tmp_path):
     root = tmp_path / "feed"
     manifest = _fixture(root)

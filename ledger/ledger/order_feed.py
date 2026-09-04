@@ -193,6 +193,7 @@ class OrderFeed:
         self.db_path = self.workspace_root / "order-feed.db"
         self._guard = threading.RLock()
         self._unpriced_cost_rows = 0
+        self._suspect_cost_rows = 0
         self._implausible_cost: tuple[int, float] = (0, 0.0)
         self.workspace_root.mkdir(parents=True, exist_ok=True)
         with self._connect() as conn:
@@ -809,6 +810,11 @@ class OrderFeed:
         after_frame = self._after_frame(after, after_items, items, store, fingerprint)
         cost_item = self._item("order_cost", "order_console_cost_v1", "订单台日期时点成本", cost_frame,
                                self._cost_template(), fingerprint)
+        if self._suspect_cost_rows:
+            cost_item.notes.append(
+                f"订单台标了 is_suspect 的商品行 {self._suspect_cost_rows:,} 行"
+                "（占位单价或数量写成 2043 的整数倍），件数不可信，成本不计"
+            )
         if self._unpriced_cost_rows:
             cost_item.notes.append(
                 f"订单台成本里 {self._unpriced_cost_rows:,} 行成本价 ≤ 0，按缺价处理不计成本；"
@@ -938,17 +944,26 @@ class OrderFeed:
         # 订单台 2026-09-03 起已把 ≤0 改判缺价，这里再守一道：关账月冻结的旧行、
         # 以及任何后续回归都不能把负成本算进利润。明确的赠品 0 价保留。
         unit = pl.col("unit_cost").cast(pl.Float64, strict=False)
-        gift_flags = (
-            items.select(pl.col("order_id", "sub_order_id").cast(pl.Utf8), pl.col("is_gift").cast(pl.Boolean, strict=False))
-            if "is_gift" in items.columns
-            else items.select(pl.col("order_id", "sub_order_id").cast(pl.Utf8)).with_columns(pl.lit(False).alias("is_gift"))
-        )
+        flags = items.select(
+            pl.col("order_id", "sub_order_id").cast(pl.Utf8),
+            *(
+                pl.col(name).cast(pl.Boolean, strict=False) if name in items.columns
+                else pl.lit(False).alias(name)
+                for name in ("is_gift", "is_suspect")
+            ),
+        ).unique(subset=["order_id", "sub_order_id"], keep="first")
         certified = certified.with_columns(pl.col("order_id", "sub_order_id").cast(pl.Utf8)).join(
-            gift_flags, on=["order_id", "sub_order_id"], how="left",
-        ).with_columns(pl.col("is_gift").fill_null(False))
+            flags, on=["order_id", "sub_order_id"], how="left",
+        ).with_columns(pl.col("is_gift", "is_suspect").fill_null(False))
+        # 订单台的 is_suspect 是「源数据留着、金额和件数不可信、不进排名和毛利」：
+        # 单价 9999 起的占位价，以及 2026-09-03 起数量是 2043 整数倍的那批。成本 = 单价 × 件数，
+        # 件数不可信成本就不可信，整行不计。
+        suspect = pl.col("is_suspect")
+        self._suspect_cost_rows = int(certified.select(suspect.sum()).item() or 0)
+        certified = certified.filter(~suspect)
         unpriced = ((unit <= 0) | unit.is_null()) & ~((unit == 0) & pl.col("is_gift"))
         self._unpriced_cost_rows = int(certified.select(unpriced.sum()).item() or 0)
-        certified = certified.filter(~unpriced).drop("is_gift")
+        certified = certified.filter(~unpriced).drop("is_gift", "is_suspect")
         # 商品行数量写错时成本会被放大几十倍（2026-09-03 见拼多多「定制配件」行数量 2043、
         # 实付 0.03，一行成本 3 万；同批还有 4086、8172 这类 2043 的整数倍）。一行成本
         # 超过它自己售价的若干倍、且绝对金额不小，就不是正常的亏本促销而是数据错了：
