@@ -933,7 +933,7 @@ def fees_csv(facts: Path | pl.DataFrame, model: Model) -> str:
     lines = ["订单号,科目,原始科目,金额,进账,是否进账,已挂钩,文件,工作表,行号"]
     for row in frame.iter_rows(named=True):
         lines.append(",".join((
-            csv_cell(row.get("link_key")),
+            _excel_identifier_cell(row.get("link_key")),
             csv_cell(names.get(row.get("metric_id") or "", row.get("metric_id"))),
             csv_cell(row.get("subject")),
             csv_cell(f"{float(row.get('amount') or 0):.4f}"),
@@ -945,6 +945,20 @@ def fees_csv(facts: Path | pl.DataFrame, model: Model) -> str:
             csv_cell(row.get("row_no")),
         )))
     return "\n".join(lines) + "\n"
+
+
+def _excel_identifier_cell(value: object) -> str:
+    """让 Excel 把长纯数字订单号当文本，而不是15位精度的数值。
+
+    CSV 本身没有列类型。Windows Excel 双击打开 `3816860347843871377` 时会先转成
+    浮点数，再显示成 `3816860347843870000`；文件里的原值虽然没坏，用户复制出去的
+    已经是错号。只包装纯数字长标识，其他单元格仍走普通 CSV 转义，也避免把任意文本
+    变成可执行公式。
+    """
+    text = "" if value is None else str(value).strip()
+    if text.isdigit() and (len(text) > 15 or (len(text) > 1 and text.startswith("0"))):
+        return csv_cell(f'="{text}"')
+    return csv_cell(text)
 
 
 __all__ = [

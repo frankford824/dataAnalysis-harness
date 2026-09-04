@@ -418,6 +418,18 @@ def test_fees_csv_keeps_uncounted_rows(real):
     assert "平台服务费" in text
 
 
+def test_fees_csv_forces_long_numeric_ids_to_excel_text(real):
+    """19位订单号不能被 Excel 按15位数值精度改掉尾数。"""
+    text = fees_csv(_facts([
+        {"metric_id": "ad_cost", "link_key": "3816860347843871377", "amount": -0.15,
+         "contribution": -0.15, "counted": True, "file_name": "推广.xlsx", "row_no": 292},
+        {"metric_id": "ad_cost", "link_key": "12345", "amount": -0.01,
+         "contribution": -0.01, "counted": True, "file_name": "推广.xlsx", "row_no": 293},
+    ]), real)
+    assert '"=""3816860347843871377"""' in text
+    assert "\n12345," in text, "普通短编号不需要变成公式"
+
+
 def test_keyword_is_taken_literally():
     """科目名里带括号、加号的多得是。当成正则不是报错就是撞出一堆无关的行。"""
     d = drill(_facts([
