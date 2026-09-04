@@ -39,6 +39,9 @@ LINK_SPLIT = "__link_split__"
 SPINE_STORE = "store"
 SPINE_PERIOD = "period"
 SPINE_PRODUCT = "product_id"
+#: 脊柱行来自人员投递的订单明细，还是订单台实时补充。两者可以共同参与挂钩，
+#: 但业务公式明确写“订单明细表内行数”时，分母必须只取前者。
+SPINE_ORIGIN = "__spine_origin__"
 
 
 @dataclass

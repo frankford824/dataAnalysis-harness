@@ -21,7 +21,7 @@ import polars as pl
 
 from ..model.schema import Metric
 from ..money import decimal_amount, money_float, sum_amounts
-from .link import SPINE_PERIOD, SPINE_PRODUCT, SPINE_STORE, Spine, target_role
+from .link import SPINE_ORIGIN, SPINE_PERIOD, SPINE_PRODUCT, SPINE_STORE, Spine, target_role
 from .normalize import STORE_WIDE_PRODUCT
 from .recognize import infer_period_range
 from .rules import norm_expr
@@ -218,8 +218,8 @@ def project(
         proj.notes.append(
             f"{metric.name}：推广表总花费 {abs(declared_amount):,.2f} 元 − "
             f"订单明细已算推广 {abs(calculated_amount):,.2f} 元 = "
-            f"全店托管推广 {abs(wide_amount):,.2f} 元，按 {hosted.height:,} 条有商品 ID 的"
-            "订单明细均摊"
+            f"全店托管推广 {abs(wide_amount):,.2f} 元，按 {hosted.height:,} 条原始订单明细中"
+            "有商品 ID 的行均摊"
         )
     return proj
 
@@ -345,12 +345,21 @@ def _store_wide_spine_facts(
     declared_amount: float,
     periods: tuple[str, ...] = (),
 ) -> pl.DataFrame:
-    """全店托管按有商品 ID 的订单明细行数均摊，空 ID 不进分母。"""
+    """全店托管按原始订单明细中有商品 ID 的行数均摊。
+
+    订单台实时数据会补进同一根脊柱，用它挂钩没有问题；但它不能把人工公式的分母
+    从原始订单明细 8,448 行悄悄扩成合并后的 8,923 行。确实没有原始订单明细时，
+    才回退到实时行，避免整项费用无处可落。
+    """
     if periods and SPINE_PERIOD in keyed.columns:
         keyed = keyed.filter(pl.col(SPINE_PERIOD).is_in(list(periods)))
     if SPINE_PRODUCT not in keyed.columns:
         return _empty()
     keyed = keyed.filter(norm_expr(pl.col(SPINE_PRODUCT).cast(pl.Utf8)) != "")
+    if SPINE_ORIGIN in keyed.columns:
+        from_file = keyed.filter(pl.col(SPINE_ORIGIN) == "order_detail_file")
+        if not from_file.is_empty():
+            keyed = from_file
     n = keyed.height
     if n == 0:
         return _empty()

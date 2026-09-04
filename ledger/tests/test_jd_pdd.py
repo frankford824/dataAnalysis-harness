@@ -477,6 +477,23 @@ class TestPddPromotionTotalRow:
             hosted.select("store", "period", "link_key", "amount", "factor").to_dicts(),
         )
 
+    def test_denominator_prefers_uploaded_order_detail_over_live_supplements(self, model):
+        """订单台补充行能挂账，但不能扩大人工公式所说的“订单明细表行数”。"""
+        from ledger.engine.link import SPINE_ORIGIN, SPINE_PERIOD, SPINE_PRODUCT, SPINE_STORE
+        from ledger.engine.project import _store_wide_spine_facts
+
+        keyed = pl.DataFrame({
+            SPINE_STORE: ["店"] * 3,
+            SPINE_PERIOD: ["2026-06"] * 3,
+            SPINE_PRODUCT: ["SKU1", "SKU2", "SKU3"],
+            SPINE_ORIGIN: ["order_detail_file", "order_console", "order_console"],
+            "spine_row": [0, 1, 2],
+        })
+        metric = next(m for m in model.metrics if m.id == "ad_cost")
+        hosted = _store_wide_spine_facts(keyed, metric, -90.0, -100.0, ("2026-06",))
+        assert hosted.height == 1
+        assert hosted.get_column("amount").item() == pytest.approx(-90.0)
+
     def test_summary_export_without_date_still_spreads_hosting(self, tmp_path, model):
         """商品汇总没有「日期」列，合计写在商品ID 上，全店托管格子是「-」。"""
         from ledger.engine.normalize import STORE_WIDE_PRODUCT

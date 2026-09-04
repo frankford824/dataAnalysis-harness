@@ -32,6 +32,7 @@ from .derivative import Derivative, detect as detect_derivative
 from .controls import ControlResult, summarize as summarize_controls, verify as verify_controls
 from .classify import classify, merge_reports
 from .link import (
+    SPINE_ORIGIN,
     SPINE_PERIOD,
     SPINE_PRODUCT,
     SPINE_STORE,
@@ -1293,4 +1294,8 @@ def _spine_frame(
         pl.coalesce(store, pl.col("__hint_store__") if "__hint_store__" in frame.columns else pl.lit(None, dtype=pl.Utf8)).alias(SPINE_STORE),
         pl.coalesce(period, pl.col("__hint_period__") if "__hint_period__" in frame.columns else pl.lit(None, dtype=pl.Utf8)).alias(SPINE_PERIOD),
         product.alias(SPINE_PRODUCT),
+        pl.lit(
+            "order_console" if template.id.startswith("order_console_")
+            else "order_detail_file"
+        ).alias(SPINE_ORIGIN),
     )
