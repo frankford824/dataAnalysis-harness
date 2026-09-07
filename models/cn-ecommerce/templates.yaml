@@ -350,6 +350,9 @@
     # 「业务描述 → 业务小类 → 业务大类」的映射。别和店铺发来的营销费用
     # 明细表搞混：那是源行流水，备注里出现某个费项名不等于对照表收了它。
     # 这两条在对照表那个工作簿的 18 张 sheet 里一次都没出现过。
+    - when: {field: remark, contains: [天猫APP专享折扣服务费]}
+      major: marketing_fee
+      minor: 天猫APP专享折扣服务费
     - when: {field: remark, contains: [限时红包代商家垫付扣回]}
       major: marketing_fee
       minor: 限时红包代商家垫付扣回
@@ -513,6 +516,9 @@
     - when: {field: remark, contains: [品牌新享-天猫营销托管软件服务费, 品牌新享营销托管]}
       major: marketing_fee
       minor: 天猫营销托管
+    - when: {field: remark, contains: [天猫APP专享折扣服务费]}
+      major: marketing_fee
+      minor: 天猫APP专享折扣服务费
     - when: {field: remark, contains: [限时红包代商家垫付扣回]}
       major: marketing_fee
       minor: 限时红包代商家垫付扣回
@@ -631,6 +637,9 @@
     - when: {field: remark, contains: [品牌新享-天猫营销托管软件服务费, 品牌新享营销托管]}
       major: marketing_fee
       minor: 天猫营销托管
+    - when: {field: remark, contains: [天猫APP专享折扣服务费]}
+      major: marketing_fee
+      minor: 天猫APP专享折扣服务费
     - when: {field: remark, contains: [限时红包代商家垫付扣回]}
       major: marketing_fee
       minor: 限时红包代商家垫付扣回

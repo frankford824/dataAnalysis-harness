@@ -90,8 +90,7 @@ def project(
     store_wide_facts: pl.DataFrame | None = None,
 ) -> Projection:
     """把一个指标的源金额投影到脊柱行。"""
-    if metric.link is not None:
-        spine = spine.filtered(metric.link.spine_where)
+    spine = spine.eligible(metric.link)
     role = target_role(metric.link.to) if metric.link else ""
     if not role or spine.frame.is_empty():
         return Projection(facts=_empty(), notes=[f"指标 {metric.name} 没有可投影的脊柱"])
@@ -119,7 +118,7 @@ def project(
     # 以为漏记，其实是这一处拼接用了两套写法。
     keyed = spine_frame.with_columns(
         norm_expr(pl.col(role).cast(pl.Utf8)).alias("link_key")
-    ).with_row_index("spine_row")
+    )
     # 有全店托管控制总数时，普通推广和全店托管两列都按同一张原始订单明细计算。
     # 否则普通推广先分到“文件 + 订单台补充”的合并行，全店托管却只除文件行，
     # 两列加起来就不再等于推广表总计。
@@ -130,6 +129,11 @@ def project(
     by_key = by_key.with_columns(norm_expr(pl.col("link_key")).alias("link_key"))
 
     factor = _factor(keyed, metric)
+    if metric.posting_basis == "transaction":
+        # 退款金额已由流水确认。保留有效比例的相对关系，但不能因残留比例少计退款。
+        keyed = keyed.with_columns(factor.fill_null(0.0).clip(lower_bound=0.0).alias("__factor"))
+        total = pl.col("__factor").sum().over("link_key")
+        factor = pl.when(total > 0).then(pl.col("__factor") / total).otherwise(_even())
     joined = keyed.join(by_key, on="link_key", how="left")
 
     facts = joined.select(
@@ -218,7 +222,7 @@ def project(
         orphan_keys=len(orphan_keys),
         uncovered_rows=keyed.height - covered,
     )
-    if orphan_keys:
+    if orphan_keys and metric.posting_basis != "transaction":
         proj.notes.append(
             f"{metric.name}：源表里有 {len(orphan_keys):,} 个键、{orphan_amount:,.2f} 元"
             f"在脊柱上找不到对应订单，这部分没进利润"
@@ -231,6 +235,35 @@ def project(
             "有商品 ID 的行均摊"
         )
     return proj
+
+
+def project_transactions(source_facts: pl.DataFrame, metric: Metric, spine: Spine) -> Projection:
+    """按流水发生月入账，跨期关联保留原订单身份，无订单的部分明确单列。"""
+    rows = source_facts.filter(claims(metric))
+    if rows.is_empty():
+        return Projection(facts=_empty())
+    eligible = spine.eligible(metric.link).frame
+    parts: list[pl.DataFrame] = []
+    notes: list[str] = []
+    for (store, period), scoped in rows.partition_by("store", "period", as_dict=True).items():
+        if not store or not period or period == "(未知账期)":
+            notes.append(f"{metric.name} 有流水缺少店铺或发生日期，未入账")
+            continue
+        target = eligible.filter(pl.col(SPINE_STORE) == store) if SPINE_STORE in eligible.columns else eligible.clear()
+        target = target.with_columns(pl.lit(period).alias(SPINE_PERIOD))
+        projected = project(scoped, metric, Spine(target))
+        notes.extend(projected.notes)
+        if not projected.facts.is_empty():
+            parts.append(projected.facts)
+        accounted = projected.facts.select("link_key").unique()
+        unlinked = scoped.join(accounted, on="link_key", how="anti", nulls_equal=True)
+        if not unlinked.is_empty():
+            # 每个发生月独立汇总，不能把同号订单其他月份的退款一起带过来。
+            direct = unlinked.group_by("metric_id", "source_id", "store", "period", "link_key").agg(
+                pl.col("amount").sum()
+            ).with_columns(pl.lit(1.0).alias("factor"), pl.lit(None, dtype=pl.UInt32).alias("spine_row"))
+            parts.append(direct.select(SPINE_FACT_COLUMNS))
+    return Projection(facts=pl.concat(parts, how="vertical_relaxed") if parts else _empty(), notes=notes)
 
 
 def _orderless_keys(source_facts: pl.DataFrame, metric: Metric) -> set[str]:

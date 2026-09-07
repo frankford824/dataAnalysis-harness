@@ -30,7 +30,8 @@
   sign: as_is
   time_basis: settle_date
   link: {key: base_order_id, to: order.order_id, grain: order,
-         fallback_to: [order.sub_order_id]}
+         fallback_to: [order.sub_order_id], prefer_exported_orders: true,
+          spine_where: [{field: order_type, op: not_in, value: [补发订单], include_null: true}]}
   allocate: {mode: ratio, by: alloc_ratio}
   expect:
     - {field: pay_time, op: notnull}
@@ -45,6 +46,7 @@
     只占 1.8%。钱进了又全额退回，账单上就没有净收款这一行，这不是对账表没交全。
 
 - id: trade_refund
+  posting_basis: transaction
   name: 销售退款
   occasional: true
   source: settlement
@@ -54,7 +56,8 @@
   sign: as_is
   time_basis: settle_date
   link: {key: base_order_id, to: order.order_id, grain: order,
-         fallback_to: [order.sub_order_id]}
+         fallback_to: [order.sub_order_id], prefer_exported_orders: true,
+          spine_where: [{field: order_type, op: not_in, value: [补发订单], include_null: true}]}
   allocate: {mode: ratio, by: alloc_ratio}
   note: 源数据本身是负数，直接用，不取反。
 
@@ -69,7 +72,8 @@
   sign: as_is
   time_basis: settle_date
   link: {key: base_order_id, to: order.order_id, grain: order,
-         fallback_to: [order.sub_order_id]}
+         fallback_to: [order.sub_order_id], prefer_exported_orders: true,
+          spine_where: [{field: order_type, op: not_in, value: [补发订单], include_null: true}]}
   allocate: {mode: ratio, by: alloc_ratio}
   note: 含类目软件服务费（原天猫佣金）、基础软件服务费、跨境服务增值费等。源数据为负。
 
@@ -86,7 +90,8 @@
   sign: as_is
   time_basis: settle_date
   link: {key: base_order_id, to: order.order_id, grain: order,
-         fallback_to: [order.sub_order_id]}
+         fallback_to: [order.sub_order_id], prefer_exported_orders: true,
+          spine_where: [{field: order_type, op: not_in, value: [补发订单], include_null: true}]}
   allocate: {mode: ratio, by: alloc_ratio}
 
 - id: cross_border_fee
@@ -99,7 +104,8 @@
   sign: as_is
   time_basis: settle_date
   link: {key: base_order_id, to: order.order_id, grain: order,
-         fallback_to: [order.sub_order_id]}
+         fallback_to: [order.sub_order_id], prefer_exported_orders: true,
+          spine_where: [{field: order_type, op: not_in, value: [补发订单], include_null: true}]}
   allocate: {mode: ratio, by: alloc_ratio}
 
 - id: trade_compensation
@@ -112,7 +118,8 @@
   sign: as_is
   time_basis: settle_date
   link: {key: base_order_id, to: order.order_id, grain: order,
-         fallback_to: [order.sub_order_id]}
+         fallback_to: [order.sub_order_id], prefer_exported_orders: true,
+          spine_where: [{field: order_type, op: not_in, value: [补发订单], include_null: true}]}
   allocate: {mode: ratio, by: alloc_ratio}
 
 - id: marketing_fee
@@ -125,7 +132,8 @@
   sign: as_is
   time_basis: settle_date
   link: {key: base_order_id, to: order.order_id, grain: order,
-         fallback_to: [order.sub_order_id]}
+         fallback_to: [order.sub_order_id], prefer_exported_orders: true,
+          spine_where: [{field: order_type, op: not_in, value: [补发订单], include_null: true}]}
   allocate: {mode: ratio, by: alloc_ratio}
   note: >
     主要来自业务描述为空的「交易分账」行，实测 11,462 行。
@@ -325,6 +333,13 @@
   note: 商品级，按该商品的订单行数均分。实测与人工表逐行完全一致。
 
   by_platform:
+    - platform: taobao
+      link:
+        key: product_id
+        to: order.product_id
+        grain: product
+        prefer_exported_orders: true
+        spine_where: [{field: order_type, op: not_in, value: [补发订单], include_null: true}]
     # 1688 那张订单明细表的推广费用列写着「无公式，数值全补成 0」——这个店没有投放数据。
     - {platform: alibaba1688, disabled: true}
     # 京东按跟单 SKU ID、拼多多按商品ID，两家的公式都是除以 countifs(商品ID)，

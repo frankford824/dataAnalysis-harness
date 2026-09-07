@@ -27,7 +27,7 @@ from ..money import decimal_amount, money_float
 from ..version import engine_version
 from . import calculate as calc
 from .audit import AuditResult, audit
-from .project import Projection, claims, project
+from .project import Projection, claims, project, project_transactions
 from .derivative import Derivative, detect as detect_derivative
 from .controls import ControlResult, summarize as summarize_controls, verify as verify_controls
 from .classify import classify, merge_reports
@@ -717,11 +717,12 @@ def run(ingestion: Ingestion, platform: str = "*") -> RunResult:
     for metric in metrics:
         if not (metric.link and metric.link.to):
             continue
-        proj = (
-            _project_scoped_live(facts, metric, spine)
-            if live_feed and metric.link is not None
-            else project(facts, metric, spine)
-        )
+        if metric.posting_basis == "transaction":
+            proj = project_transactions(facts, metric, spine)
+        elif live_feed:
+            proj = _project_scoped_live(facts, metric, spine)
+        else:
+            proj = project(facts, metric, spine)
         projections[metric.id] = proj
         notes.extend(proj.notes)
         if not proj.facts.is_empty():
@@ -766,7 +767,7 @@ def _project_scoped_live(
     )
     rest = rows.filter(~wide_mask)
     wide = rows.filter(wide_mask)
-    projection_spine = spine.frame
+    projection_spine = spine.eligible(metric.link).frame
     if not wide.is_empty() and SPINE_ORIGIN in projection_spine.columns:
         from_file = projection_spine.filter(pl.col(SPINE_ORIGIN) == "order_detail_file")
         if not from_file.is_empty():
@@ -906,7 +907,7 @@ def _mark_counted(facts: pl.DataFrame, spine_facts: pl.DataFrame,
     for metric in metrics:
         claim = claim | claims(metric)
     return (
-        facts.join(weights, on=["metric_id", "store", "period", "link_key"], how="left")
+        facts.join(weights, on=["metric_id", "store", "period", "link_key"], how="left", nulls_equal=True)
         .with_columns(
             (claim & pl.col("__share__").is_not_null()).alias("counted"),
         )
@@ -1090,8 +1091,9 @@ def _scoped_link_reports(
         )
         role = target_role(metric.link.to) if metric.link else ""
         if role:
-            known = local_spine.keys(role)
-            expected = local_spine.keys_where(role, metric.expect)
+            eligible = local_spine.eligible(metric.link)
+            known = eligible.keys(role)
+            expected = eligible.keys_where(role, metric.expect)
             report.spine_keys_total = len(known)
             report.spine_keys = len(expected)
             report.expect_label = metric.expect_label if len(expected) != len(known) else ""

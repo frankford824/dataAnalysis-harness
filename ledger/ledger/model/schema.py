@@ -518,6 +518,8 @@ class LinkRule(Base):
     #: 关联目标本身还要满足的条件。例如补发目标单可以承接补发成本，但不能承接
     #: 原销售订单的收款；这个过滤必须同时用于挂钩和投影，避免“显示未挂、金额却进账”。
     spine_where: tuple[Predicate, ...] = ()
+    #: 同一主订单已有平台明细时，内部拆单/补发行不再参与该指标的分摊。
+    prefer_exported_orders: bool = False
     #: `to` 挂不上时依次再试的角色。命中后把键换算成 `to` 那个角色的值，
     #: 归集层级不变。
     #:
@@ -674,6 +676,8 @@ class Metric(Base):
     sign: SignRule = "as_is"
     #: 时间归属依据。广告费按花费日而非下单日。
     time_basis: TimeSlot = "order_date"
+    #: 流水口径按发生月确认全部金额；关联仅用于归属，不决定是否入账。
+    posting_basis: Literal["order", "transaction"] = "order"
     #: 该科目是否天然无订单号。为真时挂不上订单不算异常。
     naturally_unlinked: bool = False
     #: 分摊方式。为空表示源金额直接落到脊柱行，不拆。

@@ -93,6 +93,28 @@ class Spine:
             return self
         return Spine(self.frame.filter(compile_where(where, self.frame)))
 
+    def indexed(self) -> "Spine":
+        """在任何筛选之前固定行身份，供商品/人员分摊回查。"""
+        return self if "spine_row" in self.frame.columns else Spine(self.frame.with_row_index("spine_row"))
+
+    def eligible(self, rule: LinkRule | None) -> "Spine":
+        """关联与投影使用同一份权威订单集合；不删除成本所需的原脊柱。"""
+        selected = self.indexed()
+        if rule is None:
+            return selected
+        frame = selected.frame
+        if rule.prefer_exported_orders and {SPINE_ORIGIN, "order_id"} <= set(frame.columns):
+            keys = ["order_id"] + ([SPINE_STORE] if SPINE_STORE in frame.columns else [])
+            exported = frame.filter(pl.col(SPINE_ORIGIN) == "order_detail_file").select(keys).unique()
+            if not exported.is_empty():
+                marked = frame.join(exported.with_columns(pl.lit(True).alias("__exported")),
+                                    on=keys, how="left", nulls_equal=True, maintain_order="left")
+                frame = marked.filter(
+                    (pl.col(SPINE_ORIGIN) != "order_console").fill_null(True)
+                    | pl.col("__exported").is_null()
+                ).drop("__exported")
+        return Spine(frame).filtered(rule.spine_where)
+
     def keys_where(self, role: str, where: tuple[Predicate, ...]) -> set[str]:
         """脊柱上满足条件的那些键。
 
@@ -193,7 +215,7 @@ def link(
         )
         return _without_link(frame), report
 
-    spine = spine.filtered(rule.spine_where)
+    spine = spine.eligible(rule)
 
     report = LinkReport(metric_id=metric.id, key_role=rule.key, grain=rule.grain, total_rows=frame.height)
 

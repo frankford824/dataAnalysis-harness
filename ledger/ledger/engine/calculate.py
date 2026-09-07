@@ -122,7 +122,11 @@ def evaluate_metric(
         if slot in frame.columns
         else pl.lit(None, dtype=pl.Utf8)
     )
-    if "__spine_period__" in frame.columns:
+    if metric.posting_basis == "transaction":
+        if slot not in frame.columns:
+            raise CalculateError(f"{metric.name} 缺少流水发生日期 {slot}，不能判断入账月份")
+        period = own_period
+    elif "__spine_period__" in frame.columns:
         # A multi-month live spine contains the same product in many periods.  The
         # metric's declared time basis remains authoritative; inheriting the first
         # matching product's order month would move July ad spend into June.
@@ -137,7 +141,8 @@ def evaluate_metric(
         )
     else:
         period = own_period
-    period = pl.coalesce(period, pl.lit(period_hint or None, dtype=pl.Utf8))
+    if metric.posting_basis != "transaction":
+        period = pl.coalesce(period, pl.lit(period_hint or None, dtype=pl.Utf8))
 
     own_store = _own_store(frame, store_names or {}, notes if not shared_table else None)
     store = (

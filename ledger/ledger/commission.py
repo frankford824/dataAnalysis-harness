@@ -250,13 +250,18 @@ def _order_base(
     if ORDER_TIME not in rows.columns:
         rows = rows.with_columns(pl.lit(None, dtype=pl.Datetime).alias(ORDER_TIME))
 
-    rows = rows.filter(
-        pl.col(SPINE_STORE).cast(pl.Utf8).is_in(stores) & (pl.col(SPINE_PERIOD) == period)
-    ).select(keep)
-    if rows.is_empty():
-        return rows
-
     facts = result.spine_facts
+    if not facts.is_empty():
+        facts = facts.filter(
+            pl.col("metric_id").is_in(list(metrics))
+            & pl.col("store").is_in(stores) & (pl.col("period") == period)
+        )
+    booked_rows = facts.get_column("spine_row").drop_nulls().unique().to_list() if not facts.is_empty() else []
+    rows = rows.filter(
+        pl.col(SPINE_STORE).cast(pl.Utf8).is_in(stores)
+        & ((pl.col(SPINE_PERIOD) == period) | pl.col("spine_row").is_in(booked_rows))
+    ).select(keep)
+
     if facts.is_empty():
         base = rows.with_columns(pl.lit(0.0).alias("base"))
     else:
