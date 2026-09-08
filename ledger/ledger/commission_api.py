@@ -67,10 +67,7 @@ def csv_response(filename, columns, rows):
         buffer = io.StringIO()
         writer = csv.writer(buffer)
         writer.writerow(columns)
-        yield buffer.getvalue()
         for row in rows:
-            buffer.seek(0)
-            buffer.truncate()
             values = []
             for column in columns:
                 value = row.get(column, "")
@@ -82,6 +79,11 @@ def csv_response(filename, columns, rows):
                         value = "'" + value if value else ""
                 values.append(value)
             writer.writerow(values)
+            if buffer.tell() >= 65536:
+                yield buffer.getvalue()
+                buffer.seek(0)
+                buffer.truncate()
+        if buffer.tell():
             yield buffer.getvalue()
     return StreamingResponse(stream(), media_type="text/csv; charset=utf-8",
                              headers={"Content-Disposition": f'attachment; filename="{filename}"'})
@@ -406,7 +408,7 @@ def install(app, workspace, model):
     @router.get("/export/history")
     def export_history():
         def rows():
-            with reg().connect() as conn:
+            with reg().connect(thread_affine=False) as conn:
                 for row in conn.execute("SELECT * FROM event ORDER BY id"):
                     yield dict(row)
         return csv_response("commission-history.csv", ["id", "at", "actor", "action", "entity_id", "reason", "before_json", "after_json"], rows())
@@ -415,7 +417,7 @@ def install(app, workspace, model):
     def export_schemes(store_id: str = "", at: str = "", all_versions: bool = False):
         moment = local_time(at) if at else ""
         def rows():
-            with reg().connect() as conn:
+            with reg().connect(thread_affine=False) as conn:
                 people = {r["id"]: r["name"] for r in conn.execute("SELECT * FROM person")}
                 cursor = conn.execute("SELECT s.store_id,s.product_id,v.* FROM scheme s JOIN scheme_version v ON v.scheme_id=s.id "
                                       "WHERE (?='' OR s.store_id=?) AND (? OR v.id=s.active_version) ORDER BY s.store_id,s.product_id,v.revision",
@@ -434,7 +436,7 @@ def install(app, workspace, model):
     @router.get("/export/import/{batch_id}")
     def export_import(batch_id: str):
         def rows():
-            with reg().connect() as conn:
+            with reg().connect(thread_affine=False) as conn:
                 for row in conn.execute("SELECT * FROM import_row WHERE batch_id=? ORDER BY row_no", (batch_id,)):
                     payload = json.loads(row["payload"])
                     yield {**dict(row), **payload}

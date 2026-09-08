@@ -214,8 +214,10 @@ class Registry:
                 _initialized.add(key)
 
     @contextmanager
-    def connect(self) -> Iterator[sqlite3.Connection]:
-        conn = sqlite3.connect(self.path, timeout=30)
+    def connect(self, *, thread_affine: bool = True) -> Iterator[sqlite3.Connection]:
+        # Streaming HTTP iterators resume sequentially on different worker threads.
+        # Only those private read connections opt out of thread affinity.
+        conn = sqlite3.connect(self.path, timeout=30, check_same_thread=thread_affine)
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA foreign_keys=ON")
         try:

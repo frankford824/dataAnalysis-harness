@@ -67,3 +67,35 @@ def test_bulk_validation_is_atomic_and_closed_period_remains_frozen(tmp_path):
     assert res.status_code == 200
     assert ws.state("s1", "2026-06").run_id == run_id
     assert c.get("/api/commission-v2/payout?store_id=s1&period=2026-06").json()["total"] == 12.34
+
+
+def test_large_csv_export_survives_sequential_worker_thread_switches(tmp_path, monkeypatch):
+    from concurrent.futures import ThreadPoolExecutor
+    import ledger.commission_api as api
+    ws, registry, _ = setup(tmp_path)
+    with registry.transaction() as conn:
+        for i in range(3000):
+            Registry.audit(conn, "tester", "probe", str(i), "x" * 80, {}, {"row": i})
+    app = FastAPI()
+    routers = []
+    monkeypatch.setattr(app, "include_router", routers.append)
+    install(app, lambda: ws, _model)
+    # Starlette calls next(iterator) in a thread pool. Exercise an actual switch
+    # after the cursor has opened, including closing it on another worker.
+    monkeypatch.setattr(api, "StreamingResponse", lambda iterator, **kwargs: iterator)
+    route = next(r for r in routers[0].routes if r.path == "/api/commission-v2/export/history")
+    stream = route.endpoint()
+    chunks = []
+    with ThreadPoolExecutor(1) as first, ThreadPoolExecutor(1) as second:
+        pools = [first, second]
+        for i in range(100):
+            chunk = pools[i % 2].submit(next, stream, None).result()
+            if chunk is None:
+                break
+            chunks.append(chunk)
+        else:
+            raise AssertionError("export did not finish")
+    rows = list(csv.DictReader(io.StringIO("".join(chunks).lstrip("\ufeff"))))
+    assert len(rows) == 3001  # operator creation plus all events
+    assert rows[-1]["entity_id"] == "'2999"
+    assert len(chunks) < 40  # bounded chunks, not one thread hop per CSV row
