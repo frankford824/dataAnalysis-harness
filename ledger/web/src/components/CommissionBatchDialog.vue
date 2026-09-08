@@ -58,7 +58,7 @@ async function apply() {
   try {const r=await call(`/settings/apply/${plan.value.id}`,{method:'POST'});shown.value=false;message.success(`已保存${r.count}条设置，涉及${r.stores}家店铺`);emit('saved')}
   catch(e){failure.value=e.message}finally{busy.value=false}
 }
-defineExpose({open,importFile})
+defineExpose({open,importFile,shown})
 </script>
 <template>
 <n-modal v-model:show="shown" preset="card" :title="title" class="batch-dialog" :mask-closable="!busy" style="width:min(1080px,95vw)">

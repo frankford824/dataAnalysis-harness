@@ -18,13 +18,12 @@ export const router = createRouter({
     },
     {
       path: '/commission',
-      name: 'commission',
-      component: () => import('./views/CommissionWorkspace.vue'),
-    },
-    {
-      path: '/commission/reports',
-      name: 'commission-reports',
-      component: () => import('./views/CommissionReports.vue'),
+      component: () => import('./views/CommissionLayout.vue'),
+      meta: { commission: true },
+      children: [
+        { path: '', name: 'commission', component: () => import('./views/CommissionWorkspace.vue') },
+        { path: 'reports', name: 'commission-reports', component: () => import('./views/CommissionReports.vue') },
+      ],
     },
     {
       path: '/commission/legacy',
@@ -55,6 +54,7 @@ export const router = createRouter({
    * 文档还是个骨架，这时候滚到第 580 像素只会停在顶上——位置记了等于没记。
    */
   scrollBehavior: (to, from, savedPosition) => {
+    if (to.meta.commission && from.meta.commission && !savedPosition) return false
     if (!savedPosition) return { top: 0 }
     return new Promise((resolve) => {
       let waited = 0

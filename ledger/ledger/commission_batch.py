@@ -48,7 +48,7 @@ def preview(registry, model, request, actor):
     if entries is None:
         targets=request.get('targets') or []
         if request.get('scope') is not None:
-            scope={k:v for k,v in request['scope'].items() if k in {'store_id','search','state','person_id'}}
+            scope={k:v for k,v in request['scope'].items() if k in {'store_id','store_ids','search','state','person_id','person_ids'}}
             known={s.id for s in model.stores}
             excluded=set(request['scope'].get('excluded',[]))
             targets=[{k:r.get(k) for k in ['store_id','product_id','product_name','revision']} for r in iter_settings(registry,**scope) if r['store_id'] in known and r['store_id']+':'+r['product_id'] not in excluded]

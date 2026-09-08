@@ -95,7 +95,7 @@ defineExpose({ take })
 </script>
 
 <template>
-  <div class="shell">
+  <div class="shell" :class="{'commission-shell':$route.meta.commission}">
     <nav class="side">
       <div class="brand">
         记账
@@ -121,10 +121,14 @@ defineExpose({ take })
       <router-link
         class="navlink"
         :class="{ on: $route.name === 'commission' || $route.name === 'commission-reports' }"
-        to="/commission"
+        :to="{name:'commission',query:$route.meta.commission ? $route.query : {}}"
       >
         提成
       </router-link>
+      <nav v-if="$route.meta.commission" class="commission-subnav" aria-label="提成菜单">
+        <router-link :to="{name:'commission',query:$route.query}">提成设置</router-link>
+        <router-link :to="{name:'commission-reports',query:$route.query}">金额汇总</router-link>
+      </nav>
       <router-link class="navlink" :class="{ on: $route.name === 'fees' }" to="/fees">
         费项
       </router-link>
@@ -153,7 +157,7 @@ defineExpose({ take })
       <main class="page">
         <router-view v-slot="{ Component, route }">
           <transition name="page-shift">
-            <div :key="route.name" class="route-page">
+            <div :key="route.meta.commission ? 'commission' : route.name" class="route-page">
               <component :is="Component" />
             </div>
           </transition>

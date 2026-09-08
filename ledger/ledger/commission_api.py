@@ -80,6 +80,10 @@ class ReportSelection(BaseModel):
     person_ids: list[str] = Field(default_factory=list, max_length=2000)
     run_ids: list[int] | None = Field(default=None, max_length=240000)
     fingerprint: str = ""
+    view: str = ""
+    offset: int = Field(default=0, ge=0)
+    limit: int = Field(default=50, ge=1, le=200)
+    presentation: bool = False
 
 
 def csv_response(filename, columns, rows):
@@ -249,8 +253,9 @@ def install(app, workspace, model):
 
     @router.get("/settings")
     def settings(store_id: str = "", search: str = "", state: str = "", after: str = "",
-                 limit: int = Query(60, ge=1, le=500), person_id: str = ""):
-        return commission_catalog.settings(reg(), store_id=store_id, search=search, state=state, after=after, limit=limit, person_id=person_id)
+                 limit: int = Query(60, ge=1, le=500), person_id: str = "",
+                 store_ids: list[str] = Query(default=[]), person_ids: list[str] = Query(default=[])):
+        return commission_catalog.settings(reg(), store_id=store_id, search=search, state=state, after=after, limit=limit, person_id=person_id, store_ids=store_ids, person_ids=person_ids)
 
     @router.post("/settings/preview")
     async def settings_preview(request: Request):
@@ -447,13 +452,26 @@ def install(app, workspace, model):
 
     @router.post("/reports/query")
     def report_query(selection: ReportSelection):
-        return report_result(selection)
+        report = report_result(selection)
+        if not selection.view:
+            return report
+        if selection.view not in commission_reports.COLUMNS:
+            raise RegistryError("请选择查看方式")
+        rows = report['rows' if selection.view == 'breakdown' else selection.view]
+        return {k:v for k,v in report.items() if k not in {'people','stores','rows','coverage'}} | {
+            'items': rows[selection.offset:selection.offset+selection.limit], 'count': len(rows),
+            'people_count':len(report['people']), 'store_count':len(report['stores']),
+            'view':selection.view, 'offset':selection.offset,
+        }
 
     @router.post("/export/reports/{kind}")
     def report_export(kind: str, selection: ReportSelection):
         if kind not in commission_reports.COLUMNS:
             raise RegistryError("请选择导出类型")
         report = report_result(selection)
+        if selection.presentation:
+            columns, rows = commission_reports.business_export(report, kind)
+            return csv_response(f"commission-{kind}-{selection.start}-{selection.end}.csv", columns, rows)
         return csv_response(f"commission-{kind}-{selection.start}-{selection.end}.csv",
                             commission_reports.COLUMNS[kind], commission_reports.export_rows(report, kind))
 
@@ -502,11 +520,12 @@ def install(app, workspace, model):
         return csv_response("commission-details.csv", data.columns, data.iter_rows(named=True))
 
     @router.get("/export/settings")
-    def export_settings(store_id: str = "", search: str = "", state: str = "", person_id: str = ""):
+    def export_settings(store_id: str = "", search: str = "", state: str = "", person_id: str = "",
+                        store_ids: list[str] = Query(default=[]), person_ids: list[str] = Query(default=[])):
         names = {s.id:s.name for s in model().stores}
         labels = {"enabled":"提成中","disabled":"不提成","pending":"未设置","scheduled":"待生效","expired":"已到期"}
         def rows():
-            for row in commission_catalog.iter_settings(reg(), store_id=store_id, search=search, state=state, person_id=person_id):
+            for row in commission_catalog.iter_settings(reg(), store_id=store_id, search=search, state=state, person_id=person_id, store_ids=store_ids, person_ids=person_ids):
                 current = row["setting"] or {}
                 for person in row["people"] or [{}]:
                     yield {"店铺":names.get(row["store_id"], row["store_id"]),"宝贝ID":row["product_id"],

@@ -106,15 +106,33 @@ def products(registry: Registry, *, store_id="", search="", missing=False, after
             "next_after": rows[-1]["store_id"] + "\x1f" + rows[-1]["product_id"] if rows and has_more else ""}
 
 
-def iter_settings(registry: Registry, *, store_id="", search="", state="", after="", limit=-1, at=None, person_id=""):
+def iter_settings(registry: Registry, *, store_id="", search="", state="", after="", limit=-1, at=None, person_id="", store_ids=None, person_ids=None):
     from datetime import datetime, timezone, timedelta
     moment = at or datetime.now(timezone(timedelta(hours=8))).replace(tzinfo=None).isoformat(timespec="seconds")
     # Include historical bindings even when the live catalogue no longer lists the item.
-    sql = """WITH items AS (
-      SELECT store_id,product_id,product_name,payload FROM catalog WHERE (?='' OR store_id=?)
+    stores = sorted(set(store_ids or ([store_id] if store_id else [])))
+    persons = sorted(set(person_ids or ([person_id] if person_id else [])))
+    clauses = []; params = []
+    if stores:
+        clauses.append('store_id IN ('+','.join('?' for _ in stores)+')'); params.extend(stores)
+    if after:
+        parts = after.split('\x1f', 1)
+        if len(parts) != 2: raise RegistryError('请重新打开商品列表')
+        clauses.append('(store_id,product_id)>(?,?)'); params.extend(parts)
+    condition = ' AND '.join(clauses) or '1'
+    # Apply indexed shop/cursor bounds before joining version JSON. For the common
+    # unfiltered page, only decode the requested page, not the whole catalogue.
+    candidate_limit = limit if not (state or persons) else -1
+    person_condition = '1' if not persons else "EXISTS (SELECT 1 FROM json_each(coalesce(setting,(SELECT f.value FROM json_each(body,'$.segments') f WHERE json_extract(f.value,'$.valid_from')>? ORDER BY json_extract(f.value,'$.valid_from') LIMIT 1),'{}'),'$.allocations') a WHERE json_extract(a.value,'$.person_id') IN ("+','.join('?' for _ in persons)+'))'
+    sql = f"""WITH items AS (
+      SELECT store_id,product_id,product_name,payload FROM catalog WHERE {condition}
       UNION ALL
-      SELECT s.store_id,s.product_id,s.product_name,'{}' payload FROM scheme s WHERE (?='' OR s.store_id=?)
+      SELECT s.store_id,s.product_id,s.product_name,'{{}}' payload FROM scheme s WHERE {condition}
       AND NOT EXISTS (SELECT 1 FROM catalog c WHERE c.store_id=s.store_id AND c.product_id=s.product_id)
+    ), candidates AS (
+      SELECT * FROM items WHERE (?='' OR instr(product_id,?)>0 OR
+        instr(coalesce(nullif((SELECT s.product_name FROM scheme s WHERE s.store_id=items.store_id AND s.product_id=items.product_id),''),product_name),?)>0)
+      ORDER BY store_id,product_id LIMIT ?
     ), rows AS (
       SELECT c.store_id,c.product_id,coalesce(nullif(s.product_name,''),c.product_name) product_name,c.payload,
         s.id scheme_id,s.revision,v.body,j.value setting,
@@ -123,21 +141,20 @@ def iter_settings(registry: Registry, *, store_id="", search="", state="", after
              WHEN j.value IS NOT NULL OR v.body IS NULL THEN 'pending'
              WHEN EXISTS (SELECT 1 FROM json_each(v.body,'$.segments') f WHERE json_extract(f.value,'$.valid_from')>?) THEN 'scheduled'
              ELSE 'expired' END state
-      FROM items c LEFT JOIN scheme s ON s.store_id=c.store_id AND s.product_id=c.product_id
+      FROM candidates c LEFT JOIN scheme s ON s.store_id=c.store_id AND s.product_id=c.product_id
       LEFT JOIN scheme_version v ON v.id=s.active_version
       LEFT JOIN json_each(v.body,'$.segments') j
         ON json_extract(j.value,'$.valid_from')<=?
         AND (coalesce(json_extract(j.value,'$.valid_to'),'')='' OR json_extract(j.value,'$.valid_to')>?)
-    ) SELECT * FROM rows WHERE (store_id || char(31) || product_id)>?
-      AND (?='' OR product_id LIKE ? OR product_name LIKE ?)
+    ) SELECT * FROM rows WHERE (?='' OR instr(product_id,?)>0 OR instr(product_name,?)>0)
       AND (?='' OR state=?)
-      AND (?='' OR EXISTS (SELECT 1 FROM json_each(coalesce(setting,(SELECT f.value FROM json_each(body,'$.segments') f WHERE json_extract(f.value,'$.valid_from')>? ORDER BY json_extract(f.value,'$.valid_from') LIMIT 1),'{}'),'$.allocations') a WHERE json_extract(a.value,'$.person_id')=?))
+      AND {person_condition}
       ORDER BY store_id,product_id LIMIT ?"""
     with registry.connect(thread_affine=False) as conn:
         conn.execute("BEGIN")
         people = {r['id']:r['name'] for r in conn.execute('SELECT id,name FROM person')}
-        cursor = conn.execute(sql, (store_id,store_id,store_id,store_id,moment,moment,moment,
-                              after,search,'%'+search+'%','%'+search+'%',state,state,person_id,moment,person_id,limit))
+        cursor = conn.execute(sql, [*params,*params,search,search,search,candidate_limit,moment,moment,moment,
+                              search,search,search,state,state,*([moment,*persons] if persons else []),limit])
         for record in cursor:
             row = dict(record)
             body = json.loads(row.pop('body') or '{}')
@@ -156,8 +173,8 @@ def iter_settings(registry: Registry, *, store_id="", search="", state="", after
             yield row
 
 
-def settings(registry: Registry, *, store_id="", search="", state="", after="", limit=60, at=None, person_id="") -> dict:
-    rows = list(iter_settings(registry, store_id=store_id, search=search, state=state, after=after, limit=limit+1, at=at, person_id=person_id))
+def settings(registry: Registry, *, store_id="", search="", state="", after="", limit=60, at=None, person_id="", store_ids=None, person_ids=None) -> dict:
+    rows = list(iter_settings(registry, store_id=store_id, search=search, state=state, after=after, limit=limit+1, at=at, person_id=person_id, store_ids=store_ids, person_ids=person_ids))
     more = len(rows)>limit
     rows = rows[:limit]
     return {'rows':rows,'has_more':more,'next_after':rows[-1]['store_id']+'\x1f'+rows[-1]['product_id'] if rows and more else ''}

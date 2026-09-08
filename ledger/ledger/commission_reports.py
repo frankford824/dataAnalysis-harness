@@ -43,14 +43,14 @@ def build(workspace, registry, model, start, end, store_ids=None, person_ids=Non
         if len(run_ids)!=len(set(run_ids)):raise RegistryError('计算记录不能重复')
         source='FROM run r LEFT JOIN period p ON p.store_id=r.store_id AND p.period=r.period'
         where.append('r.id IN ('+','.join('?' for _ in run_ids)+')' if run_ids else '0');args.extend(run_ids)
-    records=[dict(r) for r in workspace.conn.execute("SELECT r.id,r.store_id,r.period,r.at,r.result,p.state,p.run_id frozen_id "+source+' WHERE '+' AND '.join(where)+' ORDER BY r.period DESC,r.store_id',args)]
+    records=[dict(r) for r in workspace.conn.execute("SELECT r.id,r.store_id,r.period,r.at,json_extract(r.result,'$.commission') commission_json,json_extract(r.result,'$.store') store_name,p.state,p.run_id frozen_id "+source+' WHERE '+' AND '.join(where)+' ORDER BY r.period DESC,r.store_id',args)]
     if run_ids is not None and len(records)!=len(run_ids):raise RegistryError('部分计算记录已不存在或不在所选范围，请重新查询')
     keys=[(r['store_id'],r['period']) for r in records]
     if len(keys)!=len(set(keys)):raise RegistryError('同店同账期只能选择一份计算结果')
-    scopes={}; lines=[]; available={}; people_totals={}; store_totals={}
+    scopes={}; lines=[]; available={}; people_totals={}; store_totals={}; store_people={}
     for record in records:
-        result=json.loads(record['result']);c=result.get('commission') or {};sid=record['store_id'];period=record['period']
-        names.setdefault(sid,result.get('store') or sid)
+        c=json.loads(record['commission_json'] or '{}');sid=record['store_id'];period=record['period']
+        names.setdefault(sid,record['store_name'] or sid)
         closed=record['state']=='closed' and record['frozen_id']==record['id']
         legacy=c.get('engine')!='commission-v2'
         status='已结账' if closed else ('历史口径' if legacy else ('已计算' if c.get('amount_complete') else '试算'))
@@ -77,6 +77,7 @@ def build(workspace, registry, model, start, end, store_ids=None, person_ids=Non
             available.setdefault(pid,{'id':pid,'name':label})
             if selected_people and pid not in selected_people:continue
             amount=decimal(person['amount']);scope['selected_amount']+=amount
+            store_people.setdefault(sid,set()).add(pid)
             lines.append({'person_id':pid,'person':name,'employee_no':roster.get(pid,{}).get('employee_no',''),
                           'store_id':sid,'store':names[sid],'period':period,'amount':money_float(amount),
                           'base':person.get('base'),'base_name':scope['base_name'],'status':status,
@@ -101,7 +102,7 @@ def build(workspace, registry, model, start, end, store_ids=None, person_ids=Non
                 total['amount']+=scope['selected_amount'];total['periods']+=1
             else:total['missing']+=1
             total['statuses'].add(scope['status'])
-        total['people']={x['person_id'] for x in lines if x['store_id']==sid}
+        total['people']=store_people.get(sid,set())
         store_totals[sid]=total
     for pid in selected_people-set(people_totals):
         p=roster.get(pid,{})
@@ -139,3 +140,19 @@ def export_rows(report, kind):
     elif kind=='coverage':
         for r in report['coverage']:yield dict(zip(COLUMNS[kind],[r['store'],r['period'],r['selected_amount'],r['status'],r['unassigned_orders'],r['calculated_at'],r['notes'],r['finance_run']]))
     else:raise RegistryError('请选择导出类型')
+
+
+def business_export(report, kind):
+    columns = {
+        'people': [('人员','person'),('工号','employee_no'),('提成金额','amount'),('店铺数','stores'),('月份数','periods'),('状态','status')],
+        'stores': [('店铺','store'),('提成金额','amount'),('人数','people'),('已有金额月份','periods'),('未出金额月份','missing'),('状态','status')],
+        'breakdown': [('人员','person'),('工号','employee_no'),('店铺','store'),('月份','period'),('提成金额','amount'),('状态','status')],
+        'coverage': [('店铺','store'),('月份','period'),('提成金额','selected_amount'),('状态','status'),('未分配人员订单数','unassigned_orders')],
+    }[kind]
+    def rows():
+        for row in report['rows' if kind == 'breakdown' else kind]:
+            item = {label:row.get(key) for label,key in columns}
+            for original, replacement in [('未计算提成','未出金额'),('未计算','未出金额'),('试算','待核对'),('历史口径','历史提成'),('已计算','待结账'),('无对应提成记录','暂无提成'),('合计待核对','金额待核对')]:
+                item['状态'] = item['状态'].replace(original, replacement)
+            yield item
+    return [label for label,_ in columns], rows()
