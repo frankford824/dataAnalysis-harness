@@ -882,8 +882,8 @@ def test_live_order_projection_never_halves_a_later_month_receipt():
     ]
 
 
-def test_reship_target_cannot_receive_sales_money_but_still_receives_reship_cost(tmp_path):
-    """补发单复用原线上订单号时，只承接补发成本，不能冒充原销售订单。"""
+def test_reship_cost_requires_original_sale_period_instead_of_reship_date(tmp_path):
+    """新口径：原销售单缺失时先挂账，拿到原单后归入原销售月份。"""
     from ledger.engine.link import LINKED, link
     from ledger.engine.runtime import _spine_frame
 
@@ -926,7 +926,16 @@ def test_reship_target_cannot_receive_sales_money_but_still_receives_reship_cost
     cost_rows, _ = link(
         pl.DataFrame({"original_order_id": ["6926682603205983993"]}), reshipment, spine,
     )
+    assert cost_rows.get_column(LINKED).to_list() == [False]
+    original = spine.frame.with_columns(
+        pl.lit("销售订单").alias("order_type"), pl.lit("2026-05").alias("period"),
+    )
+    full = Spine(pl.concat([original, spine.frame], how="vertical_relaxed"))
+    cost_rows, _ = link(
+        pl.DataFrame({"original_order_id": ["6926682603205983993"]}), reshipment, full,
+    )
     assert cost_rows.get_column(LINKED).to_list() == [True]
+    assert cost_rows.get_column("__spine_period__").to_list() == ["2026-05"]
 
 
 def test_a_real_sale_wins_when_a_reship_reuses_the_same_online_and_suborder(tmp_path):

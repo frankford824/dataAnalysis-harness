@@ -471,8 +471,15 @@ def _selected(
         ))
         hit = pl.lit(False)
         for text in terms:
-            for col in ("link_key", "subject", "minor", "file_name", "sheet"):
-                hit = hit | pl.col(col).cast(pl.Utf8).str.contains(text, literal=True)
+            for col in ("link_key", "order_id", "internal_order_id", "sku", "subject", "minor", "file_name", "sheet"):
+                if col in facts.columns:
+                    hit = hit | pl.col(col).cast(pl.Utf8).str.contains(text, literal=True)
+            # 输入完整子单/内部行号时，展示同一平台主单的全部成本组件。
+            # 只从本次冻结的事实行恢复父子关系，不查询当前订单台来改写历史归属。
+            if "order_id" in facts.columns and len(text) >= 6:
+                parents = facts.filter(pl.col("link_key").cast(pl.Utf8) == text).get_column("order_id").drop_nulls().unique().to_list()
+                if parents:
+                    hit = hit | pl.col("order_id").is_in(parents)
         facts = facts.filter(hit.fill_null(False))
     return facts
 
@@ -546,7 +553,7 @@ def drill(facts: pl.DataFrame | str | Path, model: Model, node_id: str,
                 column for column in (
                     "metric_id", "link_key", "linked", "counted", "contribution",
                     "amount", "subject", "minor", "classify_via", "file_name",
-                    "sheet", "row_no", "major", "file_sha",
+                    "sheet", "row_no", "major", "file_sha", "order_id", "internal_order_id", "sku",
                 )
                 if column in columns
             ]
@@ -642,7 +649,7 @@ def drill(facts: pl.DataFrame | str | Path, model: Model, node_id: str,
             *[c for c in (
                 "metric_id", "link_key", "linked", "counted", "contribution",
                 "amount", "subject", "minor", "classify_via",
-                "file_sha", "file_name", "sheet", "row_no",
+                "file_sha", "file_name", "sheet", "row_no", "order_id", "internal_order_id", "sku",
             ) if c in picked.columns]
         )
         .sort(by, descending=descending)

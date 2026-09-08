@@ -715,9 +715,7 @@ def run(ingestion: Ingestion, platform: str = "*") -> RunResult:
     spine_parts: list[pl.DataFrame] = []
     projections: dict[str, Projection] = {}
     for metric in metrics:
-        if not (metric.link and metric.link.to):
-            continue
-        if metric.posting_basis == "transaction":
+        if not (metric.link and metric.link.to) or metric.posting_basis == "transaction":
             proj = project_transactions(facts, metric, spine)
         elif live_feed:
             proj = _project_scoped_live(facts, metric, spine)
@@ -1027,9 +1025,9 @@ def _build_slice(
     unavailable = {
         m.id for m in model.metrics if m.source in completeness.missing
     }
-    totals = calc.totals_by_metric(
-        scoped_spine if not scoped_spine.is_empty() else scoped, only_linked=False
-    )
+    # 没有合格订单时，零投影就是未入账，不能退回源金额把已拦下的补发成本算回来。
+    # 期间级指标也已生成显式投影，因此所有损益只使用实际入账事实。
+    totals = calc.totals_by_metric(scoped_spine, only_linked=False)
     inapplicable = {m.id for m in model.metrics if m.for_platform(platform) is None}
     nodes = calc.evaluate_statement(model, totals, unavailable, inapplicable)
     own = classify_report.for_rows(_anchors_of(scoped))

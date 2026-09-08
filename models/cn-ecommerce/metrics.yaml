@@ -271,9 +271,14 @@
     - {field: order_state, op: not_in, value: [已取消, 取消], include_null: true}
   sign: negate
   time_basis: order_date
-  link: {key: original_order_id, to: order.order_id, grain: order}
+  link: {key: original_order_id, to: order.order_id, grain: order,
+         prefer_exported_orders: true,
+         spine_where: [{field: order_type, op: not_in, value: [补发订单], include_null: true}]}
   allocate: {mode: even}
   note: >
+    补发成本按原销售订单月份确认，不按补发发生月。只向可验证的原销售订单投影；
+    原单资料缺失时保留未入账证据，不能用补发单的日期代替原单月份。
+
     补发成本不来自单独的补发表，而是从聚水潭成本表按订单类型拆出来的。
     人工流程是「在聚水潭表里筛出补发订单粘贴成另一张表」，那张表是副本不是新数据：
     实测淘宝店 708 行补发订单在两张表里逐行相同，各摄各的就会重复记 4,071.43 元。
@@ -589,11 +594,14 @@
   value: {op: sum, of: [income, outgo]}
   sign: as_is
   time_basis: settle_date
-  link: {key: base_order_id, to: order.order_id, grain: order}
+  link: {key: base_order_id, to: order.order_id, grain: order,
+         prefer_exported_orders: true,
+         spine_where: [{field: order_type, op: not_in, value: [补发订单], include_null: true}]}
   allocate: {mode: even}
   note: 交易收入-订单收入，加上优惠券结算那部分。收入列和支出列相加取净额。
 
 - id: trade_refund_pdd
+  posting_basis: transaction
   name: 销售退款
   occasional: true
   source: settlement
@@ -602,7 +610,9 @@
   value: {op: sum, of: [income, outgo]}
   sign: as_is
   time_basis: settle_date
-  link: {key: base_order_id, to: order.order_id, grain: order}
+  link: {key: base_order_id, to: order.order_id, grain: order,
+         prefer_exported_orders: true,
+         spine_where: [{field: order_type, op: not_in, value: [补发订单], include_null: true}]}
   allocate: {mode: even}
 
 - id: software_fee_pdd
@@ -613,7 +623,9 @@
   value: {op: sum, of: [income, outgo]}
   sign: as_is
   time_basis: settle_date
-  link: {key: base_order_id, to: order.order_id, grain: order}
+  link: {key: base_order_id, to: order.order_id, grain: order,
+         prefer_exported_orders: true,
+         spine_where: [{field: order_type, op: not_in, value: [补发订单], include_null: true}]}
   allocate: {mode: even}
   note: 技术服务费和基础技术服务费。费率很低，本期 7,847 行合计只有 -522.14 元。
 
@@ -626,7 +638,9 @@
   value: {op: sum, of: [income, outgo]}
   sign: as_is
   time_basis: settle_date
-  link: {key: base_order_id, to: order.order_id, grain: order}
+  link: {key: base_order_id, to: order.order_id, grain: order,
+         prefer_exported_orders: true,
+         spine_where: [{field: order_type, op: not_in, value: [补发订单], include_null: true}]}
   allocate: {mode: even}
 
 - id: cross_border_fee_pdd
@@ -638,7 +652,9 @@
   value: {op: sum, of: [income, outgo]}
   sign: as_is
   time_basis: settle_date
-  link: {key: base_order_id, to: order.order_id, grain: order}
+  link: {key: base_order_id, to: order.order_id, grain: order,
+         prefer_exported_orders: true,
+         spine_where: [{field: order_type, op: not_in, value: [补发订单], include_null: true}]}
   allocate: {mode: even}
 
 - id: trade_compensation_pdd
@@ -650,7 +666,9 @@
   value: {op: sum, of: [income, outgo]}
   sign: as_is
   time_basis: settle_date
-  link: {key: base_order_id, to: order.order_id, grain: order}
+  link: {key: base_order_id, to: order.order_id, grain: order,
+         prefer_exported_orders: true,
+         spine_where: [{field: order_type, op: not_in, value: [补发订单], include_null: true}]}
   allocate: {mode: even}
   note: >
     售后费用那一组（运费补偿、售后补偿消费者、延迟发货、虚假发货、缺货、
@@ -665,7 +683,9 @@
   value: {op: sum, of: [income, outgo]}
   sign: as_is
   time_basis: settle_date
-  link: {key: base_order_id, to: order.order_id, grain: order}
+  link: {key: base_order_id, to: order.order_id, grain: order,
+         prefer_exported_orders: true,
+         spine_where: [{field: order_type, op: not_in, value: [补发订单], include_null: true}]}
   allocate: {mode: even}
   note: >
     多多进宝。字典和界面规则都能把它归成 marketing_fee，但原先只有淘宝那条
