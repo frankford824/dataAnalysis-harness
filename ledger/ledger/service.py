@@ -21,6 +21,7 @@ import polars as pl
 
 from . import commission as comm
 from . import commission_engine
+from . import commission_catalog
 from .commission_registry import Registry
 from . import progress
 from . import order_feed
@@ -338,6 +339,8 @@ def _recompute_locked(
     ).hexdigest()
     slices = sorted(result.slices.items(), key=lambda kv: (kv[0][1] or ""))
     registry = Registry(ws.root) if (ws.root / "commission" / "registry.db").exists() else None
+    if registry:
+        commission_catalog.observe(registry, store, result.spine)
     for i, ((_s, _p), sl) in enumerate(slices, 1):
         report(f"存账期 · {where}", i, len(slices))
         payload = slice_dict(sl, store, model)

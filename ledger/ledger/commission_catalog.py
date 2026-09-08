@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import polars as pl
 
 from .commission_registry import Registry, RegistryError, json_text, now
 from .order_feed import Client
@@ -46,8 +47,12 @@ def refresh(registry: Registry, model, client=None) -> dict:
     if not rows:
         raise RegistryError("商品目录为空，保留现有目录")
     with registry.transaction() as conn:
+        keys = {(r[0], r[1]) for r in rows}
+        observed = [tuple(r) for r in conn.execute(
+            "SELECT * FROM catalog WHERE payload LIKE '%\"origin\":\"order_observation\"%'")
+                    if (r["store_id"], r["product_id"]) not in keys]
         conn.execute("DELETE FROM catalog")
-        conn.executemany("INSERT INTO catalog VALUES(?,?,?,?,?,?)", rows)
+        conn.executemany("INSERT INTO catalog VALUES(?,?,?,?,?,?)", rows + observed)
         conn.execute("DELETE FROM external_person")
         conn.executemany("INSERT INTO external_person VALUES(?,?)", [
             (str(u["user_id"]), json_text({k: u.get(k) for k in
@@ -55,8 +60,28 @@ def refresh(registry: Registry, model, client=None) -> dict:
             for u in users.get("users", [])
         ])
     return {"products": len(rows), "refreshed_at": refreshed_at,
+            "recent_order_products": len(observed),
             "unmapped_products": sum(r[0].startswith("unmapped:") for r in rows),
             "users": len(users.get("users", []))}
+
+
+def observe(registry: Registry, store, spine) -> int:
+    """New ordered listings are visible immediately, even before the daily catalog rebuild."""
+    if not isinstance(spine, pl.DataFrame) or spine.is_empty() or not {"store", "product_id"} <= set(spine.columns):
+        return 0
+    rows = spine.filter(pl.col("store").is_in([store.id, store.name, *store.aliases]))
+    if "product_name" not in rows.columns:
+        rows = rows.with_columns(pl.lit("", dtype=pl.Utf8).alias("product_name"))
+    rows = rows.select(pl.col("product_id").cast(pl.Utf8), pl.col("product_name").cast(pl.Utf8))
+    rows = rows.filter(pl.col("product_id").str.contains(r"^\d{9,20}$")).unique(subset=["product_id"], keep="first")
+    stamp = now()
+    with registry.transaction() as conn:
+        known = {r[0] for r in conn.execute("SELECT product_id FROM catalog WHERE store_id=?", (store.id,))}
+        fresh = [r for r in rows.iter_rows(named=True) if r["product_id"] not in known]
+        conn.executemany("INSERT OR IGNORE INTO catalog VALUES(?,?,?,?,?,?)", [
+            (store.id, r["product_id"], r["product_name"] or "", "", json_text({"origin": "order_observation",
+             "listed": None, "observed_at": stamp}), stamp) for r in fresh])
+    return len(fresh)
 
 
 def products(registry: Registry, *, store_id="", search="", missing=False, after="", limit=100) -> dict:

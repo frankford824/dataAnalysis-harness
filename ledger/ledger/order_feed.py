@@ -32,6 +32,7 @@ from .model.schema import ColumnBinding, Model, Store, Template
 SCHEMA_VERSION = "ledger-feed.v1"
 REPLACED_SOURCES = frozenset({"order_cost", "after_sales"})
 ACCOUNTING_ENTITIES = frozenset({"order", "order_item", "order_cost", "order_relation", "after_sale", "after_sale_item"})
+CATALOG_ENTITIES = frozenset({"shop", "shop_group", "user", "shop_item", "department"})
 # 一行商品成本超过该行售价这么多倍、且金额超过这个门槛，视为数量或成本写错，不计。
 # 正常亏本引流是 1 分钱卖 1 块成本的东西，绝对金额小；5 倍 + 100 元把它们都放过。
 IMPLAUSIBLE_COST_TO_PRICE = 5.0
@@ -385,7 +386,8 @@ class OrderFeed:
                     or page.get("to_seq") != seqs[-1]):
                 raise OrderFeedError("增量页序号不连续推进或页尾不匹配，未提交检查点")
             workers = max(1, int(os.environ.get("LEDGER_ORDER_FEED_FETCHERS", "8")))
-            hrefs = {self._fetch_href(change) for change in changes if change.get("operation") != "delete"}
+            hrefs = {self._fetch_href(change) for change in changes
+                     if change.get("operation") != "delete" and change.get("entity_type") not in CATALOG_ENTITIES}
             fetched: dict[str, dict[str, Any] | None] = {}
 
             def fetch_href(href: str):
@@ -432,6 +434,13 @@ class OrderFeed:
     ) -> tuple[dict[str, Any], dict[str, Any] | None]:
         if change.get("operation") == "delete":
             return change, None
+        if change.get("entity_type") in CATALOG_ENTITIES:
+            # The listing/user catalog has its own complete paginated refresh.
+            # Millions of per-SKU mapping pointers are not accounting facts;
+            # preserve their sequence without making one HTTP request per link.
+            return change, {"catalog_pointer": True, "entity_href": change.get("entity_href"),
+                            "source_updated_at": change.get("source_updated_at"),
+                            "revision": change.get("revision")}
         href = self._fetch_href(change)
         got = fetched.get(href)
         if got is None:

@@ -1,4 +1,4 @@
-import{I as re,J as o,ar as Se,aF as Te,bj as Pe,E as Ce,G as De,H as W,V as _e,a4 as Q,M as Fe,N as le,aJ as Oe,Z as Ae,A as B,$ as ke,a0 as h,w as Ue,a9 as $e,z as Ee,aH as X,aI as Z,bk as q,a2 as I,ax as ze,aQ as Y,bl as He,a3 as Le}from"./index-DvrpF4sf.js";import{A as je}from"./Add-DngvvFUo.js";const Ge=re({name:"Remove",render(){return o("svg",{xmlns:"http://www.w3.org/2000/svg",viewBox:"0 0 512 512"},o("line",{x1:"400",y1:"256",x2:"112",y2:"256",style:`
+import{I as re,J as o,ar as Se,aF as Te,bj as Pe,E as Ce,G as De,H as W,V as _e,a4 as Q,M as Fe,N as le,aJ as Oe,Z as Ae,A as B,$ as ke,a0 as h,w as Ue,a9 as $e,z as Ee,aH as X,aI as Z,bk as q,a2 as I,ax as ze,aQ as Y,bl as He,a3 as Le}from"./index-BJpLh0LZ.js";import{A as je}from"./Add-NOA4eXJG.js";const Ge=re({name:"Remove",render(){return o("svg",{xmlns:"http://www.w3.org/2000/svg",viewBox:"0 0 512 512"},o("line",{x1:"400",y1:"256",x2:"112",y2:"256",style:`
         fill: none;
         stroke: currentColor;
         stroke-linecap: round;

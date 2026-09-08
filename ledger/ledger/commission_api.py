@@ -131,7 +131,7 @@ def install(app, workspace, model):
             counts["active"] = int(conn.execute("SELECT count(*) FROM scheme WHERE active_version IS NOT NULL").fetchone()[0])
             jobs = [dict(r) for r in conn.execute("SELECT id,kind,at,status,result,error FROM job ORDER BY at DESC LIMIT 10")]
             imports = [dict(r) for r in conn.execute("SELECT * FROM import_batch ORDER BY at DESC LIMIT 20")]
-            refreshed = conn.execute("SELECT max(refreshed_at) FROM catalog").fetchone()[0]
+            refreshed = conn.execute("SELECT max(refreshed_at) FROM catalog WHERE payload NOT LIKE '%\"origin\":\"order_observation\"%'").fetchone()[0]
             pending = [dict(r) for r in conn.execute("SELECT * FROM pending ORDER BY revision")]
         for item in imports:
             item["summary"] = json.loads(item["summary"])

@@ -246,7 +246,7 @@ function ratesText(body) { return (body?.segments || []).map(s => `${s.valid_fro
         <thead><tr><th v-if="section==='schemes'"><input type="checkbox" aria-label="选择本页关系" :checked="!!data.schemes?.length && selectedIds.length===data.schemes.length" @change="selectedIds=$event.target.checked ? data.schemes.map(s=>s.id) : []" /></th><th>店铺</th><th>宝贝与名称</th><th>{{ section==='products' ? '目录状态' : '有效区间与分点' }}</th><th>关系</th><th></th></tr></thead>
         <tbody v-if="section==='products'"><tr v-for="p in data.products || []" :key="`${p.store_id}:${p.product_id}`">
           <td>{{ storeName(p.store_id) }}</td><td><div>{{ p.product_name || '名称待补' }}</div><small>{{ p.product_id }}</small></td>
-          <td>{{ p.payload.listed ? '在售' : '目录未标在售' }}<br /><small>历史销售 {{ p.payload.sales?.lines_total ?? p.payload.lines_total ?? 0 }} 行</small></td>
+          <td>{{ p.payload.origin==='order_observation' ? '新订单已发现' : (p.payload.listed ? '在售' : '目录未标在售') }}<br /><small v-if="p.payload.origin==='order_observation'">等待外部目录汇总</small><small v-else>历史销售 {{ p.payload.sales?.lines_total ?? p.payload.lines_total ?? 0 }} 行</small></td>
           <td>{{ p.active_version ? '已启用' : p.draft_version ? '有草稿' : '待登记' }}</td>
           <td><n-button size="small" :disabled="p.store_id.startsWith('unmapped:')" @click="openScheme(p)">{{ p.scheme_id ? '查看 / 调整' : '登记' }}</n-button></td>
         </tr></tbody>

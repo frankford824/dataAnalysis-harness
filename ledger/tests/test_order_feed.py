@@ -72,6 +72,24 @@ def test_empty_changes_below_watermark_does_not_claim_caught_up(tmp_path):
     assert feed.state()["consumed_seq"] == 10
 
 
+def test_catalog_pointers_do_not_hydrate_every_sku_link(tmp_path):
+    manifest = _fixture(tmp_path / "feed")
+    client = FakeClient(manifest)
+    original = client.get
+    def get(path, params=None):
+        if path == "changes":
+            return {"to_seq": 11, "has_more": False, "changes": [{"seq":11,"revision":11,
+                "entity_type":"shop_item","entity_id":"link1","operation":"upsert",
+                "order_store_id":"10","entity_href":"/api/integration/ledger/v1/entities/shop_item/link1"}]}
+        return original(path, params)
+    client.get = get
+    feed = OrderFeed(tmp_path / "ws", client=client, feed_root=tmp_path / "feed")
+    assert feed.sync().consumed_seq == 11
+    with feed._connect() as conn:
+        saved = conn.execute("SELECT payload_json FROM feed_entity WHERE entity_type='shop_item'").fetchone()[0]
+        assert json.loads(saved)["catalog_pointer"] is True
+
+
 def _write(root: Path, name: str, frame: pl.DataFrame) -> dict:
     data = root / "objects" / name
     data.parent.mkdir(parents=True, exist_ok=True)
