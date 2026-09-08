@@ -219,9 +219,9 @@ watch(
         :hint="`已收 ${count(info.files?.length || 0)} 张表`"
       >
         <template #actions>
-          <n-button size="small" @click="fixing = true">数字不对？</n-button>
+          <n-button size="small" @click="fixing = true">核对金额</n-button>
           <n-button v-if="app.ingestMode !== 'nas'" size="small" :loading="!!app.busy" :disabled="loading" @click="recompute">重算</n-button>
-          <n-tag v-else size="small" type="info" :bordered="false">索引更新后自动计算</n-tag>
+          <n-tag v-else size="small" type="info" :bordered="false">收到新资料后自动更新</n-tag>
           <n-button
             v-if="!closed"
             type="primary"
@@ -249,8 +249,8 @@ watch(
           style="margin-bottom: var(--s4)"
         >
           已结账{{ snap.at ? `于 ${stamp(snap.at)}` : '' }}{{ snap.by ? ` · ${snap.by}` : '' }}
-          <template v-if="snap.stale"> · 之后又交了新表，数字还是结账那一版</template>
-          <div v-if="snap.note" class="small" style="margin-top: 4px">{{ snap.note }}</div>
+          <template v-if="snap.stale"> · 有新资料，当前仍显示结账金额</template>
+          <details v-if="snap.note" class="small" style="margin-top: 6px"><summary>结账备注</summary><p>{{ snap.note }}</p></details>
         </n-alert>
 
         <n-alert
@@ -261,15 +261,14 @@ watch(
           style="margin-bottom: var(--s4)"
         >
           <div class="small">
-            这期按只读结果归档，没有改写原文件。来源：{{ snap.archive.source_path }}
+            来源：{{ snap.archive.source_path?.split(/[\\/]/).pop() }}
             · {{ snap.archive.sheet }} · 第 {{ snap.archive.row_numbers?.join('、') }} 行
           </div>
-          <div class="xs muted num" style="margin-top: 4px">
-            SHA-256 {{ snap.archive.source_sha256 }}
+          <details class="xs muted" style="margin-top: 8px"><summary>原文件信息</summary><p>{{ snap.archive.source_path }}</p><p class="num">文件校验值：{{ snap.archive.source_sha256 }}</p>
             <template v-if="Math.abs(snap.archive.legacy_adjustment || 0) > 0.005">
               · 历史结账调整 {{ money(snap.archive.legacy_adjustment) }}
             </template>
-          </div>
+          </details>
         </n-alert>
 
         <!-- 结账按钮灰着而不说为什么，是最容易被理解成「系统坏了」的一种状态。
@@ -293,7 +292,7 @@ watch(
             {{ f.name }}：{{ f.head || f.message }}
           </div>
           <div class="row" style="margin-top: var(--s3)">
-            <n-button size="tiny" @click="rail = 'checks'">看自检明细</n-button>
+            <n-button size="tiny" @click="rail = 'checks'">查看核对结果</n-button>
             <n-button size="tiny" @click="fixing = true">怎么改</n-button>
           </div>
         </n-alert>
@@ -355,7 +354,7 @@ watch(
 
               <n-tab-pane name="checks">
                 <template #tab>
-                  自检
+                  结账检查
                   <n-badge
                     v-if="bad.length"
                     :value="bad.length"
@@ -473,10 +472,10 @@ watch(
                 </div>
               </n-tab-pane>
 
-              <n-tab-pane v-if="historicalArchive || snap.quality?.length" name="quality" tab="质量">
+              <n-tab-pane v-if="historicalArchive || snap.quality?.length" name="quality" tab="数据核对">
                 <template v-if="historicalArchive">
                   <p class="xs muted" style="margin-bottom: var(--s2)">
-                    历史终态的质量只核对原件、映射和金额勾稽；订单级挂钩与覆盖没有分母，明确显示“不适用”。
+                    历史结账记录可核对原文件和汇总金额，没有订单明细的项目显示“不适用”。
                   </p>
                   <div class="scroll">
                     <n-table size="small" :bordered="false" :single-line="false">

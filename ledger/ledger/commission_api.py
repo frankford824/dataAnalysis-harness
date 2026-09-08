@@ -462,6 +462,7 @@ def install(app, workspace, model):
             'items': rows[selection.offset:selection.offset+selection.limit], 'count': len(rows),
             'people_count':len(report['people']), 'store_count':len(report['stores']),
             'view':selection.view, 'offset':selection.offset,
+            'run_scopes':[{'run_id':row['finance_run'],'store_id':row['store_id'],'period':row['period']} for row in report['coverage'] if row['finance_run'] is not None],
         }
 
     @router.post("/export/reports/{kind}")

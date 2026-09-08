@@ -196,8 +196,7 @@ def _zero_with_rows(payload: dict[str, Any], model: Model) -> list[dict[str, Any
         total = sum(q.get("rows") or 0 for q in have)
         out.append(_gap(
             "zero", "warn", f"{row.get('name')} 是 0.00",
-            f"它的表里读进来 {total:,} 行，但一分钱都没算进这一项——"
-            f"多半是列绑错了或者字典少一条，也可能这个月真的没有",
+            f"原表有 {total:,} 行记录，本项金额为 0。请核对原表金额、列设置及费项分类。",
             node=row.get("id") or "",
         ))
     return out
@@ -217,8 +216,8 @@ def _nothing_linked(payload: dict[str, Any], model: Model) -> list[dict[str, Any
             continue
         mid = q.get("metric") or ""
         out.append(_gap(
-            "unmatched", "warn", f"{q.get('name')}一行都没挂上",
-            f"读进来 {rows:,} 行，没有一行对上订单——多半是订单号那一列取错了",
+            "unmatched", "warn", f"{q.get('name')}未匹配到订单",
+            f"共 {rows:,} 行记录未匹配到订单，请核对原表订单号及对应列设置。",
             metric=mid,
             node=metric_node(model, mid) or (f"{METRIC_PREFIX}{mid}" if mid else ""),
             only="uncounted",
@@ -257,8 +256,7 @@ def _dropped_to_zero(payload: dict[str, Any],
             continue
         out.append(_gap(
             "dropped", "warn", f"{row.get('name')} 这个月是 0",
-            f"上个账期是 {then:,.2f}。要么这个月真没有，要么这一项的数没接上——"
-            f"0 和「没接上」在报表上长得一样，所以摆出来让人确认一次",
+            f"上个账期金额为 {then:,.2f}，本月为 0。请确认本月没有发生这项收支，或补充对应资料。",
             node=row.get("id") or "", amount=then,
         ))
     return out
@@ -281,7 +279,7 @@ def _coverage(payload: dict[str, Any], model: Model) -> list[dict[str, Any]]:
         label = q.get("expect_label") or "全部"
         mid = q.get("metric") or ""
         out.append(_gap(
-            "coverage", "warn", f"{q.get('name')}只盖到 {cov:.1%}",
+            "coverage", "warn", f"{q.get('name')}：{cov:.1%} 的订单有金额",
             f"{label}的 {q.get('expected'):,} 笔订单里有 {missed:,} 笔没有这一项",
             metric=mid, node=metric_node(model, mid),
         ))
@@ -298,7 +296,7 @@ def _unclassified(payload: dict[str, Any]) -> list[dict[str, Any]]:
         out.append(_gap(
             "unclassified", "warn", f"尚未归类：{caption}",
             f"{item.get('count'):,} 笔、合计 {item.get('amount'):,.2f}，"
-            f"字典和规则都没有这一条，这笔钱没进损益表",
+            f"尚未设置费项分类，暂未计入损益表。",
             amount=item.get("amount"),
             node="__unclassified__",
             only="all",
@@ -333,9 +331,9 @@ def _unlinked(payload: dict[str, Any]) -> list[dict[str, Any]]:
     # 标题里写绝对值。这个总额是净额，可能是负的，而「有 -357.06 挂不上订单」
     # 得在脑子里绕一圈才知道是三百多块钱没落地。方向留给金额那一栏去表达。
     return [_gap(
-        "unlinked", "warn", f"有 {abs(total):,.2f} 挂不上订单",
-        (f"{count:,} 行取不出订单号。" if count else "")
-        + "这部分没进店铺利润，也不该硬摊进去，要人查清归属",
+        "unlinked", "warn", f"{abs(total):,.2f} 尚未确认所属订单",
+        (f"共 {count:,} 行记录。" if count else "")
+        + "请核对订单号和所属店铺；这些金额暂未计入店铺利润。",
         amount=total,
         node="__unlinked__",
         only="all",

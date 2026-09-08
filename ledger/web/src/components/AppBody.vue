@@ -104,10 +104,10 @@ defineExpose({ take })
 </script>
 
 <template>
-  <div class="shell" :class="{'commission-shell':$route.meta.commission}">
+  <div class="shell workflow-shell" :class="{'commission-shell':$route.meta.commission}">
     <nav class="side">
       <div class="brand">
-        记账
+        台账
         <div class="brand-scope">{{ app.periodLabel }}</div>
       </div>
       <router-link

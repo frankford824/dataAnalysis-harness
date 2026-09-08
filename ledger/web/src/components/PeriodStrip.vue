@@ -1,10 +1,8 @@
 <script setup>
-/* 一家店的账期切换：年份标签 + 6×2 月份网格。
- *
- * 所有月份一目了然，不用滚动。每个月用颜色和文字同时标出状态，
- * 选中态用深色突出。没算过的月份保留位置但淡化。
- */
-import { computed, ref, watch } from 'vue'
+/* 常用月份就近切换，全年进度在月份面板查看。 */
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
+import { CalendarDays, ChevronLeft, ChevronRight } from '@lucide/vue'
+import LedgerTabs from './ui/LedgerTabs.vue'
 
 const props = defineProps({
   periods: { type: Array, default: () => [] },
@@ -15,6 +13,11 @@ const props = defineProps({
 const emit = defineEmits(['update:modelValue'])
 
 const OTHER = '其他'
+const picker=ref(false),small=ref(false)
+let screen
+function resize(){small.value=screen.matches}
+onMounted(()=>{screen=window.matchMedia('(max-width:600px)');resize();screen.addEventListener('change',resize)})
+onUnmounted(()=>screen?.removeEventListener('change',resize))
 
 function yearOf(p) { return /^\d{4}-\d{2}$/.test(p || '') ? p.slice(0, 4) : OTHER }
 function pretty(p) { const m = /^(\d{4})-(\d{2})$/.exec(p || ''); return m ? `${m[1]} 年 ${Number(m[2])} 月` : p || '' }
@@ -23,7 +26,6 @@ const list = computed(() =>
   [...(props.periods || [])].sort((a, b) => String(b.period).localeCompare(String(a.period))),
 )
 const index = computed(() => list.value.findIndex((p) => p.period === props.modelValue))
-const current = computed(() => list.value[index.value] || null)
 const byPeriod = computed(() => new Map(list.value.map((p) => [p.period, p])))
 
 const years = computed(() => {
@@ -56,7 +58,7 @@ const months = computed(() => {
   })
 })
 
-function go(p) { if (p && p !== props.modelValue) emit('update:modelValue', p) }
+function go(p) { picker.value=false;if (p && p !== props.modelValue) emit('update:modelValue', p) }
 function step(dir) { const next = list.value[index.value + dir]; if (next) go(next.period) }
 
 function statusOf(p) {
@@ -67,10 +69,9 @@ function statusOf(p) {
   return { mark: 'pending', text: '待补资料' }
 }
 
-const status = computed(() => statusOf(current.value))
 const statusCounts = computed(() => {
   const c = { closed: 0, ready: 0, pending: 0, evidence: 0 }
-  for (const item of list.value) c[statusOf(item).mark || 'pending'] += 1
+  for (const item of list.value){if(item.state==='closed')c.closed++;const mark=statusOf(item).mark||'pending';if(mark!=='closed')c[mark]++}
   return c
 })
 const yearCounts = computed(() => {
@@ -78,51 +79,25 @@ const yearCounts = computed(() => {
   for (const item of list.value) { const y = yearOf(item.period); m.set(y, (m.get(y) || 0) + 1) }
   return m
 })
+const nearby=computed(()=>{
+  const size=small.value?3:6
+  const start=Math.max(0,Math.min(index.value-Math.floor(size/2),list.value.length-size))
+  return list.value.slice(start,start+size).reverse()
+})
 </script>
 
 <template>
-  <div v-if="list.length" class="ps" :class="{ compact }">
-    <div class="ps-head">
-      <div class="ps-pager">
-        <button type="button" :disabled="index <= 0" title="较新的一个月" @click="step(-1)">‹</button>
-        <button type="button" :disabled="index < 0 || index >= list.length - 1" title="更早的一个月" @click="step(1)">›</button>
-      </div>
-      <div class="ps-when">{{ pretty(modelValue) }}</div>
-      <div v-if="status.text" class="ps-badge" :class="status.mark"><i />{{ status.text }}</div>
-    </div>
-
-    <div class="ps-card">
-      <div class="ps-years" role="tablist">
-        <button
-          v-for="y in years" :key="y" type="button" role="tab"
-          :class="{ on: y === shownYear }" :aria-selected="y === shownYear"
-          @click="shownYear = y"
-        >{{ y }}<small>{{ yearCounts.get(y) }}期</small></button>
-      </div>
-
-      <div class="ps-grid" :class="{ free: shownYear === OTHER }">
-        <button
-          v-for="m in months" :key="m.key" type="button"
-          class="ps-cell" :class="[m.status?.mark, { on: m.period === modelValue, off: !m.has }]"
-          :disabled="!m.has" :title="m.has ? `${pretty(m.period)} · ${m.status.text}` : '该月暂无数据'"
-          @click="go(m.period)"
-        >
-          <span class="ps-m">{{ m.label }}<em v-if="shownYear !== OTHER">月</em></span>
-          <span v-if="m.has" class="ps-s">{{ m.status.text }}</span>
-        </button>
-      </div>
-
-      <div class="ps-legend">
-        <span class="closed"><i />已结账 {{ statusCounts.closed }}</span>
-        <span class="ready"><i />可确认 {{ statusCounts.ready }}</span>
-        <span class="pending"><i />待补资料 {{ statusCounts.pending }}</span>
-        <span class="evidence"><i />有新资料 {{ statusCounts.evidence }}</span>
-      </div>
-    </div>
+  <div v-if="list.length" class="month-strip" :class="{compact}">
+    <div class="month-nearby"><button class="month-step" :disabled="index<0||index>=list.length-1" aria-label="上一个月" @click="step(1)"><ChevronLeft :size="15"/></button><button v-for="item in nearby" :key="item.period" class="month-shortcut" :class="{selected:item.period===modelValue}" :title="`${pretty(item.period)} · ${statusOf(item).text}`" :aria-pressed="item.period===modelValue" @click="go(item.period)"><i :class="statusOf(item).mark"/>{{item.period}}</button><button class="month-step" :disabled="index<=0" aria-label="下一个月" @click="step(-1)"><ChevronRight :size="15"/></button></div>
+    <n-popover trigger="click" :show="picker" :show-arrow="false" raw placement="bottom-end" @update:show="picker=$event"><template #trigger><button class="month-calendar" :aria-expanded="picker"><CalendarDays :size="15"/><span>全部月份</span></button></template>
+      <div class="month-picker"><LedgerTabs v-model="shownYear" :options="years.map(y=>({key:y,label:y,count:yearCounts.get(y)}))" label="选择年份"/><div class="ps-grid" :class="{free:shownYear===OTHER}"><button v-for="month in months" :key="month.key" class="ps-cell" :class="[month.status.mark,{on:month.period===modelValue,off:!month.has}]" :disabled="!month.has" @click="go(month.period)"><span class="ps-m">{{month.label}}<em v-if="shownYear!==OTHER">月</em></span><span v-if="month.has" class="ps-s">{{month.status.text}}</span></button></div><div class="ps-legend"><span class="closed">已结账 {{statusCounts.closed}}</span><span class="ready">可确认 {{statusCounts.ready}}</span><span class="pending">待补资料 {{statusCounts.pending}}</span><span class="evidence">有新资料 {{statusCounts.evidence}}</span></div></div>
+    </n-popover>
   </div>
 </template>
 
 <style scoped>
+.month-strip{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:12px 0;margin-bottom:16px;border-bottom:1px solid #e5ebf3}.month-nearby{display:flex;align-items:center;gap:7px;min-width:0;overflow:auto}.month-shortcut,.month-step,.month-calendar{display:flex;align-items:center;justify-content:center;gap:6px;flex:none;border:1px solid #e0e6ef;background:#fff;border-radius:5px;color:#667992;min-height:34px;padding:6px 10px;font-size:12px;cursor:pointer}.month-shortcut.selected{color:#3468f0;background:#edf3ff;border-color:#b8cdf8}.month-shortcut i{width:5px;height:5px;border-radius:50%;background:#9daabb}.month-shortcut i.closed{background:#3a986b}.month-shortcut i.evidence,.month-shortcut i.pending{background:#d3a252}.month-shortcut i.ready{background:#3468f0}.month-step{padding:5px}.month-step:disabled{opacity:.4;cursor:default}.month-calendar{border-color:transparent;background:transparent;white-space:nowrap;color:#3468f0}.month-picker{width:min(490px,calc(100vw - 24px));background:#fff;border:1px solid #dfe6f0;border-radius:8px;padding:10px 12px;box-shadow:0 10px 32px #233b5e20}.month-picker .ps-grid{padding:12px 0}.month-picker .ps-legend{padding:10px 0 0;background:#fff}.month-picker :deep(.ledger-tabs){padding:0 4px}@media(max-width:600px){.month-strip{gap:4px}.month-step{display:none}.month-shortcut{padding:6px 8px;font-size:11px}.month-nearby{gap:5px}.month-calendar{padding:5px;font-size:11px;gap:4px}.month-picker .ps-grid{grid-template-columns:repeat(3,minmax(0,1fr))}}
+
 .ps { margin-bottom: var(--s5); padding: var(--s3) 0 var(--s4); border-bottom: 1px solid var(--n2); }
 .ps.compact { margin-top: var(--s4); }
 

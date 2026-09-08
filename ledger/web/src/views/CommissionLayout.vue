@@ -1,10 +1,15 @@
 <script setup>
-import { computed, onMounted, onUnmounted, watch } from 'vue'
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useCommission } from '../commissionStore'
 import '../commission.css'
 import LedgerMultiSelect from '../components/ui/LedgerMultiSelect.vue'
+import { Search, RefreshCw, X } from '@lucide/vue'
 const state = useCommission(), route = useRoute(), router = useRouter()
+const page=ref(null),allFilters=ref(false)
+const applied=computed(()=>[...state.storeIds.map(id=>({type:'store',id,name:state.storeOptions.find(o=>o.value===id)?.label||'未找到的店铺'})),...state.personIds.map(id=>({type:'person',id,name:state.personOptions.find(o=>o.value===id)?.label||'未找到的人员'}))])
+const visibleFilters=computed(()=>allFilters.value?applied.value:applied.value.slice(0,6))
+function removeFilter(filter){const key=filter.type==='store'?'storeIds':'personIds';state[key]=state[key].filter(id=>id!==filter.id)}
 const section = computed(() => route.name === 'commission-reports' ? 'reports' : 'settings')
 const stamp = computed(() => state.updated[section.value] ? new Date(state.updated[section.value]).toLocaleTimeString('zh-CN', { hour12: false, timeZone:'Asia/Shanghai' }) : '')
 let poll, alive=true
@@ -42,15 +47,19 @@ function syncQuery() {
 watch(() => [state.storeIds, state.personIds, state.start, state.end, state.reportView], syncQuery, { deep: true })
 </script>
 <template>
-  <section class="commission-area">
-    <header class="commission-heading"><h1>{{ section === 'settings' ? '提成设置' : '金额汇总' }}</h1><div class="commission-updated" aria-live="polite"><span>{{ state.loading[section] ? '正在更新…' : stamp ? `更新于 ${stamp}` : '' }}</span><button class="refresh-button" type="button" aria-label="刷新列表" :disabled="state.loading[section] || !state.ready" @click="state.refresh"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M20 7v5h-5M4 17v-5h5M5.2 8a7 7 0 0 1 11.6-3L20 8M4 16l3.2 3A7 7 0 0 0 18.8 16"/></svg></button></div></header>
+  <section class="commission-area workflow-area">
+    <header class="commission-heading"><h1>{{section==='settings'?'提成设置':'金额汇总'}}</h1><div class="workflow-heading-actions"><span class="workflow-updated" aria-live="polite">{{state.loading[section]?'正在更新…':stamp?`更新于 ${stamp}`:''}}</span><template v-if="section==='settings'"><n-button :disabled="!page||!state.ready||page.busy" @click="page?.menu('import')">导入表格</n-button><n-button type="primary" :disabled="!page||!state.ready||page.busy" @click="page?.edit()">新增设置</n-button></template></div></header>
     <nav class="commission-mobile-nav" aria-label="提成菜单"><router-link :to="{name:'commission',query:route.query}">提成设置</router-link><router-link :to="{name:'commission-reports',query:route.query}">金额汇总</router-link></nav>
-    <div class="commission-filters">
-      <div class="filter-field"><span>店铺</span><LedgerMultiSelect v-model="state.storeIds" :options="state.storeOptions" placeholder="全部店铺" label="家店铺" aria-label="筛选店铺" :disabled="!state.ready" /></div>
-      <div class="filter-field"><span>人员</span><LedgerMultiSelect v-model="state.personIds" :options="state.personOptions" placeholder="全部人员" label="位人员" aria-label="筛选人员" :disabled="!state.ready" /></div>
-      <button class="text-button clear-filters" :disabled="!state.storeIds.length && !state.personIds.length" @click="state.clear">清空</button>
+    <div class="workflow-scope">
+      <div class="workflow-scope-controls">
+        <n-input v-if="section==='settings'" v-model:value="state.settingsSearch" class="workflow-product-search" placeholder="搜索商品或宝贝ID" aria-label="搜索商品" clearable><template #prefix><Search :size="15"/></template></n-input>
+        <LedgerMultiSelect v-model="state.storeIds" :options="state.storeOptions" label="家店铺" aria-label="筛选店铺" :disabled="!state.ready" :show-chips="false"/>
+        <LedgerMultiSelect v-model="state.personIds" :options="state.personOptions" label="位人员" aria-label="筛选人员" :disabled="!state.ready" :show-chips="false"/>
+        <n-button text class="workflow-refresh" :disabled="state.loading[section]||!state.ready" @click="state.refresh"><RefreshCw :size="14" style="margin-right:6px"/>刷新</n-button>
+      </div>
+      <div v-if="applied.length" class="workflow-applied" aria-label="当前筛选条件"><button v-for="filter in visibleFilters" :key="filter.type+filter.id" class="workflow-active-chip" :title="filter.name" :aria-label="`移除${filter.type==='store'?'店铺':'人员'}${filter.name}`" @click="removeFilter(filter)"><span>{{filter.name}}</span><X :size="12"/></button><button v-if="applied.length>6" class="text-button" @click="allFilters=!allFilters">{{allFilters?'收起':`展开其余 ${applied.length-6} 项`}}</button><button class="text-button" @click="state.clear">清空筛选</button></div>
     </div>
-    <div v-if="state.initError" class="commission-error" role="alert">{{ state.initError }} <button class="text-button" @click="state.init(route.query)">重试</button></div>
-    <router-view v-slot="{Component}"><keep-alive><component :is="Component" /></keep-alive></router-view>
+    <div v-if="state.initError" class="commission-error" role="alert">{{state.initError}} <button class="text-button" @click="state.init(route.query)">重试</button></div>
+    <router-view v-slot="{Component}"><keep-alive><component :is="Component" ref="page" /></keep-alive></router-view>
   </section>
 </template>

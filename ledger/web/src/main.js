@@ -5,6 +5,7 @@ import App from './App.vue'
 import './design.css'
 import './app.css'
 import './ledger-ui.css'
+import './workflow.css'
 import { router } from './router'
 import { accessibleTabs } from './components/ui/accessibleTabs'
 

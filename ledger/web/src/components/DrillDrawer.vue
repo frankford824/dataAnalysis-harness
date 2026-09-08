@@ -196,7 +196,7 @@ function close() {
             style="margin-top: var(--s3)"
           >
             这次算账的留档还没有进账标记，下面是全部源记录，加起来可能对不上报表。
-            <template v-if="liveIndex">新文件索引稳定后会自动计算，不需要手工重算。</template>
+            <template v-if="liveIndex">收到完整的新文件后会自动更新。</template>
             <template v-else>重算一次即可刷新。</template>
           </n-alert>
 
@@ -232,16 +232,16 @@ function close() {
             />
             <span v-if="terms.length > 1" class="xs muted num">{{ terms.length }} 项</span>
             <n-button size="small" :loading="indexLoading" @click="applyFilter">
-              {{ liveIndex ? '筛当前账 + 实时搜原文件' : '筛' }}
+              {{ liveIndex ? '查询账目和原文件' : '筛' }}
             </n-button>
           </div>
 
           <n-alert v-if="indexError" type="error" :bordered="false" style="margin-bottom: var(--s3)">
-            实时索引搜索失败：{{ indexError }}
+            原文件搜索失败：{{ indexError }}
           </n-alert>
           <section v-if="liveIndex && indexResult" class="live-index-results">
             <div class="spread" style="margin-bottom: var(--s2)">
-              <h3>实时原文件索引</h3>
+              <h3>原文件搜索结果</h3>
               <span class="xs muted">
                 搜索 {{ indexResult.queries.join('、') }} · 命中 {{ count(indexResult.hits.length) }} 行
               </span>
@@ -263,7 +263,7 @@ function close() {
                 </tr>
               </tbody>
             </n-table>
-            <n-empty v-else size="small" description="原文件索引没有命中" />
+            <n-empty v-else size="small" description="没有找到对应的原文件记录" />
           </section>
 
           <n-alert

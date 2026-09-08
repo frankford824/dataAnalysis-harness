@@ -132,7 +132,7 @@ async function copyPath() {
             </tbody>
           </table>
         </div>
-        <n-empty v-else description="没有可预览的索引行" />
+        <n-empty v-else description="没有可预览的记录" />
       </n-spin>
 
       <p class="xs muted preview-path">{{ target?.path || result?.metadata?.path }}</p>

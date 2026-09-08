@@ -10,7 +10,7 @@ export const useCommission = defineStore('commission', () => {
   const settingsSearch = ref(''), settingsState = ref(''), reportView = ref('people')
   const updated = ref({}), loading = ref({}), initError = ref('')
   let bootstrap, rosterLoad
-  const storeOptions = computed(() => app.stores.map(s => ({ value: s.id, label: s.name })))
+  const storeOptions = computed(() => app.stores.map(s => ({ value: s.id, label: s.name, group:app.platforms.find(p=>p.id===s.platform)?.name || s.platform || '' })))
   const personOptions = computed(() => {
     const options = new Map(people.value.map(p => [p.id, { value:p.id, label:p.name + (p.employee_no ? `（${p.employee_no}）` : '') }]))
     for(const p of reportPeople.value)if(!options.has(p.id))options.set(p.id,{value:p.id,label:p.name})

@@ -71,3 +71,20 @@ def test_report_pages_keep_whole_scope_total_and_export(view,key,tmp_path):
     exported=list(csv.DictReader(io.StringIO(business.lstrip('\ufeff'))))
     from decimal import Decimal
     assert sum((Decimal(r['提成金额']) for r in exported if r['提成金额']),Decimal(0))==31
+
+
+def test_detail_drawer_stays_on_the_parent_calculation_after_new_run(tmp_path):
+    ws,registry,people,client=fixture(tmp_path)
+    closed=record(ws,people,'s1','2026-06',[12.34])
+    ws.close_period('s1','2026-06',by='test',note='原结账')
+    record(ws,people,'s1','2026-06',[999])
+    opened=record(ws,people,'s2','2026-06',[7.89])
+    scope={'start':'2026-06','end':'2026-06','view':'stores'}
+    parent=client.post('/api/commission-v2/reports/query',json=scope).json()
+    assert {s['run_id'] for s in parent['run_scopes']}=={closed,opened}
+    record(ws,people,'s2','2026-06',[888])
+    chosen=[s['run_id'] for s in parent['run_scopes'] if s['store_id']=='s2']
+    detail=client.post('/api/commission-v2/reports/query',json={**scope,'view':'breakdown','store_ids':['s2'],'run_ids':chosen}).json()
+    assert detail['total']==7.89
+    assert detail['total']==next(row['amount'] for row in parent['items'] if row['store_id']=='s2')
+    assert ws.state('s1','2026-06').run_id==closed

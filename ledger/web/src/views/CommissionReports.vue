@@ -1,13 +1,14 @@
 <script setup>
-import { computed, h, ref, watch } from 'vue'
+import { computed, h, onDeactivated, ref, watch } from 'vue'
 import { NButton, NTag } from 'naive-ui'
 import LedgerTabs from '../components/ui/LedgerTabs.vue'
 import LedgerTable from '../components/ui/LedgerTable.vue'
+import CommissionDetailDrawer from '../components/CommissionDetailDrawer.vue'
 import { useCommission } from '../commissionStore'
 import { useCommissionQuery } from '../components/useCommissionQuery'
 import { commissionRequest } from '../components/commissionRequest'
 const state = useCommission()
-const page = ref(1), downloading = ref(false), downloadError = ref(''), previous = ref(null)
+const page = ref(1), downloading = ref(false), downloadError = ref(''), detail = ref(null)
 const kinds = [{key:'people',label:'按人员'},{key:'stores',label:'按店铺'},{key:'breakdown',label:'按月明细'},{key:'coverage',label:'月份进度'}]
 const scope = computed(() => ({start:state.start,end:state.end,...state.scope}))
 const monthError = computed(() => state.start && state.end && state.start > state.end ? '结束月份不能早于开始月份' : '')
@@ -52,17 +53,19 @@ function shortcut(which) {
   state.start=which==='three'?monthsAgo(state.end,-2):state.end
 }
 function drill(row) {
-  previous.value={...state.scope,view:state.reportView}
-  if(state.reportView==='people')state.personIds=[row.person_id]
-  else state.storeIds=[row.store_id]
-  state.reportView='breakdown'
+  if(locked.value||row.amount==null)return
+  const selection={...report.value.selection}
+  let runIds=report.value.run_ids
+  if(state.reportView==='people')selection.person_ids=[row.person_id]
+  else{
+    selection.store_ids=[row.store_id]
+    runIds=(report.value.run_scopes||[]).filter(run=>run.store_id===row.store_id).map(run=>run.run_id)
+  }
+  detail.value={kind:state.reportView,name:row.person||row.store,expected:row.amount,selection,run_ids:runIds}
 }
-function back() {
-  state.storeIds=previous.value.store_ids;state.personIds=previous.value.person_ids;state.reportView=previous.value.view
-  previous.value=null
-}
-watch(() => JSON.stringify(scope.value), () => {page.value=1;downloadError.value=''})
-watch(() => state.reportView, () => {page.value=1;downloadError.value=''})
+watch(() => JSON.stringify(scope.value), () => {page.value=1;downloadError.value='';detail.value=null})
+watch(() => state.reportView, () => {page.value=1;downloadError.value='';detail.value=null})
+onDeactivated(()=>{detail.value=null})
 watch(report, value => { if(value)state.reportPeople=value.available_people || [] })
 async function download() {
   if(!report.value || locked.value || downloading.value)return
@@ -88,7 +91,7 @@ const tableColumns=computed(()=>{
       h('div',{class:['amount','selected_amount'].includes(key)?['table-money',row[key]<0?'negative':'']:undefined},
         index===0?[h('span',cell(row,key)),h('div',{class:'table-secondary table-mobile-only'},status(row.status))]:cell(row,key))
   }))
-  if(['people','stores'].includes(state.reportView))list.push({title:'操作',key:'action',width:96,mobileWidth:78,fixed:'right',render:row=>h(NButton,{text:true,type:'primary',size:'small',disabled:locked.value,onClick:()=>drill(row)},()=> '查看明细')})
+  if(['people','stores'].includes(state.reportView))list.push({title:'操作',key:'action',width:96,mobileWidth:78,fixed:'right',render:row=>h(NButton,{text:true,type:'primary',size:'small',disabled:locked.value||row.amount==null,onClick:()=>drill(row)},()=> '查看明细')})
   return list
 })
 </script>
@@ -98,11 +101,12 @@ const tableColumns=computed(()=>{
     <div v-if="monthError" class="commission-error" role="alert">{{ monthError }}</div>
     <div v-if="error || downloadError" class="commission-error" role="alert">{{ error || downloadError }}<button class="text-button" @click="downloadError='';load()">重试</button></div>
     <div class="report-overview" :class="{'commission-stale':stale}"><div class="report-total"><span>提成合计</span><strong><small v-if="report?.total!=null">¥</small>{{ money(report?.total) }}</strong></div><div class="report-count"><strong>{{ report?.people_count ?? '—' }}</strong><span>位人员</span></div><div class="report-count"><strong>{{ report?.store_count ?? '—' }}</strong><span>家店铺</span></div><button v-if="warnings" class="report-attention" @click="state.reportView='coverage'"><span class="attention-dot"/>{{ report?.missing_periods ? `${report.missing_periods} 个月份未出金额` : '金额待核对' }} <span>查看</span></button></div>
-    <div class="report-tabs-row"><LedgerTabs v-model="state.reportView" :options="kinds" label="汇总方式" @update:model-value="previous=null" /><n-button type="primary" :disabled="!report || locked" :loading="downloading" @click="download">导出表格</n-button></div>
-    <div v-if="previous && state.reportView==='breakdown'" class="report-back"><button class="text-button" @click="back">‹ 返回{{ previous.view==='people'?'人员':'店铺' }}汇总</button></div>
+    <div class="report-tabs-row"><LedgerTabs v-model="state.reportView" :options="kinds" label="汇总方式" @update:model-value="detail=null" /><n-button type="primary" :disabled="!report || locked" :loading="downloading" @click="download">导出表格</n-button></div>
+
     <div v-if="loading" class="commission-loading-line"/>
     <LedgerTable :rows="rows" :columns="tableColumns" :row-key="rowKey" :loading="loading" :max-height="440" empty="没有找到提成记录，可调整店铺、人员或月份" />
     <div class="commission-paging"><span class="row-count">共 {{report?.count || 0}} {{state.reportView==='people'?'人':state.reportView==='stores'?'家店铺':'条'}}</span><n-button size="small" :disabled="page<=1||locked" @click="page--">上一页</n-button><span>{{page}} / {{Math.max(1,Math.ceil((report?.count||0)/50))}}</span><n-button size="small" :disabled="page*50>=(report?.count||0)||locked" @click="page++">下一页</n-button></div>
+    <CommissionDetailDrawer :target="detail" @close="detail=null" />
   </div>
 </template>
 <style scoped>

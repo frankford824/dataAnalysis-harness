@@ -122,12 +122,12 @@ function recompute() {
     <section class="stack">
       <h3>第三步 · {{ autoMode ? '等待自动计算，然后确认结账' : '重算，然后结账' }}</h3>
       <p v-if="autoMode" class="small">
-        NAS 索引到稳定的新版本后会自动计算，不需要手工点重算。确认损益、自检和来源证据都正确后，
-        只需要由人点击“结账”。结账后数字冻结；发现结错可以反结账，但必须留下理由。
+        收到完整的新资料后会自动更新。核对损益金额和原文件后，点击“结账”保存本月金额。
+        如需修改已结账月份，请反结账并填写原因。
       </p>
       <p v-else class="small">
-        表或口径动过之后要重算一次，账上的数才会跟着变。结账之后数字就定死了；
-        发现结错了可以反结账，但必须写清为什么——这条会记进账期历史。
+        资料或计算规则修改后，请重新计算并核对金额，再进行结账。
+        如需修改已结账月份，请反结账并填写原因。
       </p>
       <div v-if="!autoMode" class="row" style="margin-top: var(--s2)">
         <n-button size="small" type="primary" @click="recompute">重算这家店</n-button>
