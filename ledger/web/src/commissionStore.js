@@ -1,6 +1,7 @@
 import { computed, ref } from 'vue'
 import { defineStore } from 'pinia'
 import { useApp } from './store'
+import { initialStoreIds } from './commissionScope'
 
 export const useCommission = defineStore('commission', () => {
   const app = useApp()
@@ -34,7 +35,7 @@ export const useCommission = defineStore('commission', () => {
       try {
         await Promise.all([app.loadNavigation(), loadPeople()])
         const month = app.period || app.periods[0] || new Date().toLocaleDateString('sv-SE', { timeZone: 'Asia/Shanghai' }).slice(0, 7)
-        storeIds.value = query.shops ? String(query.shops).split(',').filter(Boolean) : app.storeId ? [app.storeId] : []
+        storeIds.value = initialStoreIds(query, app.storeId)
         personIds.value = query.people ? String(query.people).split(',').filter(Boolean) : []
         start.value = /^\d{4}-\d{2}$/.test(query.from || '') ? query.from : month
         end.value = /^\d{4}-\d{2}$/.test(query.to || '') ? query.to : start.value
