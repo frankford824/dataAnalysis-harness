@@ -717,7 +717,7 @@ def run(ingestion: Ingestion, platform: str = "*") -> RunResult:
     for metric in metrics:
         if not (metric.link and metric.link.to) or metric.posting_basis == "transaction":
             proj = project_transactions(facts, metric, spine)
-        elif live_feed:
+        elif live_feed or (metric.link is not None and metric.link.grain == "product"):
             proj = _project_scoped_live(facts, metric, spine)
         else:
             proj = project(facts, metric, spine)
@@ -748,7 +748,7 @@ def run(ingestion: Ingestion, platform: str = "*") -> RunResult:
 def _project_scoped_live(
     source_facts: pl.DataFrame, metric: Metric, spine: Spine,
 ) -> Projection:
-    """Project a live multi-month feed inside each accounting store-period.
+    """Project multi-month feeds and product exports inside each store-period.
 
     Platform exports were historically one-month files. With a multi-month spine, projecting
     only by product/order key lets a June source row spread over July and August occurrences of

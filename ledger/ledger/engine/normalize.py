@@ -125,9 +125,15 @@ def _drop_total_rows(frame: pl.DataFrame, template: Template, notes: list[str]) 
     is_total = pl.lit(False)
     used = ""
     if marker and marker in frame.columns:
-        is_total = is_total | (
-            pl.col(marker).is_null()
-            | pl.col(marker).cast(pl.Utf8).str.strip_chars().is_in(["", *_TOTAL_LABELS])
+        blank = pl.col(marker).is_null() | (pl.col(marker).cast(pl.Utf8).str.strip_chars() == "")
+        if template.source == "promotion" and "product_id" in frame.columns:
+            # A product row with a missing date is bad detail, not a total.
+            blank = blank & (
+                pl.col("product_id").is_null()
+                | (pl.col("product_id").cast(pl.Utf8).str.strip_chars() == "")
+            )
+        is_total = is_total | blank | (
+            pl.col(marker).cast(pl.Utf8).str.strip_chars().is_in(list(_TOTAL_LABELS)).fill_null(False)
         )
         used = marker
     if template.source == "promotion":
@@ -325,7 +331,12 @@ def _numeric_roles(template: Template) -> list[str]:
     文本，等到有指标对它求和才炸，而且炸出来的错和业务无关。所以新模板应该写 kind。
     """
     out = []
+    time_roles = set(template.time_slots.values())
     for b in template.bindings:
+        if b.role in time_roles:
+            # A declared date source must survive until date parsing, even when
+            # its name (e.g. spend_time) matches the legacy numeric heuristic.
+            continue
         if b.kind:
             if b.kind == "number":
                 out.append(b.role)

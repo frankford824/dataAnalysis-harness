@@ -799,7 +799,7 @@
     - {role: subject_type, columns: [主体类型], required: false}
     - {role: product_name, columns: [主体名称], required: false}
     - {role: spend, columns: [花费]}
-    - {role: spend_time, columns: [日期]}
+    - {role: spend_time, columns: [日期], kind: time}
   note: 商品级，没有订单号。按商品ID 均分到该商品的订单行。
 
 - id: promotion_douyin_v1
@@ -810,7 +810,7 @@
   bindings:
     - {role: product_id, columns: [商品ID]}
     - {role: spend, columns: [整体消耗]}
-    - {role: spend_time, columns: [日期], required: false}
+    - {role: spend_time, columns: [日期], required: false, kind: time}
   time_slots: {spend_date: spend_time}
 
 - id: promotion_jd_v1
@@ -822,7 +822,7 @@
     - {role: product_id, columns: [跟单SKU ID]}
     - {role: product_name, columns: [跟单SKU名称], required: false}
     - {role: spend, columns: [花费]}
-    - {role: spend_period, columns: [日期], required: false}
+    - {role: spend_period, columns: [日期], required: false, kind: text}
   note: >
     按跟单 SKU ID 匹配订单明细的商品ID，与淘宝按主体ID、拼多多按商品ID 是同一件事。
 
@@ -846,7 +846,7 @@
     - {role: spend, columns: ["总花费(元)", 总花费, "花费(元)"]}
     # 平台有两种原始导出：日明细带「日期」，商品汇总按所选区间聚合且没有日期。
     # 后者跟着商品挂到订单行的账期，和京东汇总表同理；不能因为少日期整表拒收。
-    - {role: spend_time, columns: [日期], required: false}
+    - {role: spend_time, columns: [日期], required: false, kind: time}
   note: >
     一行一个商品一天。表底有一行总计（日期那格写着「总计」，靠 total_row_marker
     丢掉）——不丢的话推广费正好翻倍，店铺那张手工表就是这么翻的：

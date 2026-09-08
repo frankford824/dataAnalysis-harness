@@ -123,7 +123,24 @@ def evaluate_metric(
         if slot in frame.columns
         else pl.lit(None, dtype=pl.Utf8)
     )
-    if metric.posting_basis == "transaction":
+    dated_product = (
+        metric.link is not None and metric.link.grain == "product"
+        and slot in template.time_slots and slot in frame.columns
+    )
+    if dated_product:
+        # An optional date column may be absent in a summary export. Once it is
+        # present, empty/invalid dates cannot inherit an unrelated order month.
+        detail = (
+            (pl.col(LINK_KEY) != STORE_WIDE_PRODUCT).fill_null(True)
+            if LINK_KEY in frame.columns else pl.lit(True)
+        )
+        bad = frame.filter(detail & pl.col(slot).is_null() & (pl.col(AMOUNT) != 0))
+        if not bad.is_empty():
+            raise CalculateError(
+                f"{metric.name} 有 {bad.height} 行非零金额的发生日期缺失或无效，不能判断入账月份"
+            )
+        period = own_period
+    elif metric.posting_basis == "transaction":
         if slot not in frame.columns:
             raise CalculateError(f"{metric.name} 缺少流水发生日期 {slot}，不能判断入账月份")
         period = own_period
@@ -142,8 +159,14 @@ def evaluate_metric(
         )
     else:
         period = own_period
-    if metric.posting_basis != "transaction":
+    if metric.posting_basis != "transaction" and not dated_product:
         period = pl.coalesce(period, pl.lit(period_hint or None, dtype=pl.Utf8))
+    elif dated_product and LINK_KEY in frame.columns:
+        # The synthetic hosting control total represents the whole export; it
+        # has no daily date and retains the established summary-period hint.
+        period = pl.when(pl.col(LINK_KEY) == STORE_WIDE_PRODUCT).then(
+            pl.coalesce(own_period, pl.lit(period_hint or None, dtype=pl.Utf8))
+        ).otherwise(period)
 
     own_store = _own_store(frame, store_names or {}, notes if not shared_table else None)
     store = (
