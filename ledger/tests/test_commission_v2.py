@@ -164,3 +164,11 @@ def test_live_feed_recompute_persists_commission_and_financial_evidence(tmp_path
     details = pl.read_parquet(registry.root / "calculations" / row["path"])
     assert details.height > 0
     assert ws.facts_path(state.run_id).exists()
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    from ledger.commission_api import install
+    app = FastAPI()
+    install(app, lambda: ws, lambda: model)
+    listed = TestClient(app).get("/api/commission-v2/calculations").json()["calculations"][0]
+    assert listed["amount_complete"] == state.result["commission"]["amount_complete"]
+    assert listed["notes"] == state.result["commission"]["notes"]

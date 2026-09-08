@@ -283,7 +283,7 @@ function ratesText(body) { return (body?.segments || []).map(s => `${s.valid_fro
     </template>
     <template v-if="section==='calculations'">
       <div class="notice">这里保留每次计算。非当前展示版本为历史或调整试算；不会覆盖已结账结果。</div>
-      <div class="table-wrap"><table><thead><tr><th>店铺 / 账期</th><th>计算时间</th><th>版本性质</th><th>基数 / 提成</th><th>待分配订单</th><th></th></tr></thead><tbody><tr v-for="c in data.calculations || []" :key="c.id"><td>{{ storeName(c.store_id) }}<br />{{ c.period }}</td><td>{{ displayTime(c.at) }}</td><td>{{ c.shown ? (c.closed ? '已结账版本' : '当前结果') : '历史 / 调整试算' }}</td><td>{{ money(c.base_total) }} / {{ money(c.total) }}</td><td>{{ c.unassigned_orders }}</td><td><n-button size="small" @click="showCalculation(c.id)">查看与导出</n-button></td></tr></tbody></table></div>
+      <div class="table-wrap"><table><thead><tr><th>店铺 / 账期</th><th>计算时间</th><th>版本性质</th><th>基数 / 提成</th><th>待分配订单</th><th></th></tr></thead><tbody><tr v-for="c in data.calculations || []" :key="c.id"><td>{{ storeName(c.store_id) }}<br />{{ c.period }}</td><td>{{ displayTime(c.at) }}</td><td>{{ c.shown ? (c.closed ? '已结账版本' : (c.amount_complete ? '当前结果' : '当前试算')) : '历史 / 调整试算' }}<small v-if="!c.amount_complete">{{ (c.notes || []).join('；') }}</small></td><td>{{ money(c.base_total) }} / {{ money(c.total) }}</td><td>{{ c.unassigned_orders }}</td><td><n-button size="small" @click="showCalculation(c.id)">查看与导出</n-button></td></tr></tbody></table></div>
     </template>
     <template v-if="section==='history'">
       <div class="toolbar"><a href="/api/commission-v2/export/history">导出完整变更记录</a></div>

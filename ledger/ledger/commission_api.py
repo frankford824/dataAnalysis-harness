@@ -372,7 +372,9 @@ def install(app, workspace, model):
                 "ORDER BY finance_run DESC LIMIT ?", (store_id, store_id, period, period, after, after, limit))]
         for row in rows:
             summary = json.loads(row.pop("summary_json"))
-            row.update(total=summary["total"], base_total=summary["base_total"], unassigned_orders=summary.get("unassigned_orders", 0))
+            row.update(total=summary["total"], base_total=summary["base_total"], unassigned_orders=summary.get("unassigned_orders", 0),
+                       amount_complete=summary.get("amount_complete", False), notes=summary.get("notes", []),
+                       wage_preview_orders=summary.get("wage_preview_orders", 0))
             state = workspace().state(row["store_id"], row["period"])
             row["shown"] = bool(state and state.run_id == row["finance_run"])
             row["closed"] = bool(state and state.state == "closed")
