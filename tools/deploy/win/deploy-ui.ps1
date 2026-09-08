@@ -67,8 +67,8 @@ try {
   Copy-Item -LiteralPath (Join-Path $Stage 'VERSION') -Destination $NewStamp
   $Switched = $false
   try {
-    [IO.File]::Replace($NewIndex,$IndexFile,$null); $Switched = $true
-    [IO.File]::Replace($NewStamp,$VersionFile,$null)
+    [IO.File]::Replace($NewIndex,$IndexFile,(Join-Path $ReleaseRoot 'index.previous.html')); $Switched = $true
+    [IO.File]::Replace($NewStamp,$VersionFile,(Join-Path $ReleaseRoot 'VERSION.previous'))
     $HomeResponse = Invoke-WebRequest -Uri 'http://127.0.0.1:8000/' -UseBasicParsing -TimeoutSec 20
     $Info = Invoke-RestMethod -Uri 'http://127.0.0.1:8000/api/version' -TimeoutSec 20
     if ($HomeResponse.StatusCode -ne 200 -or $Info.version -ne $Version) { throw 'UI publication readback failed' }
