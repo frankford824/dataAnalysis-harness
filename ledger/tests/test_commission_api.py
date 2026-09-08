@@ -22,7 +22,8 @@ def setup(tmp_path):
     return ws, registry, client
 
 
-def test_writes_auth_audit_and_conflict(tmp_path):
+def test_writes_auth_audit_and_conflict(tmp_path, monkeypatch):
+    monkeypatch.setenv("LEDGER_COMMISSION_AUTH_MODE", "password")
     _, registry, c = setup(tmp_path)
     payload = {"person": {"name": "甲"}, "reason": "登记", "expected_revision": 0}
     assert c.post("/api/commission-v2/people", json=payload).status_code == 401
@@ -99,3 +100,47 @@ def test_large_csv_export_survives_sequential_worker_thread_switches(tmp_path, m
     assert len(rows) == 3001  # operator creation plus all events
     assert rows[-1]["entity_id"] == "'2999"
     assert len(chunks) < 40  # bounded chunks, not one thread hop per CSV row
+
+
+def test_simple_settings_without_login_and_atomic_person_creation(tmp_path, monkeypatch):
+    monkeypatch.delenv("LEDGER_COMMISSION_AUTH_MODE", raising=False)
+    _, registry, client = setup(tmp_path)
+    change = {"store_id":"s1","product_id":"123456789001","product_name":"商品甲",
+              "valid_from":"2000-06-01", "allocations":[{"name":"直接填写的人员","rate":"0.05"}]}
+    response = client.post("/api/commission-v2/settings", json=change)
+    assert response.status_code == 200
+    assert client.get("/api/commission-v2/status").json()["auth_mode"] == "open"
+    with registry.transaction() as conn:
+        conn.execute("INSERT INTO catalog VALUES(?,?,?,?,?,?)", ('s1','123456789001','源端标题','10','{}','2000-06-01'))
+    rows = client.get("/api/commission-v2/settings?state=enabled&search=商品甲").json()["rows"]
+    assert len(rows) == 1 and rows[0]["people"][0]["name"] == "直接填写的人员"
+    assert rows[0]["people"][0]["rate"] == "0.05"
+    assert rows[0]["product_name"] == "商品甲"  # still visible without a catalog entry
+    export = client.get("/api/commission-v2/export/settings").text
+    exported = list(csv.DictReader(io.StringIO(export.lstrip('\ufeff'))))
+    assert exported[0]["宝贝ID"] == "'123456789001"
+    assert exported[0]["提成比例"] == "5.00%"
+    assert client.post("/api/commission-v2/settings", json=change, headers={"Origin":"https://example.invalid"}).status_code == 403
+    bad = {**change,"product_id":"123456789002","allocations":[{"name":"不能残留的人员","rate":"2"}]}
+    assert client.post("/api/commission-v2/settings", json=bad).status_code == 400
+    assert not any(p['name']=="不能残留的人员" for p in registry.people())
+    assert client.post("/api/commission-v2/settings", json=change).status_code == 409
+
+
+def test_simple_edit_keeps_prior_dates_future_settings_and_role_parts(tmp_path):
+    _, registry, _ = setup(tmp_path)
+    p = registry.person_save({"name":"甲"}, "tester", "登记")
+    original = {"segments":[
+        {"valid_from":"2026-06-01","valid_to":"2026-10-01","mode":"distribute","total_rate":".05",
+         "allocations":[{"person_id":p['id'],"role":"组长","rate":".02"},{"person_id":p['id'],"role":"运营","rate":".03"}]},
+        {"valid_from":"2026-10-01","mode":"exclude","total_rate":"0","allocations":[]}]}
+    registry.save_scheme('s1','123456789001',original,'tester','原设置',publish=True)
+    updated = registry.save_setting({"store_id":"s1","product_id":"123456789001","valid_from":"2026-09-01",
+                                     "expected_revision":1,"allocations":[{"person_id":p['id'],"rate":".05"}]}, 'local:commission')
+    parts = updated['body']['segments']
+    assert [(p['valid_from'],p['valid_to']) for p in parts] == [('2026-06-01T00:00:00','2026-09-01T00:00:00'),('2026-09-01T00:00:00','2026-10-01T00:00:00'),('2026-10-01T00:00:00','')]
+    assert len(parts[1]['allocations']) == 2
+    from ledger.commission_catalog import settings
+    row = settings(registry, at='2026-09-10T00:00:00')['rows'][0]
+    assert len(row['people']) == 1 and row['people'][0]['rate'] == '0.05'
+    assert settings(registry, state='disabled', at='2026-10-10T00:00:00')['rows'][0]['setting']['mode'] == 'exclude'

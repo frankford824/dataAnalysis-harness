@@ -104,3 +104,58 @@ def products(registry: Registry, *, store_id="", search="", missing=False, after
         row["payload"] = json.loads(row["payload"])
     return {"products": rows, "has_more": has_more,
             "next_after": rows[-1]["store_id"] + "\x1f" + rows[-1]["product_id"] if rows and has_more else ""}
+
+
+def iter_settings(registry: Registry, *, store_id="", search="", state="", after="", limit=-1, at=None):
+    from datetime import datetime, timezone, timedelta
+    moment = at or datetime.now(timezone(timedelta(hours=8))).replace(tzinfo=None).isoformat(timespec="seconds")
+    # Include historical bindings even when the live catalogue no longer lists the item.
+    sql = """WITH items AS (
+      SELECT store_id,product_id,product_name,payload FROM catalog WHERE (?='' OR store_id=?)
+      UNION ALL
+      SELECT s.store_id,s.product_id,s.product_name,'{}' payload FROM scheme s WHERE (?='' OR s.store_id=?)
+      AND NOT EXISTS (SELECT 1 FROM catalog c WHERE c.store_id=s.store_id AND c.product_id=s.product_id)
+    ), rows AS (
+      SELECT c.store_id,c.product_id,coalesce(nullif(s.product_name,''),c.product_name) product_name,c.payload,
+        s.id scheme_id,s.revision,v.body,j.value setting,
+        CASE WHEN json_extract(j.value,'$.mode')='distribute' THEN 'enabled'
+             WHEN json_extract(j.value,'$.mode')='exclude' THEN 'disabled'
+             WHEN j.value IS NOT NULL OR v.body IS NULL THEN 'pending'
+             WHEN json_extract(v.body,'$.segments[0].valid_from')>? THEN 'scheduled'
+             ELSE 'expired' END state
+      FROM items c LEFT JOIN scheme s ON s.store_id=c.store_id AND s.product_id=c.product_id
+      LEFT JOIN scheme_version v ON v.id=s.active_version
+      LEFT JOIN json_each(v.body,'$.segments') j
+        ON json_extract(j.value,'$.valid_from')<=?
+        AND (coalesce(json_extract(j.value,'$.valid_to'),'')='' OR json_extract(j.value,'$.valid_to')>?)
+    ) SELECT * FROM rows WHERE (store_id || char(31) || product_id)>?
+      AND (?='' OR product_id LIKE ? OR product_name LIKE ?)
+      AND (?='' OR state=?) ORDER BY store_id,product_id LIMIT ?"""
+    with registry.connect(thread_affine=False) as conn:
+        conn.execute("BEGIN")
+        people = {r['id']:r['name'] for r in conn.execute('SELECT id,name FROM person')}
+        cursor = conn.execute(sql, (store_id,store_id,store_id,store_id,moment,moment,moment,
+                              after,search,'%'+search+'%','%'+search+'%',state,state,limit))
+        for record in cursor:
+            row = dict(record)
+            body = json.loads(row.pop('body') or '{}')
+            row['listed'] = json.loads(row.pop('payload') or '{}').get('listed')
+            row['setting'] = json.loads(row['setting']) if row['setting'] else None
+            if row['state']=='scheduled':
+                row['setting'] = body['segments'][0]
+            grouped = {}
+            from decimal import Decimal
+            for a in (row['setting'] or {}).get('allocations', []):
+                pid = a['person_id']
+                person = grouped.setdefault(pid, {'person_id':pid,'name':people.get(pid,pid),'rate':Decimal(0)})
+                person['rate'] += Decimal(a['rate'])
+            row['people'] = [{**a,'rate':str(a['rate'])} for a in grouped.values()]
+            row['product_name'] = row['product_name'] or body.get('product_name','')
+            yield row
+
+
+def settings(registry: Registry, *, store_id="", search="", state="", after="", limit=60, at=None) -> dict:
+    rows = list(iter_settings(registry, store_id=store_id, search=search, state=state, after=after, limit=limit+1, at=at))
+    more = len(rows)>limit
+    rows = rows[:limit]
+    return {'rows':rows,'has_more':more,'next_after':rows[-1]['store_id']+'\x1f'+rows[-1]['product_id'] if rows and more else ''}

@@ -327,6 +327,67 @@ class Registry:
                          (store_id, rev))
         return result
 
+    def save_setting(self, data: dict, actor: str) -> dict:
+        """One-screen editing; retain earlier dates and already scheduled changes."""
+        start = local_time(data["valid_from"])
+        end = local_time(data.get("valid_to", ""), optional=True)
+        mode = data.get("mode", "distribute")
+        with self.transaction() as conn:
+            row = conn.execute("SELECT * FROM scheme WHERE store_id=? AND product_id=?",
+                               (data["store_id"], data["product_id"])).fetchone()
+            if (row["revision"] if row else 0) != data.get("expected_revision", 0):
+                raise RevisionConflict("这条设置已被修改，请重新打开后保存")
+            if row and row["draft_version"]:
+                raise RegistryError("该商品还有未生效的修改，需要先核对，避免覆盖")
+            previous = conn.execute("SELECT body FROM scheme_version WHERE id=?", (row["active_version"],)).fetchone() if row else None
+            body = json.loads(previous[0]) if previous else {}
+            old = body.get("segments", [])
+            future = min((x["valid_from"] for x in old if x["valid_from"] > start), default="")
+            if future and end and end > future:
+                raise RegistryError("结束时间不能越过已有的后续设置：" + future.replace("T", " "))
+            end = end or future
+            current = next((x for x in old if x["valid_from"] <= start and (not x.get("valid_to") or start < x["valid_to"])), {})
+            allocations = []
+            seen = set()
+            for item in data.get("allocations", []) if mode == "distribute" else []:
+                pid = str(item.get("person_id") or "")
+                if not pid:
+                    name = str(item.get("name") or "").strip()
+                    if not name or len(name) > 100:
+                        raise RegistryError("请填写人员姓名")
+                    matches = conn.execute("SELECT id FROM person WHERE name=?", (name,)).fetchall()
+                    if len(matches) > 1:
+                        raise RegistryError("存在同名人员，请从列表选择具体人员")
+                    if matches:
+                        pid = matches[0][0]
+                    else:
+                        pid = str(uuid.uuid4())
+                        person = {"id":pid,"name":name,"employee_no":"","external_user_id":"","archived":0,"revision":1,"note":""}
+                        conn.execute("INSERT INTO person VALUES(:id,:name,:employee_no,:external_user_id,:archived,:revision,:note)", person)
+                        self.audit(conn, actor, "person.save", pid, "设置提成人员", None, person)
+                if pid in seen:
+                    raise RegistryError("同一人员只需填写一次，比例填合计值")
+                seen.add(pid)
+                share = rate(item.get("rate", "0"))
+                parts = [a for a in current.get("allocations", []) if a["person_id"] == pid]
+                if parts and sum(Decimal(a["rate"]) for a in parts) == Decimal(share):
+                    allocations.extend(parts)
+                else:
+                    allocations.append({"person_id":pid,"role":parts[0]["role"] if len(parts)==1 else "提成","rate":share})
+            segment = {"valid_from":start,"valid_to":end,"mode":mode,"allocations":allocations,
+                       "total_rate":str(sum((Decimal(a["rate"]) for a in allocations), Decimal(0))),
+                       "amount_hold":current.get("amount_hold", "")}
+            segments = []
+            for x in old:
+                if x["valid_from"] < start:
+                    segments.append({**x,"valid_to":min(x.get("valid_to") or start, start)})
+                elif end and x["valid_from"] >= end:
+                    segments.append(x)
+            segments.append(segment)
+            return self.save_scheme(data["store_id"], data["product_id"],
+                                    {**body,"product_name":data.get("product_name", ""),"segments":segments},
+                                    actor, "调整提成设置", expected=data.get("expected_revision",0), publish=True, conn=conn)
+
     def publish(self, sid: str, expected: int, actor: str, reason: str) -> dict:
         with self.transaction() as conn:
             row = conn.execute("SELECT * FROM scheme WHERE id=?", (sid,)).fetchone()
@@ -430,7 +491,7 @@ class Registry:
             return dict(row) if row else None
 
     def auth_mode(self) -> str:
-        return "declared" if os.environ.get("LEDGER_COMMISSION_AUTH_MODE") == "declared" else "password"
+        return os.environ.get("LEDGER_COMMISSION_AUTH_MODE", "open")
 
     def enqueue(self, kind: str, payload: dict, actor: str) -> dict:
         job_id = str(uuid.uuid4())

@@ -36,6 +36,17 @@ class SchemeChange(Change):
     publish: bool = False
 
 
+class SettingChange(BaseModel):
+    store_id: str
+    product_id: str
+    product_name: str = ""
+    mode: str = "distribute"
+    allocations: list[dict] = Field(default_factory=list)
+    valid_from: str
+    valid_to: str = ""
+    expected_revision: int = 0
+
+
 class PersonChange(Change):
     person: dict
 
@@ -75,7 +86,7 @@ def csv_response(filename, columns, rows):
                     value = json_text(value)
                 if isinstance(value, str):
                     # Prevent formulas; preserve long identifiers as text in Excel.
-                    if value[:1] in "=+@-" or column.endswith("_id") or column == "product_id":
+                    if value[:1] in "=+@-" or column.endswith("_id") or column in {"product_id", "宝贝ID"}:
                         value = "'" + value if value else ""
                 values.append(value)
             writer.writerow(values)
@@ -108,6 +119,8 @@ def install(app, workspace, model):
         if origin and urlparse(origin).netloc != request.headers.get("host"):
             raise HTTPException(403, "跨站写入已拒绝")
         registry = reg()
+        if registry.auth_mode() == "open":
+            return {"id": "local:commission", "name": "本机操作", "admin": False}
         if registry.auth_mode() == "declared":
             name = request.headers.get("x-commission-actor", "").strip()
             if not name or len(name) > 100:
@@ -223,6 +236,18 @@ def install(app, workspace, model):
     @router.post("/catalog/refresh")
     def refresh_catalog(request: Request):
         return reg().enqueue("catalog", {}, actor(request)["id"])
+
+    @router.get("/settings")
+    def settings(store_id: str = "", search: str = "", state: str = "", after: str = "",
+                 limit: int = Query(60, ge=1, le=500)):
+        return commission_catalog.settings(reg(), store_id=store_id, search=search, state=state, after=after, limit=limit)
+
+    @router.post("/settings")
+    def setting_save(change: SettingChange, request: Request):
+        if change.store_id not in {s.id for s in model().stores}:
+            raise RegistryError("请选择已登记的店铺")
+        validate_product(change.store_id, change.product_id.strip())
+        return reg().save_setting({**change.model_dump(), "product_id":change.product_id.strip()}, actor(request)["id"])
 
     @router.get("/products")
     def products(store_id: str = "", search: str = "", missing: bool = False, after: str = "",
@@ -406,6 +431,20 @@ def install(app, workspace, model):
         frame, _ = detail_frame(calculation_id)
         data = frame.collect()
         return csv_response("commission-details.csv", data.columns, data.iter_rows(named=True))
+
+    @router.get("/export/settings")
+    def export_settings(store_id: str = "", search: str = "", state: str = ""):
+        names = {s.id:s.name for s in model().stores}
+        labels = {"enabled":"提成中","disabled":"不提成","pending":"未设置","scheduled":"待生效","expired":"已到期"}
+        def rows():
+            for row in commission_catalog.iter_settings(reg(), store_id=store_id, search=search, state=state):
+                current = row["setting"] or {}
+                for person in row["people"] or [{}]:
+                    yield {"店铺":names.get(row["store_id"], row["store_id"]),"宝贝ID":row["product_id"],
+                           "商品名称":row["product_name"],"状态":labels[row["state"]],"人员":person.get("name", ""),
+                           "提成比例":format(Decimal(person["rate"])*100,'f')+'%' if person else "",
+                           "生效时间":current.get("valid_from", ""),"结束时间":current.get("valid_to", "")}
+        return csv_response("commission-settings.csv", ["店铺","宝贝ID","商品名称","状态","人员","提成比例","生效时间","结束时间"], rows())
 
     @router.get("/export/history")
     def export_history():
