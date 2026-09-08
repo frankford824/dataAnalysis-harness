@@ -239,8 +239,9 @@ def _order_base(
         return spine
 
     keep = ["spine_row", SPINE_PRODUCT, ORDER_TIME]
-    if "sub_order_id" in spine.columns:
-        keep.append("sub_order_id")
+    for column in ("order_id", "sub_order_id", "product_name"):
+        if column in spine.columns:
+            keep.append(column)
     rows = spine.with_row_index("spine_row").with_columns(
         pl.col("spine_row").cast(pl.UInt32)
     )

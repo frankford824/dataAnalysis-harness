@@ -18,6 +18,60 @@ from ledger.order_feed import OrderFeed, OrderFeedError, OrderFeedNotFound
 from ledger.workspace import Workspace
 
 
+def test_api_delta_uses_snapshot_identity_and_time_fields(tmp_path):
+    manifest = _fixture(tmp_path / "feed")
+    feed = OrderFeed(tmp_path / "ws", feed_root=tmp_path / "feed")
+    base = pl.read_parquet(tmp_path / "feed" / manifest["objects"]["order_items.parquet"]["path"])
+    payload = {"order_item": {"sub_order_id": "11", "order_id": "1", "sku_id": "SKU1",
+                              "shop_item_id": "P1", "item_name": "商品新名称",
+                              "platform_sub_order_id": "S1", "item_pay_amount": "18.00"}}
+    delta = {"entity_type": "order_item", "entity_id": "11", "operation": "upsert",
+             "payload_json": json.dumps(payload), "order_id": "1", "sub_order_id": "11", "sku_id": "SKU1"}
+    result = feed._overlay(base, [delta], "order_item", "sub_order_id", lambda p: [p["order_item"]])
+    assert result["merchant_sku"].item() == "P1"
+    assert result["product_name"].item() == "商品新名称"
+    assert result["outer_sku"].item() == "S1"
+    assert result["paid_amount"].item() == "18.00"
+    from ledger.order_feed import normalize_entity
+    order = normalize_entity("order", {"order_date": "2026-06-01T10:00:00", "pay_date": "2026-06-01T10:01:00",
+                                       "pay_amount": "20.00", "paid_amount": "19.00", "status_code": "Sent"})
+    assert order["order_time"] == "2026-06-01T10:00:00"
+    assert order["paid_amount"] == "20.00"
+    assert order["settled_amount"] == "19.00"
+
+
+def test_unmapped_store_does_not_stop_confirmed_stores_or_discard_its_events(tmp_path):
+    manifest = _fixture(tmp_path / "feed")
+    client = FakeClient(manifest)
+    original = client.get
+    def get(path, params=None):
+        response = original(path, params)
+        if path == "stores":
+            response["stores"].append({"order_store_id": "unmapped", "mapping_status": "unmapped", "ledger_store_id": None})
+        return response
+    client.get = get
+    feed = OrderFeed(tmp_path / "ws", client=client, feed_root=tmp_path / "feed")
+    result = feed.sync()
+    assert result.caught_up
+    with feed._connect() as conn:
+        row = conn.execute("SELECT * FROM feed_store WHERE order_store_id='unmapped'").fetchone()
+        assert row["mapping_status"] == "unmapped" and row["ledger_store_id"] == ""
+    assert "taobao_test" in feed.pending_stores()
+    feed.acknowledge_stores({"taobao_test"}, result.consumed_seq)
+    assert not feed.pending_stores()
+
+
+def test_empty_changes_below_watermark_does_not_claim_caught_up(tmp_path):
+    manifest = _fixture(tmp_path / "feed")
+    client = FakeClient(manifest)
+    original = client.get
+    client.get = lambda path, params=None: {"to_seq": 10, "has_more": False, "changes": []} if path == "changes" else original(path, params)
+    feed = OrderFeed(tmp_path / "ws", client=client, feed_root=tmp_path / "feed")
+    with pytest.raises(OrderFeedError, match="增量页为空"):
+        feed.sync()
+    assert feed.state()["consumed_seq"] == 10
+
+
 def _write(root: Path, name: str, frame: pl.DataFrame) -> dict:
     data = root / "objects" / name
     data.parent.mkdir(parents=True, exist_ok=True)
@@ -477,7 +531,8 @@ def test_disk_current_snapshot_wins_over_stale_health_announce(tmp_path):
     feed.sync()
     assert feed.state()["snapshot_id"] == "s1"
 
-    newer = {**old, "snapshot_id": "s2", "revision": 12}
+    # The replacement snapshot includes the newly announced event boundary.
+    newer = {**old, "snapshot_id": "s2", "revision": 12, "through_seq": 12}
     (root / "current" / "manifest.json").write_text(json.dumps(newer), encoding="utf-8")
 
     class StaleHealth(FakeClient):

@@ -34,6 +34,7 @@ from pydantic import BaseModel, ValidationError
 
 from . import assist, fees as fees_mod, gaps, index_client, nas_ingest, nas_status, onboard, order_feed, overhead, ownership, progress, service, view
 from . import search as search_mod
+from . import commission_api, commission_manager
 from .model import propose
 from .model.config import (
     COMMISSION_COLUMNS,
@@ -58,12 +59,15 @@ from .workspace import (
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
-    global _nas_worker, _order_feed_worker
+    global _nas_worker, _order_feed_worker, _commission_worker
     anyio.to_thread.current_default_thread_limiter().total_tokens = max(
         1, int(os.environ.get("LEDGER_THREAD_TOKENS", "16")),
     )
     _snapshot()
     workspace()
+    if hasattr(workspace(), "root"):
+        _commission_worker = commission_manager.Manager(lambda: workspace(), lambda: _model())
+        _commission_worker.start()
     if nas_status.ingest_mode() == "nas":
         catalog = Path(os.environ.get("LEDGER_INDEX_CATALOG", r"D:\ledger\index\catalog.db"))
         _nas_worker = nas_ingest.NasIngestWorker(
@@ -82,6 +86,9 @@ async def lifespan(_app: FastAPI):
     try:
         yield
     finally:
+        if _commission_worker is not None:
+            _commission_worker.stop()
+            _commission_worker = None
         if _nas_worker is not None:
             _nas_worker.stop()
             _nas_worker = None
@@ -124,6 +131,7 @@ _model_repo_root: Path | None = None
 _model_repo_guard = threading.Lock()
 _nas_worker: nas_ingest.NasIngestWorker | None = None
 _order_feed_worker: order_feed.Worker | None = None
+_commission_worker: commission_manager.Manager | None = None
 _read_cache_guard = threading.RLock()
 _overview_cache: OrderedDict[tuple, dict] = OrderedDict()
 _gap_cache: OrderedDict[tuple, dict | None] = OrderedDict()
@@ -227,24 +235,31 @@ def workspace() -> Workspace:
     return _ws
 
 
+_commission_actor = commission_api.install(app, lambda: workspace(), lambda: _model())
+
+
+@app.middleware("http")
+async def protect_migrated_commission(request: Request, call_next):
+    if request.method == "POST" and request.url.path in {"/api/commission/config", "/api/commission/plan"}:
+        preview = request.url.path.endswith("/plan") and request.query_params.get("apply", "false") != "true"
+        path = (WORKSPACE_ROOT or default_root()) / "commission" / "registry.db"
+        if not preview and path.exists():
+            from .commission_registry import Registry
+            with Registry(path.parent.parent).connect() as conn:
+                active = conn.execute("SELECT 1 FROM scheme WHERE active_version IS NOT NULL LIMIT 1").fetchone()
+            if active:
+                from fastapi.responses import JSONResponse
+                return JSONResponse(status_code=409, content={"detail": "提成已使用版本化关系，请在提成管理中调整；旧配置仅供回查"})
+    return await call_next(request)
+
+
 def _apply_order_feed(store_ids: set[str], fingerprint: str) -> None:
-    """Turn one caught-up feed batch into stale flags and fresh open-period runs."""
+    """Durably queue accounting without pausing the live source consumer."""
     ws = workspace()
-    snapshot = _snapshot()
     for store_id in sorted(store_ids):
-        try:
-            store = snapshot.model.store(store_id)
-        except KeyError:
-            continue
         ws.note_external_version(store_id, "__order_console__", fingerprint)
-        result = service.recompute(
-            ws, snapshot.model, store,
-            note=f"{store.name} · 订单台实时证据",
-        )
-        if result.failure:
-            raise order_feed.OrderFeedError(
-                f"{store.name} 自动重算失败：{result.failure.get('why') or result.failure}"
-            )
+    from .commission_registry import Registry
+    Registry(ws.root).enqueue_source(store_ids, fingerprint)
 
 
 def _periods_of_store(ws: Any, store_id: str) -> list[PeriodState]:

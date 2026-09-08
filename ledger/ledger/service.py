@@ -20,6 +20,8 @@ from typing import IO, Any, Iterable
 import polars as pl
 
 from . import commission as comm
+from . import commission_engine
+from .commission_registry import Registry
 from . import progress
 from . import order_feed
 from .engine.runtime import Ingestion, RunResult, Slice, ingest, run
@@ -335,14 +337,35 @@ def _recompute_locked(
         (model_revision + "\0" + engine_version() + "\0" + "\0".join(sorted(shas))).encode("utf-8")
     ).hexdigest()
     slices = sorted(result.slices.items(), key=lambda kv: (kv[0][1] or ""))
+    registry = Registry(ws.root) if (ws.root / "commission" / "registry.db").exists() else None
     for i, ((_s, _p), sl) in enumerate(slices, 1):
         report(f"存账期 · {where}", i, len(slices))
         payload = slice_dict(sl, store, model)
-        payload["commission"] = _commission(result, model, store, sl.period)
+        allocation = commission_engine.calculate(result, model, store.id, sl.period, registry) if registry else None
+        payload["commission"] = allocation[0] if allocation else _commission(result, model, store, sl.period)
+        if allocation:
+            c = payload["commission"]
+            base = next((n for n in payload.get("statement", []) if n["id"] == c["base_node"]), None)
+            if not base or base.get("value") is None:
+                c["amount_complete"] = False
+                c["notes"].append("本期基数所需财务证据未齐，金额仅为现有证据试算")
+            else:
+                delta = round(float(c["base_total"]) - float(base["value"]), 2)
+                c["base_reconciliation_delta"] = delta
+                if abs(delta) > 0.011:
+                    c["amount_complete"] = False
+                    c["notes"].append(f"提成基数与损益节点相差{delta:.2f}元，需核对后结算提成")
+            allocation[2]["summary_json"] = json.dumps(c, ensure_ascii=False)
         run_id = ws.record(
             store.id, sl.period, payload, shas, evidence_ready=False,
             model_revision=model_revision, input_fingerprint=fingerprint,
         )
+        if allocation:
+            try:
+                commission_engine.persist(registry, run_id, allocation[1], allocation[2])
+            except Exception as exc:
+                ws.mark_evidence(run_id, ready=False, error=f"提成明细留档失败：{exc}")
+                raise
         _keep_facts(ws, run_id, sl)
         state = ws.state(store.id, sl.period)
         shown = state.result if state and state.result else payload

@@ -31,6 +31,7 @@ from .model.schema import ColumnBinding, Model, Store, Template
 
 SCHEMA_VERSION = "ledger-feed.v1"
 REPLACED_SOURCES = frozenset({"order_cost", "after_sales"})
+ACCOUNTING_ENTITIES = frozenset({"order", "order_item", "order_cost", "order_relation", "after_sale", "after_sale_item"})
 # 一行商品成本超过该行售价这么多倍、且金额超过这个门槛，视为数量或成本写错，不计。
 # 正常亏本引流是 1 分钱卖 1 块成本的东西，绝对金额小；5 倍 + 100 元把它们都放过。
 IMPLAUSIBLE_COST_TO_PRICE = 5.0
@@ -75,6 +76,10 @@ create table if not exists feed_entity (
   primary key(entity_type,entity_id)
 );
 create index if not exists feed_entity_store on feed_entity(order_store_id,entity_type);
+create table if not exists feed_pending_store (
+  ledger_store_id text primary key,
+  seq integer not null
+);
 """
 
 _STATE_COLUMNS = {
@@ -82,6 +87,34 @@ _STATE_COLUMNS = {
     "revision_etag": "text not null default ''",
     "stores_refreshed_at": "integer not null default 0",
 }
+
+
+def normalize_entity(kind: str, record: dict[str, Any]) -> dict[str, Any]:
+    """Use the snapshot contract for both snapshot rows and API deltas.
+
+    The integration API uses operational names; dropping its extra columns before
+    this conversion used to erase product IDs, names and order timestamps.
+    A missing platform listing ID is never replaced with an ERP SKU.
+    """
+    row = dict(record)
+    if kind == "order" and "order_date" in row and "pay_amount" in row:
+        row["settled_amount"] = row.get("paid_amount")
+        row["paid_amount"] = row["pay_amount"]
+    aliases = {
+        "order": {"order_time": "order_date", "pay_time": "pay_date",
+                  "order_status_raw": "status_code", "order_status_text": "status_text",
+                  "link_order_id": "linked_order_id"},
+        "order_item": {"merchant_sku": "shop_item_id", "product_name": "item_name",
+                       "outer_sku": "platform_sub_order_id", "line_amount": "amount",
+                       "paid_amount": "item_pay_amount"},
+    }.get(kind, {})
+    for canonical, incoming in aliases.items():
+        if canonical not in row or row[canonical] in (None, ""):
+            if incoming in row:
+                row[canonical] = row[incoming]
+    if kind == "order_item":
+        row["shop_item_id"] = row.get("shop_item_id") or row.get("merchant_sku") or None
+    return row
 
 
 class OrderFeedError(RuntimeError):
@@ -342,8 +375,15 @@ class OrderFeed:
             page = self.client.get("changes", {"after_seq": result.consumed_seq, "limit": limit})
             changes = page.get("changes") or []
             if not changes:
+                if result.consumed_seq < source_latest_seq:
+                    raise OrderFeedError("源端仍有待消费事件但增量页为空，已保留检查点")
                 result.caught_up = True
                 break
+            seqs = [c.get("seq") for c in changes]
+            if (any(type(seq) is not int for seq in seqs)
+                    or seqs != sorted(set(seqs)) or seqs[0] <= result.consumed_seq
+                    or page.get("to_seq") != seqs[-1]):
+                raise OrderFeedError("增量页序号不连续推进或页尾不匹配，未提交检查点")
             workers = max(1, int(os.environ.get("LEDGER_ORDER_FEED_FETCHERS", "8")))
             hrefs = {self._fetch_href(change) for change in changes if change.get("operation") != "delete"}
             fetched: dict[str, dict[str, Any] | None] = {}
@@ -366,7 +406,9 @@ class OrderFeed:
             result.affected_stores.update(affected)
             result.changes += len(changes)
             result.consumed_seq = int(page["to_seq"])
-            if not page.get("has_more"):
+            if not page.get("has_more") and result.consumed_seq < source_latest_seq:
+                raise OrderFeedError("增量页提前结束但尚未达到源端水位，已保留实际消费位置")
+            if not page.get("has_more") or result.consumed_seq >= source_latest_seq:
                 result.caught_up = True
                 break
         return result
@@ -496,9 +538,7 @@ class OrderFeed:
         source_latest_seq: int,
         revision_etag: str,
     ) -> None:
-        confirmed = [s for s in stores.get("stores") or [] if s.get("mapping_status") == "confirmed"]
-        if len(confirmed) != len(stores.get("stores") or []):
-            raise OrderFeedError("订单台仍有未确认店铺映射")
+        records = self._store_records(stores)
         with self._connect() as conn:
             conn.execute("begin immediate")
             conn.execute("delete from feed_entity")
@@ -506,10 +546,20 @@ class OrderFeed:
             conn.executemany(
                 "insert into feed_store(order_store_id,ledger_store_id,mapping_status,payload_json) values(?,?,?,?)",
                 [
-                    (str(s["order_store_id"]), str(s["ledger_store_id"]), str(s["mapping_status"]),
+                    (str(s["order_store_id"]), str(s.get("ledger_store_id") or ""), str(s["mapping_status"]),
                      json.dumps(s, ensure_ascii=False, separators=(",", ":")))
-                    for s in confirmed
+                    for s in records
                 ],
+            )
+            conn.execute(
+                "update feed_state set stores_refreshed_at=?,last_success=?,last_error='' where id=1",
+                (int(time.time()), _now()),
+            )
+            conn.executemany(
+                "insert into feed_pending_store values (?,?) on conflict(ledger_store_id) "
+                "do update set seq=max(seq,excluded.seq)",
+                [(str(s["ledger_store_id"]), int(manifest["through_seq"])) for s in records
+                 if s["mapping_status"] == "confirmed"],
             )
             conn.execute(
                 "update feed_state set schema_version=?,snapshot_id=?,snapshot_revision=?,"
@@ -560,23 +610,47 @@ class OrderFeed:
             )
 
     def _refresh_stores(self, stores: dict[str, Any]) -> None:
-        confirmed = [s for s in stores.get("stores") or [] if s.get("mapping_status") == "confirmed"]
-        if len(confirmed) != len(stores.get("stores") or []):
-            raise OrderFeedError("订单台仍有未确认店铺映射")
+        records = self._store_records(stores)
         with self._connect() as conn:
             conn.execute("begin immediate")
             conn.execute("delete from feed_store")
             conn.executemany(
                 "insert into feed_store(order_store_id,ledger_store_id,mapping_status,payload_json) values(?,?,?,?)",
                 [
-                    (str(s["order_store_id"]), str(s["ledger_store_id"]), str(s["mapping_status"]),
+                    (str(s["order_store_id"]), str(s.get("ledger_store_id") or ""), str(s["mapping_status"]),
                      json.dumps(s, ensure_ascii=False, separators=(",", ":")))
-                    for s in confirmed
+                    for s in records
                 ],
             )
+
             conn.execute(
                 "update feed_state set stores_refreshed_at=?,last_success=?,last_error='' where id=1",
                 (int(time.time()), _now()),
+            )
+
+    @staticmethod
+    def _store_records(stores: dict[str, Any]) -> list[dict[str, Any]]:
+        if not isinstance(stores.get("stores"), list) or not stores["stores"]:
+            raise OrderFeedError("订单台店铺目录为空，保留上一份映射")
+        seen: set[str] = set()
+        for row in stores["stores"]:
+            sid = str(row.get("order_store_id") or "")
+            if not sid or sid in seen:
+                raise OrderFeedError("订单台店铺目录存在空键或重复键")
+            seen.add(sid)
+            if row.get("mapping_status") == "confirmed" and not row.get("ledger_store_id"):
+                raise OrderFeedError(f"订单台店铺 {sid} 已确认但没有台账店铺ID")
+        return stores["stores"]
+
+    def pending_stores(self) -> set[str]:
+        with self._connect() as conn:
+            return {str(r[0]) for r in conn.execute("select ledger_store_id from feed_pending_store")}
+
+    def acknowledge_stores(self, stores: set[str], through_seq: int) -> None:
+        with self._connect() as conn:
+            conn.executemany(
+                "delete from feed_pending_store where ledger_store_id=? and seq<=?",
+                [(sid, through_seq) for sid in stores],
             )
 
     def _commit_page(
@@ -593,11 +667,12 @@ class OrderFeed:
             conn.execute("begin immediate")
             mapping = {
                 str(r["order_store_id"]): str(r["ledger_store_id"])
-                for r in conn.execute("select order_store_id,ledger_store_id from feed_store")
+                for r in conn.execute("select order_store_id,ledger_store_id from feed_store "
+                                      "where mapping_status='confirmed'")
             }
             for change, payload in entities:
                 order_store_id = str(change.get("order_store_id") or "")
-                if order_store_id in mapping:
+                if order_store_id in mapping and change["entity_type"] in ACCOUNTING_ENTITIES:
                     affected.add(mapping[order_store_id])
                 conn.execute(
                     "insert into feed_entity(entity_type,entity_id,seq,revision,operation,order_store_id,"
@@ -621,6 +696,11 @@ class OrderFeed:
                     int(page["to_seq"]), source_revision, source_latest_seq, revision_etag,
                     json.dumps(health, ensure_ascii=False), _now(),
                 ),
+            )
+            conn.executemany(
+                "insert into feed_pending_store values (?,?) on conflict(ledger_store_id) "
+                "do update set seq=max(seq,excluded.seq)",
+                [(sid, int(page["to_seq"])) for sid in affected],
             )
         return affected
 
@@ -753,6 +833,11 @@ class OrderFeed:
 
     def _frames(self, store: Store, manifest: dict[str, Any]) -> list[Ingested]:
         with self._connect() as conn:
+            conn.execute("BEGIN")
+            captured = conn.execute("SELECT snapshot_id,consumed_seq FROM feed_state WHERE id=1").fetchone()
+            if captured["snapshot_id"] != manifest["snapshot_id"]:
+                raise OrderFeedError("订单快照刚发生切换，本次计算等待重试")
+            fingerprint = f"order-feed:{captured['snapshot_id']}:{captured['consumed_seq']}"
             order_store_ids = [
                 str(r[0]) for r in conn.execute(
                     "select order_store_id from feed_store where ledger_store_id=? and mapping_status='confirmed'",
@@ -760,7 +845,8 @@ class OrderFeed:
                 )
             ]
             deltas = [dict(r) for r in conn.execute(
-                "select * from feed_entity where order_store_id in (%s)"
+                "select * from feed_entity where entity_type in ('order','order_item','order_cost',"
+                "'order_relation','after_sale','after_sale_item') and order_store_id in (%s)"
                 % ",".join("?" for _ in order_store_ids), order_store_ids,
             )] if order_store_ids else []
         if not order_store_ids:
@@ -817,7 +903,6 @@ class OrderFeed:
             child_records.extend(payload.get("items") or [])
         after_items = self._append_records(after_items, child_records)
 
-        fingerprint = self.fingerprint()
         order_frame = self._order_frame(orders, items, after, relations, store, fingerprint)
         cost_frame = self._cost_frame(orders, items, costs, relations, store, fingerprint)
         after_frame = self._after_frame(after, after_items, items, store, fingerprint)
@@ -872,6 +957,7 @@ class OrderFeed:
             for record in extract(json.loads(delta["payload_json"])):
                 if not record:
                     continue
+                record = normalize_entity(entity_type, record)
                 for k in parent_keys:
                     if record.get(k) in (None, "") and delta.get(k) not in (None, ""):
                         record[k] = str(delta[k])
@@ -917,12 +1003,15 @@ class OrderFeed:
         refund = after.group_by("order_id").agg(
             pl.col("online_status_raw").drop_nulls().last().alias("refund_status")
         ) if not after.is_empty() else pl.DataFrame(schema={"order_id": pl.Utf8, "refund_status": pl.Utf8})
+        product_columns = [pl.col(c).cast(pl.Utf8).replace("", None)
+                           for c in ("shop_item_id", "merchant_sku") if c in items.columns]
+        product = pl.coalesce(product_columns) if product_columns else pl.lit(None, dtype=pl.Utf8)
         frame = items.join(orders, on="order_id", how="inner", suffix="_order").join(
             refund, on="order_id", how="left",
         ).select(
             pl.col("online_order_no_order").fill_null(pl.col("online_order_no")).cast(pl.Utf8).alias("order_id"),
             pl.col("outer_sku").fill_null(pl.col("sub_order_id")).cast(pl.Utf8).alias("sub_order_id"),
-            pl.col("merchant_sku").fill_null(pl.col("sku_id")).cast(pl.Utf8).alias("product_id"),
+            product.cast(pl.Utf8).fill_null("").alias("product_id"),
             pl.col("product_name").cast(pl.Utf8),
             pl.col("paid_amount").cast(pl.Float64, strict=False).alias("buyer_paid"),
             pl.col("refund_amount").cast(pl.Float64, strict=False),
@@ -1176,8 +1265,10 @@ class Worker:
             try:
                 result = self.feed.sync()
                 self.pending_stores.update(result.affected_stores)
+                self.pending_stores.update(self.feed.pending_stores())
                 if result.caught_up and self.pending_stores and self.on_stores:
                     self.on_stores(set(self.pending_stores), self.feed.fingerprint())
+                    self.feed.acknowledge_stores(self.pending_stores, result.consumed_seq)
                     self.pending_stores.clear()
             except Exception as exc:
                 # status() carries the exact failure; a transient source outage must not kill Ledger.
