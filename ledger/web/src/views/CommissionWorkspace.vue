@@ -125,7 +125,8 @@ function historicalPeople(segment) {
       <n-button @click="fileInput.click()">Excel导入</n-button>
       <input ref="fileInput" type="file" accept=".xlsx" class="file-input" aria-label="导入Excel文件" @change="importFile" />
       <a href="/static/commission-template.xlsx" download="提成设置导入模板.xlsx">下载模板</a>
-      <a :href="`/api/commission-v2/export/settings?${params}`">导出</a>
+      <a :href="`/api/commission-v2/export/settings?${params}`">导出设置</a>
+      <router-link to="/commission/reports">金额汇总 / 导出</router-link>
       <n-button text :disabled="loading" @click="load">刷新</n-button>
     </div>
     <div class="selection" v-if="rows.length || chosen.length || allScope">

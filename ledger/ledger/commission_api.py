@@ -20,7 +20,7 @@ from fastapi.responses import StreamingResponse
 from starlette.concurrency import run_in_threadpool
 from pydantic import BaseModel, Field
 
-from . import commission_catalog, commission_batch
+from . import commission_catalog, commission_batch, commission_reports
 from .commission_registry import Registry, RegistryError, RevisionConflict, json_text, local_time
 from .money import money_float
 
@@ -73,6 +73,15 @@ class PolicyChange(Change):
     wages: str = "pending"
 
 
+class ReportSelection(BaseModel):
+    start: str
+    end: str
+    store_ids: list[str] = Field(default_factory=list, max_length=2000)
+    person_ids: list[str] = Field(default_factory=list, max_length=2000)
+    run_ids: list[int] | None = Field(default=None, max_length=240000)
+    fingerprint: str = ""
+
+
 def csv_response(filename, columns, rows):
     def stream():
         yield "\ufeff"
@@ -87,7 +96,7 @@ def csv_response(filename, columns, rows):
                     value = json_text(value)
                 if isinstance(value, str):
                     # Prevent formulas; preserve long identifiers as text in Excel.
-                    if value[:1] in "=+@-" or column.endswith("_id") or column in {"product_id", "宝贝ID"}:
+                    if value[:1] in "=+@-\t\r\n" or column.endswith("_id") or column in {"product_id", "宝贝ID", "人员ID", "工号"}:
                         value = "'" + value if value else ""
                 values.append(value)
             writer.writerow(values)
@@ -427,6 +436,26 @@ def install(app, workspace, model):
                 conn.execute("UPDATE import_batch SET summary=? WHERE id=?", (json_text(summary), batch_id))
             registry.audit(conn, who, "import.resolve", batch_id, change.reason, dict(row), result)
         return result
+
+    def report_result(selection: ReportSelection):
+        report = commission_reports.build(workspace(), reg(), model(), selection.start, selection.end,
+                                          selection.store_ids, selection.person_ids, selection.run_ids)
+        fingerprint = hashlib.sha256(json_text(report).encode()).hexdigest()
+        if selection.fingerprint and selection.fingerprint != fingerprint:
+            raise RevisionConflict("计算状态或人员信息已变化，请重新查询后导出")
+        return {**report, "fingerprint": fingerprint}
+
+    @router.post("/reports/query")
+    def report_query(selection: ReportSelection):
+        return report_result(selection)
+
+    @router.post("/export/reports/{kind}")
+    def report_export(kind: str, selection: ReportSelection):
+        if kind not in commission_reports.COLUMNS:
+            raise RegistryError("请选择导出类型")
+        report = report_result(selection)
+        return csv_response(f"commission-{kind}-{selection.start}-{selection.end}.csv",
+                            commission_reports.COLUMNS[kind], commission_reports.export_rows(report, kind))
 
     @router.get("/calculations")
     def calculations(store_id: str = "", period: str = "", after: int = 0, limit: int = Query(50, ge=1, le=500)):

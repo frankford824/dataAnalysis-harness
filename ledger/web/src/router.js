@@ -22,6 +22,11 @@ export const router = createRouter({
       component: () => import('./views/CommissionWorkspace.vue'),
     },
     {
+      path: '/commission/reports',
+      name: 'commission-reports',
+      component: () => import('./views/CommissionReports.vue'),
+    },
+    {
       path: '/commission/legacy',
       name: 'commission-legacy',
       component: () => import('./views/CommissionView.vue'),

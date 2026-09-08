@@ -120,7 +120,7 @@ defineExpose({ take })
       </router-link>
       <router-link
         class="navlink"
-        :class="{ on: $route.name === 'commission' }"
+        :class="{ on: $route.name === 'commission' || $route.name === 'commission-reports' }"
         to="/commission"
       >
         提成
@@ -132,7 +132,7 @@ defineExpose({ take })
     </nav>
 
     <div class="body">
-      <header v-if="$route.path !== '/commission'" class="topbar">
+      <header v-if="!['commission', 'commission-reports'].includes($route.name)" class="topbar">
         <FilterBar />
         <!-- 上传只有这一个固定入口，每一页都在同一个地方。上一版侧栏最下角那个
              「交表」，位置和用词都在让人猜：交给谁、是不是报送、和结账什么关系。
