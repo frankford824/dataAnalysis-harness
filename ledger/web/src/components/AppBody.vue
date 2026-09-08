@@ -1,5 +1,6 @@
 <script setup>
 import { useMessage } from 'naive-ui'
+import { LayoutDashboard, Store, Coins, Tags, RefreshCw } from '@lucide/vue'
 import { computed, defineAsyncComponent, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 
@@ -15,10 +16,14 @@ const emit = defineEmits(['taken'])
 const app = useApp()
 const message = useMessage()
 const router = useRouter()
+function refreshCurrent(){app.uiRefresh++;app.loadNavigation(true).catch(e=>message.error(e.message))}
 
 // 懒加载页面时给导航一个明确反馈。保留很短的最小展示时间，避免快请求只闪一下；
 // 真正的数据加载由页面自己的骨架屏接手，两层各自说明自己在等什么。
 const routeLoading = ref(false)
+const pageLoadError=ref(false)
+function pageFailed(){routeLoading.value=false;pageLoadError.value=true}
+function reloadPage(){window.location.reload()}
 let routeTimer = null
 const stopBefore = router.beforeEach((to, from) => {
   if (to.fullPath === from.fullPath) return
@@ -29,6 +34,7 @@ const stopAfter = router.afterEach(() => {
   clearTimeout(routeTimer)
   routeLoading.value = false
 })
+const stopError=router.onError(pageFailed)
 
 // 鼠标经过或浏览器空闲时提前取页面代码；数据不会预取，仍以当前筛选为准。
 function preloadDeliver() {
@@ -56,6 +62,8 @@ onUnmounted(() => {
   clearTimeout(routeTimer)
   stopBefore()
   stopAfter()
+  stopError()
+  window.removeEventListener('ledger:page-load-error',pageFailed)
 })
 
 async function take(files) {
@@ -86,6 +94,7 @@ watch(
 const explaining = ref(false)
 
 onMounted(() => {
+  window.addEventListener('ledger:page-load-error',pageFailed)
   app.loadNavigation().catch((e) => message.error(e.message, { duration: 6000 }))
   if ('requestIdleCallback' in window) window.requestIdleCallback(preloadDeliver, { timeout: 1500 })
   else setTimeout(preloadDeliver, 500)
@@ -107,7 +116,7 @@ defineExpose({ take })
         to="/"
         :title="readyCount ? `${readyCount} 个店期可以结账` : '总览'"
       >
-        总览<span v-if="readyCount" class="count">{{ readyCount }}</span>
+        <LayoutDashboard class="nav-icon" aria-hidden="true"/>总览<span v-if="readyCount" class="count">{{ readyCount }}</span>
       </router-link>
       <router-link
         class="navlink"
@@ -116,21 +125,21 @@ defineExpose({ take })
         @mouseenter="preloadDeliver"
         @focus="preloadDeliver"
       >
-        数据与店铺<span class="count">{{ app.stores.length || '' }}</span>
+        <Store class="nav-icon" aria-hidden="true"/>数据与店铺<span class="count">{{ app.stores.length || '' }}</span>
       </router-link>
       <router-link
         class="navlink"
         :class="{ on: $route.name === 'commission' || $route.name === 'commission-reports' }"
         :to="{name:'commission',query:$route.meta.commission ? $route.query : {}}"
       >
-        提成
+        <Coins class="nav-icon" aria-hidden="true"/>提成
       </router-link>
       <nav v-if="$route.meta.commission" class="commission-subnav" aria-label="提成菜单">
         <router-link :to="{name:'commission',query:$route.query}">提成设置</router-link>
         <router-link :to="{name:'commission-reports',query:$route.query}">金额汇总</router-link>
       </nav>
       <router-link class="navlink" :class="{ on: $route.name === 'fees' }" to="/fees">
-        费项
+        <Tags class="nav-icon" aria-hidden="true"/>费项
       </router-link>
       <div class="grow" />
     </nav>
@@ -138,6 +147,7 @@ defineExpose({ take })
     <div class="body">
       <header v-if="!['commission', 'commission-reports'].includes($route.name)" class="topbar">
         <FilterBar />
+        <n-button quaternary size="small" :disabled="app.loading || !!app.busy" aria-label="刷新当前页面" title="刷新当前页面" @click="refreshCurrent"><RefreshCw :size="16"/></n-button>
         <!-- 上传只有这一个固定入口，每一页都在同一个地方。上一版侧栏最下角那个
              「交表」，位置和用词都在让人猜：交给谁、是不是报送、和结账什么关系。
 
@@ -148,13 +158,14 @@ defineExpose({ take })
           上传表格
         </n-button>
         <n-tag v-else size="small" :bordered="false">
-          NAS 自动接收
+          自动收表
         </n-tag>
       </header>
       <div class="route-progress" :class="{ on: routeLoading }" aria-hidden="true">
         <span />
       </div>
       <main class="page">
+        <n-alert v-if="pageLoadError" type="error" class="ledger-page-error" :bordered="false">页面未能加载，请刷新后重试。 <n-button size="small" @click="reloadPage">刷新页面</n-button></n-alert>
         <router-view v-slot="{ Component, route }">
           <transition name="page-shift">
             <div :key="route.meta.commission ? 'commission' : route.name" class="route-page">
@@ -165,7 +176,7 @@ defineExpose({ take })
       </main>
     </div>
 
-    <div v-if="app.busy" class="busy">
+    <div v-if="app.busy" class="busy" role="status" aria-live="polite">
       <span class="spin" />
       <span>{{ app.busy.label }}</span>
       <!-- 阶段和百分比是这条提示存在的理由：转圈只能证明「还没返回」，证明不了

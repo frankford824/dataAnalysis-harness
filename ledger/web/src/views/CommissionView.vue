@@ -448,7 +448,7 @@ function open(id) {
   </PageHead>
 
   <div class="card">
-    <n-tabs :value="tab" type="line" size="small" @update:value="goTab">
+    <n-tabs v-ledger-tabs :value="tab" type="line" size="small" @update:value="goTab">
       <!-- 1. 这个月要发多少 -->
       <n-tab-pane name="payout" tab="本月发放">
         <n-spin :show="loading">

@@ -5,13 +5,14 @@
  * 卡在哪。上一版把它做成了一张平铺的表，十几家店三个月就是几百个格子，
  * 什么都看得见等于什么都看不见。
  *
- * 所以顺序是：先四个数（全公司这个月），再一张所有店的明细表。逐月对比是同一批
+ * 所以顺序是：先四个数（全公司这个月），再一张所有店的明细表。月份对比是同一批
  * 数字的另一种排法，收在标签页后面——两张表竖着摆的话，一屏之内看不完，人会以为
  * 下面那张是别的东西。
  */
 import { computed, onMounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 
+import { useLatest } from '../components/ui/useLatest'
 import { api } from '../api'
 import { count, money, percent, prettyPeriod, signed, signedPct } from '../format'
 import { useApp } from '../store'
@@ -23,6 +24,7 @@ const app = useApp()
 const router = useRouter()
 
 onMounted(() => app.loadOverview().catch(() => {}))
+watch(()=>app.uiRefresh,()=>app.loadOverview(true).catch(()=>{}))
 
 const period = computed(
   () => app.period || app.overview?.default_period || app.periods[0] || '',
@@ -91,7 +93,7 @@ const groups = computed(() => {
   }))
 })
 
-//: 逐月对比里的账期，新的在上。
+//: 月份对比里的账期，新的在上。
 //:
 //: 这一块返工过两次，两次都错在同一个地方。第一版横着摆六列矩阵，金额只能缩写成
 //: 「15.2 万」——对账的人要的是 152,392.61。第二版把金额写全了，代价是三张表竖着
@@ -101,7 +103,7 @@ const groups = computed(() => {
 //: 各店、和上个月差多少。要看细节的人本来就要点一下，不看细节的人不该被迫滚过去。
 const shown = computed(() => app.periods)
 
-/** 一行逐月对比：钱、利润率、和上个月差多少。 */
+/** 一行月份对比：钱、利润率、和上个月差多少。 */
 function line(period, list) {
   const done = list.filter((c) => c.revenue !== null && c.profit !== null)
   const revenue = done.reduce((a, c) => a + c.revenue, 0)
@@ -164,15 +166,17 @@ const tab = app.noted('board.tab', 'here')
 const trend = ref(null)
 const trendBusy = ref(false)
 
+const pullTrendRequest=useLatest()
+const pullTrendError=ref('')
+let pullTrendSerial=0
 async function pullTrend() {
-  trendBusy.value = true
+  const serial=++pullTrendSerial
+  trendBusy.value=true;pullTrendError.value=''
   try {
-    trend.value = await api.trend({ store_id: app.storeId, platform: app.platform })
-  } catch {
-    trend.value = null
-  } finally {
-    trendBusy.value = false
-  }
+    const response=await pullTrendRequest.run(signal=>api.trend({store_id:app.storeId,platform:app.platform},{signal}))
+    if(response)trend.value=response.value
+  }catch(e){if(serial===pullTrendSerial)pullTrendError.value=e.message}
+  finally{if(serial===pullTrendSerial)trendBusy.value=false}
 }
 
 watch(
@@ -275,7 +279,7 @@ function amount(v, display) {
 function label(c) {
   if (!c) return ''
   if (c.state === 'closed') return c.stale ? '已结账 · 有新数据' : '已结账'
-  if (c.blocking?.length) return `${c.blocking.length} 项拦住`
+  if (c.blocking?.length) return `${c.blocking.length} 项待处理`
   if (c.missing?.length) return `缺 ${c.missing.length} 项`
   if (c.can_close) return '可结账'
   return '进行中'
@@ -286,7 +290,7 @@ const rows = computed(() =>
   groups.value.flatMap((g) => [{ head: g.name, size: g.list.length }, ...g.list]),
 )
 
-/* 要看的：所有店 × 所有账期的空值项和异常项。
+/* 待处理：所有店 × 所有账期的空值项和异常项。
  *
  * 这一块补的是之前一直缺的那一步。空值项和异常项本来只在单个账期页面里，等于
  * 「哪个店哪个月有问题」这个问题只能靠逐店逐月点开来回答——十几家店三个月是
@@ -298,15 +302,17 @@ const rows = computed(() =>
 const flaws = ref(null)
 const flawsBusy = ref(false)
 
+const pullGapsRequest=useLatest()
+const pullGapsError=ref('')
+let pullGapsSerial=0
 async function pullGaps() {
-  flawsBusy.value = true
+  const serial=++pullGapsSerial
+  flawsBusy.value=true;pullGapsError.value=''
   try {
-    flaws.value = await api.gaps({ platform: app.platform, store_id: app.storeId })
-  } catch {
-    flaws.value = null
-  } finally {
-    flawsBusy.value = false
-  }
+    const response=await pullGapsRequest.run(signal=>api.gaps({store_id:app.storeId,platform:app.platform},{signal}))
+    if(response)flaws.value=response.value
+  }catch(e){if(serial===pullGapsSerial)pullGapsError.value=e.message}
+  finally{if(serial===pullGapsSerial)flawsBusy.value=false}
 }
 
 watch(
@@ -347,8 +353,8 @@ function gapText(c) {
   const g = c.gaps
   if (!g || !g.count) return ''
   const parts = []
-  if (g.empty) parts.push(`空 ${g.empty}`)
-  if (g.odd) parts.push(`异 ${g.odd}`)
+  if (g.empty) parts.push(`缺项 ${g.empty}`)
+  if (g.odd) parts.push(`异常 ${g.odd}`)
   return parts.join(' · ')
 }
 
@@ -369,8 +375,11 @@ watch([() => app.storeId, () => app.platform], () => {
 
 <template>
   <n-spin :show="app.loading">
-    <div v-if="!app.overview?.cells?.length" class="card">
-      <n-empty description="还没有账">
+    <n-alert v-if="app.error" type="error" class="ledger-page-error">{{app.error}} <n-button text @click="app.loadOverview(true).catch(()=>{})">重试</n-button></n-alert>
+    <n-alert v-if="tab==='months' && pullTrendError || tab==='gaps' && pullGapsError" type="error" class="ledger-page-error">{{tab==='months'?pullTrendError:pullGapsError}} <n-button text @click="tab==='months'?pullTrend():pullGaps()">重试</n-button></n-alert>
+    <div v-if="!app.overview && app.loading" class="card" aria-label="正在加载总览"><n-skeleton text :repeat="5" /></div>
+    <div v-else-if="!app.error && !app.overview?.cells?.length" class="card">
+      <n-empty description="暂无台账">
         <template #extra>
           <div class="small muted" style="max-width: 420px; margin-bottom: var(--s4)">
             把一个月的表拖进来就行——订单明细、对账、运费、推广，有几张交几张。
@@ -383,8 +392,7 @@ watch([() => app.storeId, () => app.platform], () => {
 
     <template v-else>
       <PageHead
-        kicker="总览"
-        :title="boardTitle"
+        title="月度总览"
         :scope="app.scopeParts"
       >
         <template #actions>
@@ -406,12 +414,12 @@ watch([() => app.storeId, () => app.platform], () => {
 
       <div v-if="blankMonth" class="banner warn" style="margin-bottom: var(--s4)">
         <strong>{{ prettyPeriod(period) }} 还没有算出损益</strong>
-        上面的销售收入和利润是破折号，不是这个月赚了 0。
-        {{ here.length }} 家店都还没算出数。
+        销售收入与利润暂未计算。
+        {{ here.length }} 家店都待补金额。
       </div>
 
       <div v-if="!here.length" class="card">
-        <n-empty :description="`${app.currentStore?.name || '当前筛选'} 在 ${period || '这个账期'} 还没有账`">
+        <n-empty :description="`${app.currentStore?.name || '当前筛选'} 在 ${period || '这个账期'} 暂无台账`">
           <template #extra>
             <p class="small muted" style="max-width: 420px; margin-bottom: var(--s3)">
               换一个账期，或到「数据与店铺」看有没有表进来。
@@ -427,7 +435,7 @@ watch([() => app.storeId, () => app.platform], () => {
           <div class="label">销售收入</div>
           <div class="value">{{ money(totals.revenue) }}</div>
           <div class="foot">
-            <template v-if="blankMonth">还不知道，不是 0</template>
+            <template v-if="blankMonth">暂无金额</template>
             <template v-else>
               {{ prettyPeriod(period) }}
               <template v-if="!app.storeId"> · {{ totals.ready }}/{{ here.length }} 家已算出</template>
@@ -437,23 +445,23 @@ watch([() => app.storeId, () => app.platform], () => {
         <div class="kpi">
           <div class="label">利润</div>
           <div class="value" :class="{ neg: totals.profit < 0 }">{{ money(totals.profit) }}</div>
-          <div class="foot">{{ blankMonth ? '还不知道，不是 0' : `利润率 ${percent(totals.margin)}` }}</div>
+          <div class="foot">{{ blankMonth ? '暂无金额' : `利润率 ${percent(totals.margin)}` }}</div>
         </div>
         <div class="kpi">
           <div class="label">已结账</div>
           <div class="value">{{ totals.closed }} / {{ here.length }}</div>
-          <div class="foot">{{ totals.incomplete ? `${totals.incomplete} 家还没算出数` : '都算出数了' }}</div>
+          <div class="foot">{{ totals.incomplete ? `${totals.incomplete} 家待补金额` : '金额已齐' }}</div>
         </div>
-        <div class="kpi tap" title="打开要看的" @click="tab = 'gaps'">
-          <div class="label">结不了</div>
+        <div class="kpi tap" role="button" tabindex="0" aria-label="查看待处理事项" @keydown.enter="tab='gaps'" @keydown.space.prevent="tab='gaps'" title="查看待处理事项" @click="tab = 'gaps'">
+          <div class="label">待处理</div>
           <div class="value" :class="{ neg: totals.stuck > 0 }">{{ totals.stuck }}</div>
-          <div class="foot">{{ totals.stuck ? '点这里看卡在哪' : '没有卡住的' }}</div>
+          <div class="foot">{{ totals.stuck ? '查看待处理事项' : '暂无待处理事项' }}</div>
         </div>
       </div>
 
       <div class="card" style="margin-top: var(--s4)">
-        <n-tabs v-model:value="tab" type="line" size="small">
-          <n-tab-pane name="here" :tab="`${prettyPeriod(period)} 各店（${here.length}）`">
+        <n-tabs v-ledger-tabs v-model:value="tab" type="line" size="small">
+          <n-tab-pane name="here" :tab="`本月店铺（${here.length}）`">
             <div class="scroll tall">
               <n-table size="small" :bordered="false" :single-line="false">
                 <thead>
@@ -462,7 +470,7 @@ watch([() => app.storeId, () => app.platform], () => {
                     <th class="right">销售收入</th>
                     <th class="right">利润</th>
                     <th class="right">利润率</th>
-                    <th>要看的</th>
+                    <th>待处理</th>
                     <th>状态</th>
                     <th></th>
                   </tr>
@@ -474,7 +482,7 @@ watch([() => app.storeId, () => app.platform], () => {
                         {{ r.head }} · {{ r.size }} 家店
                       </td>
                     </tr>
-                    <tr v-else :key="r.store_id" class="board-row" @click="open(r)">
+                    <tr v-else :key="r.store_id" class="board-row" tabindex="0" @keydown.enter="open(r)" @keydown.space.prevent="open(r)" @click="open(r)">
                       <td>{{ r.store }}</td>
                       <td class="right num">{{ money(r.revenue) }}</td>
                       <td class="right num" :class="{ neg: r.profit < 0 }">{{ money(r.profit) }}</td>
@@ -509,7 +517,7 @@ watch([() => app.storeId, () => app.platform], () => {
             </div>
           </n-tab-pane>
 
-          <n-tab-pane name="months" :tab="`逐月对比（${shown.length} 个账期）`">
+          <n-tab-pane name="months" :tab="`月份对比（${shown.length} 个账期）`">
             <div class="months">
               <div class="scroll">
                 <table>
@@ -530,7 +538,7 @@ watch([() => app.storeId, () => app.platform], () => {
                       :key="r.period"
                       class="tap"
                       :class="{ now: r.period === period }"
-                      @click="openMonth(r.period)"
+                      tabindex="0" @keydown.enter="openMonth(r.period)" @keydown.space.prevent="openMonth(r.period)" @click="openMonth(r.period)"
                     >
                       <td class="num nowrap">
                         {{ r.period }}
@@ -575,7 +583,7 @@ watch([() => app.storeId, () => app.platform], () => {
 
           <n-tab-pane name="gaps">
             <template #tab>
-              要看的
+              待处理
               <n-badge
                 v-if="flawTotals.cells"
                 :value="flawTotals.empty + flawTotals.odd"
@@ -676,7 +684,7 @@ watch([() => app.storeId, () => app.platform], () => {
         </div>
       </div>
 
-      <n-tabs type="segment" size="small" default-value="items" style="margin-top: var(--s4)">
+      <n-tabs v-ledger-tabs type="segment" size="small" default-value="items" style="margin-top: var(--s4)">
         <n-tab-pane name="items" tab="利润项">
           <n-spin :show="trendBusy">
             <div v-if="detailItems.length" class="scroll tall">

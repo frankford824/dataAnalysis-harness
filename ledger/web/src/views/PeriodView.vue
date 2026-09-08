@@ -1,5 +1,5 @@
 <script setup>
-/* 一家店一个账期：损益表、自检、该交的表、质量、结账。
+/* 一家店一个账期：损益表、自检、所需资料、质量、结账。
  *
  * 损益表每一行都能点开——这是这套系统和一张普通报表的唯一区别。数字点不开，
  * 对不上账时人就只能回去用 Excel 手工核。
@@ -12,6 +12,7 @@ import { useDialog, useMessage } from 'naive-ui'
 import { computed, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 
+import { useLatest } from '../components/ui/useLatest'
 import { api } from '../api'
 import DrillDrawer from '../components/DrillDrawer.vue'
 import DropZone from '../components/DropZone.vue'
@@ -46,26 +47,26 @@ const platformName = computed(() => {
 
 const closed = computed(() => snap.value?.state === 'closed')
 
-async function load() {
-  loading.value = true
-  failed.value = ''
+const periodRequest=useLatest()
+let loadSerial=0
+async function load(force=false) {
+  const serial=++loadSerial, id=props.id, requested=period.value
+  loading.value=true;failed.value=''
   try {
-    info.value = await api.store(props.id)
-    const want = period.value || info.value.periods?.[0]?.period
-    if (want) {
-      snap.value = await api.period(props.id, want)
-      app.pick({ store: props.id, period: want })
-    } else {
-      snap.value = null
-    }
-  } catch (e) {
-    failed.value = e.message
-  } finally {
-    loading.value = false
-  }
+    const result=await periodRequest.run(async signal=>{
+      const detail=!force&&info.value?.store?.id===id?info.value:await api.store(id,{signal})
+      const wanted=requested||detail.periods?.[0]?.period
+      const snapshot=wanted?await api.period(id,wanted,{signal}):null
+      return {detail,snapshot,wanted}
+    })
+    if(!result)return
+    info.value=result.value.detail;snap.value=result.value.snapshot
+    if(result.value.wanted)app.pick({store:id,period:result.value.wanted})
+  }catch(e){if(serial===loadSerial)failed.value=e.message}
+  finally{if(serial===loadSerial)loading.value=false}
 }
-
-watch(() => [props.id, period.value], load, { immediate: true })
+watch(()=>[props.id,period.value],()=>{drill.value=null;load()}, {immediate:true})
+watch(()=>app.uiRefresh,()=>load(true))
 
 function go(p) {
   app.pick({ period: p })
@@ -76,8 +77,8 @@ async function recompute() {
   try {
     await app.run('正在重算', () => api.recompute(props.id))
     app.invalidate()
-    await load()
-    message.success('算完了')
+    await load(true)
+    message.success('已更新计算结果')
   } catch (e) {
     message.error(`没算成：${e.message}`, { duration: 6000 })
   }
@@ -87,8 +88,8 @@ async function close() {
   try {
     await app.run('正在结账', () => api.close(props.id, period.value))
     app.invalidate()
-    await load()
-    message.success('结账了')
+    await load(true)
+    message.success('已结账')
   } catch (e) {
     message.error(`结不了：${e.message}`, { duration: 6000 })
   }
@@ -105,7 +106,7 @@ async function reopen() {
     asking.value = false
     why.value = ''
     app.invalidate()
-    await load()
+    await load(true)
     message.success('已改回未结账')
   } catch (e) {
     message.error(e.message, { duration: 6000 })
@@ -123,7 +124,7 @@ function openDrill(row, only = 'counted') {
 const bad = computed(() => (snap.value?.findings || []).filter((f) => !f.passed))
 const historicalArchive = computed(() => snap.value?.archive?.kind === 'legacy_final_summary')
 const historicalChecks = computed(() => historicalArchive.value ? (snap.value?.findings || []) : [])
-//: 真正拦着结账的那几条。灰掉的结账按钮不说明理由，人只能猜是不是坏了。
+//: 真正待处理的那几条。灰掉的结账按钮不说明理由，人只能猜是不是坏了。
 const blockers = computed(() => bad.value.filter((f) => f.blocking))
 const fixing = ref(false)
 const missingSources = computed(() =>
@@ -132,7 +133,7 @@ const missingSources = computed(() =>
 
 const gaps = computed(() => snap.value?.gaps || [])
 
-/* 没进利润的钱。
+/* 未计入金额。
  *
  * 要查的那一桶排最前，其余按金额。后端已经按这个顺序给了，这里只补一件事：
  * 让「算进合计的」和「不算进合计的」在视觉上分开——四行金额差几个数量级，
@@ -189,7 +190,7 @@ function openFinding(f) {
   }
 }
 
-// 右栏默认停在最需要人处理的那一块：有缺口就停在缺口，有没交的表就停在该交的表，
+// 右栏默认停在最需要人处理的那一块：有缺口就停在缺口，有没交的表就停在所需资料，
 // 都没有才停在质量。默认永远停在第一个标签的话，真正要人处理的那条就藏在后面。
 const rail = ref('gaps')
 watch(
@@ -219,18 +220,18 @@ watch(
       >
         <template #actions>
           <n-button size="small" @click="fixing = true">数字不对？</n-button>
-          <n-button v-if="app.ingestMode !== 'nas'" size="small" @click="recompute">重算</n-button>
+          <n-button v-if="app.ingestMode !== 'nas'" size="small" :loading="!!app.busy" :disabled="loading" @click="recompute">重算</n-button>
           <n-tag v-else size="small" type="info" :bordered="false">索引更新后自动计算</n-tag>
           <n-button
             v-if="!closed"
             type="primary"
-            :disabled="!snap?.can_close"
+            :disabled="loading || !!app.busy || !snap?.can_close"
             :title="snap?.can_close ? `结账 ${period}` : (blockers[0]?.name || '还不能结账')"
             @click="close"
           >
             结账 {{ period }}
           </n-button>
-          <n-button v-else size="small" @click="asking = true">反结账</n-button>
+          <n-button v-else size="small" :disabled="loading || !!app.busy" @click="asking = true">反结账</n-button>
         </template>
       </PageHead>
 
@@ -256,7 +257,7 @@ watch(
           v-if="snap.archive?.kind === 'legacy_final_summary'"
           type="info"
           :bordered="false"
-          title="台账上线前的历史终态"
+          title="历史结账记录"
           style="margin-bottom: var(--s4)"
         >
           <div class="small">
@@ -274,18 +275,18 @@ watch(
         <!-- 结账按钮灰着而不说为什么，是最容易被理解成「系统坏了」的一种状态。
              拦路的那几条本来就在自检里，但那是右栏第二个标签页，得先点开才看得见。 -->
         <n-alert
-          v-else-if="snap.can_close"
+          v-else-if="!closed && snap.can_close"
           type="success"
           :bordered="false"
           style="margin-bottom: var(--s4)"
         >
-          这一期可以结账了。右边若还有提示，是要人看一眼的，不拦结账。
+          本月已满足结账条件。
         </n-alert>
         <n-alert
-          v-else-if="blockers.length"
+          v-else-if="!closed && blockers.length"
           type="error"
           :bordered="false"
-          title="这个账期还结不了"
+          title="本月仍有待处理事项"
           style="margin-bottom: var(--s4)"
         >
           <div v-for="f in blockers" :key="f.id" class="small" style="margin-top: 2px">
@@ -301,7 +302,7 @@ watch(
           <div class="card" style="margin-top: 0">
             <header>
               <h2>损益表</h2>
-              <span class="sub">点任意一行看它是怎么来的</span>
+              <span class="sub">点击科目查看明细</span>
               <a
                 v-if="snap.run_id"
                 class="sub"
@@ -317,7 +318,7 @@ watch(
                 :key="row.id"
                 class="line"
                 :class="[`lv${row.level}`, { total: row.is_total, drillable: row.drillable }]"
-                @click="openDrill(row)"
+                :role="row.drillable?'button':undefined" :tabindex="row.drillable?0:undefined" :aria-label="row.drillable?`查看${row.name}明细`:undefined" @keydown.enter="openDrill(row)" @keydown.space.prevent="openDrill(row)" @click="openDrill(row)"
               >
                 <span>{{ row.name }}</span>
                 <span v-if="!row.available" class="na">—</span>
@@ -332,10 +333,10 @@ watch(
           </div>
 
           <div class="card rail" style="margin-top: 0">
-            <n-tabs v-model:value="rail" type="line" size="small">
+            <n-tabs v-ledger-tabs v-model:value="rail" type="line" size="small">
               <n-tab-pane name="gaps">
                 <template #tab>
-                  要看的
+                  待处理
                   <n-badge
                     v-if="gaps.length"
                     :value="gaps.length"
@@ -344,10 +345,10 @@ watch(
                   />
                 </template>
                 <p v-if="historicalArchive" class="xs muted" style="margin-bottom: var(--s3)">
-                  历史账只报告终态文件里能证明的事项；没有订单级原始行的检查不会伪造成通过。
+                  历史账按原结账资料展示。
                 </p>
                 <p v-else class="xs muted" style="margin-bottom: var(--s3)">
-                  这个账期的空值项和异常项都在这儿。能点的点开就是它的来源明细。
+                  点击事项查看对应明细。
                 </p>
                 <GapList :gaps="gaps" clickable @open="openGap" />
               </n-tab-pane>
@@ -363,17 +364,16 @@ watch(
                   />
                 </template>
                 <p v-if="historicalArchive" class="xs muted" style="margin-bottom: var(--s3)">
-                  这些检查针对只读终态文件、店期映射、金额勾稽和关账边界；不会声称旧账通过了后来才建立的订单级门禁。
+                  历史账核对原始结账资料，不包含逐笔订单核对。
                 </p>
                 <p v-else class="xs muted" style="margin-bottom: var(--s3)">
-                  拦路的那条不解决就结不了账。每条都能点进去看是哪些行——只给一段话不给行号，
-                  等于让人自己再对一遍账。
+                  处理以下事项后即可结账。
                 </p>
                 <n-alert
                   v-for="f in bad"
                   :key="f.id"
                   :type="f.blocking ? 'error' : 'warning'"
-                  :title="`${f.name}${f.blocking ? ' · 拦着结账' : ''}`"
+                  :title="`${f.name}${f.blocking ? ' · 待处理' : ''}`"
                   :bordered="false"
                   style="margin-bottom: var(--s2)"
                 >
@@ -389,7 +389,7 @@ watch(
                   </ul>
                   <div v-if="f.drill || f.tab" class="row" style="margin-top: var(--s2)">
                     <n-button size="tiny" type="primary" @click="openFinding(f)">
-                      {{ f.tab === 'sources' ? '去看该交的表' : '看这些行' }}
+                      {{ f.tab === 'sources' ? '去看所需资料' : '看这些行' }}
                     </n-button>
                   </div>
                 </n-alert>
@@ -430,7 +430,7 @@ watch(
 
               <n-tab-pane name="sources">
                 <template #tab>
-                  该交的表
+                  所需资料
                   <n-badge
                     v-if="missingSources"
                     :value="missingSources"
@@ -541,7 +541,7 @@ watch(
                 </template>
               </n-tab-pane>
 
-              <n-tab-pane v-if="historicalArchive || snap.unlinked_buckets?.length" name="unlinked" tab="没进利润的钱">
+              <n-tab-pane v-if="historicalArchive || snap.unlinked_buckets?.length" name="unlinked" tab="未计入金额">
                 <template v-if="historicalArchive">
                   <n-alert type="info" :bordered="false" title="没有订单级未归属证据">
                     {{ snap.archive?.unlinked_evidence?.detail }}

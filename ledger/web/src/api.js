@@ -22,7 +22,8 @@ async function call(path, init) {
     body = null
   }
   if (!res.ok) {
-    throw new Error(body?.detail || text || `请求失败（${res.status}）`)
+    const detail=typeof body?.detail==='string'?body.detail:null
+    throw new Error(detail || (res.status>=500?'服务暂时未能完成请求，请稍后重试':res.status===404?'没有找到对应数据，请刷新后重试':res.status===422?'请检查填写内容':`请求失败（${res.status}）`))
   }
   return body
 }
@@ -41,11 +42,11 @@ export const api = {
   bootstrap: () => call('/api/bootstrap'),
 
   overview: (params, options = {}) => call(`/api/overview${query(params)}`, options),
-  trend: (params) => call(`/api/trend${query(params)}`),
-  gaps: (params) => call(`/api/gaps${query(params)}`),
+  trend: (params, options = {}) => call(`/api/trend${query(params)}`, options),
+  gaps: (params, options = {}) => call(`/api/gaps${query(params)}`, options),
   store: (id, options = {}) => call(`/api/stores/${encodeURIComponent(id)}`, options),
-  period: (id, period) =>
-    call(`/api/stores/${encodeURIComponent(id)}/periods/${encodeURIComponent(period)}`),
+  period: (id, period, options = {}) =>
+    call(`/api/stores/${encodeURIComponent(id)}/periods/${encodeURIComponent(period)}`, options),
   recompute: (id) =>
     call(`/api/stores/${encodeURIComponent(id)}/recompute`, { method: 'POST' }),
   close: (id, period, note = '') =>
@@ -97,15 +98,15 @@ export const api = {
       method: 'DELETE',
     }),
 
-  search: (params) => call(`/api/search${query(params)}`),
+  search: (params, options = {}) => call(`/api/search${query(params)}`, options),
   indexStatus: () => call('/api/index/status'),
   indexFiles: () => call('/api/index/files'),
   indexErrors: () => call('/api/index/errors'),
   indexStorage: () => call('/api/index/storage'),
-  indexPreview: (params) => call(`/api/index/preview${query(params)}`),
+  indexPreview: (params, options = {}) => call(`/api/index/preview${query(params)}`, options),
   orderFeedStatus: () => call('/api/order-feed/status'),
-  drill: (runId, nodeId, params) =>
-    call(`/api/runs/${runId}/drill/${encodeURIComponent(nodeId)}${query(params)}`),
+  drill: (runId, nodeId, params, options = {}) =>
+    call(`/api/runs/${runId}/drill/${encodeURIComponent(nodeId)}${query(params)}`, options),
 
   stores: () => call('/api/stores'),
   patchStore: (id, patch) =>
@@ -139,9 +140,9 @@ export const api = {
     )
   },
 
-  roles: (source) => call(`/api/roles${query({ source })}`),
-  draft: (sha, params) => call(`/api/onboard/${sha}${query(params)}`),
-  assist: (sha, params) => call(`/api/onboard/${sha}/assist${query(params)}`),
+  roles: (source, options = {}) => call(`/api/roles${query({ source })}`, options),
+  draft: (sha, params, options = {}) => call(`/api/onboard/${sha}${query(params)}`, options),
+  assist: (sha, params, options = {}) => call(`/api/onboard/${sha}/assist${query(params)}`, options),
   onboardTry: (commit) =>
     call('/api/onboard/try', {
       method: 'POST',
@@ -155,7 +156,7 @@ export const api = {
       body: JSON.stringify(commit),
     }),
 
-  fees: (params) => call(`/api/fees${query(params)}`),
+  fees: (params, options = {}) => call(`/api/fees${query(params)}`, options),
   feesPreview: (body) =>
     call('/api/fees/preview', {
       method: 'POST',

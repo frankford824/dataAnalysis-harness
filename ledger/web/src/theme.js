@@ -10,7 +10,7 @@ const n = {
   5: '#9aa1ae', 6: '#6b7280', 7: '#434a56', 8: '#262b34', 9: '#14171c',
 }
 
-const accent = '#1f5eff'
+const accent = '#3468f0'
 const accentHover = '#4a7dff'
 const accentPressed = '#1a52e0'
 
@@ -44,7 +44,7 @@ export const theme = {
     popoverColor: n[0],
     tableHeaderColor: n[0],
 
-    borderRadius: '10px',
+    borderRadius: '6px',
     borderRadiusSmall: '6px',
     fontSize: '14px',
     fontSizeSmall: '13px',
@@ -56,12 +56,16 @@ export const theme = {
     fontFamilyMono: 'ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace',
   },
   Card: {
-    borderRadius: '14px',
+    borderRadius: '8px',
   },
+  Button: { heightMedium:'36px', heightSmall:'30px', heightTiny:'24px', fontWeight:'500' },
+  Input: { heightMedium:'36px' },
+  Select: { peers: { InternalSelection: { heightMedium:'36px' } } },
+  Tabs: { tabFontSizeMedium:'14px', tabFontSizeSmall:'13px', tabGapMedium:'24px' },
   DataTable: {
-    thColor: n[0],
+    thColor: '#f6f8fc',
     thTextColor: n[6],
-    thFontWeight: '560',
+    thFontWeight: '500',
     tdColorHover: n[1],
     borderColor: n[2],
     fontSizeSmall: '13px',

@@ -11,6 +11,7 @@
  */
 import { computed, defineAsyncComponent, ref, watch } from 'vue'
 
+import { useLatest } from './ui/useLatest'
 import { api } from '../api'
 import { count, money } from '../format'
 
@@ -56,24 +57,16 @@ const diff = computed(() => {
   return d.source_total - d.value
 })
 
+const drillRequest=useLatest()
+let drillSerial=0
 async function load() {
-  loading.value = true
-  failed.value = ''
-  try {
-    data.value = await api.drill(props.runId, props.node, {
-      limit: size,
-      offset: page.value * size,
-      only: only.value,
-      subject: subject.value,
-      file: file.value,
-      q: appliedTerm.value,
-      order: order.value,
-    })
-  } catch (e) {
-    failed.value = e.message
-  } finally {
-    loading.value = false
-  }
+  const serial=++drillSerial
+  loading.value=true;failed.value=''
+  try{
+    const result=await drillRequest.run(signal=>api.drill(props.runId,props.node,{limit:size,offset:page.value*size,only:only.value,subject:subject.value,file:file.value,q:appliedTerm.value,order:order.value},{signal}))
+    if(result)data.value=result.value
+  }catch(e){if(serial===drillSerial)failed.value=e.message}
+  finally{if(serial===drillSerial)loading.value=false}
 }
 
 watch([() => props.runId, () => props.node, () => props.only], () => {
@@ -162,13 +155,14 @@ function previewFact(row) {
   previewing.value = true
 }
 function close() {
+  drillRequest.cancel()
   show.value = false
   emit('close')
 }
 </script>
 
 <template>
-  <n-drawer :show="show" :width="820" placement="right" @update:show="close">
+  <n-drawer :show="show" :width="'min(940px, 100vw)'" placement="right" @update:show="close">
     <n-drawer-content :title="title || node" closable>
       <n-spin :show="loading">
         <n-alert v-if="failed" type="error" :bordered="false">{{ failed }}</n-alert>

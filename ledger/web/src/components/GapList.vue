@@ -25,8 +25,8 @@ const groups = computed(() => {
   const empty = props.gaps.filter((g) => g.kind === 'missing' || g.kind === 'empty')
   const odd = props.gaps.filter((g) => !(g.kind === 'missing' || g.kind === 'empty'))
   return [
-    { key: 'empty', name: '空值项', hint: '这几项没有数，要补表', list: empty },
-    { key: 'odd', name: '异常值项', hint: '有数但数看着不对，要查', list: odd },
+    { key: 'empty', name: '空值项', hint: '需要补充资料', list: empty },
+    { key: 'odd', name: '异常值项', hint: '需要核对金额', list: odd },
   ].filter((g) => g.list.length)
 })
 
@@ -58,7 +58,7 @@ function can(g) {
         :key="`${item.kind}-${item.node || item.metric || item.source || i}`"
         class="gap"
         :class="[tone(item), { tap: can(item) }]"
-        @click="can(item) && emit('open', item)"
+        :role="can(item)?'button':undefined" :tabindex="can(item)?0:undefined" @keydown.enter="can(item) && emit('open',item)" @keydown.space.prevent="can(item) && emit('open',item)" @click="can(item) && emit('open', item)"
       >
         <div class="line">
           <span class="title">{{ item.title }}</span>
@@ -68,7 +68,7 @@ function can(g) {
         </div>
         <div class="detail">{{ item.detail }}</div>
         <div v-if="can(item)" class="go">
-          {{ item.node === '__sources__' ? '去看该交的表 →' : '点开看这些行 →' }}
+          {{ item.node === '__sources__' ? '查看所需资料' : '查看明细' }}
         </div>
       </div>
     </section>

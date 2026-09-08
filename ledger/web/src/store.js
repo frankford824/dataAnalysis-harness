@@ -11,8 +11,8 @@
 import { defineStore } from 'pinia'
 import { computed, ref, watch } from 'vue'
 
-import { api } from './api'
-import { prettyPeriod } from './format'
+import { api } from './api.js'
+import { prettyPeriod } from './format.js'
 
 //: 刷新之后还该记得的东西存这儿。只存「人选到哪儿了」，不存数据本身——数据要
 //: 是也缓存下来，账重算过之后界面会拿旧数骗人。
@@ -34,6 +34,7 @@ export const useApp = defineStore('app', () => {
   const loadingJobs = ref(0)
   const loading = computed(() => loadingJobs.value > 0)
   const error = ref('')
+  const uiRefresh = ref(0)
   let navigationPromise = null
   let modelPromise = null
   let overviewPromise = null
@@ -181,6 +182,7 @@ export const useApp = defineStore('app', () => {
   }
 
   async function run(label, fn) {
+    if (busy.value) throw new Error('请等待当前操作完成')
     busy.value = { label, since: Date.now() }
     try {
       return await fn()
@@ -301,7 +303,7 @@ export const useApp = defineStore('app', () => {
   }
 
   return {
-    navigation, boot, overview, storeDetails, loading, error,
+    navigation, boot, overview, storeDetails, loading, error, uiRefresh,
     platform, storeId, period, busy, intake, memo, showIntake,
     stores, platforms, visibleStores, periods, currentStore,
     platformName, periodLabel, scopeParts, ingestMode, nasUploadPath,

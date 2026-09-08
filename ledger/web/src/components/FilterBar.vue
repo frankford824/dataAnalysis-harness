@@ -56,7 +56,14 @@ function onStore(id) {
   // 点店铺下拉就像没反应（其实人已经不在这一页了），配提成按钮也点不到。
   if (id && route.name === 'period') {
     router.push({ name: 'period', params: { id }, query: { period: app.period } })
+  } else if (!id && route.name === 'period') {
+    router.push({name:'board'})
   }
+}
+
+function onPlatform(value) {
+  app.pick({platform:value})
+  if(route.name==='period' && !app.storeId)router.push({name:'board'})
 }
 
 function onPeriod(v) {
@@ -69,6 +76,9 @@ function onPeriod(v) {
       params: { id: route.params.id },
       query: { period: v },
     })
+  } else if(route.name==='period' && !v) {
+    app.noted('board.tab','here').value='months'
+    router.push({name:'board'})
   }
 }
 
@@ -84,24 +94,24 @@ function submit() {
       size="small"
       quaternary
       class="locator-back"
-      title="回到上一页，还停在你刚才看的位置"
+      title="返回上一页"
       @click="router.back()"
     >
       ← 返回
     </n-button>
 
-    <label class="locator-field platform">
-      <span class="locator-label">平台</span>
+    <label v-if="route.name!=='onboard'" class="locator-field platform">
+      <span class="locator-label">{{route.name==='fees'?'默认平台':'平台'}}</span>
       <n-select
         :value="app.platform"
         :options="platformOptions"
         size="small"
-        @update:value="(v) => app.pick({ platform: v })"
+        @update:value="onPlatform"
       />
     </label>
     <span class="locator-sep" aria-hidden="true">›</span>
-    <label class="locator-field store">
-      <span class="locator-label">店铺</span>
+    <label v-if="route.name!=='onboard'" class="locator-field store">
+      <span class="locator-label">{{route.name==='fees'?'试算店铺':'店铺'}}</span>
       <n-select
         :value="app.storeId"
         :options="storeOptions"
@@ -111,23 +121,23 @@ function submit() {
       />
     </label>
     <span class="locator-sep" aria-hidden="true">›</span>
-    <label class="locator-field period">
-      <span class="locator-label">账期</span>
+    <label v-if="!['fees','onboard'].includes(route.name)" class="locator-field period">
+      <span class="locator-label">月份</span>
       <n-select
         :value="app.period"
         :options="periodOptions"
         size="small"
-        title="有数据的月份才会出现在这儿。账期不用预先建：表一交上来，它落在哪个月，哪个月就自己出现了。"
+        title="选择已有数据的月份"
         @update:value="onPeriod"
       />
     </label>
 
     <div class="locator-search">
-      <span class="locator-label">检索</span>
+      <span class="locator-label">搜索</span>
       <n-input
         v-model:value="term"
         size="small"
-        placeholder="订单号、金额、科目、文件名"
+        placeholder="订单、金额或文件"
         clearable
         @keyup.enter="submit"
       >

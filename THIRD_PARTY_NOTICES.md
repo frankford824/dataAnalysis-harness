@@ -14,6 +14,9 @@ This repository orchestrates, but does not copy into its original source, third-
 | Polars | MIT | deterministic tabular processing | <https://github.com/pola-rs/polars> |
 | DuckDB | MIT | deterministic analytical processing | <https://github.com/duckdb/duckdb> |
 | React | MIT | web UI | <https://github.com/facebook/react> |
+| Vue | MIT | ledger UI | <https://github.com/vuejs/core> |
+| Naive UI | MIT | ledger selectors, tabs, tables and feedback | <https://github.com/tusen-ai/naive-ui> |
+| Lucide (`@lucide/vue`) | ISC | ledger navigation and action icons | <https://github.com/lucide-icons/lucide> |
 | Vite | MIT | web build tooling | <https://github.com/vitejs/vite> |
 | Tauri | Apache-2.0 / MIT | desktop shell | <https://github.com/tauri-apps/tauri> |
 | Apache Superset | Apache-2.0 | external BI service | <https://github.com/apache/superset> |

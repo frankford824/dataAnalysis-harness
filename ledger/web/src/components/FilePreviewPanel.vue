@@ -1,6 +1,7 @@
 <script setup>
 import { computed, ref, watch } from 'vue'
 
+import { useLatest } from './ui/useLatest'
 import { api } from '../api'
 
 const props = defineProps({
@@ -34,29 +35,23 @@ function columnName(index) {
   return out
 }
 
-async function load(nextOffset = offset.value) {
-  if (!props.target?.sha256) return
-  offset.value = Math.max(0, nextOffset)
-  loading.value = true
-  error.value = ''
-  try {
-    result.value = await api.indexPreview({
-      sha: props.target.sha256,
-      sheet: props.target.sheet || '',
-      offset: offset.value,
-      limit: pageSize,
-    })
-  } catch (reason) {
-    error.value = reason.message
-  } finally {
-    loading.value = false
-  }
+const previewRequest=useLatest()
+let previewSerial=0
+async function load(nextOffset=offset.value){
+  if(!props.target?.sha256)return
+  const serial=++previewSerial;offset.value=Math.max(0,nextOffset);loading.value=true;error.value=''
+  try{
+    const response=await previewRequest.run(signal=>api.indexPreview({sha:props.target.sha256,sheet:props.target.sheet||'',offset:offset.value,limit:pageSize},{signal}))
+    if(response)result.value=response.value
+  }catch(e){if(serial===previewSerial)error.value=e.message}
+  finally{if(serial===previewSerial)loading.value=false}
 }
 
 watch(
   () => [props.show, props.target?.sha256, props.target?.sheet, props.target?.row_no],
   ([show]) => {
-    if (!show) return
+    if (!show) { previewRequest.cancel();return }
+    result.value=null
     const centered = props.target?.row_no ? Math.max(0, props.target.row_no - 6) : 0
     load(centered)
   },
@@ -76,7 +71,7 @@ async function copyPath() {
     textarea.style.opacity = '0'
     document.body.appendChild(textarea)
     textarea.select()
-    document.execCommand('copy')
+    if(!document.execCommand('copy')){textarea.remove();error.value='复制失败，请手动复制文件路径';return}
     textarea.remove()
   }
   copied.value = true
@@ -96,7 +91,7 @@ async function copyPath() {
       <div class="spread preview-toolbar">
         <div class="small muted">
           <span v-if="target?.sheet">{{ target.sheet }} · </span>
-          第 {{ offset + 1 }}–{{ offset + (result?.rows?.length || 0) }} 个索引行
+          <template v-if="result?.rows?.length">第 {{offset + 1}}–{{ offset + result.rows.length }} 行</template><template v-else>{{loading?'正在加载…':'暂无记录'}}</template>
           <template v-if="result?.metadata?.total_rows"> / 共 {{ result.metadata.total_rows }} 行</template>
         </div>
         <div class="row">

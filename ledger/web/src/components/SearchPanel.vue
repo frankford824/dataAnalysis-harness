@@ -7,6 +7,7 @@
  */
 import { computed, defineAsyncComponent, ref, watch } from 'vue'
 
+import { useLatest } from './ui/useLatest'
 import { api } from '../api'
 import { money } from '../format'
 import { useApp } from '../store'
@@ -36,34 +37,24 @@ function preview(hit) {
   previewing.value = true
 }
 
-watch(
-  () => [props.show, props.term],
-  async ([show, term]) => {
-    if (!show || !term.trim()) return
-    loading.value = true
-    error.value = ''
-    result.value = null
-    try {
-      result.value = await api.search({
-        q: term.trim(),
-        store_id: app.storeId,
-        period: app.period,
-        platform: app.platform,
-      })
-    } catch (e) {
-      error.value = e.message
-    } finally {
-      loading.value = false
-    }
-  },
-  { immediate: true },
-)
+const searchRequest=useLatest()
+let searchSerial=0
+watch(()=>[props.show,props.term,app.storeId,app.period,app.platform],async ([show,term])=>{
+  const serial=++searchSerial;searchRequest.cancel()
+  if(!show||!term.trim()){loading.value=false;return}
+  loading.value=true;error.value='';result.value=null
+  try{
+    const response=await searchRequest.run(signal=>api.search({q:term.trim(),store_id:app.storeId,period:app.period,platform:app.platform},{signal}))
+    if(response)result.value=response.value
+  }catch(e){if(serial===searchSerial)error.value=e.message}
+  finally{if(serial===searchSerial)loading.value=false}
+},{immediate:true})
 </script>
 
 <template>
   <n-drawer
     :show="show"
-    :width="720"
+    :width="'min(820px, 100vw)'"
     placement="right"
     @update:show="(v) => emit('update:show', v)"
   >

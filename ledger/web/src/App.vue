@@ -4,7 +4,7 @@
  * 拖放挂在整个窗口上而不是某个方框里。交表是这套系统里最高频的动作，让人先找到
  * 一个方框再松手是多出来的一步。
  */
-import { NConfigProvider, NDialogProvider, NMessageProvider } from 'naive-ui'
+import { NConfigProvider, NDialogProvider, NMessageProvider, zhCN, dateZhCN } from 'naive-ui'
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 
 import AppBody from './components/AppBody.vue'
@@ -19,7 +19,7 @@ const overlay = computed(() => dragging.value > 0)
 const dropped = ref(null)
 
 function onEnter(e) {
-  if (app.ingestMode === 'nas' || route.path === '/commission') return
+  if (app.ingestMode === 'nas' || route.meta.commission) return
   if (![...(e.dataTransfer?.types || [])].includes('Files')) return
   dragging.value += 1
 }
@@ -32,7 +32,7 @@ function onOver(e) {
 function onDrop(e) {
   e.preventDefault()
   dragging.value = 0
-  if (app.ingestMode === 'nas' || route.path === '/commission') return
+  if (app.ingestMode === 'nas' || route.meta.commission) return
   const files = [...(e.dataTransfer?.files || [])]
   if (files.length) dropped.value = files
 }
@@ -52,11 +52,11 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <NConfigProvider :theme="null" :theme-overrides="theme">
+  <NConfigProvider :theme="null" :theme-overrides="theme" :locale="zhCN" :date-locale="dateZhCN">
     <NMessageProvider>
       <NDialogProvider>
         <AppBody :dropped="dropped" @taken="dropped = null" />
-        <div v-if="overlay && app.ingestMode !== 'nas'" class="veil">松手就收下</div>
+        <div v-if="overlay && app.ingestMode !== 'nas'" class="veil">松开以上传文件</div>
       </NDialogProvider>
     </NMessageProvider>
   </NConfigProvider>

@@ -61,7 +61,7 @@ async function apply() {
 defineExpose({open,importFile,shown})
 </script>
 <template>
-<n-modal v-model:show="shown" preset="card" :title="title" class="batch-dialog" :mask-closable="!busy" style="width:min(1080px,95vw)">
+<n-modal v-model:show="shown" preset="card" :title="title" class="batch-dialog" :mask-closable="!busy" :closable="!busy" :close-on-esc="!busy" style="width:min(1080px,95vw)">
   <p v-if="busy">{{ plan ? '正在保存，请稍候…' : '正在核对店铺、人员、比例和日期…' }}</p>
   <p v-if="failure" class="error" role="alert">{{ failure }}</p>
   <template v-if="!plan && kind!=='import'">

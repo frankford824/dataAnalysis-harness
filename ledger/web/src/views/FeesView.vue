@@ -8,9 +8,11 @@
  * 模型只给建议，不落库。exclude 和「没挂上订单也进账」两个开关能静默改利润，
  * 必须人自己勾，试算里会单独标出来。
  */
-import { useMessage } from 'naive-ui'
+import { useDialog, useMessage } from 'naive-ui'
 import { computed, ref, watch } from 'vue'
-import { useRoute } from 'vue-router'
+import { onBeforeRouteLeave, useRoute } from 'vue-router'
+import { useLatest } from '../components/ui/useLatest'
+import { mergeRuleResponse, feePreviewKey } from '../components/ui/editableRules'
 
 import { api } from '../api'
 import { count, money, prettyUnmatched, stamp } from '../format'
@@ -20,6 +22,10 @@ import PageHead from '../components/PageHead.vue'
 const app = useApp()
 const route = useRoute()
 const message = useMessage()
+const dialog = useDialog()
+const feeRequest = useLatest()
+const previewSignature = ref('')
+let feeSerial=0
 
 const data = ref(null)
 const loading = ref(false)
@@ -171,13 +177,16 @@ function addBatch() {
 
 const opened = ref('')
 
-async function load() {
+async function load(force=false) {
+  const serial=++feeSerial
   loading.value = true
   failed.value = ''
   try {
-    const incoming = await api.fees({ section: tab.value })
-    data.value = { ...(data.value || {}), ...incoming }
-    if (incoming.rules) draft.value = JSON.parse(JSON.stringify(incoming.rules))
+    const response = await feeRequest.run(signal=>api.fees({ section: tab.value },{signal}))
+    if(!response)return
+    const incoming=response.value
+    const merged=mergeRuleResponse(data.value,draft.value,incoming,force)
+    data.value=merged.data;draft.value=merged.draft
     const label = route.query.label
     if (label && typeof label === 'string' && label !== opened.value) {
       opened.value = label
@@ -186,9 +195,9 @@ async function load() {
       else addFrom({ label, field: 'subject', value: label, how: 'exact' })
     }
   } catch (e) {
-    failed.value = e.message
+    if(serial===feeSerial)failed.value = e.message
   } finally {
-    loading.value = false
+    if(serial===feeSerial)loading.value = false
   }
 }
 
@@ -204,7 +213,8 @@ watch(
   },
 )
 
-watch(() => [route.query.label, tab.value], load, { immediate: true })
+watch(() => [route.query.label, tab.value], () => load(), { immediate: true })
+watch(()=>app.uiRefresh,()=>load())
 
 function blank() {
   return {
@@ -274,10 +284,13 @@ function move(i, dir) {
 }
 
 async function suggest() {
-  if (!editing.value?.value) return
+  if (!editing.value?.value || suggesting.value) return
+  const target=editing.value
+  const requested=JSON.stringify({value:target.value,field:target.field,platform:target.platform})
   suggesting.value = true
   try {
     const got = await api.feesSuggest({ label: editing.value.value, field: editing.value.field })
+    if(editing.value!==target || requested!==JSON.stringify({value:target.value,field:target.field,platform:target.platform}))return
     if (!got.ok) {
       message.warning(got.note || '没有建议')
       return
@@ -299,9 +312,10 @@ async function runPreview() {
     return
   }
   try {
-    preview.value = await app.run('正在试算这家店', () =>
-      api.feesPreview({ rules: draft.value, store_id: app.storeId }),
-    )
+    const signature=feePreviewKey(draft.value,app.storeId)
+    const result=await app.run('正在试算', () => api.feesPreview({rules:JSON.parse(JSON.stringify(draft.value)),store_id:app.storeId}))
+    if(signature!==feePreviewKey(draft.value,app.storeId)){message.warning('规则已修改，请重新试算');return}
+    previewSignature.value=signature;preview.value=result
     tab.value = 'rules'
   } catch (e) {
     message.error(e.message)
@@ -309,13 +323,13 @@ async function runPreview() {
 }
 
 async function apply() {
-  if (!preview.value) {
+  if (!preview.value || previewSignature.value!==feePreviewKey(draft.value,app.storeId)) {
     message.warning('先试算一家店，看损益哪几行会变，再落库')
     return
   }
   try {
     const hadOverview = !!app.overview
-    await app.run('正在落库并重算', () =>
+    await app.run('正在保存并重算', () =>
       api.feesApply({
         rules: draft.value,
         store_id: app.storeId,
@@ -327,12 +341,17 @@ async function apply() {
     app.invalidate()
     await app.loadNavigation(true)
     if (hadOverview) await app.loadOverview(true)
-    await load()
+    await load(true)
     message.success('规则已生效，有表的店都重算过了')
   } catch (e) {
     message.error(e.message)
   }
 }
+watch(()=>feePreviewKey(draft.value,app.storeId),value=>{if(value!==previewSignature.value)preview.value=null})
+onBeforeRouteLeave(()=>{
+  if(!data.value?.rules || !dirty.value)return true
+  return new Promise(resolve=>dialog.warning({title:'修改尚未保存',content:'离开后，本次修改将丢失。',positiveText:'离开',negativeText:'继续编辑',onPositiveClick:()=>resolve(true),onNegativeClick:()=>resolve(false),onClose:()=>resolve(false),onMaskClick:()=>resolve(false)}))
+})
 </script>
 
 <template>
@@ -342,20 +361,22 @@ async function apply() {
 
   <PageHead
     title="费项"
-    :scope="app.scopeParts"
-    hint="把到账里的业务描述、备注归到对应费项。尚未归属的新费项会在这里列出来。"
+    :scope="['全公司费项']"
+    hint="管理流水归类规则，上方店铺用于试算。"
   >
     <template #actions>
-      <n-button size="small" :disabled="!dirty" @click="runPreview">试算当前店</n-button>
-      <n-button type="primary" :disabled="!dirty || !preview" @click="apply">
-        落库并重算
+      <n-button size="small" :disabled="!dirty || loading || !!app.busy" :loading="!!app.busy" @click="runPreview">试算当前店</n-button>
+      <n-button type="primary" :disabled="!dirty || !preview || loading || !!app.busy" :loading="!!app.busy" @click="apply">
+        保存并重算
       </n-button>
     </template>
   </PageHead>
 
-  <n-spin :show="loading">
+  <n-alert v-if="data?.rules && dirty" type="warning" :bordered="false" class="ledger-page-error">修改尚未保存，请先试算再保存。</n-alert>
+  <div v-if="loading && data" class="ledger-loading-status" role="status">正在加载…</div>
+  <n-spin :show="loading && !data">
     <div class="card">
-      <n-tabs v-model:value="tab" type="line" size="small">
+      <n-tabs v-ledger-tabs v-model:value="tab" type="line" size="small">
         <n-tab-pane name="unmatched">
           <template #tab>
             未归类
@@ -411,9 +432,9 @@ async function apply() {
           </template>
         </n-tab-pane>
 
-        <n-tab-pane name="rules" :tab="`已配规则（${draft.length}）`">
+        <n-tab-pane name="rules" :tab="data?.rules ? `已配规则（${draft.length}）` : '已配规则'">
           <p class="xs muted" style="margin-bottom: var(--s3)">
-            这些规则已经保存。默认只改还没挂上费项的流水，不会动模板里已经归好的项；
+            以下规则按从上到下的顺序应用。默认只改还没挂上费项的流水，不会动模板里已经归好的项；
             选「覆盖模板里已有的归类」才会改写，损益金额可能变化，请先试算。
             同一组里，排在上面的优先。
           </p>
@@ -452,8 +473,8 @@ async function apply() {
                   <td class="row">
                     <button class="link" type="button" @click="move(i, -1)">上移</button>
                     <button class="link" type="button" @click="move(i, 1)">下移</button>
-                    <button class="link" type="button" @click="editAt(i)">改</button>
-                    <button class="link" type="button" @click="dropAt(i)">删</button>
+                    <button class="link" type="button" @click="editAt(i)">修改</button>
+                    <button class="link" type="button" @click="dropAt(i)">移除</button>
                   </td>
                 </tr>
               </tbody>
@@ -493,11 +514,11 @@ async function apply() {
           </div>
         </n-tab-pane>
 
-        <n-tab-pane name="known" :tab="`已有归类（${data?.known?.length || 0}）`">
+        <n-tab-pane name="known" :tab="data?.known ? `已有归类（${data.known.length}）` : '已有归类'">
           <p class="xs muted" style="margin-bottom: var(--s3)">
             科目字典的精确匹配，以及各对账模板里写好的规则。要改这些需要发版；新费项请在「已配规则」里添加。
           </p>
-          <n-tabs
+          <n-tabs v-ledger-tabs
             v-model:value="knownPlatShown"
             type="segment"
             size="small"
@@ -556,25 +577,25 @@ async function apply() {
     @update:show="(v) => { if (!v) editing = null }"
   >
     <div v-if="editing" class="stack" style="gap: var(--s3)">
-      <n-select v-model:value="editing.platform" :options="platformOptions" size="small" />
+      <label class="fee-field"><span>平台</span><n-select aria-label="平台" v-model:value="editing.platform" :options="platformOptions" size="small" /></label>
       <div class="row" style="align-items: stretch">
-        <n-select
+        <label class="fee-field"><span>匹配字段</span><n-select aria-label="匹配字段"
           v-model:value="editing.field"
           :options="fieldOptions"
           size="small"
           style="flex: 1; min-width: 140px"
           :consistent-menu-width="false"
-        />
-        <n-select
+        /></label>
+        <label class="fee-field"><span>匹配方式</span><n-select aria-label="匹配方式"
           v-model:value="editing.how"
           :options="howOptions"
           size="small"
           style="flex: 1; min-width: 180px"
           :consistent-menu-width="false"
-        />
+        /></label>
       </div>
       <n-input v-model:value="editing.value" size="small" placeholder="对账表这一列里出现的词" />
-      <n-select
+      <label class="fee-field"><span>归入费项</span><n-select aria-label="归入费项"
         v-model:value="editing.major"
         :options="majorOptions"
         size="small"
@@ -582,15 +603,15 @@ async function apply() {
         clearable
         placeholder="归到哪个费项"
         :disabled="editing.exclude"
-      />
+      /></label>
       <n-input v-model:value="editing.minor" size="small" placeholder="细项（对账表上显示的名字，可空）" />
-      <n-select
+      <label class="fee-field"><span>应用范围</span><n-select aria-label="应用范围"
         v-model:value="editing.stage"
         :options="stageOptions"
         size="small"
         :consistent-menu-width="false"
         placeholder="这条规则何时生效"
-      />
+      /></label>
       <n-checkbox v-model:checked="editing.exclude">命中后排除，不计入损益</n-checkbox>
       <n-checkbox v-model:checked="editing.count_without_order" :disabled="editing.exclude">
         未关联本期订单也计入损益
@@ -602,10 +623,10 @@ async function apply() {
     </div>
     <template #footer>
       <div class="row" style="justify-content: space-between">
-        <n-button size="small" :loading="suggesting" @click="suggest">请模型建议</n-button>
+        <n-button size="small" :loading="suggesting" @click="suggest">查看归类建议</n-button>
         <div class="row">
           <n-button size="small" @click="editing = null">取消</n-button>
-          <n-button size="small" type="primary" @click="saveEdit">保存</n-button>
+          <n-button size="small" type="primary" @click="saveEdit">确定修改</n-button>
         </div>
       </div>
     </template>

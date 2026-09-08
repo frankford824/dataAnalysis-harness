@@ -61,10 +61,10 @@ function step(dir) { const next = list.value[index.value + dir]; if (next) go(ne
 
 function statusOf(p) {
   if (!p) return { mark: '', text: '' }
-  if (p.state === 'closed' && p.stale) return { mark: 'evidence', text: '有新证据' }
+  if (p.state === 'closed' && p.stale) return { mark: 'evidence', text: '有新资料' }
   if (p.state === 'closed') return { mark: 'closed', text: '已结账' }
   if (p.can_close) return { mark: 'ready', text: '可确认' }
-  return { mark: 'pending', text: '待补证据' }
+  return { mark: 'pending', text: '待补资料' }
 }
 
 const status = computed(() => statusOf(current.value))
@@ -104,7 +104,7 @@ const yearCounts = computed(() => {
         <button
           v-for="m in months" :key="m.key" type="button"
           class="ps-cell" :class="[m.status?.mark, { on: m.period === modelValue, off: !m.has }]"
-          :disabled="!m.has" :title="m.has ? `${pretty(m.period)} · ${m.status.text}` : '这个月还没算过'"
+          :disabled="!m.has" :title="m.has ? `${pretty(m.period)} · ${m.status.text}` : '该月暂无数据'"
           @click="go(m.period)"
         >
           <span class="ps-m">{{ m.label }}<em v-if="shownYear !== OTHER">月</em></span>
@@ -115,8 +115,8 @@ const yearCounts = computed(() => {
       <div class="ps-legend">
         <span class="closed"><i />已结账 {{ statusCounts.closed }}</span>
         <span class="ready"><i />可确认 {{ statusCounts.ready }}</span>
-        <span class="pending"><i />待补证据 {{ statusCounts.pending }}</span>
-        <span class="evidence"><i />有新证据 {{ statusCounts.evidence }}</span>
+        <span class="pending"><i />待补资料 {{ statusCounts.pending }}</span>
+        <span class="evidence"><i />有新资料 {{ statusCounts.evidence }}</span>
       </div>
     </div>
   </div>

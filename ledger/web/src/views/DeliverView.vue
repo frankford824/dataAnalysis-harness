@@ -3,6 +3,7 @@ import { useDialog, useMessage } from 'naive-ui'
 import { computed, defineAsyncComponent, onMounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 
+import LedgerTabs from '../components/ui/LedgerTabs.vue'
 import { api } from '../api'
 import PageHead from '../components/PageHead.vue'
 import SystemStatusLine from '../components/SystemStatusLine.vue'
@@ -13,6 +14,7 @@ const UploadPanel = defineAsyncComponent(() => import('../components/UploadPanel
 const FilePreviewPanel = defineAsyncComponent(() => import('../components/FilePreviewPanel.vue'))
 
 const app = useApp()
+const storeSection=app.noted('deliver.section','work')
 const message = useMessage()
 const dialog = useDialog()
 const router = useRouter()
@@ -27,6 +29,7 @@ const periodError = ref('')
 let periodRequest = 0
 
 const adding = ref(false)
+const registering=ref(false)
 const explaining = ref(false)
 const draft = ref({ name: '', platform: '' })
 const indexFiles = ref([])
@@ -64,21 +67,21 @@ function prettyPeriod(period) {
 }
 
 function taskStatus(cell) {
-  if (cell.state === 'closed' && cell.stale) return { id: 'evidence', label: '有新证据', priority: 1 }
+  if (cell.state === 'closed' && cell.stale) return { id: 'evidence', label: '有新资料', priority: 1 }
   if (cell.can_close) return { id: 'ready', label: '可确认', priority: 2 }
-  return { id: 'pending', label: '待补证据', priority: 0 }
+  return { id: 'pending', label: '待补资料', priority: 0 }
 }
 
 function shortReason(cell) {
-  if (cell.state === 'closed' && cell.stale) return '结账后收到新证据，冻结结果没有改变'
-  if (cell.can_close) return '资料和自检已通过，可以人工确认'
+  if (cell.state === 'closed' && cell.stale) return '结账后有新资料，请核对差异'
+  if (cell.can_close) return '资料已齐，可以结账'
   if (cell.missing?.length) return `缺${cell.missing.join('、')}`
   const msg = cell.blocking?.[0] || ''
   const coverage = /(商品成本|销售收入|发货运费).*?覆盖\s*([\d.]+)%/.exec(msg)
   if (coverage) return `${coverage[1]}覆盖 ${coverage[2]}%`
   if (msg) return msg.split(/[。；]/)[0]
   if (cell.profit === null) return '关键金额还没有算齐'
-  return '仍有证据需要核对'
+  return '仍有资料需要核对'
 }
 
 const tasks = computed(() => (app.overview?.cells || [])
@@ -177,7 +180,7 @@ async function loadPeriodSnap(storeId, period) {
   const request = ++periodRequest
   periodSnap.value = null
   periodError.value = ''
-  if (!storeId || !period) return
+  if (!storeId || !period) { periodLoading.value=false;return }
   periodLoading.value = true
   try {
     const data = await api.period(storeId, period)
@@ -202,7 +205,7 @@ const blockerRows = computed(() => {
   const snap = periodSnap.value
   if (!snap || !currentCell.value) return []
   if (currentCell.value.status === 'evidence') {
-    return [{ title: '结账后收到新证据', detail: '原结账结果仍然冻结；请核对差异后决定是否反结账。' }]
+    return [{ title: '结账后收到新证据', detail: '请核对新增资料，原结账金额保留。' }]
   }
   if (currentCell.value.status === 'ready') {
     return [{ title: '资料和自检已经通过', detail: '这是人工确认点；确认前仍可查看损益和原始证据。', ok: true }]
@@ -280,17 +283,17 @@ function evidenceAction(row) {
 }
 
 function periodStatus(period) {
-  if (period.state === 'closed' && period.stale) return { text: '有新证据', tone: 'evidence' }
+  if (period.state === 'closed' && period.stale) return { text: '有新资料', tone: 'evidence' }
   if (period.state === 'closed') return { text: '已结账', tone: 'closed' }
   if (period.can_close) return { text: '可确认', tone: 'ready' }
-  return { text: '待补证据', tone: 'pending' }
+  return { text: '待补资料', tone: 'pending' }
 }
 
 function detailState() {
   if (!currentCell.value) return { title: '当前账期没有待处理项', tone: 'quiet' }
   if (currentCell.value.status === 'ready') return { title: '资料已齐，可以人工确认', tone: 'ready' }
-  if (currentCell.value.status === 'evidence') return { title: '结账后有新证据，冻结结果未改变', tone: 'evidence' }
-  return { title: '证据未齐，暂不能确认', tone: 'pending' }
+  if (currentCell.value.status === 'evidence') return { title: '结账后有新资料，冻结结果未改变', tone: 'evidence' }
+  return { title: '资料未齐，暂不能结账', tone: 'pending' }
 }
 
 function primaryLabel() {
@@ -350,7 +353,8 @@ function drop(storeId, name, shared = false) {
 }
 
 async function register() {
-  if (!draft.value.name.trim() || !draft.value.platform) return
+  if (registering.value || !draft.value.name.trim() || !draft.value.platform) return
+  registering.value=true
   const id = `${draft.value.platform}_${Date.now().toString(36)}`
   try {
     await api.addStore({ id, name: draft.value.name.trim(), platform: draft.value.platform })
@@ -362,11 +366,16 @@ async function register() {
     if (store) pickStore(store)
     message.success('登记好了。把这家店的表放入 NAS 对应目录即可。')
   } catch (error) { message.error(error.message, { duration: 6000 }) }
+  finally { registering.value=false }
 }
 
 onMounted(() => {
   app.loadOverview().catch(() => {})
   loadSystemState()
+})
+watch(()=>app.uiRefresh,()=>{
+  app.loadOverview(true).catch(()=>{});loadSystemState()
+  if(app.storeId){loadDetail(app.storeId,true).catch(()=>{});loadPeriodSnap(app.storeId,app.period)}
 })
 </script>
 
@@ -374,13 +383,14 @@ onMounted(() => {
   <PageHead
     title="数据与店铺"
     :scope="app.storeId ? app.scopeParts : []"
-    :hint="app.storeId ? '' : '先在顶栏选店铺和账期。没选店时，下面是全公司还没结完的账。'"
+    :hint="app.storeId ? '' : '选择店铺查看资料，或从待办进入对应月份。'"
   >
     <template #actions>
       <n-button size="small" quaternary @click="adding = true">登记新店</n-button>
     </template>
   </PageHead>
 
+  <n-alert v-if="app.error || loadError" type="error" class="ledger-page-error">{{app.error || loadError}}<n-button text @click="app.loadOverview(true).catch(()=>{});app.storeId && loadDetail(app.storeId,true).catch(()=>{})">重试</n-button></n-alert>
   <SystemStatusLine :feed="orderFeed" :index-errors="indexErrors" @details="systemOpen = true" />
 
   <!-- 未选择店铺：显示全公司待办概览 -->
@@ -388,9 +398,9 @@ onMounted(() => {
     <div v-if="!app.overview && app.loading" style="padding:var(--s5) 0"><n-skeleton text :repeat="6" /></div>
     <template v-else-if="pendingCounts.total">
       <div class="overview-stats">
-        <div class="stat-card warn"><span class="stat-value num">{{ pendingCounts.pending }}</span><span class="stat-label">待补证据</span></div>
+        <div class="stat-card warn"><span class="stat-value num">{{ pendingCounts.pending }}</span><span class="stat-label">待补资料</span></div>
         <div class="stat-card accent"><span class="stat-value num">{{ pendingCounts.ready }}</span><span class="stat-label">可确认</span></div>
-        <div class="stat-card ok"><span class="stat-value num">{{ pendingCounts.evidence }}</span><span class="stat-label">有新证据</span></div>
+        <div class="stat-card ok"><span class="stat-value num">{{ pendingCounts.evidence }}</span><span class="stat-label">有新资料</span></div>
         <div class="stat-card"><span class="stat-value num">{{ pendingCounts.total }}</span><span class="stat-label">总待处理</span></div>
       </div>
       <p class="overview-hint">从上方 <b>店铺</b> 下拉框选择一家店，或点击下方快捷入口。</p>
@@ -404,7 +414,7 @@ onMounted(() => {
         </div>
       </section>
     </template>
-    <div v-else class="overview-empty">
+    <div v-else-if="!app.error" class="overview-empty">
       <b>全部店期已处理完毕</b>
       <span>从上方店铺下拉框选择任意一家店，可以查看历史账期和文件。</span>
     </div>
@@ -420,8 +430,28 @@ onMounted(() => {
       </div>
     </header>
 
+    <LedgerTabs v-model="storeSection" label="店铺资料" :options="[{key:'work',label:'待办事项'},{key:'files',label:'收到的表',count:files().length},{key:'months',label:'月份进度',count:periods().length}]" />
+    <section v-if="storeSection==='files'" class="store-resource-panel"><n-spin :show="!!loadingStore"><template v-if="files().length">          <div class="scroll store-files compact-files">
+            <table class="files"><thead><tr><th>文件</th><th class="right">大小</th><th class="right">更新</th><th/></tr></thead>
+              <tbody><tr v-for="file in files()" :key="`${file.store_id}:${file.name}`">
+                <td class="f-name">{{ file.name }}<span v-if="file.shared" class="pill">全公司共用</span></td>
+                <td class="right xs num nowrap">{{ bytes(file.size / 1024) }}</td>
+                <td class="right xs muted nowrap">{{ ago(file.updated_at) || '—' }}</td>
+                <td class="right nowrap">
+                  <button v-if="app.ingestMode === 'nas'" class="f-drop" :disabled="!indexed(file)?.sha256" :title="indexed(file)?.sha256?'预览文件':'文件尚未就绪'" @click="previewFile(file)">预览</button>
+                  <button v-if="app.ingestMode === 'nas'" class="f-drop" @click="manageFile(file)">替换/撤下</button>
+                  <button v-else class="f-drop" @click="drop(file.store_id || here.id, file.name, file.shared)">撤下</button>
+                </td>
+              </tr></tbody>
+            </table>
+          </div></template><n-empty v-else-if="!loadingStore" description="尚未收到文件"/></n-spin></section>
+    <section v-if="storeSection==='months'" class="store-resource-panel">          <div class="other-period-list">
+            <button v-for="p in periods()" :key="p.period" type="button" @click="pickPeriod(p.period)">
+              <span class="num">{{ prettyPeriod(p.period) }}</span><span :class="periodStatus(p).tone">{{ periodStatus(p).text }}</span>
+            </button>
+          </div></section>
     <!-- 待处理账期快捷栏 -->
-    <div v-if="storePeriodsForBar.length" class="period-bar">
+    <div v-if="storeSection==='work' && storePeriodsForBar.length" class="period-bar">
       <span class="period-bar-label">待处理账期</span>
       <button
         v-for="item in storePeriodsForBar"
@@ -435,13 +465,13 @@ onMounted(() => {
         <span class="period-chip-badge" :class="item.status">{{ item.statusLabel }}</span>
       </button>
     </div>
-    <div v-else-if="!loadingStore" class="period-bar-empty">
+    <div v-else-if="storeSection==='work' && !loadingStore" class="period-bar-empty">
       <span>该店铺当前没有待处理的账期。</span>
       <span class="muted">可从上方账期下拉框选择已结账的账期查看。</span>
     </div>
 
     <!-- 选中账期的详情 -->
-    <section v-if="app.period" class="work-detail" aria-live="polite">
+    <section v-if="app.period && storeSection==='work'" class="work-detail" aria-live="polite">
       <h3 class="period-title">{{ prettyPeriod(app.period) }}</h3>
 
       <div class="work-state" :class="detailState().tone">
@@ -458,7 +488,7 @@ onMounted(() => {
       <n-alert v-else-if="periodError" type="error" :bordered="false">{{ periodError }}</n-alert>
       <template v-else-if="periodSnap">
         <section v-if="blockerRows.length || currentCell" class="blocker-section">
-          <h3>{{ currentCell?.status === 'ready' ? '确认前最后检查' : '影响确认的关键证据' }}</h3>
+          <h3>{{ currentCell?.status === 'ready' ? '确认前最后检查' : '待处理事项' }}</h3>
           <ol v-if="blockerRows.length" class="blocker-list">
             <li v-for="(row, idx) in blockerRows" :key="`${row.title}:${idx}`" :class="{ ok: row.ok }">
               <span class="blocker-index num">{{ idx + 1 }}</span>
@@ -476,7 +506,7 @@ onMounted(() => {
         </div>
 
         <section class="evidence-section">
-          <h3>相关证据</h3>
+          <h3>相关资料</h3>
           <div class="evidence-table">
             <div v-for="row in evidenceRows" :key="row.id" class="evidence-row">
               <span class="evidence-icon" :class="row.tone">
@@ -491,42 +521,19 @@ onMounted(() => {
           </div>
         </section>
 
-        <details v-if="files().length" class="supporting-detail">
-          <summary>查看该店全部文件（{{ files().length }}）</summary>
-          <div class="scroll store-files compact-files">
-            <table class="files"><thead><tr><th>文件</th><th class="right">大小</th><th class="right">更新</th><th/></tr></thead>
-              <tbody><tr v-for="file in files()" :key="`${file.store_id}:${file.name}`">
-                <td class="f-name">{{ file.name }}<span v-if="file.shared" class="pill">全公司共用</span></td>
-                <td class="right xs num nowrap">{{ bytes(file.size / 1024) }}</td>
-                <td class="right xs muted nowrap">{{ ago(file.updated_at) || '—' }}</td>
-                <td class="right nowrap">
-                  <button v-if="app.ingestMode === 'nas'" class="f-drop" @click="previewFile(file)">预览</button>
-                  <button v-if="app.ingestMode === 'nas'" class="f-drop" @click="manageFile(file)">替换/撤下</button>
-                  <button v-else class="f-drop" @click="drop(file.store_id || here.id, file.name, file.shared)">撤下</button>
-                </td>
-              </tr></tbody>
-            </table>
-          </div>
-        </details>
 
-        <details v-if="periods().length" class="supporting-detail other-periods">
-          <summary>查看当前店铺其他账期</summary>
-          <div class="other-period-list">
-            <button v-for="p in periods().slice(0, 24)" :key="p.period" type="button" @click="pickPeriod(p.period)">
-              <span class="num">{{ prettyPeriod(p.period) }}</span><span :class="periodStatus(p).tone">{{ periodStatus(p).text }}</span>
-            </button>
-          </div>
-        </details>
+
+
       </template>
     </section>
 
-    <div v-else class="period-prompt">
+    <div v-else-if="storeSection==='work'" class="period-prompt">
       <p>从上方 <b>账期</b> 下拉框选择一个账期，或点击上面的待处理标签。</p>
     </div>
   </div>
 
   <n-modal v-model:show="systemOpen" preset="card" title="系统状态" style="max-width:720px">
-    <div class="system-modal-head"><div><b>{{ orderFeed?.last_error ? '实时同步当前暂停' : feedLag ? '实时同步正在追赶' : '实时同步正常' }}</b><p class="small muted">这些是排查系统问题时才需要看的内部水位，不影响日常处理店期。</p></div><n-button size="small" :loading="indexLoading" @click="loadSystemState">刷新</n-button></div>
+    <div class="system-modal-head"><div><b>{{ orderFeed?.last_error ? '实时同步当前暂停' : feedLag ? '实时同步正在追赶' : '实时同步正常' }}</b><p class="small muted">查看文件接收与数据更新状态。</p></div><n-button size="small" :loading="indexLoading" @click="loadSystemState">刷新</n-button></div>
     <dl class="system-facts">
       <div><dt>订单与成本</dt><dd>{{ feedLag ? `落后 ${count(feedLag)} 条` : '已跟上' }}</dd></div><div><dt>最近更新</dt><dd>{{ ago(orderFeed?.last_success) || '—' }}</dd></div>
       <div><dt>快照</dt><dd class="num">{{ orderFeed?.snapshot_id || '—' }}</dd></div><div><dt>消费水位</dt><dd class="num">{{ count(orderFeed?.consumed_seq || 0) }} / {{ count(orderFeed?.source_latest_seq || orderFeed?.health?.latest_seq || 0) }}</dd></div>
@@ -536,13 +543,13 @@ onMounted(() => {
     <n-alert v-if="indexErrors.length" type="warning" :bordered="false" style="margin-top:var(--s3)">{{ indexErrors.length }} 份原文件需要处理。</n-alert>
   </n-modal>
 
-  <n-modal v-model:show="adding" preset="dialog" title="登记新店" positive-text="登记" negative-text="算了" :positive-button-props="{ disabled: !draft.name.trim() || !draft.platform }" @positive-click="register">
+  <n-modal :closable="!registering" :mask-closable="!registering" :close-on-esc="!registering" v-model:show="adding" preset="dialog" title="登记新店" positive-text="登记" negative-text="取消" :positive-button-props="{disabled:registering || !draft.name.trim() || !draft.platform,loading:registering}" @positive-click="register">
     <p class="small muted" style="margin-bottom:var(--s3)">只要店名和平台，主体和税号可以之后补。</p><n-space vertical><n-input v-model:value="draft.name" placeholder="店铺名称，比如 淘宝喜必顺"/><n-select v-model:value="draft.platform" placeholder="选平台" :options="app.platforms.map((p) => ({ label: p.name, value: p.id }))"/></n-space>
   </n-modal>
 
-  <n-modal :show="Boolean(missingSource)" preset="card" title="补充这份证据" style="max-width:680px" @update:show="(show) => { if (!show) missingSource = null }"><template v-if="missingSource"><h3>{{ missingSource.name }}</h3><p class="small muted" style="margin-top:var(--s2)">{{ missingSource.reason || '这份证据是本期确认所必需的。' }}</p><n-alert type="info" :bordered="false" style="margin-top:var(--s4)">把文件放入 NAS 上传区中"{{ platformName(here?.platform) }} / {{ here?.name }} / {{ missingSource.name }}"对应目录。文件关闭后，系统会自动索引和重算。</n-alert><p class="xs num muted" style="margin-top:var(--s3)">{{ app.nasUploadPath }}</p></template></n-modal>
+  <n-modal :show="Boolean(missingSource)" preset="card" title="补充资料" style="max-width:680px" @update:show="(show) => { if (!show) missingSource = null }"><template v-if="missingSource"><h3>{{ missingSource.name }}</h3><p class="small muted" style="margin-top:var(--s2)">{{ missingSource.reason || '这份证据是本期确认所必需的。' }}</p><n-alert type="info" :bordered="false" style="margin-top:var(--s4)">把文件放入 NAS 上传区中"{{ platformName(here?.platform) }} / {{ here?.name }} / {{ missingSource.name }}"对应目录。文件关闭后，系统会自动索引和重算。</n-alert><p class="xs num muted" style="margin-top:var(--s3)">{{ app.nasUploadPath }}</p></template></n-modal>
 
   <UploadPanel v-if="explaining && app.ingestMode !== 'nas'" v-model:show="explaining"/>
   <FilePreviewPanel v-if="previewing" v-model:show="previewing" :target="previewTarget"/>
-  <n-modal :show="Boolean(managing)" preset="card" title="在 NAS 中替换或撤下" style="max-width:680px" @update:show="(show) => { if (!show) managing = null }"><template v-if="managing"><p class="small"><b>{{ managing.name }}</b></p><p class="small muted preview-path">{{ managing.index?.path || '索引路径暂不可用' }}</p><n-alert type="info" :bordered="false" style="margin-top:var(--s3)"><b>替换：</b>把新文件放进对应的"00_上传区"目录。旧版本仍会完整留档。</n-alert><n-alert type="warning" :bordered="false" style="margin-top:var(--s3)"><b>撤下：</b>从"10_已接收"移走或删除。已结账期只标记有新证据，不自动反结账。</n-alert></template></n-modal>
+  <n-modal :show="Boolean(managing)" preset="card" title="在 NAS 中替换或撤下" style="max-width:680px" @update:show="(show) => { if (!show) managing = null }"><template v-if="managing"><p class="small"><b>{{ managing.name }}</b></p><p class="small muted preview-path">{{ managing.index?.path || '索引路径暂不可用' }}</p><n-alert type="info" :bordered="false" style="margin-top:var(--s3)"><b>替换：</b>把新文件放进对应的"00_上传区"目录。旧版本仍会完整留档。</n-alert><n-alert type="warning" :bordered="false" style="margin-top:var(--s3)"><b>撤下：</b>从"10_已接收"移走或删除。已结账期只标记有新资料，不自动反结账。</n-alert></template></n-modal>
 </template>

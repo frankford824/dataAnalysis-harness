@@ -1,7 +1,10 @@
 <script setup>
-import { computed, ref, watch } from 'vue'
+import { computed, h, ref, watch } from 'vue'
 import { storeToRefs } from 'pinia'
-import { useMessage } from 'naive-ui'
+import { useMessage, NButton, NTag } from 'naive-ui'
+import { ChevronDown } from '@lucide/vue'
+import LedgerTabs from '../components/ui/LedgerTabs.vue'
+import LedgerTable from '../components/ui/LedgerTable.vue'
 import { useApp } from '../store'
 import { useCommission } from '../commissionStore'
 import { useCommissionQuery } from '../components/useCommissionQuery'
@@ -111,16 +114,28 @@ async function save() {
 function historicalPeople(segment) {
   return (segment.allocations || []).map(a => `${people.value.find(p => p.id === a.person_id)?.name || '原登记人员'} ${rateText(a.rate)}`).join('、')
 }
+
+const visibleChecked=computed(()=>rows.value.filter(rowSelected).map(keyOf))
+function checkTableRows(keys){const selected=new Set(keys);for(const row of rows.value)if(!row.store_id.startsWith('unmapped:'))toggleRow(row,selected.has(keyOf(row)))}
+const tableColumns=computed(()=>[
+  {type:'selection',width:42,mobileWidth:32,disabled:row=>locked.value||row.store_id.startsWith('unmapped:')},
+  {title:'商品',key:'product',minWidth:230,mobileWidth:140,render:row=>h('div',[
+    h('div',{class:'table-product'},row.product_name||'未填写商品名称'),h('div',{class:'table-secondary'},row.product_id==='*'?'店铺通用':row.product_id)])},
+  {title:'店铺',key:'store',width:210,mobile:false,render:row=>storeName(row.store_id)},
+  {title:'所属人员 / 比例',key:'people',width:195,mobileWidth:105,render:row=>row.people.length?row.people.map(p=>h('div',{class:'table-assignee'},[h('span',p.name),h('strong',rateText(p.rate))])):h('span',{class:'table-secondary'},'未分配')},
+  {title:'状态',key:'state',width:100,mobile:false,render:row=>h(NTag,{size:'small',bordered:false,type:row.state==='enabled'?'success':row.state==='pending'?'warning':'default'},()=>states[row.state])},
+  {title:'操作',key:'action',width:74,mobileWidth:56,fixed:'right',render:row=>h(NButton,{text:true,type:'primary',size:'small',disabled:locked.value||row.store_id.startsWith('unmapped:'),onClick:()=>edit(row)},()=> '修改')},
+])
 </script>
 
 <template>
   <div class="commission-content" @dragover.prevent @drop.stop.prevent="batchDialog?.importFile($event.dataTransfer.files?.[0])">
     <div class="commission-toolbar">
       <input v-model="search" class="commission-search" placeholder="搜索商品名称或宝贝ID" aria-label="搜索商品" />
-      <div class="commission-segments" aria-label="商品状态"><button v-for="item in [{key:'',label:'全部'},{key:'enabled',label:'提成中'},{key:'pending',label:'未设置'},{key:'disabled',label:'不提成'}]" :key="item.key" :class="{selected:state===item.key}" :aria-pressed="state===item.key" @click="state=item.key">{{ item.label }}</button><n-dropdown trigger="click" :options="otherStates" @select="state=$event"><button :class="{selected:['scheduled','expired'].includes(state)}">{{['scheduled','expired'].includes(state)?states[state]:'更多'}}⌄</button></n-dropdown></div>
+      <LedgerTabs v-model="state" appearance="segment" label="商品状态" :options="[{key:'',label:'全部'},{key:'enabled',label:'提成中'},{key:'pending',label:'未设置'},{key:'disabled',label:'不提成'},{key:'scheduled',label:'待生效'},{key:'expired',label:'已到期'}]" />
       <span class="spacer" />
       <n-button type="primary" :disabled="busy || !shared.ready" @click="edit()">新增设置</n-button>
-      <n-dropdown trigger="click" :options="menuOptions" @select="menu"><n-button :disabled="busy || !shared.ready">更多操作 <span aria-hidden="true">⌄</span></n-button></n-dropdown>
+      <n-dropdown trigger="click" :options="menuOptions" @select="menu"><n-button :disabled="busy || !shared.ready">更多操作 <ChevronDown :size="14" style="margin-left:6px" aria-hidden="true"/></n-button></n-dropdown>
       <input ref="fileInput" type="file" accept=".xlsx" class="file-input" aria-label="导入表格" @change="importFile" />
     </div>
     <div v-if="chosen.length || allScope" class="commission-selection">
@@ -131,27 +146,12 @@ function historicalPeople(segment) {
     </div>
     <div v-if="error" class="commission-error" role="alert">{{ error }}<button class="text-button" @click="load">重试</button></div>
     <div v-if="loading" class="commission-loading-line" />
-    <div class="commission-table-wrap" :aria-busy="loading" :class="{'commission-stale':stale}">
-      <table class="commission-table settings-table">
-        <thead><tr><th class="check"><input type="checkbox" aria-label="选择本页商品" :disabled="locked" :checked="!!rows.filter(r=>!r.store_id.startsWith('unmapped:')).length && rows.filter(r=>!r.store_id.startsWith('unmapped:')).every(rowSelected)" @change="togglePage($event.target.checked)" /></th><th style="width:32%">商品</th><th style="width:24%">店铺</th><th style="width:23%">所属人员 / 比例</th><th style="width:110px">状态</th><th class="sticky-action">操作</th></tr></thead>
-        <tbody><tr v-for="row in rows" :key="keyOf(row)">
-          <td class="check"><input type="checkbox" :disabled="locked || row.store_id.startsWith('unmapped:')" :aria-label="`选择商品 ${row.product_id}`" :checked="rowSelected(row)" @change="toggleRow(row,$event.target.checked)" /></td>
-          <td><span class="product-title">{{ row.product_name || '未填写商品名称' }}</span><span class="sub">{{ row.product_id==='*'?'店铺通用':row.product_id }}</span></td>
-          <td>{{ storeName(row.store_id) }}</td>
-          <td><div v-for="person in row.people" :key="person.person_id" class="setting-person"><span>{{ person.name }}</span><strong>{{ rateText(person.rate) }}</strong></div><span v-if="!row.people.length" class="sub">未分配</span></td>
-          <td><span class="commission-status" :class="row.state">{{ states[row.state] }}</span><span class="sub" v-if="row.listed===false">已下架</span></td>
-          <td class="sticky-action"><button class="text-button" :disabled="locked || row.store_id.startsWith('unmapped:')" @click="edit(row)">修改</button></td>
-        </tr>
-        <template v-if="!rows.length && loading"><tr v-for="i in 6" :key="i" class="commission-skeleton"><td v-for="j in 6" :key="j"><span /></td></tr></template>
-        <tr v-else-if="!rows.length"><td colspan="6" class="empty">没有找到商品<button v-if="search || state || shared.storeIds.length || shared.personIds.length" class="text-button empty-reset" @click="search='';state='';shared.clear()">清空筛选</button></td></tr>
-        </tbody>
-      </table>
-    </div>
+    <LedgerTable :rows="rows" :columns="tableColumns" :row-key="keyOf" :loading="loading" :checked-keys="visibleChecked" :max-height="520" empty="没有找到商品，可调整筛选条件" @update:checked-keys="checkTableRows" />
     <div class="commission-paging"><span class="row-count">本页 {{ rows.length }} 件商品</span><n-button size="small" :disabled="!pages.length || locked" @click="previousPage">上一页</n-button><span>{{ pages.length+1 }}</span><n-button size="small" :disabled="!next || locked" @click="nextPage">下一页</n-button></div>
 
     <CommissionBatchDialog ref="batchDialog" :stores="app.stores" :people="people" @saved="saved" />
     <CommissionPeople ref="peopleDialog" @changed="shared.changed();load()" @assignments="showAssignments" />
-    <n-modal v-model:show="showEditor" preset="card" title="设置提成" class="commission-editor" style="width:min(640px,94vw)">
+    <n-modal :mask-closable="!busy" :closable="!busy" :close-on-esc="!busy" v-model:show="showEditor" preset="card" title="设置提成" class="commission-editor" style="width:min(640px,94vw)">
       <div class="fields">
         <label>店铺<select v-model="form.store_id" :disabled="!!selected" aria-label="设置店铺"><option value="">选择店铺</option><option v-for="s in app.stores" :key="s.id" :value="s.id">{{ s.name }}</option></select></label>
         <label>宝贝ID<input v-model="form.product_id" :disabled="!!selected" aria-label="宝贝ID" /></label>

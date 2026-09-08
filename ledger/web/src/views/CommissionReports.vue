@@ -1,5 +1,8 @@
 <script setup>
-import { computed, ref, watch } from 'vue'
+import { computed, h, ref, watch } from 'vue'
+import { NButton, NTag } from 'naive-ui'
+import LedgerTabs from '../components/ui/LedgerTabs.vue'
+import LedgerTable from '../components/ui/LedgerTable.vue'
 import { useCommission } from '../commissionStore'
 import { useCommissionQuery } from '../components/useCommissionQuery'
 import { commissionRequest } from '../components/commissionRequest'
@@ -74,6 +77,20 @@ async function download() {
     document.body.appendChild(link);link.click();link.remove();setTimeout(()=>URL.revokeObjectURL(url),1000)
   }catch(e){downloadError.value=e.message}finally{downloading.value=false;if(stale.value)load()}
 }
+
+const rowKey=row=>[row.person_id,row.store_id,row.period].filter(Boolean).join(':')
+const tableColumns=computed(()=>{
+  const list=columns.value.map(([key,title],index)=>({title,key,
+    width:key==='amount'||key==='selected_amount'?145:key==='employee_no'?90:key==='period'?100:index===0?undefined:key==='store'?240:125,
+    minWidth:index===0?180:undefined,mobileWidth:key==='amount'||key==='selected_amount'?115:key==='period'?84:index===0?135:undefined,
+    mobile:index===0||['amount','selected_amount','period'].includes(key),align:['amount','selected_amount'].includes(key)?'right':'left',
+    render:row=>key==='status'?h(NTag,{bordered:false,size:'small',type:row.status?.includes('试算')?'warning':'default'},()=>status(row.status)):
+      h('div',{class:['amount','selected_amount'].includes(key)?['table-money',row[key]<0?'negative':'']:undefined},
+        index===0?[h('span',cell(row,key)),h('div',{class:'table-secondary table-mobile-only'},status(row.status))]:cell(row,key))
+  }))
+  if(['people','stores'].includes(state.reportView))list.push({title:'操作',key:'action',width:96,mobileWidth:78,fixed:'right',render:row=>h(NButton,{text:true,type:'primary',size:'small',disabled:locked.value,onClick:()=>drill(row)},()=> '查看明细')})
+  return list
+})
 </script>
 <template>
   <div class="commission-content report-content">
@@ -81,14 +98,10 @@ async function download() {
     <div v-if="monthError" class="commission-error" role="alert">{{ monthError }}</div>
     <div v-if="error || downloadError" class="commission-error" role="alert">{{ error || downloadError }}<button class="text-button" @click="downloadError='';load()">重试</button></div>
     <div class="report-overview" :class="{'commission-stale':stale}"><div class="report-total"><span>提成合计</span><strong><small v-if="report?.total!=null">¥</small>{{ money(report?.total) }}</strong></div><div class="report-count"><strong>{{ report?.people_count ?? '—' }}</strong><span>位人员</span></div><div class="report-count"><strong>{{ report?.store_count ?? '—' }}</strong><span>家店铺</span></div><button v-if="warnings" class="report-attention" @click="state.reportView='coverage'"><span class="attention-dot"/>{{ report?.missing_periods ? `${report.missing_periods} 个月份未出金额` : '金额待核对' }} <span>查看</span></button></div>
-    <div class="report-tabs-row"><div class="report-tabs" role="tablist" aria-label="汇总方式"><button v-for="item in kinds" :key="item.key" role="tab" :aria-selected="state.reportView===item.key" :class="{active:state.reportView===item.key}" @click="state.reportView=item.key;previous=null">{{ item.label }}</button></div><n-button type="primary" :disabled="!report || locked" :loading="downloading" @click="download">导出表格</n-button></div>
+    <div class="report-tabs-row"><LedgerTabs v-model="state.reportView" :options="kinds" label="汇总方式" @update:model-value="previous=null" /><n-button type="primary" :disabled="!report || locked" :loading="downloading" @click="download">导出表格</n-button></div>
     <div v-if="previous && state.reportView==='breakdown'" class="report-back"><button class="text-button" @click="back">‹ 返回{{ previous.view==='people'?'人员':'店铺' }}汇总</button></div>
     <div v-if="loading" class="commission-loading-line"/>
-    <div class="commission-table-wrap" :aria-busy="loading" :class="{'commission-stale':stale}"><table class="commission-table report-table"><thead><tr><th v-for="[key,label] in columns" :key="key" :data-field="key" :class="{amount:key==='amount'||key==='selected_amount'}">{{ label }}</th><th v-if="['people','stores'].includes(state.reportView)" class="sticky-action">操作</th></tr></thead><tbody>
-      <tr v-for="(row,index) in rows" :key="index"><td v-for="[key] in columns" :key="key" :data-field="key" :class="{amount:key==='amount'||key==='selected_amount',negative:(key==='amount'||key==='selected_amount')&&row[key]<0}"><span v-if="key==='status'" class="report-state" :class="{review:row.status?.includes('试算')||row.status?.includes('待核对')}">{{ cell(row,key) }}</span><template v-else>{{ cell(row,key) }}<span v-if="key===columns[0][0]" class="mobile-context">{{ status(row.status) }}<template v-if="state.reportView==='breakdown'"> · {{ row.store }}</template></span></template></td><td v-if="['people','stores'].includes(state.reportView)" class="sticky-action"><button class="text-button" :disabled="locked" @click="drill(row)">查看明细</button></td></tr>
-      <template v-if="!rows.length && loading"><tr v-for="i in 4" :key="i" class="commission-skeleton"><td v-for="j in columns.length" :key="j"><span/></td></tr></template>
-      <tr v-else-if="!rows.length"><td :colspan="columns.length+1" class="empty">{{state.reportView==='coverage'?'这些月份还没有记录':'没有找到提成记录'}}<button v-if="state.reportView!=='coverage'" class="text-button report-empty-action" @click="state.reportView='coverage'">查看月份进度</button></td></tr>
-    </tbody></table></div>
+    <LedgerTable :rows="rows" :columns="tableColumns" :row-key="rowKey" :loading="loading" :max-height="440" empty="没有找到提成记录，可调整店铺、人员或月份" />
     <div class="commission-paging"><span class="row-count">共 {{report?.count || 0}} {{state.reportView==='people'?'人':state.reportView==='stores'?'家店铺':'条'}}</span><n-button size="small" :disabled="page<=1||locked" @click="page--">上一页</n-button><span>{{page}} / {{Math.max(1,Math.ceil((report?.count||0)/50))}}</span><n-button size="small" :disabled="page*50>=(report?.count||0)||locked" @click="page++">下一页</n-button></div>
   </div>
 </template>
