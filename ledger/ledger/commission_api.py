@@ -17,9 +17,10 @@ from urllib.parse import urlparse
 import polars as pl
 from fastapi import APIRouter, File, HTTPException, Query, Request, Response, UploadFile
 from fastapi.responses import StreamingResponse
+from starlette.concurrency import run_in_threadpool
 from pydantic import BaseModel, Field
 
-from . import commission_catalog
+from . import commission_catalog, commission_batch
 from .commission_registry import Registry, RegistryError, RevisionConflict, json_text, local_time
 from .money import money_float
 
@@ -239,8 +240,47 @@ def install(app, workspace, model):
 
     @router.get("/settings")
     def settings(store_id: str = "", search: str = "", state: str = "", after: str = "",
-                 limit: int = Query(60, ge=1, le=500)):
-        return commission_catalog.settings(reg(), store_id=store_id, search=search, state=state, after=after, limit=limit)
+                 limit: int = Query(60, ge=1, le=500), person_id: str = ""):
+        return commission_catalog.settings(reg(), store_id=store_id, search=search, state=state, after=after, limit=limit, person_id=person_id)
+
+    @router.post("/settings/preview")
+    async def settings_preview(request: Request):
+        acting = actor(request)
+        return await run_in_threadpool(commission_batch.preview, reg(), model(), await request.json(), acting["id"])
+
+    @router.post("/settings/apply/{batch_id}")
+    def settings_apply(batch_id: str, request: Request):
+        return commission_batch.apply(reg(), model(), batch_id, actor(request)["id"])
+
+    @router.post("/settings/import-preview")
+    async def settings_import(request: Request, file: UploadFile = File(...)):
+        acting = actor(request)
+        raw = await file.read(20*1024*1024+1)
+        parsed = await run_in_threadpool(commission_batch.parse_excel, raw, Path(file.filename or '提成.xlsx').name, model())
+        if parsed.get('errors'):
+            return parsed
+        registry = reg()
+        original = registry.root / 'batch-inputs' / (parsed['source']['sha256']+'.xlsx')
+        original.parent.mkdir(parents=True, exist_ok=True)
+        if not original.exists(): original.write_bytes(raw)
+        return await run_in_threadpool(commission_batch.preview, registry, model(), parsed, acting['id'])
+
+    @router.get("/people/summary")
+    def people_summary():
+        from datetime import datetime, timezone, timedelta
+        moment = datetime.now(timezone(timedelta(hours=8))).replace(tzinfo=None).isoformat(timespec='seconds')
+        with reg().connect() as conn:
+            counts = {r['person_id']:dict(r) for r in conn.execute("""
+                SELECT json_extract(a.value,'$.person_id') person_id,
+                       count(DISTINCT s.id) products,count(DISTINCT s.store_id) stores
+                FROM scheme s JOIN scheme_version v ON v.id=s.active_version
+                JOIN json_each(v.body,'$.segments') t JOIN json_each(t.value,'$.allocations') a
+                WHERE json_extract(t.value,'$.valid_from')<=?
+                  AND (coalesce(json_extract(t.value,'$.valid_to'),'')='' OR json_extract(t.value,'$.valid_to')>?)
+                GROUP BY person_id""", (moment,moment))}
+            people = [{**dict(r), 'products':counts.get(r['id'],{}).get('products',0),
+                       'stores':counts.get(r['id'],{}).get('stores',0)} for r in conn.execute('SELECT * FROM person ORDER BY archived,name,id')]
+        return {'people':people}
 
     @router.post("/settings")
     def setting_save(change: SettingChange, request: Request):
@@ -433,11 +473,11 @@ def install(app, workspace, model):
         return csv_response("commission-details.csv", data.columns, data.iter_rows(named=True))
 
     @router.get("/export/settings")
-    def export_settings(store_id: str = "", search: str = "", state: str = ""):
+    def export_settings(store_id: str = "", search: str = "", state: str = "", person_id: str = ""):
         names = {s.id:s.name for s in model().stores}
         labels = {"enabled":"提成中","disabled":"不提成","pending":"未设置","scheduled":"待生效","expired":"已到期"}
         def rows():
-            for row in commission_catalog.iter_settings(reg(), store_id=store_id, search=search, state=state):
+            for row in commission_catalog.iter_settings(reg(), store_id=store_id, search=search, state=state, person_id=person_id):
                 current = row["setting"] or {}
                 for person in row["people"] or [{}]:
                     yield {"店铺":names.get(row["store_id"], row["store_id"]),"宝贝ID":row["product_id"],

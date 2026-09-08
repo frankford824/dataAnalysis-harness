@@ -8,16 +8,18 @@ import { NConfigProvider, NDialogProvider, NMessageProvider } from 'naive-ui'
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 
 import AppBody from './components/AppBody.vue'
+import { useRoute } from 'vue-router'
 import { useApp } from './store'
 import { theme } from './theme'
 
 const app = useApp()
+const route = useRoute()
 const dragging = ref(0)
 const overlay = computed(() => dragging.value > 0)
 const dropped = ref(null)
 
 function onEnter(e) {
-  if (app.ingestMode === 'nas') return
+  if (app.ingestMode === 'nas' || route.path === '/commission') return
   if (![...(e.dataTransfer?.types || [])].includes('Files')) return
   dragging.value += 1
 }
@@ -30,7 +32,7 @@ function onOver(e) {
 function onDrop(e) {
   e.preventDefault()
   dragging.value = 0
-  if (app.ingestMode === 'nas') return
+  if (app.ingestMode === 'nas' || route.path === '/commission') return
   const files = [...(e.dataTransfer?.files || [])]
   if (files.length) dropped.value = files
 }

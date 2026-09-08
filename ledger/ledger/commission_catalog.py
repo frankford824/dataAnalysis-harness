@@ -106,7 +106,7 @@ def products(registry: Registry, *, store_id="", search="", missing=False, after
             "next_after": rows[-1]["store_id"] + "\x1f" + rows[-1]["product_id"] if rows and has_more else ""}
 
 
-def iter_settings(registry: Registry, *, store_id="", search="", state="", after="", limit=-1, at=None):
+def iter_settings(registry: Registry, *, store_id="", search="", state="", after="", limit=-1, at=None, person_id=""):
     from datetime import datetime, timezone, timedelta
     moment = at or datetime.now(timezone(timedelta(hours=8))).replace(tzinfo=None).isoformat(timespec="seconds")
     # Include historical bindings even when the live catalogue no longer lists the item.
@@ -121,7 +121,7 @@ def iter_settings(registry: Registry, *, store_id="", search="", state="", after
         CASE WHEN json_extract(j.value,'$.mode')='distribute' THEN 'enabled'
              WHEN json_extract(j.value,'$.mode')='exclude' THEN 'disabled'
              WHEN j.value IS NOT NULL OR v.body IS NULL THEN 'pending'
-             WHEN json_extract(v.body,'$.segments[0].valid_from')>? THEN 'scheduled'
+             WHEN EXISTS (SELECT 1 FROM json_each(v.body,'$.segments') f WHERE json_extract(f.value,'$.valid_from')>?) THEN 'scheduled'
              ELSE 'expired' END state
       FROM items c LEFT JOIN scheme s ON s.store_id=c.store_id AND s.product_id=c.product_id
       LEFT JOIN scheme_version v ON v.id=s.active_version
@@ -130,19 +130,21 @@ def iter_settings(registry: Registry, *, store_id="", search="", state="", after
         AND (coalesce(json_extract(j.value,'$.valid_to'),'')='' OR json_extract(j.value,'$.valid_to')>?)
     ) SELECT * FROM rows WHERE (store_id || char(31) || product_id)>?
       AND (?='' OR product_id LIKE ? OR product_name LIKE ?)
-      AND (?='' OR state=?) ORDER BY store_id,product_id LIMIT ?"""
+      AND (?='' OR state=?)
+      AND (?='' OR EXISTS (SELECT 1 FROM json_each(coalesce(setting,(SELECT f.value FROM json_each(body,'$.segments') f WHERE json_extract(f.value,'$.valid_from')>? ORDER BY json_extract(f.value,'$.valid_from') LIMIT 1),'{}'),'$.allocations') a WHERE json_extract(a.value,'$.person_id')=?))
+      ORDER BY store_id,product_id LIMIT ?"""
     with registry.connect(thread_affine=False) as conn:
         conn.execute("BEGIN")
         people = {r['id']:r['name'] for r in conn.execute('SELECT id,name FROM person')}
         cursor = conn.execute(sql, (store_id,store_id,store_id,store_id,moment,moment,moment,
-                              after,search,'%'+search+'%','%'+search+'%',state,state,limit))
+                              after,search,'%'+search+'%','%'+search+'%',state,state,person_id,moment,person_id,limit))
         for record in cursor:
             row = dict(record)
             body = json.loads(row.pop('body') or '{}')
             row['listed'] = json.loads(row.pop('payload') or '{}').get('listed')
             row['setting'] = json.loads(row['setting']) if row['setting'] else None
             if row['state']=='scheduled':
-                row['setting'] = body['segments'][0]
+                row['setting'] = next(s for s in body['segments'] if s['valid_from']>moment)
             grouped = {}
             from decimal import Decimal
             for a in (row['setting'] or {}).get('allocations', []):
@@ -154,8 +156,8 @@ def iter_settings(registry: Registry, *, store_id="", search="", state="", after
             yield row
 
 
-def settings(registry: Registry, *, store_id="", search="", state="", after="", limit=60, at=None) -> dict:
-    rows = list(iter_settings(registry, store_id=store_id, search=search, state=state, after=after, limit=limit+1, at=at))
+def settings(registry: Registry, *, store_id="", search="", state="", after="", limit=60, at=None, person_id="") -> dict:
+    rows = list(iter_settings(registry, store_id=store_id, search=search, state=state, after=after, limit=limit+1, at=at, person_id=person_id))
     more = len(rows)>limit
     rows = rows[:limit]
     return {'rows':rows,'has_more':more,'next_after':rows[-1]['store_id']+'\x1f'+rows[-1]['product_id'] if rows and more else ''}

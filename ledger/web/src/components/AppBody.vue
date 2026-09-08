@@ -132,7 +132,7 @@ defineExpose({ take })
     </nav>
 
     <div class="body">
-      <header class="topbar">
+      <header v-if="$route.path !== '/commission'" class="topbar">
         <FilterBar />
         <!-- 上传只有这一个固定入口，每一页都在同一个地方。上一版侧栏最下角那个
              「交表」，位置和用词都在让人猜：交给谁、是不是报送、和结账什么关系。
