@@ -157,7 +157,8 @@
     # 取消的单子没有成本。空状态要留下：不知道状态不等于已取消，因为不知道就丢掉
     # 一笔成本，账上只会表现为利润高了一点。
     #
-    # 两个词都要认。聚水潭这一列在天猫皇莉诗那份导出里写的是「取消」两个字，
+    # 订单台接口保留原始状态码 Cancelled，也必须排除，不能只识别中文导出。
+    # 两个中文词都要认。聚水潭这一列在天猫皇莉诗那份导出里写的是「取消」两个字，
     # 别的四家店写的是「已取消」——而原先这条只认「已取消」，于是天猫那 9,203 行
     # 取消订单的成本 79,999.07 元（落进 2026-06 的是 6,074 行、54,622.45 元）
     # 一直被当成真成本计进去了，利润凭空少这么多。
@@ -165,7 +166,7 @@
     # 之前四家店没暴露这个问题，不是因为条件写对了，是因为那四家的店长按导表说明
     # 「注3：对于订单状态已取消的需删除对应行数据」手工删掉了取消行——一条永远
     # 匹配不上的过滤条件，和没有这条过滤是一回事，而它看起来像在把关。
-    - {field: order_state, op: not_in, value: [已取消, 取消], include_null: true}
+    - {field: order_state, op: not_in, value: [已取消, 取消, Cancelled], include_null: true}
   exclude_when:
     - source: after_sales
       when:
@@ -217,7 +218,7 @@
       #
       # 补发那条不要，取消那条要留着——清空整个 where 会把它一起清掉。
       where:
-        - {field: order_state, op: not_in, value: [已取消, 取消], include_null: true}
+        - {field: order_state, op: not_in, value: [已取消, 取消, Cancelled], include_null: true}
 
     # 京东和拼多多的聚水潭表都挂原始线上订单号，公式也都除了 countifs，
     # 和 1688 一路。两家的规则表都写着「状态为已取消的数据进行清除」，
@@ -268,7 +269,7 @@
   value: {op: sum_product, of: [unit_cost, quantity]}
   where:
     - {field: order_type, op: in, value: [补发订单]}
-    - {field: order_state, op: not_in, value: [已取消, 取消], include_null: true}
+    - {field: order_state, op: not_in, value: [已取消, 取消, Cancelled], include_null: true}
   sign: negate
   time_basis: order_date
   link: {key: original_order_id, to: order.order_id, grain: order,
