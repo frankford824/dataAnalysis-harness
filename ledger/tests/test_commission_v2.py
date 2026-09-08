@@ -124,3 +124,43 @@ def test_global_policy_with_no_relationship_still_records_unassigned(tmp_path):
     summary, details, _ = calculate(_run([("a","p1","2026-05-02",100)]), _model(), "s1", "2026-05", r)
     assert summary["unassigned_base"] == 100
     assert details["amount"].item() is None
+
+
+def test_live_feed_recompute_persists_commission_and_financial_evidence(tmp_path, monkeypatch):
+    from pathlib import Path
+    from ledger import service
+    from ledger.order_feed import OrderFeed
+    from ledger.workspace import Workspace
+    from ledger.model.loader import load_model
+    from ledger.model.schema import Store
+    from test_order_feed import _fixture, FakeClient
+    root = tmp_path / "feed"
+    manifest = _fixture(root)
+    ws = Workspace(tmp_path / "workspace")
+    OrderFeed(ws.root, client=FakeClient(manifest), feed_root=root).sync()
+    monkeypatch.setenv("LEDGER_ORDER_FEED_ENABLED", "1")
+    monkeypatch.setenv("LEDGER_ORDER_FEED_ROOT", str(root))
+    model = load_model(Path(__file__).resolve().parents[2] / "models" / "cn-ecommerce")
+    store = Store(id="taobao_test", name="淘宝测试店", platform="taobao")
+    model = model.model_copy(update={"stores": (store,), "metrics": (
+        Metric(id="test_income", name="测试收入", source="order_detail", value=ValueExpr(op="sum", of=["buyer_paid"]),
+               link={"key":"sub_order_id", "to":"order.sub_order_id", "grain":"order"}),),
+        "statement": (StatementNode(id="net_profit", name="利润", commission_base=True,
+                                     formula={"op":"add","of":["test_income"]}),)})
+    registry = Registry(ws.root)
+    person = registry.person_save({"name": "甲"}, "tester", "登记")
+    registry.save_scheme(store.id, "P1", {"segments": [segment("2026-06-01", person["id"])]},
+                         "tester", "试算", publish=True)
+    registry.save_policy({"base_node":"net_profit","wages":"skip_preview"}, "2026-06-01", "tester", "利润")
+    result = service.recompute(ws, model, store)
+    assert not result.failure
+    state = ws.state(store.id, "2026-06")
+    assert state and state.result["commission"]["base_node"] == "net_profit"
+    calculation = state.result["commission"]["calculation_id"]
+    with registry.connect() as conn:
+        row = conn.execute("SELECT * FROM calculation WHERE id=?", (calculation,)).fetchone()
+        assert row["finance_run"] == state.run_id
+        assert json.loads(row["summary_json"]) == state.result["commission"]
+    details = pl.read_parquet(registry.root / "calculations" / row["path"])
+    assert details.height > 0
+    assert ws.facts_path(state.run_id).exists()
