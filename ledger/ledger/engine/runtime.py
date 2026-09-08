@@ -1145,6 +1145,16 @@ def _completeness(
         contributing |= set(scoped.get_column("source_id").unique().to_list())
 
     for source in model.sources:
+        if why := (eval_errors or {}).get(source.id):
+            # Optional sources may be absent, but uploaded failures must not
+            # leave a plausible zero or partial total on the statement.
+            out.missing.append(source.id)
+            out.reasons[source.id] = (
+                "表认出来了，但这个月的数算不出来："
+                + why[0].split("：", 1)[-1]
+                + (f"（另有 {len(why) - 1} 条指标同样停在这里）" if len(why) > 1 else "")
+            )
+            continue
         if not source.required_for_close:
             continue
         if source.id in contributing:
@@ -1159,20 +1169,6 @@ def _completeness(
         out.missing.append(source.id)
         if source.id not in uploaded:
             out.reasons[source.id] = "还没传"
-        elif (eval_errors or {}).get(source.id):
-            # 算的时候停下来了，别说成表里没这个月的数据——那是让人回去翻文件。
-            #
-            # 实测京东换了对账表的导出口，新版少了「结算状态」一列，而那三条指标都
-            # 筛「只算已结算」。六条指标全部停在这一列上，事实里一行都没有，界面照
-            # 老路报「传了，但里面没有 2026-06 的数据」。表里 24,578 行、13,045 行
-            # 就在 2026-06。人照着这句话找了一下午：前后传了六次、手改了三轮列名，
-            # 而列名和这件事毫无关系。
-            why = (eval_errors or {})[source.id]
-            out.reasons[source.id] = (
-                "表认出来了，但这个月的数算不出来："
-                + why[0].split("：", 1)[-1]
-                + (f"（另有 {len(why) - 1} 条指标同样停在这里）" if len(why) > 1 else "")
-            )
         elif _source_has_period(all_facts, source.id, period):
             out.reasons[source.id] = "传了，但里面没有这个店的数据"
         else:

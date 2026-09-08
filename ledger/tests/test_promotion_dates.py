@@ -9,7 +9,7 @@ from ledger.engine.normalize import normalize
 from ledger.engine.runtime import Ingested, Ingestion, run
 from ledger.engine.types import FileRef, RawRow, RawTable, Recognition
 from ledger.model.loader import load_model
-from ledger.model.schema import ColumnBinding, Model, SourceContract, StatementNode, Store, Template
+from ledger.model.schema import ColumnBinding, Metric, Model, SourceContract, StatementNode, Store, Template
 
 
 def ingested(template, headers, rows):
@@ -26,16 +26,17 @@ def calculate(rows, *, live=False, dated=True, platform="douyin"):
     model = Model(id="test", name="test", stores=(Store(id="s", name="shop", platform=platform),),
                   sources=(SourceContract(id="order_detail", name="订单", is_spine=True,
                                           owner_role="shop_owner", cadence="monthly"),
-                           SourceContract(id="promotion", name="推广", owner_role="shop_owner", cadence="monthly")),
-                  metrics=(builtin.metric("ad_cost"),),
+                           SourceContract(id="promotion", name="推广", owner_role="shop_owner", cadence="monthly", required_for_close=False)),
+                  metrics=(builtin.metric("ad_cost"), Metric(id="order_amount", name="订单金额", source="order_detail",
+                           value={"op": "sum", "of": ["buyer_paid"]}, time_basis="order_date")),
                   statement=(StatementNode(id="ad", name="推广", formula={"op": "add", "of": ["ad_cost"]}),))
-    fields = ["order_id", "product_id", "store_name", "order_time"]
+    fields = ["order_id", "product_id", "store_name", "order_time", "buyer_paid"]
     template = Template(id=("order_console_" if live else "") + "orders", source="order_detail", name="orders",
                         match_columns=("order_id",), time_slots={"order_date": "order_time"},
                         bindings=tuple(ColumnBinding(role=r, columns=(r,)) for r in fields))
     orders = ingested(template, fields, [
-        ["A", "P1", "shop", "2026-06-01"], ["B", "P1", "shop", "2026-07-01"],
-        ["C", "P1", "shop", "2026-08-01"], ["D", "P2", "shop", "2026-08-01"],
+        ["A", "P1", "shop", "2026-06-01", 1], ["B", "P1", "shop", "2026-07-01", 1],
+        ["C", "P1", "shop", "2026-08-01", 1], ["D", "P2", "shop", "2026-08-01", 1],
     ])
     promo = ingested(builtin.template("promotion_" + platform + "_v1"),
                      ["商品ID", "整体消耗" if platform == "douyin" else "总花费(元)"] + (["日期"] if dated else []), rows)
@@ -58,7 +59,7 @@ def test_declared_time_source_is_never_coerced_to_money_by_its_name():
 def test_multi_month_product_spend_is_projected_only_to_same_month(live):
     result = calculate([["P1", 10, "2026-06-02"], ["P1", 20, "2026-07-02"],
                         ["P1", 30, "2026-08-02"], ["P2", 40, "2026-06-02"]], live=live)
-    assert dict(result.spine_facts.group_by("period").agg(pl.col("amount").sum()).iter_rows()) == {
+    assert dict(result.spine_facts.filter(pl.col("metric_id") == "ad_cost").group_by("period").agg(pl.col("amount").sum()).iter_rows()) == {
         "2026-06": -10, "2026-07": -20, "2026-08": -30,
     }
     orphan = result.facts.filter(pl.col("link_key") == "P2")
@@ -73,11 +74,32 @@ def test_invalid_dated_spend_blocks_instead_of_inheriting_order_month(platform, 
     result = calculate([["P1", 10, bad_date]], platform=platform)
     assert "promotion" in result.eval_errors
     assert "发生日期缺失或无效" in result.eval_errors["promotion"][0]
-    assert result.spine_facts.is_empty()
+    assert result.spine_facts.filter(pl.col("metric_id") == "ad_cost").is_empty()
+    june = result.slices[("shop", "2026-06")]
+    assert not june.nodes["ad"].available
+    assert june.nodes["ad"].value is None
+    assert "发生日期缺失或无效" in june.completeness.reasons["promotion"]
 
 
 @pytest.mark.parametrize("platform", ["douyin", "pdd"])
 def test_optional_date_absent_summary_export_keeps_existing_policy(platform):
     result = calculate([["P1", 10]], dated=False, platform=platform)
     assert not result.eval_errors
-    assert result.spine_facts["amount"].sum() == -10
+    assert result.spine_facts.filter(pl.col("metric_id") == "ad_cost")["amount"].sum() == -10
+
+
+def test_blank_optional_product_name_does_not_discard_invalid_date_detail():
+    template = load_model(MODELS / "cn-ecommerce").template("promotion_pdd_v1")
+    item = ingested(template, ["商品ID", "商品名称", "总花费(元)", "日期"], [["P1", None, 10, None]])
+    assert item.frame.height == 1
+    assert item.frame["spend"].item() == 10
+
+
+def test_failed_optional_upload_cannot_be_hidden_by_another_contributing_file():
+    from ledger.engine.runtime import _completeness
+    model = load_model(MODELS / "cn-ecommerce")
+    facts = pl.DataFrame({"source_id": ["promotion"], "period": ["2026-06"]})
+    completeness = _completeness(model, Ingestion(model=model), facts, facts, facts,
+                                 "shop", "2026-06", 1, {"promotion": ["日期缺失或无效"]})
+    assert "promotion" in completeness.missing
+    assert "promotion" not in completeness.arrived

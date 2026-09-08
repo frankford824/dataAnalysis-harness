@@ -140,7 +140,7 @@ def _drop_total_rows(frame: pl.DataFrame, template: Template, notes: list[str]) 
         for extra in ("product_id", "product_name"):
             if extra in frame.columns:
                 is_total = is_total | (
-                    pl.col(extra).cast(pl.Utf8).str.strip_chars().is_in(list(_TOTAL_LABELS))
+                    pl.col(extra).cast(pl.Utf8).str.strip_chars().is_in(list(_TOTAL_LABELS)).fill_null(False)
                 )
                 used = used or extra
     if not used:
