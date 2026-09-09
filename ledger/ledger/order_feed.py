@@ -717,7 +717,8 @@ class OrderFeed:
 
     def fingerprint(self) -> str:
         state = self.state()
-        return f"order-feed:{state.get('snapshot_id','')}:{int(state.get('consumed_seq') or 0)}"
+        from .order_components import fingerprint
+        return f"order-feed:{state.get('snapshot_id','')}:{int(state.get('consumed_seq') or 0)}" + fingerprint(self.workspace_root)
 
     def append_to(self, ingestion: Ingestion, store: Store) -> None:
         """Overlay live facts while preserving human-certified platform identities.
@@ -732,7 +733,21 @@ class OrderFeed:
         state = self.state()
         if not state.get("snapshot_id") or not state.get("manifest_json"):
             raise OrderFeedError("订单台快照尚未同步")
-        frames = self._frames(store, json.loads(state["manifest_json"]))
+        exported: dict[str, set[str]] = {}
+        for item in ingestion.frames_of("order_detail"):
+            if item.frame is None or not {"order_id", "sub_order_id"} <= set(item.frame.columns):
+                continue
+            if item.template.id.startswith("order_console_"):
+                continue
+            frame = item.frame
+            if "store_name" in frame.columns:
+                frame = frame.filter(pl.col("store_name").is_in([store.name, *store.aliases]))
+            for child, parent in frame.select("sub_order_id", "order_id").unique().iter_rows():
+                child, parent = normalize_key(child), normalize_key(parent)
+                if child and parent:
+                    exported.setdefault(child, set()).add(parent)
+        frames = self._frames(store, json.loads(state["manifest_json"]),
+                              {child: next(iter(parents)) if len(parents) == 1 else None for child, parents in exported.items()})
         if not frames:
             raise OrderFeedError(f"订单台没有 {store.name} 的已确认店铺映射")
         feed_order = next(item for item in frames if item.recognition.source_id == "order_detail")
@@ -750,7 +765,14 @@ class OrderFeed:
             + (f"上传的售后单一并参与判定：{'、'.join(kept)}" if kept
                else "本店没有上传聚水潭售后单，其余售后的成本规则暂无依据")
         )
-        self._align_after_sale_skus(ingestion, feed_cost.frame)
+        from .order_components import load as load_order_components
+        with self._connect() as conn:
+            source_stores = [str(row[0]) for row in conn.execute(
+                "SELECT order_store_id FROM feed_store WHERE ledger_store_id=? AND mapping_status='confirmed'", (store.id,))]
+        components = load_order_components(self.workspace_root, store.id, source_stores, feed_cost.frame)
+        self._align_after_sale_skus(ingestion, feed_cost.frame, components)
+        from .engine.component_returns import normalize as normalize_component_returns
+        normalize_component_returns(ingestion, feed_cost.frame, components)
         from .engine.preship_refunds import apply as apply_preship_refunds
         apply_preship_refunds(feed_cost, [*ingestion.frames_of("after_sales"), feed_after])
         self._enrich_existing_orders(ingestion, feed_order.frame)
@@ -781,7 +803,7 @@ class OrderFeed:
             item.frame = item.frame.with_columns(pl.lit(True).alias("__live_period_scope__"))
 
     @staticmethod
-    def _align_after_sale_skus(ingestion: Ingestion, cost: pl.DataFrame | None) -> None:
+    def _align_after_sale_skus(ingestion: Ingestion, cost: pl.DataFrame | None, components: pl.DataFrame | None = None) -> None:
         """Resolve an old ERP SKU code through the same internal order and item ID.
 
         Uploaded cost prices remain unused. Only immutable item identities bridge
@@ -797,10 +819,13 @@ class OrderFeed:
             if all((internal, item, sub, sku)):
                 current.setdefault((internal, item), set()).add((sub, sku))
         candidates: dict[tuple[str, str, str], set[tuple[str, str]]] = {}
-        for original in ingestion.frames_of("order_cost"):
-            if original.frame is None or not set(columns) <= set(original.frame.columns):
+        originals = [item.frame for item in ingestion.frames_of("order_cost")]
+        if components is not None:
+            originals.append(components)
+        for original in originals:
+            if original is None or not set(columns) <= set(original.columns):
                 continue
-            for record in original.frame.select(columns).unique().iter_rows():
+            for record in original.select(columns).unique().iter_rows():
                 internal, item, sub, sku = map(normalize_key, record)
                 matches = current.get((internal, item), set())
                 if not all((internal, item, sub, sku)) or len(matches) != 1:
@@ -897,7 +922,7 @@ class OrderFeed:
                     update={"bindings": item.template.bindings + extra}
                 )
 
-    def _frames(self, store: Store, manifest: dict[str, Any]) -> list[Ingested]:
+    def _frames(self, store: Store, manifest: dict[str, Any], exported_orders: dict[str, str | None] | None = None) -> list[Ingested]:
         with self._connect() as conn:
             conn.execute("BEGIN")
             captured = conn.execute("SELECT snapshot_id,consumed_seq FROM feed_state WHERE id=1").fetchone()
@@ -969,8 +994,9 @@ class OrderFeed:
             child_records.extend(payload.get("items") or [])
         after_items = self._append_records(after_items, child_records)
 
-        order_frame = self._order_frame(orders, items, after, relations, store, fingerprint)
-        cost_frame = self._cost_frame(orders, items, costs, relations, store, fingerprint)
+        reship_origins = self._reshipment_origins(after, items, exported_orders)
+        order_frame = self._order_frame(orders, items, after, relations, store, fingerprint, reship_origins)
+        cost_frame = self._cost_frame(orders, items, costs, relations, store, fingerprint, reship_origins)
         after_frame = self._after_frame(after, after_items, items, store, fingerprint)
         cost_item = self._item("order_cost", "order_console_cost_v1", "订单台日期时点成本", cost_frame,
                                self._cost_template(), fingerprint)
@@ -1055,10 +1081,53 @@ class OrderFeed:
             pl.lit("订单台").alias(ANCHOR_SHEET),
         )
 
+    @staticmethod
+    def _reshipment_origins(after: pl.DataFrame, items: pl.DataFrame | None = None,
+                           exported_orders: dict[str, str | None] | None = None) -> dict[str, str]:
+        """Resolve reserved ERP after-sale item markers only from confirmed reship records."""
+        required = {"after_sale_id", "online_order_no", "after_sale_type_raw"}
+        if not required <= set(after.columns):
+            return {}
+        # A merged order header can name a different sale. The exact original
+        # item referenced by the after-sale retains its own platform order.
+        item_orders: dict[tuple[str, str], set[str]] = {}
+        if items is not None and {"order_id", "sub_order_id", "online_order_no"} <= set(items.columns):
+            columns = ["order_id", "sub_order_id", "online_order_no"] + (["outer_sku"] if "outer_sku" in items.columns else [])
+            for row in items.select(columns).unique().iter_rows(named=True):
+                key = (normalize_key(row["order_id"]), normalize_key(row["sub_order_id"]))
+                value = normalize_key(row["online_order_no"])
+                child = normalize_key(row.get("outer_sku"))
+                if child in (exported_orders or {}):
+                    value = exported_orders[child]
+                    item_orders.setdefault(key, set()).add(value or "")
+                    continue
+                if all(key) and value:
+                    item_orders.setdefault(key, set()).add(value)
+        choices: dict[str, set[str]] = {}
+        for row in after.iter_rows(named=True):
+            if row["after_sale_type_raw"] not in {"补发", "补发订单"}:
+                continue
+            event = normalize_key(row["after_sale_id"])
+            original = normalize_key(row["online_order_no"])
+            candidates = item_orders.get((normalize_key(row.get("order_id")), normalize_key(row.get("sub_order_id"))), set())
+            if candidates:
+                if len(candidates) != 1:
+                    continue
+                original = next(iter(candidates))
+                prefix = normalize_key(row.get("order_store_id"))
+                if prefix and original.startswith(prefix + ":"):
+                    original = original[len(prefix) + 1:]
+                if ":" in original:
+                    continue
+            if not event or not original or any(c in original for c in (",", "，", ";", "；")):
+                continue
+            choices.setdefault("$asr-" + event.casefold(), set()).add(original)
+        return {key: next(iter(values)) for key, values in choices.items() if len(values) == 1}
+
     def _order_frame(
         self, orders: pl.DataFrame, items: pl.DataFrame, after: pl.DataFrame,
         relations: pl.DataFrame,
-        store: Store, fingerprint: str,
+        store: Store, fingerprint: str, reship_origins: dict[str, str] | None = None,
     ) -> pl.DataFrame:
         reships = (
             relations.filter(pl.col("relation_type") == "reship")
@@ -1084,7 +1153,7 @@ class OrderFeed:
             pl.col("refund_status").cast(pl.Utf8).fill_null("没有申请退款"),
             pl.col("tracking_no").fill_null(pl.col("tracking_no_order")).cast(pl.Utf8),
             pl.col("order_status_raw").cast(pl.Utf8).alias("order_state"),
-            pl.when(pl.col("order_id").cast(pl.Utf8).is_in(reships))
+            pl.when(pl.col("order_id").cast(pl.Utf8).is_in(reships) | pl.col("outer_sku").cast(pl.Utf8).str.to_lowercase().is_in(list(reship_origins or {})).fill_null(False))
             .then(pl.lit("补发订单")).otherwise(pl.lit("销售订单")).alias("order_type"),
             self._dt("order_time").alias("order_time"),
             self._dt("pay_time").alias("pay_time"),
@@ -1124,7 +1193,7 @@ class OrderFeed:
     def _cost_frame(
         self, orders: pl.DataFrame, items: pl.DataFrame, costs: pl.DataFrame,
         relations: pl.DataFrame,
-        store: Store, fingerprint: str,
+        store: Store, fingerprint: str, reship_origins: dict[str, str] | None = None,
     ) -> pl.DataFrame:
         certified = costs.filter(
             (pl.col("cost_status") == "priced")
@@ -1215,6 +1284,16 @@ class OrderFeed:
             .then(pl.lit("补发订单")).otherwise(pl.lit("销售订单")).alias("order_type"),
             pl.lit(store.name).alias("store_name"),
         ).with_columns(pl.col("order_time").alias("order_date"))
+        if reship_origins:
+            frame = frame.with_columns(pl.col("sub_order_id").str.to_lowercase().replace_strict(
+                reship_origins, default=None, return_dtype=pl.Utf8).alias("__reship_original"))
+            frame = frame.with_columns(
+                pl.coalesce("__reship_original", "original_order_id").alias("original_order_id"),
+                pl.when(pl.col("__reship_original").is_not_null()).then(pl.lit("补发订单")).otherwise(pl.col("order_type")).alias("order_type"),
+                pl.when(pl.col("__reship_original").is_not_null()).then(pl.concat_str([
+                    pl.lit("补发商品；原订单："), pl.col("__reship_original"), pl.lit("；实际发货单："), pl.col("internal_order_id")
+                ])).otherwise(pl.lit(None, dtype=pl.Utf8)).alias("source_note"),
+            ).drop("__reship_original")
         return self._anchors(frame, fingerprint, "订单台日期时点成本")
 
     def _after_frame(

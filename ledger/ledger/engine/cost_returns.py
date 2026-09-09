@@ -109,6 +109,9 @@ def build(ingestion, platform):
             if key not in costs:
                 errors.append(f"售后单{event} 商品{base_key[2]}缺少唯一的内部商品行对应关系")
                 continue
+            if row.get("__component_return_pending"):
+                errors.append(f"售后单{event} 组合商品{key[2]}的组件清单不完整或实退数量不一致")
+                continue
             quantity = number(row.get("returned_quantity"))
             if quantity == 0:
                 continue
@@ -147,7 +150,7 @@ def build(ingestion, platform):
                    order_id=original[0].get("order_id"), store_name=original[0].get("store_name"),
                    after_sale_id=identity[0], returned_quantity=float(quantity),
                    return_time=when, settle_date=when, total_cost=float(amount),
-                   source_note=f"退货日期：{when}；本次冲回数量：{quantity}；原成本单价：{sold_amount / sold_quantity}；售后单：{identity[0]}；原订单：{original[0].get('order_id')}" + (f"；原表实退数量：{requested}，累计冲回以原销售数量为限" if requested != quantity else ""))
+                   source_note=f"退货日期：{when}；本次冲回数量：{quantity}；原成本单价：{sold_amount / sold_quantity}；售后单：{identity[0]}；原订单：{original[0].get('order_id')}" + (f"；原表实退数量：{requested}，累计冲回以原销售数量为限" if requested != quantity else "") + ("；"+evidence["component_note"] if evidence.get("component_note") else ""))
         generated.append(row)
     schema = {ANCHOR_SHA:pl.Utf8, ANCHOR_FILE:pl.Utf8, ANCHOR_SHEET:pl.Utf8, ANCHOR_ROW:pl.Int64,
               "internal_order_id":pl.Utf8, "sub_order_id":pl.Utf8, "sku":pl.Utf8, "order_id":pl.Utf8,

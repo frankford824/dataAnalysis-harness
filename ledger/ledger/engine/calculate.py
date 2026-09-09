@@ -177,6 +177,9 @@ def evaluate_metric(
     store = pl.coalesce(store, pl.lit(store_hint or None, dtype=pl.Utf8))
 
     grain = metric.link.grain if metric.link else "period"
+    source_note = pl.col("source_note").cast(pl.Utf8) if "source_note" in frame.columns else pl.lit(None, dtype=pl.Utf8)
+    if metric.posting_basis == "transaction" and slot in frame.columns:
+        source_note = pl.coalesce(source_note, pl.concat_str([pl.lit("发生日期："), pl.col(slot).dt.strftime("%Y-%m-%d")]))
     facts = frame.select(
         pl.lit(metric.id).alias("metric_id"),
         pl.lit(metric.source).alias("source_id"),
@@ -215,8 +218,9 @@ def evaluate_metric(
         pl.col(ANCHOR_ROW).alias("row_no"),
         *[
             (pl.col(role).cast(pl.Utf8) if role in frame.columns else pl.lit(None, dtype=pl.Utf8)).alias(role)
-            for role in ("order_id", "internal_order_id", "sku", "source_note")
+            for role in ("order_id", "internal_order_id", "sku")
         ],
+        source_note.alias("source_note"),
     ).filter(pl.col("amount") != 0.0)
     return facts, notes
 
