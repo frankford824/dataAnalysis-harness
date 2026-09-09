@@ -60,3 +60,56 @@ def test_actual_zero_refund_remains_traceable_but_missing_amount_does_not_become
     assert result.facts['period'].to_list()==['2026-06']
     missing=calculate('260601-610889920124065',6,'trade_refund_pdd',None)
     assert missing.facts.is_empty()
+
+
+def test_filename_month_cannot_supply_an_unknown_original_order_month():
+    from ledger.engine.calculate import evaluate_metric
+    from ledger.engine.link import LINK_KEY, LINKED
+    metric=load_model(MODELS/'cn-ecommerce').metric('trade_refund_pdd')
+    rows=[dict(order_id='unknown',base_order_id='unknown',store_name='shop',
+               order_time=datetime(2026,6,1),settle_date=datetime(2026,6,20),income=0.,outgo=-10.)]
+    source=item('settlement',rows,rows[0])
+    frame=source.frame.with_columns(pl.lit('unknown').alias(LINK_KEY),pl.lit(False).alias(LINKED))
+    facts,_=evaluate_metric(frame,metric,source.template,store_hint='shop',period_hint='2026-06')
+    assert facts['period'].to_list()==['(未知账期)']
+    assert facts['amount'].sum()==-10
+
+
+@pytest.mark.parametrize('key', [None, '', '  '])
+def test_only_empty_order_number_uses_actual_statement_month(key):
+    result=calculate(key,7,'trade_refund_pdd')
+    assert result.facts['period'].to_list()==['2026-07']
+    assert result.facts['contribution'].sum()==-10
+    assert '无订单号，按发生月份：2026-07' in result.facts['source_note'].item()
+
+
+def test_orderless_nonzero_statement_requires_real_occurrence_date():
+    from ledger.engine.calculate import CalculateError, evaluate_metric
+    from ledger.engine.link import LINK_KEY, LINKED
+    metric=load_model(MODELS/'cn-ecommerce').metric('software_fee_pdd')
+    rows=[dict(base_order_id='',store_name='shop',order_time=datetime(2026,6,1),income=.11,outgo=0.)]
+    source=item('settlement',rows,rows[0])
+    frame=source.frame.with_columns(pl.lit('').alias(LINK_KEY),pl.lit(False).alias(LINKED))
+    with pytest.raises(CalculateError,match='无订单号收支缺少有效发生日期'):
+        evaluate_metric(frame,metric,source.template,store_hint='shop',period_hint='2026-06')
+
+
+def test_orderless_exception_is_only_enabled_for_pdd_statement_metrics():
+    for metric in load_model(MODELS/'cn-ecommerce').metrics:
+        effective=metric.for_platform('pdd')
+        if effective is None:
+            continue
+        expected=metric.platform=='pdd' and metric.source=='settlement'
+        assert (effective.orderless_time_basis=='settle_date') == expected
+
+
+def test_failed_key_extraction_does_not_turn_a_nonempty_id_into_orderless_income():
+    from ledger.engine.calculate import evaluate_metric
+    from ledger.engine.link import LINK_KEY, LINKED
+    metric=load_model(MODELS/'cn-ecommerce').metric('software_fee_pdd')
+    rows=[dict(base_order_id='invalid-original',store_name='shop',order_time=datetime(2026,6,1),
+               settle_date=datetime(2026,6,23),income=.11,outgo=0.)]
+    source=item('settlement',rows,rows[0])
+    frame=source.frame.with_columns(pl.lit(None,dtype=pl.Utf8).alias(LINK_KEY),pl.lit(False).alias(LINKED))
+    facts,_=evaluate_metric(frame,metric,source.template,store_hint='shop',period_hint='2026-06')
+    assert facts['period'].to_list()==['(未知账期)']

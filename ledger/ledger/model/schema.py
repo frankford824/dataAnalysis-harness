@@ -683,6 +683,8 @@ class Metric(Base):
     time_basis: TimeSlot = "order_date"
     #: 流水口径按发生月确认全部金额；关联仅用于归属，不决定是否入账。
     posting_basis: Literal["order", "transaction", "order_number"] = "order"
+    #: 仅原订单号为空的收支允许按此发生日期归集；异常订单号仍待核对。
+    orderless_time_basis: TimeSlot | None = None
     #: 保留真实的零金额原始记录，供逐单核对；缺失金额不视为零。
     keep_zero_rows: bool = False
     #: 该科目是否天然无订单号。为真时挂不上订单不算异常。

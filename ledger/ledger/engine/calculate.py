@@ -152,6 +152,20 @@ def evaluate_metric(
         if "__spine_period__" in frame.columns:
             period = pl.coalesce(period, pl.col("__spine_period__"))
         claimed = pl.col(COL_MAJOR) == metric.major if metric.major and COL_MAJOR in frame.columns else pl.lit(True)
+        orderless = pl.col(LINK_KEY).cast(pl.Utf8).fill_null("").str.strip_chars() == ""
+        if metric.orderless_time_basis:
+            # A failed key extraction is not proof that the source omitted its ID.
+            if metric.link and metric.link.key in frame.columns:
+                orderless = orderless & (pl.col(metric.link.key).cast(pl.Utf8).fill_null("").str.strip_chars() == "")
+            occurrence_slot = str(metric.orderless_time_basis)
+            occurrence_period = (
+                pl.col(occurrence_slot).dt.strftime("%Y-%m")
+                if occurrence_slot in frame.columns else pl.lit(None, dtype=pl.Utf8)
+            )
+            bad = frame.filter(claimed & orderless & occurrence_period.is_null() & (pl.col(AMOUNT) != 0))
+            if bad.height:
+                raise CalculateError(f"{metric.name} 有 {bad.height} 行无订单号收支缺少有效发生日期，不能判断入账月份")
+            period = pl.when(orderless).then(occurrence_period).otherwise(period)
         missing = frame.filter(claimed & period.is_null() & (pl.col(AMOUNT) != 0))
         if missing.height:
             notes.append(f"{metric.name} 有 {missing.height} 条记录缺少有效原订单日期，保留待核对，不按发生月份入账")
@@ -174,7 +188,7 @@ def evaluate_metric(
         )
     else:
         period = own_period
-    if metric.posting_basis != "transaction" and not dated_product:
+    if metric.posting_basis not in {"transaction", "order_number"} and not dated_product:
         period = pl.coalesce(period, pl.lit(period_hint or None, dtype=pl.Utf8))
     elif dated_product and LINK_KEY in frame.columns:
         # The synthetic hosting control total represents the whole export; it
@@ -194,8 +208,11 @@ def evaluate_metric(
     grain = metric.link.grain if metric.link else "period"
     source_note = pl.col("source_note").cast(pl.Utf8) if "source_note" in frame.columns else pl.lit(None, dtype=pl.Utf8)
     if metric.posting_basis == "order_number":
+        period_label = pl.lit("下单月份：")
+        if metric.orderless_time_basis:
+            period_label = pl.when(orderless).then(pl.lit("无订单号，按发生月份：")).otherwise(period_label)
         source_note = pl.concat_str([source_note,
-            pl.concat_str([pl.lit("下单月份："), period.fill_null("待核对")])], separator="；", ignore_nulls=True)
+            pl.concat_str([period_label, period.fill_null("待核对")])], separator="；", ignore_nulls=True)
     elif metric.posting_basis == "transaction" and slot in frame.columns:
         source_note = pl.coalesce(source_note, pl.concat_str([pl.lit("发生日期："), pl.col(slot).dt.strftime("%Y-%m-%d")]))
     keep = pl.col(AMOUNT) != 0.0

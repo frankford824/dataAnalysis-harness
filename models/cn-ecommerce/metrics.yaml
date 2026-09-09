@@ -609,6 +609,7 @@
   source: settlement
   platform: pdd
   posting_basis: order_number
+  orderless_time_basis: settle_date
   keep_zero_rows: true
   major: trade_receipt
   value: {op: sum, of: [income, outgo]}
@@ -626,6 +627,7 @@
   source: settlement
   platform: pdd
   posting_basis: order_number
+  orderless_time_basis: settle_date
   keep_zero_rows: true
   major: trade_refund
   value: {op: sum, of: [income, outgo]}
@@ -641,6 +643,7 @@
   source: settlement
   platform: pdd
   posting_basis: order_number
+  orderless_time_basis: settle_date
   keep_zero_rows: true
   major: software_fee
   value: {op: sum, of: [income, outgo]}
@@ -658,6 +661,7 @@
   source: settlement
   platform: pdd
   posting_basis: order_number
+  orderless_time_basis: settle_date
   keep_zero_rows: true
   major: logistics_fee
   value: {op: sum, of: [income, outgo]}
@@ -674,6 +678,7 @@
   source: settlement
   platform: pdd
   posting_basis: order_number
+  orderless_time_basis: settle_date
   keep_zero_rows: true
   major: cross_border_fee
   value: {op: sum, of: [income, outgo]}
@@ -690,6 +695,7 @@
   source: settlement
   platform: pdd
   posting_basis: order_number
+  orderless_time_basis: settle_date
   keep_zero_rows: true
   major: trade_compensation
   value: {op: sum, of: [income, outgo]}
@@ -709,6 +715,7 @@
   source: settlement
   platform: pdd
   posting_basis: order_number
+  orderless_time_basis: settle_date
   keep_zero_rows: true
   major: marketing_fee
   value: {op: sum, of: [income, outgo]}
