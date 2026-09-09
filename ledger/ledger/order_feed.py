@@ -1011,6 +1011,8 @@ class OrderFeed:
         after_frame = self._after_frame(after, after_items, items, store, fingerprint)
         cost_item = self._item("order_cost", "order_console_cost_v1", "订单台日期时点成本", cost_frame,
                                self._cost_template(), fingerprint)
+        if getattr(self, "_retired_cost_rows", 0):
+            cost_item.notes.append(f"{self._retired_cost_rows} 条旧商品行已不在当前订单明细中，原记录仍保留，不重复计入成本")
         if self._suspect_cost_rows:
             cost_item.notes.append(
                 f"订单台标了 is_suspect 的商品行 {self._suspect_cost_rows:,} 行"
@@ -1072,7 +1074,20 @@ class OrderFeed:
         records = [r for r in records if r]
         if not records:
             return base
-        incoming = pl.from_dicts(records, infer_schema_length=None)
+        # API responses contain richer nested metadata than the snapshot.
+        # Build only declared columns: inferring unused nested values can fail
+        # on ordinary mixtures such as component quantities 1 and 1.5.
+        shaped = []
+        for record in records:
+            row = {}
+            for name, dtype in base.schema.items():
+                value = record.get(name)
+                if value is not None and dtype == pl.Utf8:
+                    value = (json.dumps(value, ensure_ascii=False, separators=(",", ":"), default=str)
+                             if isinstance(value, (dict, list, bool)) else str(value))
+                row[name] = value
+            shaped.append(row)
+        incoming = pl.from_dicts(shaped, infer_schema_length=None, strict=False)
         for name, dtype in base.schema.items():
             if name not in incoming.columns:
                 incoming = incoming.with_columns(pl.lit(None, dtype=dtype).alias(name))
@@ -1229,6 +1244,26 @@ class OrderFeed:
         relations: pl.DataFrame,
         store: Store, fingerprint: str, reship_origins: dict[str, str] | None = None, require_history: bool = False,
     ) -> pl.DataFrame:
+        self._retired_cost_rows = 0
+        if require_history:
+            keys = ["order_id", "sub_order_id"]
+            live = items.select(pl.col(*keys).cast(pl.Utf8)).unique()
+            costs = costs.with_columns(pl.col(*keys).cast(pl.Utf8))
+            self._retired_cost_rows = costs.join(live, on=keys, how="anti").height
+            costs = costs.join(live, on=keys, how="semi")
+            missing = items.with_columns(pl.col(*keys).cast(pl.Utf8)).join(
+                costs.select(pl.col(*keys).cast(pl.Utf8)).unique(), on=keys, how="anti")
+            if "is_virtual" in missing.columns:
+                missing = missing.filter(~pl.col("is_virtual").cast(pl.Boolean, strict=False).fill_null(False))
+            if not missing.is_empty():
+                pending = missing.select(pl.col("order_id", "sub_order_id", "sku_id", "quantity")).with_columns(
+                    pl.lit(None, dtype=pl.Float64).alias("unit_cost"),
+                    pl.lit(None, dtype=pl.Float64).alias("cost_amount"),
+                    pl.lit(None, dtype=pl.Utf8).alias("cost_source"),
+                    pl.lit("pending").alias("cost_status"),
+                    pl.lit("awaiting_cost_capture").alias("failure_reason"),
+                )
+                costs = pl.concat([costs, pending], how="diagonal_relaxed")
         certified = costs if require_history else costs.filter(
             (pl.col("cost_status") == "priced")
             & pl.col("cost_source").is_in(["history", "component_history", "blue_flag", "mirror", "scrape", "unknown_evidence"])

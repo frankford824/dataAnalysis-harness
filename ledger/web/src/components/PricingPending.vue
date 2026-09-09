@@ -37,12 +37,12 @@ watch(() => props.runId, () => { show.value = false; query.value = ''; search.va
 
 <template>
   <div class="pricing-notice">
-    <div><strong>{{ count }} 条商品成本待核价</strong><p>缺少下单日的历史成本，相关利润和提成暂不能确认。</p></div>
+    <div><strong>{{ count }} 条商品成本待核价</strong><p>还有商品成本未核实，相关利润和提成暂不能确认。</p></div>
     <n-button size="small" @click="show = true">查看待核价明细</n-button>
   </div>
   <n-drawer v-model:show="show" :width="920" style="max-width: 100vw">
     <n-drawer-content title="待核价明细" closable>
-      <p class="pricing-help">请按下单当天的成本核对。导出中的参考单价尚未计入成本。</p>
+      <p class="pricing-help">等待同步或补查的记录会自动更新。其余记录请按下单日期核价，参考单价尚未计入成本。</p>
       <form class="pricing-search" @submit.prevent="submit">
         <n-input v-model:value="query" clearable placeholder="搜索订单号、商品编码" aria-label="搜索待核价明细" />
         <n-button attr-type="submit" :loading="busy">搜索</n-button>

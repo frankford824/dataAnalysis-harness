@@ -64,3 +64,53 @@ def test_conflicting_flag_evidence_is_not_used_to_zero_cost():
     apply(SimpleNamespace(frames_of=lambda source:[original]),SimpleNamespace(platform='pdd',name='shop',aliases=[]),cost,orders)
     assert cost.frame['order_flag'].item() is None
     assert '不一致' in cost.notes[0]
+
+
+@pytest.mark.parametrize('virtual', [False, True])
+def test_absent_cost_row_is_pending_instead_of_an_implicit_zero(tmp_path, virtual):
+    root=tmp_path/'feed';manifest=_fixture(root,after_sku=None,second_unnamed=True)
+    for name in ('orders.parquet','order_items.parquet','order_costs.parquet'):
+        frame=pl.read_parquet(root/manifest['objects'][name]['path'])
+        if 'online_order_no' in frame.columns:
+            frame=frame.with_columns(pl.lit('260601-163771850381198').alias('online_order_no'))
+        if name=='order_items.parquet':
+            frame=frame.with_columns(pl.Series('is_virtual',[False,virtual]))
+        if name=='order_costs.parquet':
+            frame=frame.head(1).with_columns(pl.lit('2026-06-01').alias('cost_as_of'))
+        manifest['objects'][name]=_write(root,name,frame)
+    feed=OrderFeed(tmp_path/'ws',client=FakeClient(manifest),feed_root=root);feed.sync()
+    model,store=_model_and_store(feed)
+    store=store.model_copy(update={'platform':'pdd'})
+    model=model.model_copy(update={'stores':tuple(store if s.id==store.id else s for s in model.stores)})
+    ing=Ingestion(model=model,items=[]);feed.append_to(ing,store)
+    result=run(ing,'pdd')
+    if virtual:
+        assert result.pricing_gaps.is_empty()
+    else:
+        assert result.pricing_gaps.height==1
+        assert result.pricing_gaps['reason'].item()=='成本明细尚未同步'
+        assert result.pricing_gaps['sku'].item()=='SKU2'
+        assert result.slices[(store.name,'2026-06')].nodes['net_profit'].value is None
+
+
+def test_replaced_bundle_cost_is_not_added_to_its_current_components(tmp_path):
+    root=tmp_path/'feed';manifest=_fixture(root,after_sku=None,second_unnamed=True)
+    for name in ('orders.parquet','order_items.parquet','order_costs.parquet'):
+        frame=pl.read_parquet(root/manifest['objects'][name]['path'])
+        if 'online_order_no' in frame.columns:
+            frame=frame.with_columns(pl.lit('260601-163771850381198').alias('online_order_no'))
+        if name=='order_costs.parquet':
+            frame=frame.with_columns(pl.lit('2026-06-01').alias('cost_as_of'))
+            old=frame.head(1).with_columns(pl.lit('999').alias('sub_order_id'),pl.lit('OLD-KIT').alias('sku_id'),
+                                         pl.lit('99').alias('unit_cost'),pl.lit('198').alias('cost_amount'))
+            frame=pl.concat([frame,old])
+        manifest['objects'][name]=_write(root,name,frame)
+    feed=OrderFeed(tmp_path/'ws',client=FakeClient(manifest),feed_root=root);feed.sync()
+    model,store=_model_and_store(feed);store=store.model_copy(update={'platform':'pdd'})
+    model=model.model_copy(update={'stores':tuple(store if s.id==store.id else s for s in model.stores)})
+    ing=Ingestion(model=model,items=[]);feed.append_to(ing,store)
+    result=run(ing,'pdd')
+    assert result.pricing_gaps.is_empty()
+    assert result.facts.filter(pl.col('metric_id')=='goods_cost')['contribution'].sum()==-9
+    assert feed._retired_cost_rows==1
+    assert '旧商品行' in ' '.join(ing.frames_of('order_cost')[0].notes)

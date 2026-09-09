@@ -10,6 +10,7 @@ import hashlib
 import hmac
 import json
 import os
+import re
 import secrets
 import sqlite3
 import time
@@ -508,7 +509,10 @@ class Registry:
         return {"job_id": job_id, "status": "queued"}
 
     def enqueue_source(self, stores: set[str], fingerprint: str) -> None:
-        seq = int(fingerprint.rsplit(":", 1)[-1])
+        match = re.fullmatch(r"order-feed:[^:]+:(\d+)(?::components:[0-9a-f]{64})?", fingerprint)
+        if match is None:
+            raise RegistryError("订单来源版本格式不正确")
+        seq = int(match.group(1))
         with self.transaction() as conn:
             revision = conn.execute("SELECT revision FROM meta WHERE id=1").fetchone()[0]
             conn.executemany(

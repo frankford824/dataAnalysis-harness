@@ -223,7 +223,12 @@ def evaluate_metric(
             pl.when(col("pricing_suspect").cast(pl.Boolean).fill_null(False)).then(pl.lit("成本与订单金额差异较大，需核对"))
             .when(wanted.is_null()).then(pl.lit("原订单日期待核对"))
             .when(~quantity.is_finite().fill_null(False) | (quantity < 0)).then(pl.lit("原订单数量待核对"))
+            .when(col("cost_status") == "pending").then(pl.lit("成本明细尚未同步"))
+            .when(col("failure_reason") == "missing_cost_company").then(pl.lit("成本所属公司待核对"))
+            .when(col("failure_reason") == "invalid_component_quantity").then(pl.lit("套餐组件数量待核对"))
             .when(quoted.is_not_null() & (quoted != wanted)).then(pl.lit("取价日期与下单日不一致"))
+            .when((col("cost_status") == "missing_price") & col("cost_source").is_not_null())
+            .then(pl.lit("等待补查下单日历史成本"))
             .otherwise(pl.lit("缺少已核实的下单日历史成本")).alias("reason"),
             pl.col(ANCHOR_SHA).alias("file_sha"), pl.col(ANCHOR_FILE).alias("file_name"),
             pl.col(ANCHOR_SHEET).alias("sheet"), pl.col(ANCHOR_ROW).alias("row_no"),

@@ -80,7 +80,8 @@ class Manager:
             store_id, revision = pending["store_id"], pending["revision"]
             self.current_pending = (store_id, revision)
             ws.note_external_version(store_id, "__commission_rules__", f"commission:{revision}")
-            result = service.recompute(ws, self.model(), self.model().store(store_id), note="提成关系变更")
+            note = "订单数据更新" if pending["source_seq"] else "提成设置更新"
+            result = service.recompute(ws, self.model(), self.model().store(store_id), note=note)
             if result.failure:
                 why = result.failure.get("why") or str(result.failure)
                 if "没有任何数据" not in why and "没算出结果" not in why:
@@ -88,8 +89,8 @@ class Manager:
                 # No order inputs yet is a normal state for a newly registered
                 # listing/store. Its next source revision will enqueue it again.
             with registry.transaction() as conn:
-                conn.execute("DELETE FROM pending WHERE store_id=? AND revision<=? AND source_seq<=?",
-                             (store_id, revision, pending["source_seq"]))
+                conn.execute("DELETE FROM pending WHERE store_id=? AND revision<=? AND source_seq<=? AND source_fingerprint=?",
+                             (store_id, revision, pending["source_seq"], pending["source_fingerprint"]))
                 conn.execute("UPDATE pending SET next_attempt=? WHERE store_id=?", (int(time.time()), store_id))
                 conn.execute("INSERT INTO job VALUES(?,?,?,?,?,?,?,?)",
                              (__import__("uuid").uuid4().hex, "recompute", "system",

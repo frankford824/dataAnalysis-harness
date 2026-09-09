@@ -100,6 +100,19 @@ def test_health_contact_while_behind_does_not_claim_successful_sync(tmp_path):
     assert feed.state()['last_success'] != '2026-06-01'
 
 
+def test_delta_uses_snapshot_schema_without_losing_long_ids_or_nested_evidence():
+    base=pl.DataFrame(schema={'order_id':pl.Utf8,'amount':pl.Float64,'pricing_evidence':pl.Utf8})
+    records=[{'order_id':3306359390516122350,'amount':1.5,
+              'pricing_evidence':{'components':[{'quantity':1.5}]},'unused':{'quantity':1.5}},
+             {'order_id':3305757650104017559,'amount':1,
+              'pricing_evidence':{'components':[{'quantity':1}]},'unused':{'quantity':1}}]
+    result=OrderFeed._append_records(base,records)
+    assert result['order_id'].to_list()==['3306359390516122350','3305757650104017559']
+    assert result['amount'].to_list()==[1.5,1.0]
+    assert json.loads(result['pricing_evidence'][0])==records[0]['pricing_evidence']
+    assert result.columns==base.columns
+
+
 def _write(root: Path, name: str, frame: pl.DataFrame) -> dict:
     data = root / "objects" / name
     data.parent.mkdir(parents=True, exist_ok=True)
