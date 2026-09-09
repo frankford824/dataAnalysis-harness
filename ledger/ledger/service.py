@@ -329,7 +329,8 @@ def _recompute_locked(
         }
         return out
 
-    if not result.slices:
+    own_slices = {key: sl for key, sl in result.slices.items() if key[0] == store.name}
+    if not own_slices:
         out.failure = {
             "store": store.name,
             "why": f"{len(files)} 份表都没算出结果",
@@ -344,7 +345,7 @@ def _recompute_locked(
     fingerprint = hashlib.sha256(
         (model_revision + "\0" + engine_version() + "\0" + "\0".join(sorted(shas))).encode("utf-8")
     ).hexdigest()
-    slices = sorted(result.slices.items(), key=lambda kv: (kv[0][1] or ""))
+    slices = sorted(own_slices.items(), key=lambda kv: (kv[0][1] or ""))
     registry = Registry(ws.root) if (ws.root / "commission" / "registry.db").exists() else None
     if registry:
         commission_catalog.observe(registry, store, result.spine)
@@ -405,6 +406,8 @@ def simulate(ws: Workspace, model: Model, store: Store) -> list[dict[str, Any]]:
     result = run(ing, store.platform)
     out = []
     for (_s, _period), sl in sorted(result.slices.items(), key=lambda kv: kv[0][1] or ""):
+        if _s != store.name:
+            continue
         payload = slice_dict(sl, store, model)
         state = ws.state(store.id, sl.period)
         out.append({
