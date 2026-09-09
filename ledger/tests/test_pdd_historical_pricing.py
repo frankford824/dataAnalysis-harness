@@ -81,6 +81,7 @@ def test_pending_rows_are_saved_even_without_monetary_facts(tmp_path):
     data = pricing_gaps.page(path)
     assert data['total'] == 1
     assert data['items'][0]['reference_unit_cost'] is None
+    assert data['items'][0]['order_date'] == '2026-05-24'
     assert pricing_gaps.page(path, q='not-found')['total'] == 0
     assert pricing_gaps.page(path, offset=100)['items'] == []
     assert '260524-163771850381198' in pricing_gaps.csv(path)

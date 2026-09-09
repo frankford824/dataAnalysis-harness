@@ -25,7 +25,7 @@ def page(path: Path, *, q: str = "", offset: int = 0, limit: int = 100) -> dict:
 
 
 def csv(path: Path, q: str = "") -> str:
-    fields = [("period", "下单月份"), ("order_id", "平台订单号"),
+    fields = [("period", "下单月份"), ("order_date", "下单日期"), ("order_id", "平台订单号"),
               ("internal_order_id", "聚水潭订单号"), ("sku", "商品编码"),
               ("quantity", "数量"), ("reference_unit_cost", "参考单价（未计入）"),
               ("reason", "待核对事项"), ("file_name", "来源文件"),

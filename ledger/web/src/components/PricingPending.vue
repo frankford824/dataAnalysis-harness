@@ -13,6 +13,7 @@ let serial = 0
 const columns = [
   { title: '平台订单号', key: 'order_id', width: 230 },
   { title: '商品编码', key: 'sku', width: 210 },
+  { title: '下单日期', key: 'order_date', width: 115 },
   { title: '数量', key: 'quantity', width: 80 },
   { title: '待核对事项', key: 'reason', minWidth: 230 },
   { title: '聚水潭订单号', key: 'internal_order_id', width: 130 },
@@ -48,12 +49,13 @@ watch(() => props.runId, () => { show.value = false; query.value = ''; search.va
         <a :href="download" download>导出明细</a>
       </form>
       <n-alert v-if="error" type="error" style="margin-bottom: 16px">{{ error }} <n-button size="small" @click="load">重试</n-button></n-alert>
-      <n-data-table class="pricing-desktop" :columns="columns" :data="data.items" :loading="busy" :scroll-x="880" :max-height="560" size="small" />
+      <n-data-table class="pricing-desktop" :columns="columns" :data="data.items" :loading="busy" :scroll-x="995" :max-height="560" size="small" />
       <div class="pricing-mobile" :aria-busy="busy">
         <p v-if="busy">正在加载…</p>
         <p v-else-if="!data.items.length && !error">没有找到对应记录</p>
         <article v-for="(row, index) in data.items" :key="index">
           <strong>{{ row.sku || '商品编码待核对' }}</strong><span>数量 {{ row.quantity ?? '待核对' }}</span>
+          <p>下单日期 {{ row.order_date || '待核对' }}</p>
           <p>平台订单 {{ row.order_id || '待核对' }}</p>
           <p>聚水潭订单 {{ row.internal_order_id || '—' }}</p>
           <p class="pricing-reason">{{ row.reason }}</p>

@@ -216,6 +216,7 @@ def evaluate_metric(
         gaps = frame.filter(pending).select(
             store.fill_null("(未知店铺)").alias("store"), period.fill_null("(未知账期)").alias("period"),
             pl.lit(metric.id).alias("metric_id"), key.alias("order_id"),
+            wanted.dt.strftime("%Y-%m-%d").alias("order_date"),
             col("internal_order_id").cast(pl.Utf8).alias("internal_order_id"),
             col("sku").cast(pl.Utf8).alias("sku"), pl.when(quantity.is_finite()).then(quantity).otherwise(None).alias("quantity"),
             pl.when(reference.is_finite()).then(reference).otherwise(None).alias("reference_unit_cost"),
