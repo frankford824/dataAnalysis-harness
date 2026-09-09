@@ -721,6 +721,7 @@
   time_slots: {order_date: order_time}
   bindings:
     - {role: internal_order_id, columns: [内部订单号]}
+    - {role: internal_sub_order_id, columns: [子订单编号], required: false}
     - {role: order_id, columns: [线上订单号]}
     - {role: sub_order_id, columns: [线上子订单编号]}
     - {role: original_order_id, columns: [原始线上订单号]}

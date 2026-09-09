@@ -26,6 +26,8 @@ from typing import Any, Callable
 import polars as pl
 
 from .engine.runtime import Ingested, Ingestion
+from .engine.link import normalize_key
+from .engine.rules import norm_expr
 from .engine.types import ANCHOR_FILE, ANCHOR_ROW, ANCHOR_SHA, ANCHOR_SHEET, FileRef, Recognition
 from .model.schema import ColumnBinding, Model, Store, Template
 
@@ -748,6 +750,7 @@ class OrderFeed:
             + (f"上传的售后单一并参与判定：{'、'.join(kept)}" if kept
                else "本店没有上传聚水潭售后单，其余售后的成本规则暂无依据")
         )
+        self._align_after_sale_skus(ingestion, feed_cost.frame)
         self._enrich_existing_orders(ingestion, feed_order.frame)
         assert feed_order.frame is not None
         has_suborders = any(
@@ -774,6 +777,57 @@ class OrderFeed:
         for item in ingestion.known:
             assert item.frame is not None
             item.frame = item.frame.with_columns(pl.lit(True).alias("__live_period_scope__"))
+
+    @staticmethod
+    def _align_after_sale_skus(ingestion: Ingestion, cost: pl.DataFrame | None) -> None:
+        """Resolve an old ERP SKU code through the same internal order and item ID.
+
+        Uploaded cost prices remain unused. Only immutable item identities bridge
+        the uploaded after-sale SKU to the current cost SKU; names are never guessed.
+        An online child ID alone is insufficient because a bundle has several SKUs.
+        """
+        columns = ["internal_order_id", "internal_sub_order_id", "sub_order_id", "sku"]
+        if cost is None or not set(columns) <= set(cost.columns):
+            return
+        current: dict[tuple[str, str], set[tuple[str, str]]] = {}
+        for record in cost.select(columns).unique().iter_rows():
+            internal, item, sub, sku = map(normalize_key, record)
+            if all((internal, item, sub, sku)):
+                current.setdefault((internal, item), set()).add((sub, sku))
+        candidates: dict[tuple[str, str, str], set[str]] = {}
+        for original in ingestion.frames_of("order_cost"):
+            if original.frame is None or not set(columns) <= set(original.frame.columns):
+                continue
+            for record in original.frame.select(columns).unique().iter_rows():
+                internal, item, sub, sku = map(normalize_key, record)
+                matches = current.get((internal, item), set())
+                if not all((internal, item, sub, sku)) or len(matches) != 1:
+                    continue
+                live_sub, live_sku = next(iter(matches))
+                if live_sub == sub:
+                    candidates.setdefault((internal, sub, sku), set()).add(live_sku)
+        mapping = {key: next(iter(values)) for key, values in candidates.items()
+                   if len(values) == 1 and next(iter(values)) != key[2]}
+        if not mapping:
+            return
+        keys = ["internal_order_id", "sub_order_id", "sku"]
+        shadows = ["__alias_internal", "__alias_sub", "__alias_sku"]
+        aliases = pl.DataFrame([(*key, value) for key, value in mapping.items()],
+                               schema=[*shadows, "__alias_value"], orient="row")
+        for after in ingestion.frames_of("after_sales"):
+            if after.frame is None or not set(keys) <= set(after.frame.columns):
+                continue
+            matched = after.frame.with_columns([
+                norm_expr(pl.col(key).cast(pl.Utf8)).alias(shadow)
+                for key, shadow in zip(keys, shadows, strict=True)
+            ]).join(aliases, on=shadows, how="left", maintain_order="left")
+            changed = matched.filter(pl.col("__alias_value").is_not_null()).height
+            if changed:
+                after.frame = matched.with_columns(
+                    pl.col("original_sku" if "original_sku" in after.frame.columns else "sku").alias("original_sku"),
+                    pl.coalesce("__alias_value", "sku").alias("sku"),
+                ).drop(*shadows, "__alias_value")
+                after.notes.append(f"按内部订单及商品行号核对了 {changed:,} 行售后商品编码，原编码已保留")
 
     @staticmethod
     def _product_coverage(
@@ -1138,6 +1192,7 @@ class OrderFeed:
             items.select("order_id", "sub_order_id", "outer_sku", "tracking_no").rename({"tracking_no": "item_tracking_no"}),
             on=["order_id", "sub_order_id"], how="left",
         ).select(
+            pl.col("sub_order_id").cast(pl.Utf8).alias("internal_sub_order_id"),
             pl.col("order_id").cast(pl.Utf8).alias("internal_order_id"),
             pl.col("online_order_no").cast(pl.Utf8).alias("order_id"),
             pl.col("online_order_no").cast(pl.Utf8).alias("original_order_id"),
@@ -1211,6 +1266,7 @@ class OrderFeed:
     @classmethod
     def _cost_template(cls) -> Template:
         return cls._template("order_console_cost_v1", "order_cost", [
+            ("internal_sub_order_id", "text"),
             ("internal_order_id", "text"), ("order_id", "text"), ("original_order_id", "text"),
             ("sub_order_id", "text"), ("sku", "text"), ("quantity", "number"),
             ("unit_cost", "number"), ("total_cost", "number"), ("tracking_no", "text"),
