@@ -93,6 +93,8 @@ def build(ingestion, platform):
             continue
         relevant = item.frame.filter(pl.col("internal_order_id").cast(pl.Utf8).is_in({k[0] for k in costs}))
         for row in relevant.iter_rows(named=True):
+            if row.get("__preship_handled"):
+                continue
             base_key = tuple(normalize_key(row.get(k)) for k in KEYS)
             options = by_base.get(base_key, [])
             item_id = normalize_key(row.get("internal_sub_order_id"))

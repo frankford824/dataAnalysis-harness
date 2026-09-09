@@ -842,6 +842,8 @@ def _exclude_linked(
                 )
             try:
                 scoped = other.frame.filter(compile_where(rule.when, other.frame))
+                if "__preship_skip_exclusion" in scoped.columns:
+                    scoped = scoped.filter(~pl.col("__preship_skip_exclusion").fill_null(False))
             except PredicateError as exc:
                 raise RuntimeError(f"{other.ref.label()} 的跨源排除条件有问题：{exc}") from exc
             if scoped.is_empty():

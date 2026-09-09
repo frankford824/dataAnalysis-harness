@@ -705,6 +705,7 @@
     - {role: refund_status, columns: [线上状态]}
     - {role: goods_status, columns: [货物状态]}
     - {role: quantity, columns: [申请数量], required: false}
+    - {role: refund_confirm_time, columns: [最后确认日期], required: false, kind: time}
     - {role: returned_quantity, columns: [实退数量], required: false, kind: number}
     - {role: return_time, columns: [进仓时间], required: false, kind: time}
     - {role: received_time, columns: [退货签收时间], required: false, kind: time}

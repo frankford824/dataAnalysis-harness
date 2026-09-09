@@ -751,6 +751,8 @@ class OrderFeed:
                else "本店没有上传聚水潭售后单，其余售后的成本规则暂无依据")
         )
         self._align_after_sale_skus(ingestion, feed_cost.frame)
+        from .engine.preship_refunds import apply as apply_preship_refunds
+        apply_preship_refunds(feed_cost, [*ingestion.frames_of("after_sales"), feed_after])
         self._enrich_existing_orders(ingestion, feed_order.frame)
         assert feed_order.frame is not None
         has_suborders = any(
@@ -1187,7 +1189,9 @@ class OrderFeed:
             else []
         )
         frame = certified.join(
-            orders.select("order_id", "online_order_no", "order_time", "order_status_raw", "tracking_no"),
+            orders.select("order_id", "online_order_no", "order_time", "order_status_raw", "tracking_no",
+                          pl.col("ship_time") if "ship_time" in orders.columns else pl.lit(None).alias("ship_time"),
+                          pl.col("link_order_id") if "link_order_id" in orders.columns else pl.lit(None).alias("link_order_id")),
             on="order_id", how="left",
         ).join(
             items.select("order_id", "sub_order_id", "outer_sku", "tracking_no").rename({"tracking_no": "item_tracking_no"}),
@@ -1199,6 +1203,8 @@ class OrderFeed:
             pl.col("online_order_no").cast(pl.Utf8).alias("original_order_id"),
             pl.col("outer_sku").fill_null(pl.col("sub_order_id")).cast(pl.Utf8).alias("sub_order_id"),
             pl.col("sku_id").cast(pl.Utf8).alias("sku"),
+            pl.col("link_order_id").cast(pl.Utf8).alias("parent_internal_order_id"),
+            pl.col("ship_time").cast(pl.Utf8),
             pl.col("quantity").cast(pl.Float64, strict=False),
             pl.col("unit_cost").cast(pl.Float64, strict=False),
             pl.col("cost_amount").cast(pl.Float64, strict=False).alias("total_cost"),
@@ -1229,6 +1235,7 @@ class OrderFeed:
         )
         frame = after.join(keyed, on="after_sale_id", how="left", suffix="_item").select(
             pl.col("after_sale_id").cast(pl.Utf8),
+            (pl.col("updated_at_source") if "updated_at_source" in after.columns else pl.lit(None)).cast(pl.Utf8).alias("refund_confirm_time"),
             pl.col("order_id").cast(pl.Utf8).alias("internal_order_id"),
             pl.col("online_order_no").cast(pl.Utf8).alias("order_id"),
             pl.coalesce(pl.col("sub_order_id_item"), pl.col("sub_order_id")).cast(pl.Utf8).alias("sub_order_id"),
@@ -1267,7 +1274,7 @@ class OrderFeed:
     @classmethod
     def _cost_template(cls) -> Template:
         return cls._template("order_console_cost_v1", "order_cost", [
-            ("internal_sub_order_id", "text"),
+            ("internal_sub_order_id", "text"), ("parent_internal_order_id", "text"), ("ship_time", "time"),
             ("internal_order_id", "text"), ("order_id", "text"), ("original_order_id", "text"),
             ("sub_order_id", "text"), ("sku", "text"), ("quantity", "number"),
             ("unit_cost", "number"), ("total_cost", "number"), ("tracking_no", "text"),
@@ -1280,7 +1287,7 @@ class OrderFeed:
         return cls._template("order_console_after_sale_v1", "after_sales", [
             ("after_sale_id", "text"), ("internal_order_id", "text"), ("order_id", "text"),
             ("sub_order_id", "text"), ("sku", "text"), ("goods_status", "text"),
-            ("refund_status", "text"), ("after_sale_status", "text"), ("quantity", "number"),
+            ("refund_status", "text"), ("after_sale_status", "text"), ("quantity", "number"), ("refund_confirm_time", "time"),
             ("store_name", "text"),
         ])
 
