@@ -145,13 +145,12 @@ def build(ingestion, platform):
                    order_id=original[0].get("order_id"), store_name=original[0].get("store_name"),
                    after_sale_id=identity[0], returned_quantity=float(quantity),
                    return_time=when, settle_date=when, total_cost=float(amount),
-                   subject="退货成本冲回",
                    source_note=f"退货日期：{when}；本次冲回数量：{quantity}；原成本单价：{sold_amount / sold_quantity}；售后单：{identity[0]}；原订单：{original[0].get('order_id')}" + (f"；原表实退数量：{requested}，累计冲回以原销售数量为限" if requested != quantity else ""))
         generated.append(row)
     schema = {ANCHOR_SHA:pl.Utf8, ANCHOR_FILE:pl.Utf8, ANCHOR_SHEET:pl.Utf8, ANCHOR_ROW:pl.Int64,
               "internal_order_id":pl.Utf8, "sub_order_id":pl.Utf8, "sku":pl.Utf8, "order_id":pl.Utf8,
               "store_name":pl.Utf8, "after_sale_id":pl.Utf8, "returned_quantity":pl.Float64,
-              "return_time":pl.Date, "settle_date":pl.Date, "total_cost":pl.Float64, "subject":pl.Utf8,"source_note":pl.Utf8}
+              "return_time":pl.Date, "settle_date":pl.Date, "total_cost":pl.Float64, "source_note":pl.Utf8}
     frame = pl.DataFrame(generated, schema=schema)
     template = Template(id="derived_cost_return_v1", name="退货成本冲回", source=SOURCE,
                         match_columns=("after_sale_id",), time_slots={"settle_date":"return_time"},

@@ -34,6 +34,7 @@ def test_july_return_keeps_june_sale_and_reverses_original_cost_in_july(tmp_path
     assert source["order_id"].to_list()==["O1"]
     assert source["file_name"].to_list()==["售后单_月份.xlsx"]
     assert source["row_no"].to_list()==[2]
+    assert all(not sl.classify_report.unmatched_rows for sl in r.slices.values())
 
 
 def test_partial_and_repeated_returns_are_capped_at_original_quantity(tmp_path):
