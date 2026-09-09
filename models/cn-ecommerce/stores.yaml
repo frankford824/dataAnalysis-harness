@@ -337,6 +337,7 @@
   commission_on_loss: deduct
   note: ERP shop_id 20367522。和 taobao_zlvoey「天猫zlvoey旗舰店」同牌子不同平台。
 - id: douyin_luckywish
+  cost_return_posting: transaction
   name: 汪学成-抖店luckywish节日礼品
   platform: douyin
   commission_on_loss: deduct

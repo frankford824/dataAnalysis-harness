@@ -30,7 +30,7 @@ FACT_COLUMNS = (
     "link_key", "linked", "amount", "subject", "major", "minor",
     "count_without_order", "classify_via",
     "file_sha", "file_name", "sheet", "row_no",
-    "order_id", "internal_order_id", "sku",
+    "order_id", "internal_order_id", "sku", "source_note",
     # 投影之后才知道，见 runtime._mark_counted：这一行有没有算进损益表、算进去多少。
     "counted", "contribution",
 )
@@ -215,7 +215,7 @@ def evaluate_metric(
         pl.col(ANCHOR_ROW).alias("row_no"),
         *[
             (pl.col(role).cast(pl.Utf8) if role in frame.columns else pl.lit(None, dtype=pl.Utf8)).alias(role)
-            for role in ("order_id", "internal_order_id", "sku")
+            for role in ("order_id", "internal_order_id", "sku", "source_note")
         ],
     ).filter(pl.col("amount") != 0.0)
     return facts, notes
@@ -268,7 +268,7 @@ def _empty_facts() -> pl.DataFrame:
         "subject": pl.Utf8, "major": pl.Utf8, "minor": pl.Utf8,
         "count_without_order": pl.Boolean, "classify_via": pl.Utf8,
         "file_sha": pl.Utf8, "file_name": pl.Utf8, "sheet": pl.Utf8, "row_no": pl.Int64,
-        "order_id": pl.Utf8, "internal_order_id": pl.Utf8, "sku": pl.Utf8,
+        "order_id": pl.Utf8, "internal_order_id": pl.Utf8, "sku": pl.Utf8, "source_note": pl.Utf8,
         "counted": pl.Boolean, "contribution": pl.Float64,
     }
     return pl.DataFrame(schema=schema)

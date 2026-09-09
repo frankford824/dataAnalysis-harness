@@ -822,3 +822,15 @@
     要留意一处可能重复：对账表里也有一个叫「权益保险」的动账场景，对照表把它
     归到软件服务费（备注写着运费险）。两处同名不同表，本期 J 表为空所以不会重复，
     等 J 表真有数据时要核对一遍是不是同一笔钱记了两次。
+
+- id: goods_return_cost
+  name: 退货成本冲回
+  source: cost_return
+  occasional: true
+  value: {op: sum, of: [total_cost]}
+  sign: as_is
+  time_basis: settle_date
+  posting_basis: transaction
+  link: {key: sub_order_id, to: order.sub_order_id, grain: order, fallback_key: order_id, fallback_to: [order.order_id]}
+  allocate: {mode: even}
+  note: 仅对启用按退货月冲回的店铺生成；按实际退货日归属，累计冲回不超过原销售成本。

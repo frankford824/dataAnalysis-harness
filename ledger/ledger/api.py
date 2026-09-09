@@ -366,7 +366,7 @@ def bootstrap(request: Request, response: Response) -> Any:
                  "is_total": n.is_total, "headline": n.headline}
                 for n in view.statement_order(model)
             ],
-            "sources": [{"id": s.id, "name": s.name} for s in model.sources],
+            "sources": [{"id": s.id, "name": s.name} for s in model.sources if not s.derived],
             "commission_bases": [
                 {"id": n.id, "name": n.name} for n in model.commission_bases()
             ],

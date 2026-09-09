@@ -40,7 +40,7 @@ def model_fingerprint(model_root: Path) -> str:
 def build_layout(model_root: Path) -> dict:
     model = load_model(model_root)
     platforms = {platform.id: safe_segment(platform.name) for platform in model.platforms}
-    sources = {source.id: safe_segment(source.name) for source in model.sources}
+    sources = {source.id: safe_segment(source.name) for source in model.sources if not source.derived}
     directories = {
         "00_上传区/00_全公司共享",
         "10_已接收/00_全公司共享",
@@ -79,7 +79,7 @@ def build_layout(model_root: Path) -> dict:
         ],
         "stores": stores,
         "sources": [
-            {"id": source.id, "name": source.name} for source in model.sources
+            {"id": source.id, "name": source.name} for source in model.sources if not source.derived
         ],
         "directories": sorted(directories),
     }

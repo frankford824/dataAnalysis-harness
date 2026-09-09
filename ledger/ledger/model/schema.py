@@ -279,6 +279,7 @@ class SourceContract(Base):
     """
 
     id: str
+    derived: bool = False
     name: str
     platform: str = "*"
     owner_role: OwnerRole
@@ -944,6 +945,7 @@ class Store(Base):
     """
 
     id: str
+    cost_return_posting: Literal["order", "transaction"] = "order"
     #: 店铺全名。交上来的文件名里带的就是这个，形如「聚水潭成本-淘宝喜必顺.xlsx」。
     name: str
     platform: str

@@ -204,3 +204,12 @@
 
     三个店长各交一份，内容完全相同：2,659 个序号全部重合，金额都是 94,065.08。
     按序号去重，重复交多少份都是同一个结果。
+
+- id: cost_return
+  derived: true
+  name: 退货成本冲回
+  platform: any
+  owner_role: warehouse
+  cadence: monthly
+  required_for_close: false
+  note: 按已核对的实退数量和进仓日期冲回原销售成本，不采用售后申请数量或申请日期。

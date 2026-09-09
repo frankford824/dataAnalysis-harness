@@ -794,7 +794,7 @@ class OrderFeed:
             internal, item, sub, sku = map(normalize_key, record)
             if all((internal, item, sub, sku)):
                 current.setdefault((internal, item), set()).add((sub, sku))
-        candidates: dict[tuple[str, str, str], set[str]] = {}
+        candidates: dict[tuple[str, str, str], set[tuple[str, str]]] = {}
         for original in ingestion.frames_of("order_cost"):
             if original.frame is None or not set(columns) <= set(original.frame.columns):
                 continue
@@ -805,15 +805,15 @@ class OrderFeed:
                     continue
                 live_sub, live_sku = next(iter(matches))
                 if live_sub == sub:
-                    candidates.setdefault((internal, sub, sku), set()).add(live_sku)
+                    candidates.setdefault((internal, sub, sku), set()).add((live_sku, item))
         mapping = {key: next(iter(values)) for key, values in candidates.items()
-                   if len(values) == 1 and next(iter(values)) != key[2]}
+                   if len(values) == 1}
         if not mapping:
             return
         keys = ["internal_order_id", "sub_order_id", "sku"]
         shadows = ["__alias_internal", "__alias_sub", "__alias_sku"]
-        aliases = pl.DataFrame([(*key, value) for key, value in mapping.items()],
-                               schema=[*shadows, "__alias_value"], orient="row")
+        aliases = pl.DataFrame([(*key, *value) for key, value in mapping.items()],
+                               schema=[*shadows, "__alias_value", "__alias_item"], orient="row")
         for after in ingestion.frames_of("after_sales"):
             if after.frame is None or not set(keys) <= set(after.frame.columns):
                 continue
@@ -826,7 +826,8 @@ class OrderFeed:
                 after.frame = matched.with_columns(
                     pl.col("original_sku" if "original_sku" in after.frame.columns else "sku").alias("original_sku"),
                     pl.coalesce("__alias_value", "sku").alias("sku"),
-                ).drop(*shadows, "__alias_value")
+                    (pl.coalesce("__alias_item", "internal_sub_order_id") if "internal_sub_order_id" in after.frame.columns else pl.col("__alias_item")).alias("internal_sub_order_id"),
+                ).drop(*shadows, "__alias_value", "__alias_item")
                 after.notes.append(f"按内部订单及商品行号核对了 {changed:,} 行售后商品编码，原编码已保留")
 
     @staticmethod

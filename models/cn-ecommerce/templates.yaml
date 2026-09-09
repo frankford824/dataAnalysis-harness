@@ -693,6 +693,7 @@
   name: 聚水潭售后单
   match_columns: [售后单号, 内部订单号, 线上订单号, 线上状态, 货物状态, 商品编码, 线上子订单编号]
   parse: {header_row: 0}
+  time_slots: {settle_date: return_time}
   bindings:
     - {role: after_sale_id, columns: [售后单号]}
     - {role: internal_order_id, columns: [内部订单号]}
@@ -704,6 +705,9 @@
     - {role: refund_status, columns: [线上状态]}
     - {role: goods_status, columns: [货物状态]}
     - {role: quantity, columns: [申请数量], required: false}
+    - {role: returned_quantity, columns: [实退数量], required: false, kind: number}
+    - {role: return_time, columns: [进仓时间], required: false, kind: time}
+    - {role: received_time, columns: [退货签收时间], required: false, kind: time}
   note: >
     货物状态与线上状态只决定关联商品的聚水潭成本是否归零；售后单本身不产生金额。
     必须逐商品关联，不能只按线上订单号整单排除：同一主订单可有多个子订单和商品。

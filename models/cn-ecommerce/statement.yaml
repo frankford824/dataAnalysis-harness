@@ -37,7 +37,7 @@
                            trade_compensation_pdd]}}
 - {id: n_insurance, name: 权益保险, level: 2, formula: {op: add, of: [insurance_cost_douyin]}}
 - {id: n_marketing, name: 平台营销费用, level: 2, formula: {op: add, of: [marketing_fee, marketing_fee_pdd]}}
-- {id: n_goods, name: 商品成本, level: 2, formula: {op: add, of: [goods_cost]}}
+- {id: n_goods, name: 商品成本, level: 2, formula: {op: add, of: [goods_cost, goods_return_cost]}}
 - {id: n_dropship, name: 代发成本, level: 2, formula: {op: add, of: [dropship_cost]}}
 - {id: n_reshipment, name: 补发成本, level: 2, formula: {op: add, of: [reshipment_cost]}}
 - {id: n_freight, name: 发货运费, level: 2, formula: {op: add, of: [freight_cost]}}

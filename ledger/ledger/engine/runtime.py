@@ -626,6 +626,10 @@ def _attach_hints(frame: pl.DataFrame, store: str | None, period: str | None) ->
 def run(ingestion: Ingestion, platform: str = "*") -> RunResult:
     """挂钩 → 归类 → 核算 → 自检。"""
     model = ingestion.model
+    from .cost_returns import build as build_cost_returns
+    derived_return, return_errors = build_cost_returns(ingestion, platform)
+    if derived_return is not None:
+        ingestion = Ingestion(model=model, items=[*ingestion.items, derived_return])
     notes: list[str] = []
     live_feed = any(
         item.template is not None and item.template.id.startswith("order_console_")
@@ -645,7 +649,7 @@ def run(ingestion: Ingestion, platform: str = "*") -> RunResult:
     link_reports: dict[str, LinkReport] = {}
     classify_reports: list[ClassifyReport] = []
     #: 数据源 id → 求值报错。用途见下面 except 分支里的说明。
-    eval_errors: dict[str, list[str]] = {}
+    eval_errors: dict[str, list[str]] = {"cost_return": return_errors} if return_errors else {}
 
     # 平台限定的指标只在对应平台生效。三家店的利润口径互不相同，
     # 全部一起算会让 1688 的收支口径混进淘宝的账。下面两个循环都要按这份名单走。
@@ -814,7 +818,9 @@ def _exclude_linked(
     label: str,
 ) -> pl.DataFrame:
     """按模型声明的另一数据源逐复合键排除，不猜主订单或整单范围。"""
-    out = frame
+    from .cost_returns import policy_mask
+    deferred = frame.filter(policy_mask(frame, ingestion.model)) if metric.id == "goods_cost" else frame.clear()
+    out = frame.filter(~policy_mask(frame, ingestion.model)) if metric.id == "goods_cost" else frame
     for rule_index, rule in enumerate(metric.exclude_when):
         others = ingestion.frames_of(rule.source)
         if not others:
@@ -868,7 +874,7 @@ def _exclude_linked(
             f"{label} · {metric.name}：按 {ingestion.model.source(rule.source).name}"
             f"逐商品排除 {removed:,} 行" + (f"（{rule.note}）" if rule.note else "")
         )
-    return out
+    return pl.concat([out, deferred], how="vertical_relaxed") if not deferred.is_empty() else out
 
 
 def _mark_counted(facts: pl.DataFrame, spine_facts: pl.DataFrame,
@@ -1019,7 +1025,7 @@ def _build_slice(
     spine_rows = own_spine.height
     completeness = _completeness(
         model, ingestion, facts, scoped, scoped_spine, store, period, spine_rows,
-        eval_errors or {},
+        {key: value for key, value in (eval_errors or {}).items() if key != "cost_return"},
     )
 
     unavailable = {
@@ -1043,6 +1049,14 @@ def _build_slice(
         if live_feed else link_reports
     )
     result = audit(model, scoped, scoped_reports, own, completeness, nodes)
+    return_issues = (eval_errors or {}).get("cost_return", [])
+    if return_issues and any(s.name == store and s.cost_return_posting == "transaction" for s in model.stores):
+        from .types import Finding
+        result.findings.append(Finding(
+            "cost_return_evidence", "退货成本待核对", passed=False, blocking=True,
+            message=f"已确认的退货冲回已计入；另有{len(return_issues)}条售后记录缺少有效日期、数量或商品对应关系，暂未冲回。",
+            detail={"items": return_issues},
+        ))
     return Slice(
         store=store, period=period, nodes=nodes, facts=scoped,
         completeness=completeness, audit=result,
