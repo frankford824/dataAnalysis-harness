@@ -242,6 +242,12 @@ def _commission(result: RunResult, model: Model, store: Store, period: str) -> d
     算不出来不能让整个重算失败：提成是这套账的附加视图，配置写错了该说清楚
     是提成配置写错了，而不是让这家店连损益表都出不来。
     """
+    pending = result.pricing_gaps
+    if not pending.is_empty():
+        pending = pending.filter(pl.col("store").is_in([store.name, store.id, *store.aliases])
+                                 & pl.col("period").is_in([period, "(未知账期)"]))
+        if not pending.is_empty():
+            return commission_engine.pending_pricing(pending.height)
     try:
         return commission_dict(comm.compute(result, model, store.id, period))
     except Exception as exc:  # noqa: BLE001 — 什么都不该让重算倒下
@@ -345,8 +351,10 @@ def _recompute_locked(
     for i, ((_s, _p), sl) in enumerate(slices, 1):
         report(f"存账期 · {where}", i, len(slices))
         payload = slice_dict(sl, store, model)
-        allocation = commission_engine.calculate(result, model, store.id, sl.period, registry) if registry else None
-        payload["commission"] = allocation[0] if allocation else _commission(result, model, store, sl.period)
+        allocation = commission_engine.calculate(result, model, store.id, sl.period, registry) if registry and sl.pricing_gaps.is_empty() else None
+        payload["commission"] = (commission_engine.pending_pricing(sl.pricing_gaps.height)
+                                 if not sl.pricing_gaps.is_empty()
+                                 else allocation[0] if allocation else _commission(result, model, store, sl.period))
         if allocation:
             c = payload["commission"]
             base = next((n for n in payload.get("statement", []) if n["id"] == c["base_node"]), None)
@@ -409,11 +417,15 @@ def simulate(ws: Workspace, model: Model, store: Store) -> list[dict[str, Any]]:
 
 def _keep_facts(ws: Workspace, run_id: int, sl: Slice) -> None:
     """把事实行落一份；失败会把本次快照降级为不可结账。"""
-    if sl.facts.is_empty():
-        ws.mark_evidence(run_id, ready=True)
-        return
     path = ws.facts_path(run_id)
+    pricing_path = ws.pricing_gaps_path(run_id)
     try:
+        pending = getattr(sl, "pricing_gaps", pl.DataFrame())
+        if not pending.is_empty():
+            pending.write_parquet(pricing_path)
+        if sl.facts.is_empty():
+            ws.mark_evidence(run_id, ready=True)
+            return
         facts = sl.facts
         if isinstance(facts, pl.DataFrame):
             order = [
@@ -429,6 +441,7 @@ def _keep_facts(ws: Workspace, run_id: int, sl: Slice) -> None:
         ws.mark_evidence(run_id, ready=True)
     except Exception as exc:  # 磁盘满、权限之类必须显式拦住结账
         path.unlink(missing_ok=True)
+        pricing_path.unlink(missing_ok=True)
         ws.mark_evidence(run_id, ready=False, error=str(exc))
 
 

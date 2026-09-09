@@ -20,6 +20,7 @@ import FixPanel from '../components/FixPanel.vue'
 import GapList from '../components/GapList.vue'
 import PageHead from '../components/PageHead.vue'
 import PeriodStrip from '../components/PeriodStrip.vue'
+import PricingPending from '../components/PricingPending.vue'
 import { count, money, percent, stamp } from '../format'
 import { useApp } from '../store'
 
@@ -36,6 +37,7 @@ const snap = ref(null)
 const loading = ref(false)
 const failed = ref('')
 const drill = ref(null)
+const pricingPanel = ref(null)
 
 const period = computed(() => route.query.period || app.period || '')
 
@@ -114,6 +116,7 @@ async function reopen() {
 }
 
 function openDrill(row, only = 'counted') {
+  if (row.unavailable_reason && pricingPanel.value) { pricingPanel.value.open(); return }
   if (!row.drillable || !snap.value?.run_id) return
   drill.value = {
     runId: snap.value.run_id, node: row.id, name: row.name,
@@ -311,6 +314,7 @@ watch(
                 @click.stop
               >导出订单费项</a>
             </header>
+            <PricingPending v-if="snap.pricing_pending_count && snap.run_id" ref="pricingPanel" :key="snap.run_id" :run-id="snap.run_id" :count="snap.pricing_pending_count" />
             <div class="statement">
               <div
                 v-for="row in snap.statement || []"
@@ -320,7 +324,7 @@ watch(
                 :role="row.drillable?'button':undefined" :tabindex="row.drillable?0:undefined" :aria-label="row.drillable?`查看${row.name}明细`:undefined" @keydown.enter="openDrill(row)" @keydown.space.prevent="openDrill(row)" @click="openDrill(row)"
               >
                 <span>{{ row.name }}</span>
-                <span v-if="!row.available" class="na">—</span>
+                <span v-if="!row.available" class="na" :title="row.unavailable_reason || ''">{{ row.unavailable_reason ? '待核价' : '—' }}</span>
                 <span v-else class="amt" :class="{ neg: row.value < 0 }">
                   {{ row.display === 'percent' ? percent(row.value) : money(row.value) }}
                 </span>

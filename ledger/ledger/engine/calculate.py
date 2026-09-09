@@ -58,6 +58,7 @@ class NodeValue:
     #: 这个平台有没有这一项。为假时界面收起来——1688 没有软件服务费，
     #: 摆一行 0 在那里会被读成「这个月没花这笔钱」。
     applicable: bool = True
+    unavailable_reason: str = ""
 
 
 # --------------------------------------------------------------------------- #
@@ -73,6 +74,8 @@ def evaluate_metric(
     period_hint: str = "",
     store_names: dict[str, str] | None = None,
     shared_table: bool = False,
+    require_historical_pricing: bool = False,
+    pricing_gaps: list[dict] | None = None,
 ) -> tuple[pl.DataFrame, list[str]]:
     """把一张归一后的数据帧求值成事实行。
 
@@ -140,6 +143,18 @@ def evaluate_metric(
                 f"{metric.name} 有 {bad.height} 行非零金额的发生日期缺失或无效，不能判断入账月份"
             )
         period = own_period
+    elif metric.posting_basis == "order_number":
+        # PDD's documented YYMMDD-order format identifies the original sale,
+        # including when the only ERP row is a later replacement shipment.
+        order_day = (pl.col(LINK_KEY).cast(pl.Utf8).str.extract(r"^(\d{6})-\d{15}(?:_\d+)?$", 1)
+                     .str.strptime(pl.Date, format="%y%m%d", strict=False))
+        period = order_day.dt.strftime("%Y-%m")
+        if "__spine_period__" in frame.columns:
+            period = pl.coalesce(period, pl.col("__spine_period__"))
+        claimed = pl.col(COL_MAJOR) == metric.major if metric.major and COL_MAJOR in frame.columns else pl.lit(True)
+        missing = frame.filter(claimed & period.is_null() & (pl.col(AMOUNT) != 0))
+        if missing.height:
+            notes.append(f"{metric.name} 有 {missing.height} 条记录缺少有效原订单日期，保留待核对，不按发生月份入账")
     elif metric.posting_basis == "transaction":
         if slot not in frame.columns:
             raise CalculateError(f"{metric.name} 缺少流水发生日期 {slot}，不能判断入账月份")
@@ -178,9 +193,51 @@ def evaluate_metric(
 
     grain = metric.link.grain if metric.link else "period"
     source_note = pl.col("source_note").cast(pl.Utf8) if "source_note" in frame.columns else pl.lit(None, dtype=pl.Utf8)
-    if metric.posting_basis == "transaction" and slot in frame.columns:
+    if metric.posting_basis == "order_number":
+        source_note = pl.concat_str([source_note,
+            pl.concat_str([pl.lit("下单月份："), period.fill_null("待核对")])], separator="；", ignore_nulls=True)
+    elif metric.posting_basis == "transaction" and slot in frame.columns:
         source_note = pl.coalesce(source_note, pl.concat_str([pl.lit("发生日期："), pl.col(slot).dt.strftime("%Y-%m-%d")]))
-    facts = frame.select(
+    keep = pl.col(AMOUNT) != 0.0
+    pricing_eligible = pl.lit(True)
+    if require_historical_pricing and metric.source == "order_cost" and "unit_cost" in metric.value.of:
+        col = lambda name: pl.col(name) if name in frame.columns else pl.lit(None)
+        key_columns = [pl.col(k).cast(pl.Utf8) for k in (LINK_KEY, "original_order_id", "order_id") if k in frame.columns]
+        key = pl.coalesce(key_columns) if key_columns else pl.lit(None, dtype=pl.Utf8)
+        wanted = key.str.extract(r"^(\d{6})-\d{15}(?:_\d+)?$", 1).str.strptime(pl.Date, "%y%m%d", strict=False)
+        quoted = col("cost_as_of").cast(pl.Utf8).str.slice(0, 10).str.strptime(pl.Date, "%Y-%m-%d", strict=False)
+        unit = col("unit_cost").cast(pl.Float64, strict=False)
+        quantity = col("quantity").cast(pl.Float64, strict=False)
+        reference = pl.coalesce(col("reference_unit_cost"), unit).cast(pl.Float64, strict=False)
+        known = (col("cost_source").cast(pl.Utf8).is_in(["history", "component_history", "manual", "blue_flag"])
+                 & (col("cost_status") == "priced") & (quoted == wanted)
+                 & unit.is_finite() & (unit >= 0) & quantity.is_finite() & (quantity >= 0))
+        pending = (~known.fill_null(False) | col("pricing_suspect").cast(pl.Boolean).fill_null(False)) & ((quantity != 0) | quantity.is_null())
+        gaps = frame.filter(pending).select(
+            store.fill_null("(未知店铺)").alias("store"), period.fill_null("(未知账期)").alias("period"),
+            pl.lit(metric.id).alias("metric_id"), key.alias("order_id"),
+            col("internal_order_id").cast(pl.Utf8).alias("internal_order_id"),
+            col("sku").cast(pl.Utf8).alias("sku"), pl.when(quantity.is_finite()).then(quantity).otherwise(None).alias("quantity"),
+            pl.when(reference.is_finite()).then(reference).otherwise(None).alias("reference_unit_cost"),
+            pl.when(col("pricing_suspect").cast(pl.Boolean).fill_null(False)).then(pl.lit("成本与订单金额差异较大，需核对"))
+            .when(wanted.is_null()).then(pl.lit("原订单日期待核对"))
+            .when(~quantity.is_finite().fill_null(False) | (quantity < 0)).then(pl.lit("原订单数量待核对"))
+            .when(quoted.is_not_null() & (quoted != wanted)).then(pl.lit("取价日期与下单日不一致"))
+            .otherwise(pl.lit("缺少已核实的下单日历史成本")).alias("reason"),
+            pl.col(ANCHOR_SHA).alias("file_sha"), pl.col(ANCHOR_FILE).alias("file_name"),
+            pl.col(ANCHOR_SHEET).alias("sheet"), pl.col(ANCHOR_ROW).alias("row_no"),
+        )
+        if not gaps.is_empty():
+            notes.append(f"{metric.name} 有 {gaps.height} 条记录待核价，未用参考价格计入成本")
+            if pricing_gaps is not None:
+                pricing_gaps.extend(gaps.to_dicts())
+        pricing_eligible = ~pending
+    if metric.keep_zero_rows and all(role in frame.columns for role in metric.value.of):
+        supplied_zero = pl.all_horizontal([pl.col(role).is_not_null() for role in metric.value.of])
+        if metric.major and COL_MAJOR in frame.columns:
+            supplied_zero = supplied_zero & (pl.col(COL_MAJOR) == metric.major)
+        keep = keep | supplied_zero
+    facts = frame.filter(keep & pricing_eligible).select(
         pl.lit(metric.id).alias("metric_id"),
         pl.lit(metric.source).alias("source_id"),
         pl.lit(template.id).alias("template_id"),
@@ -221,7 +278,7 @@ def evaluate_metric(
             for role in ("order_id", "internal_order_id", "sku")
         ],
         source_note.alias("source_note"),
-    ).filter(pl.col("amount") != 0.0)
+    )
     return facts, notes
 
 

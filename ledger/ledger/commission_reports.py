@@ -58,6 +58,7 @@ def build(workspace, registry, model, start, end, store_ids=None, person_ids=Non
         if closed and c.get('amount_complete') is False:notes.append('原结账结果保留了试算标记')
         has_result=c.get('total') is not None or any(p.get('amount') is not None for p in c.get('people',[]))
         if not has_result:status='未计算提成'
+        if c.get('pricing_pending_count'):status='待核价'
         all_total=sum((decimal(p['amount']) for p in c.get('people',[]) if p.get('amount') is not None),Decimal(0))
         if c.get('total') is not None and abs(all_total-decimal(c['total']))>Decimal('.01'):
             notes.append('原记录的人员合计与店铺提成合计不一致');status+=' · 合计待核对'

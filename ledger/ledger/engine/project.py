@@ -129,7 +129,7 @@ def project(
     by_key = by_key.with_columns(norm_expr(pl.col("link_key")).alias("link_key"))
 
     factor = _factor(keyed, metric)
-    if metric.posting_basis == "transaction":
+    if metric.posting_basis in {"transaction", "order_number"}:
         # 退款金额已由流水确认。保留有效比例的相对关系，但不能因残留比例少计退款。
         keyed = keyed.with_columns(factor.fill_null(0.0).clip(lower_bound=0.0).alias("__factor"))
         total = pl.col("__factor").sum().over("link_key")
@@ -222,7 +222,7 @@ def project(
         orphan_keys=len(orphan_keys),
         uncovered_rows=keyed.height - covered,
     )
-    if orphan_keys and metric.posting_basis != "transaction":
+    if orphan_keys and metric.posting_basis not in {"transaction", "order_number"}:
         proj.notes.append(
             f"{metric.name}：源表里有 {len(orphan_keys):,} 个键、{orphan_amount:,.2f} 元"
             f"在脊柱上找不到对应订单，这部分没进利润"

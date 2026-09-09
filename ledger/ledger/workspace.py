@@ -616,6 +616,9 @@ class Workspace:
         d.mkdir(parents=True, exist_ok=True)
         return d / f"{run_id}.parquet"
 
+    def pricing_gaps_path(self, run_id: int) -> Path:
+        return self.facts_path(run_id).with_suffix(".pricing.parquet")
+
     def latest_run(self, store_id: str, period: str) -> dict[str, Any] | None:
         row = self.conn.execute(
             "select * from run where store_id=? and period=? order by id desc limit 1",

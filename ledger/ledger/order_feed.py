@@ -34,7 +34,7 @@ from .model.schema import ColumnBinding, Model, Store, Template
 SCHEMA_VERSION = "ledger-feed.v1"
 REPLACED_SOURCES = frozenset({"order_cost", "after_sales"})
 ACCOUNTING_ENTITIES = frozenset({"order", "order_item", "order_cost", "order_relation", "after_sale", "after_sale_item"})
-CATALOG_ENTITIES = frozenset({"shop", "shop_group", "user", "shop_item", "department"})
+CATALOG_ENTITIES = frozenset({"shop", "shop_group", "user", "shop_item", "department", "sku_cost"})
 # 一行商品成本超过该行售价这么多倍、且金额超过这个门槛，视为数量或成本写错，不计。
 # 正常亏本引流是 1 分钱卖 1 块成本的东西，绝对金额小；5 倍 + 100 元把它们都放过。
 IMPLAUSIBLE_COST_TO_PRICE = 5.0
@@ -613,10 +613,10 @@ class OrderFeed:
         with self._connect() as conn:
             conn.execute(
                 "update feed_state set source_revision=?,source_latest_seq=?,revision_etag=?,"
-                "health_json=?,last_success=?,last_error='' where id=1",
+                "health_json=?,last_success=CASE WHEN consumed_seq>=? THEN ? ELSE last_success END,last_error='' where id=1",
                 (
                     source_revision, source_latest_seq, revision_etag,
-                    json.dumps(health, ensure_ascii=False), _now(),
+                    json.dumps(health, ensure_ascii=False), source_latest_seq, _now(),
                 ),
             )
 
@@ -635,8 +635,8 @@ class OrderFeed:
             )
 
             conn.execute(
-                "update feed_state set stores_refreshed_at=?,last_success=?,last_error='' where id=1",
-                (int(time.time()), _now()),
+                "update feed_state set stores_refreshed_at=? where id=1",
+                (int(time.time()),),
             )
 
     @staticmethod
@@ -746,13 +746,19 @@ class OrderFeed:
                 child, parent = normalize_key(child), normalize_key(parent)
                 if child and parent:
                     exported.setdefault(child, set()).add(parent)
+        from .order_flags import collect as collect_order_flags
+        fallback_flags, _ = collect_order_flags(ingestion, store)
         frames = self._frames(store, json.loads(state["manifest_json"]),
-                              {child: next(iter(parents)) if len(parents) == 1 else None for child, parents in exported.items()})
+                              {child: next(iter(parents)) if len(parents) == 1 else None for child, parents in exported.items()},
+                              fallback_flags,
+                              any(p.id == store.platform and p.cost_pricing == "historical" for p in ingestion.model.platforms) if ingestion.model else False)
         if not frames:
             raise OrderFeedError(f"订单台没有 {store.name} 的已确认店铺映射")
         feed_order = next(item for item in frames if item.recognition.source_id == "order_detail")
         feed_after = next(item for item in frames if item.recognition.source_id == "after_sales")
         feed_cost = next(item for item in frames if item.recognition.source_id == "order_cost")
+        from .order_flags import apply as apply_order_flags
+        apply_order_flags(ingestion, store, feed_cost, feed_order)
         # 订单台售后和上传的聚水潭售后单并用，不替换。订单台一张售后只挂一个商品，
         # 多商品单整单退款时它只说得出「实付最大的那一行」，而聚水潭导出是逐商品一行；
         # 成本排除按键取并集，同一售后两边都有不会多扣，少了哪边都会漏扣。
@@ -881,6 +887,7 @@ class OrderFeed:
             return
         candidates = {
             "refund_status": "text", "tracking_no": "text", "order_state": "text",
+            "order_flag": "text",
             "order_time": "time", "pay_time": "time", "order_date": "time", "pay_date": "time",
         }
         for item in ingestion.frames_of("order_detail"):
@@ -922,7 +929,8 @@ class OrderFeed:
                     update={"bindings": item.template.bindings + extra}
                 )
 
-    def _frames(self, store: Store, manifest: dict[str, Any], exported_orders: dict[str, str | None] | None = None) -> list[Ingested]:
+    def _frames(self, store: Store, manifest: dict[str, Any], exported_orders: dict[str, str | None] | None = None,
+                fallback_flags: dict[str, str] | None = None, require_history: bool = False) -> list[Ingested]:
         with self._connect() as conn:
             conn.execute("BEGIN")
             captured = conn.execute("SELECT snapshot_id,consumed_seq FROM feed_state WHERE id=1").fetchone()
@@ -954,6 +962,9 @@ class OrderFeed:
             pl.col("order_id").cast(pl.Utf8).is_in(order_ids)
         ).collect()
         items = self._overlay(items, deltas, "order_item", "sub_order_id", lambda p: [p.get("order_item") or {}])
+        if "order_flag" not in items.columns:
+            items = items.with_columns(pl.col("order_id").cast(pl.Utf8).replace_strict(
+                fallback_flags or {}, default=None, return_dtype=pl.Utf8).alias("order_flag"))
         costs = pl.scan_parquet(path("order_costs.parquet")).filter(
             pl.col("order_id").cast(pl.Utf8).is_in(order_ids)
         ).collect()
@@ -996,7 +1007,7 @@ class OrderFeed:
 
         reship_origins = self._reshipment_origins(after, items, exported_orders)
         order_frame = self._order_frame(orders, items, after, relations, store, fingerprint, reship_origins)
-        cost_frame = self._cost_frame(orders, items, costs, relations, store, fingerprint, reship_origins)
+        cost_frame = self._cost_frame(orders, items, costs, relations, store, fingerprint, reship_origins, require_history)
         after_frame = self._after_frame(after, after_items, items, store, fingerprint)
         cost_item = self._item("order_cost", "order_console_cost_v1", "订单台日期时点成本", cost_frame,
                                self._cost_template(), fingerprint)
@@ -1082,6 +1093,15 @@ class OrderFeed:
         )
 
     @staticmethod
+    def _pdd_original(child: pl.Expr, raw: pl.Expr, header: pl.Expr) -> pl.Expr:
+        pattern = r"^(\d{6}-\d{15})(?:_\d+)?$"
+        return pl.coalesce(
+            child.cast(pl.Utf8).str.extract(pattern, 1),
+            raw.cast(pl.Utf8).str.replace(r"^[0-9]+:", "").str.extract(pattern, 1),
+            header.cast(pl.Utf8),
+        )
+
+    @staticmethod
     def _reshipment_origins(after: pl.DataFrame, items: pl.DataFrame | None = None,
                            exported_orders: dict[str, str | None] | None = None) -> dict[str, str]:
         """Resolve reserved ERP after-sale item markers only from confirmed reship records."""
@@ -1144,7 +1164,8 @@ class OrderFeed:
         frame = items.join(orders, on="order_id", how="inner", suffix="_order").join(
             refund, on="order_id", how="left",
         ).select(
-            pl.col("online_order_no_order").fill_null(pl.col("online_order_no")).cast(pl.Utf8).alias("order_id"),
+            (self._pdd_original(pl.col("outer_sku"), pl.col("online_order_no"), pl.col("online_order_no_order"))
+             if store.platform == "pdd" else pl.col("online_order_no_order").fill_null(pl.col("online_order_no"))).cast(pl.Utf8).alias("order_id"),
             pl.col("outer_sku").fill_null(pl.col("sub_order_id")).cast(pl.Utf8).alias("sub_order_id"),
             product.cast(pl.Utf8).fill_null("").alias("product_id"),
             pl.col("product_name").cast(pl.Utf8),
@@ -1153,6 +1174,7 @@ class OrderFeed:
             pl.col("refund_status").cast(pl.Utf8).fill_null("没有申请退款"),
             pl.col("tracking_no").fill_null(pl.col("tracking_no_order")).cast(pl.Utf8),
             pl.col("order_status_raw").cast(pl.Utf8).alias("order_state"),
+            *([pl.col("order_flag").cast(pl.Utf8)] if store.platform == "pdd" else []),
             pl.when(pl.col("order_id").cast(pl.Utf8).is_in(reships) | pl.col("outer_sku").cast(pl.Utf8).str.to_lowercase().is_in(list(reship_origins or {})).fill_null(False))
             .then(pl.lit("补发订单")).otherwise(pl.lit("销售订单")).alias("order_type"),
             self._dt("order_time").alias("order_time"),
@@ -1166,6 +1188,8 @@ class OrderFeed:
             pl.col("refund_status").drop_nulls().last(),
             pl.col("tracking_no").drop_nulls().first(),
             pl.col("order_state").drop_nulls().first(),
+            *([pl.when((pl.col("order_flag") == "蓝色旗帜").fill_null(False).all()).then(pl.lit("蓝色旗帜"))
+               .otherwise(pl.lit(None, dtype=pl.Utf8)).alias("order_flag")] if store.platform == "pdd" else []),
             pl.when((pl.col("order_type") == "销售订单").any())
             .then(pl.lit("销售订单")).otherwise(pl.lit("补发订单")).alias("order_type"),
             pl.col("order_time").drop_nulls().first(),
@@ -1175,6 +1199,16 @@ class OrderFeed:
             pl.col("order_time").alias("order_date"),
             pl.col("pay_time").alias("pay_date"),
         )
+        if store.platform == "pdd":
+            original_day = pl.col("order_id").str.extract(r"^(\d{6})-\d{15}(?:_\d+)?$", 1).str.strptime(
+                pl.Date, "%y%m%d", strict=False)
+            frame = frame.with_columns(
+                original_day.cast(pl.Datetime).alias("order_date"),
+                # A replacement shipment's creation time cannot choose the
+                # commission version. Keep an exact time only on the original day.
+                pl.when(pl.col("order_time").dt.date() == original_day)
+                .then(pl.col("order_time")).otherwise(None).alias("order_time"),
+            )
         # 和千牛人工表同一套：子订单净实付 / 主订单合计。不写这一列的话，
         # 和带「收入分配率」的千牛明细拼成脊柱后列在、值空，分摊按 0，
         # 对账挂得上、销售收入却是 0.00。
@@ -1193,11 +1227,11 @@ class OrderFeed:
     def _cost_frame(
         self, orders: pl.DataFrame, items: pl.DataFrame, costs: pl.DataFrame,
         relations: pl.DataFrame,
-        store: Store, fingerprint: str, reship_origins: dict[str, str] | None = None,
+        store: Store, fingerprint: str, reship_origins: dict[str, str] | None = None, require_history: bool = False,
     ) -> pl.DataFrame:
-        certified = costs.filter(
+        certified = costs if require_history else costs.filter(
             (pl.col("cost_status") == "priced")
-            & pl.col("cost_source").is_in(["history", "mirror", "scrape", "unknown_evidence"])
+            & pl.col("cost_source").is_in(["history", "component_history", "blue_flag", "mirror", "scrape", "unknown_evidence"])
         )
         # ERP 把「没价」写成 0，移动平均被退货打穿会出负数；两者都不是成交成本。
         # 订单台 2026-09-03 起已把 ≤0 改判缺价，这里再守一道：关账月冻结的旧行、
@@ -1205,6 +1239,7 @@ class OrderFeed:
         unit = pl.col("unit_cost").cast(pl.Float64, strict=False)
         flags = items.select(
             pl.col("order_id", "sub_order_id").cast(pl.Utf8),
+            (pl.col("order_flag").cast(pl.Utf8) if "order_flag" in items.columns else pl.lit(None, dtype=pl.Utf8).alias("order_flag")),
             *(
                 pl.col(name).cast(pl.Boolean, strict=False) if name in items.columns
                 else pl.lit(False).alias(name)
@@ -1220,9 +1255,12 @@ class OrderFeed:
         suspect = pl.col("is_suspect")
         self._suspect_cost_rows = int(certified.select(suspect.sum()).item() or 0)
         certified = certified.filter(~suspect)
-        unpriced = ((unit <= 0) | unit.is_null()) & ~((unit == 0) & pl.col("is_gift"))
+        blue = (pl.col("order_flag") == "蓝色旗帜").fill_null(False) if store.platform == "pdd" else pl.lit(False)
+        unpriced = ((unit <= 0) | unit.is_null()) & ~((unit == 0) & (pl.col("is_gift") | blue))
         self._unpriced_cost_rows = int(certified.select(unpriced.sum()).item() or 0)
-        certified = certified.filter(~unpriced).drop("is_gift", "is_suspect")
+        if not require_history:
+            certified = certified.filter(~unpriced)
+        certified = certified.drop("is_gift", "is_suspect")
         # 商品行数量写错时成本会被放大几十倍（2026-09-03 见拼多多「定制配件」行数量 2043、
         # 实付 0.03，一行成本 3 万；同批还有 4086、8172 这类 2043 的整数倍）。一行成本
         # 超过它自己售价的若干倍、且绝对金额不小，就不是正常的亏本促销而是数据错了：
@@ -1250,7 +1288,11 @@ class OrderFeed:
         ).fill_null(False)
         flagged = certified.filter(implausible)
         self._implausible_cost = (flagged.height, float(flagged.select(total.sum()).item() or 0.0))
-        certified = certified.filter(~implausible).drop("line_amount", "order_paid")
+        if require_history:
+            certified = certified.with_columns(implausible.alias("pricing_suspect"))
+        else:
+            certified = certified.filter(~implausible)
+        certified = certified.drop("line_amount", "order_paid")
         reships = (
             relations.filter(pl.col("relation_type") == "reship")
             .get_column("target_order_id").cast(pl.Utf8).drop_nulls().unique().to_list()
@@ -1263,13 +1305,16 @@ class OrderFeed:
                           pl.col("link_order_id") if "link_order_id" in orders.columns else pl.lit(None).alias("link_order_id")),
             on="order_id", how="left",
         ).join(
-            items.select("order_id", "sub_order_id", "outer_sku", "tracking_no").rename({"tracking_no": "item_tracking_no"}),
+            items.select("order_id", "sub_order_id", "outer_sku", "tracking_no", "online_order_no").rename(
+                {"tracking_no": "item_tracking_no", "online_order_no": "item_order_no"}),
             on=["order_id", "sub_order_id"], how="left",
         ).select(
             pl.col("sub_order_id").cast(pl.Utf8).alias("internal_sub_order_id"),
             pl.col("order_id").cast(pl.Utf8).alias("internal_order_id"),
-            pl.col("online_order_no").cast(pl.Utf8).alias("order_id"),
-            pl.col("online_order_no").cast(pl.Utf8).alias("original_order_id"),
+            (self._pdd_original(pl.col("outer_sku"), pl.col("item_order_no"), pl.col("online_order_no"))
+             if store.platform == "pdd" else pl.col("online_order_no")).cast(pl.Utf8).alias("order_id"),
+            (self._pdd_original(pl.col("outer_sku"), pl.col("item_order_no"), pl.col("online_order_no"))
+             if store.platform == "pdd" else pl.col("online_order_no")).cast(pl.Utf8).alias("original_order_id"),
             pl.col("outer_sku").fill_null(pl.col("sub_order_id")).cast(pl.Utf8).alias("sub_order_id"),
             pl.col("sku_id").cast(pl.Utf8).alias("sku"),
             pl.col("link_order_id").cast(pl.Utf8).alias("parent_internal_order_id"),
@@ -1279,6 +1324,12 @@ class OrderFeed:
             pl.col("cost_amount").cast(pl.Float64, strict=False).alias("total_cost"),
             pl.col("item_tracking_no").fill_null(pl.col("tracking_no")).cast(pl.Utf8).alias("tracking_no"),
             pl.col("order_status_raw").cast(pl.Utf8).alias("order_state"),
+            pl.col("order_flag").cast(pl.Utf8),
+            *([
+                (pl.col(name).cast(pl.Utf8) if name in certified.columns else pl.lit(None, dtype=pl.Utf8)).alias(name)
+                for name in ("cost_source", "cost_status", "cost_as_of", "failure_reason", "reference_unit_cost")
+            ] if require_history else []),
+            *([pl.col("pricing_suspect")] if require_history else []),
             self._dt("order_time").alias("order_time"),
             pl.when(pl.col("order_id").cast(pl.Utf8).is_in(reships))
             .then(pl.lit("补发订单")).otherwise(pl.lit("销售订单")).alias("order_type"),

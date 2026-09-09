@@ -108,6 +108,7 @@ def slice_dict(sl: Slice, store: Store, model: Model) -> dict[str, Any]:
         "entity": store.entity,
         "period": sl.period,
         "can_close": sl.can_close,
+        "pricing_pending_count": sl.pricing_gaps.height,
         "statement": _statement(sl, model),
         "findings": [
             {"id": f.check_id, "name": f.name, "passed": f.passed,
@@ -247,7 +248,9 @@ def _statement(sl: Slice, model: Model) -> list[dict[str, Any]]:
         out.append({
             "id": nv.id, "name": nv.name, "level": nv.level,
             "value": nv.value, "available": nv.available, "display": nv.display,
-            "missing_sources": [source_name(model, s) for s in nv.missing_sources],
+            "unavailable_reason": nv.unavailable_reason,
+            "missing_sources": [source_name(model, s) for s in nv.missing_sources
+                                if not (nv.unavailable_reason and s == "order_cost")],
             "is_total": nv.is_total,
             # 能不能点开看构成。比率行展开成分子分母两组指标，加总出来毫无意义；
             # 加总行本身没有明细。这两类不给点，免得点开一看是笔糊涂账。
@@ -926,6 +929,12 @@ def fees_csv(facts: Path | pl.DataFrame, model: Model) -> str:
     """
     if isinstance(facts, (str, Path)):
         facts = pl.read_parquet(facts)
+    if not facts.is_empty() and {"major", "metric_id"} <= set(facts.columns):
+        present = set(facts["metric_id"].unique().to_list())
+        owned = [claims(m) for m in model.metrics if m.id in present]
+        known = {m.id for m in model.metrics}
+        owned.append(~pl.col("metric_id").is_in(known))
+        facts = facts.filter(pl.any_horizontal(owned) | pl.col("major").is_null())
     names = {m.id: m.name for m in model.metrics}
     cols = [
         c for c in (

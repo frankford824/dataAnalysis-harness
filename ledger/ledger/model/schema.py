@@ -257,6 +257,8 @@ class Predicate(Base):
     #: 会把这行排除掉，也就是**因为不知道状态而丢掉一笔成本**。少算的钱不报错，
     #: 只是利润凭空高一截。所以排除型条件要显式写上「空值也留下」。
     include_null: bool = False
+    #: 旧版来源可以没有这列；只有显式声明时才把缺列视为空值。
+    allow_missing: bool = False
 
     @model_validator(mode="after")
     def _check(self) -> Predicate:
@@ -615,6 +617,8 @@ class PlatformRule(Base):
 
     platform: str
     link: LinkRule | None = None
+    posting_basis: Literal["order", "transaction", "order_number"] | None = None
+    time_basis: TimeSlot | None = None
     #: 覆盖过滤条件。给空列表就是这个平台不过滤。
     #: （留空表达不了「不过滤」，那和「不覆盖」分不开，所以用 None 表示不覆盖。）
     where: tuple[Predicate, ...] | None = None
@@ -678,7 +682,9 @@ class Metric(Base):
     #: 时间归属依据。广告费按花费日而非下单日。
     time_basis: TimeSlot = "order_date"
     #: 流水口径按发生月确认全部金额；关联仅用于归属，不决定是否入账。
-    posting_basis: Literal["order", "transaction"] = "order"
+    posting_basis: Literal["order", "transaction", "order_number"] = "order"
+    #: 保留真实的零金额原始记录，供逐单核对；缺失金额不视为零。
+    keep_zero_rows: bool = False
     #: 该科目是否天然无订单号。为真时挂不上订单不算异常。
     naturally_unlinked: bool = False
     #: 分摊方式。为空表示源金额直接落到脊柱行，不拆。
@@ -707,6 +713,8 @@ class Metric(Base):
             "expect_label": rule.expect_label or self.expect_label,
             "allocate": None if rule.direct else (rule.allocate or self.allocate),
             "major": rule.major or self.major,
+            "posting_basis": rule.posting_basis or self.posting_basis,
+            "time_basis": rule.time_basis or self.time_basis,
         })
 
 
@@ -1100,6 +1108,7 @@ class Platform(Base):
 
     id: str
     name: str
+    cost_pricing: Literal["provided", "historical"] = "provided"
     #: 店名或文件名里出现这些词，就猜是这个平台。只用于登记新店时给建议，
     #: 不参与任何计算——猜出来的东西不能进账，登记必须由人确认。
     hints: tuple[str, ...] = ()

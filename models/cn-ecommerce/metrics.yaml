@@ -240,8 +240,17 @@
         - {field: order_state, op: not_contains, value: 等待付款确认}
       expect_label: 已出库
     - platform: pdd
+      posting_basis: order_number
       link: {key: original_order_id, to: order.order_id, grain: order}
       allocate: {mode: even}
+      where:
+        - {field: order_type, op: not_in, value: [补发订单]}
+        - {field: order_state, op: not_in, value: [已取消, 取消, Cancelled], include_null: true}
+        - {field: order_flag, op: not_in, value: [蓝色旗帜], include_null: true, allow_missing: true}
+      expect:
+        - {field: tracking_no, op: notnull}
+        - {field: order_flag, op: not_in, value: [蓝色旗帜], include_null: true, allow_missing: true}
+      expect_label: 已发货且非蓝旗订单
 
 - id: dropship_cost
   name: 代发成本
@@ -259,7 +268,7 @@
     # 也是同一个语义。五家其实一致，列在这里是为了让「都一样」这件事也有据可查。
     - {platform: alibaba1688, allocate: {mode: even}}
     - {platform: jd, allocate: {mode: even}}
-    - {platform: pdd, allocate: {mode: even}}
+    - {platform: pdd, posting_basis: order_number, allocate: {mode: even}}
 
 - id: reshipment_cost
   name: 补发成本
@@ -293,6 +302,12 @@
     # 1688 的订单明细表在补发成本那一列写着「无需计算，已包含在聚水潭成本里」。
     # 它的聚水潭成本没有按订单类型排除补发，所以这里再算一遍就是重复。
     - {platform: alibaba1688, disabled: true}
+    - platform: pdd
+      posting_basis: order_number
+      where:
+        - {field: order_type, op: in, value: [补发订单]}
+        - {field: order_state, op: not_in, value: [已取消, 取消, Cancelled], include_null: true}
+        - {field: order_flag, op: not_in, value: [蓝色旗帜], include_null: true, allow_missing: true}
 
 - id: freight_cost
   name: 发货运费
@@ -324,7 +339,7 @@
     # 京东、拼多多都是 sumifs(运费表总金额, 订单号)/countifs(订单号)，组内均分。
     # 京东的订单明细没有运单号列，回查只能走聚水潭那一级，见模板里的说明。
     - {platform: jd, allocate: {mode: even}}
-    - {platform: pdd, allocate: {mode: even}}
+    - {platform: pdd, posting_basis: order_number, time_basis: order_date, allocate: {mode: even}}
 
 # ------------------------------------------------------------ 营销投入 --- #
 - id: ad_cost
@@ -370,7 +385,7 @@
     - {platform: jd, allocate: {mode: even}}
     # 拼多多这家店本期没有小额打款，它的规则表在这一项旁边写着「目前该店铺无小额打款
     # 故值设为 0」。指标照留：写死成 0 的话，哪天真发生了会一直算成 0。
-    - {platform: pdd, allocate: {mode: even}}
+    - {platform: pdd, posting_basis: order_number, allocate: {mode: even}}
 
 - id: brushing_cost
   name: 本金佣金
@@ -396,6 +411,8 @@
 # 除以 countifs 就是在同一订单的多行之间均摊，对应 allocate.mode=even。
   by_platform:
     - {platform: douyin, allocate: {mode: even}}
+
+    - {platform: pdd, posting_basis: order_number}
 
 - id: trade_receipt_1688
   name: 销售收入
@@ -591,10 +608,12 @@
   name: 销售收入
   source: settlement
   platform: pdd
+  posting_basis: order_number
+  keep_zero_rows: true
   major: trade_receipt
   value: {op: sum, of: [income, outgo]}
   sign: as_is
-  time_basis: settle_date
+  time_basis: order_date
   link: {key: base_order_id, to: order.order_id, grain: order,
          prefer_exported_orders: true,
          spine_where: [{field: order_type, op: not_in, value: [补发订单], include_null: true}]}
@@ -602,15 +621,16 @@
   note: 交易收入-订单收入，加上优惠券结算那部分。收入列和支出列相加取净额。
 
 - id: trade_refund_pdd
-  posting_basis: transaction
   name: 销售退款
   occasional: true
   source: settlement
   platform: pdd
+  posting_basis: order_number
+  keep_zero_rows: true
   major: trade_refund
   value: {op: sum, of: [income, outgo]}
   sign: as_is
-  time_basis: settle_date
+  time_basis: order_date
   link: {key: base_order_id, to: order.order_id, grain: order,
          prefer_exported_orders: true,
          spine_where: [{field: order_type, op: not_in, value: [补发订单], include_null: true}]}
@@ -620,10 +640,12 @@
   name: 平台服务费
   source: settlement
   platform: pdd
+  posting_basis: order_number
+  keep_zero_rows: true
   major: software_fee
   value: {op: sum, of: [income, outgo]}
   sign: as_is
-  time_basis: settle_date
+  time_basis: order_date
   link: {key: base_order_id, to: order.order_id, grain: order,
          prefer_exported_orders: true,
          spine_where: [{field: order_type, op: not_in, value: [补发订单], include_null: true}]}
@@ -635,10 +657,12 @@
   occasional: true
   source: settlement
   platform: pdd
+  posting_basis: order_number
+  keep_zero_rows: true
   major: logistics_fee
   value: {op: sum, of: [income, outgo]}
   sign: as_is
-  time_basis: settle_date
+  time_basis: order_date
   link: {key: base_order_id, to: order.order_id, grain: order,
          prefer_exported_orders: true,
          spine_where: [{field: order_type, op: not_in, value: [补发订单], include_null: true}]}
@@ -649,10 +673,12 @@
   occasional: true
   source: settlement
   platform: pdd
+  posting_basis: order_number
+  keep_zero_rows: true
   major: cross_border_fee
   value: {op: sum, of: [income, outgo]}
   sign: as_is
-  time_basis: settle_date
+  time_basis: order_date
   link: {key: base_order_id, to: order.order_id, grain: order,
          prefer_exported_orders: true,
          spine_where: [{field: order_type, op: not_in, value: [补发订单], include_null: true}]}
@@ -663,10 +689,12 @@
   occasional: true
   source: settlement
   platform: pdd
+  posting_basis: order_number
+  keep_zero_rows: true
   major: trade_compensation
   value: {op: sum, of: [income, outgo]}
   sign: as_is
-  time_basis: settle_date
+  time_basis: order_date
   link: {key: base_order_id, to: order.order_id, grain: order,
          prefer_exported_orders: true,
          spine_where: [{field: order_type, op: not_in, value: [补发订单], include_null: true}]}
@@ -680,10 +708,12 @@
   occasional: true
   source: settlement
   platform: pdd
+  posting_basis: order_number
+  keep_zero_rows: true
   major: marketing_fee
   value: {op: sum, of: [income, outgo]}
   sign: as_is
-  time_basis: settle_date
+  time_basis: order_date
   link: {key: base_order_id, to: order.order_id, grain: order,
          prefer_exported_orders: true,
          spine_where: [{field: order_type, op: not_in, value: [补发订单], include_null: true}]}

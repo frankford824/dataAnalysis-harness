@@ -154,7 +154,7 @@ def _empty_lines(payload: dict[str, Any]) -> list[dict[str, Any]]:
     """
     out = []
     for row in payload.get("statement") or []:
-        if row.get("available") or row.get("is_total"):
+        if row.get("available") or row.get("is_total") or row.get("unavailable_reason"):
             continue
         missing = row.get("missing_sources") or []
         out.append(_gap(

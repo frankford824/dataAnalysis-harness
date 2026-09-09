@@ -90,6 +90,16 @@ def test_catalog_pointers_do_not_hydrate_every_sku_link(tmp_path):
         assert json.loads(saved)["catalog_pointer"] is True
 
 
+def test_health_contact_while_behind_does_not_claim_successful_sync(tmp_path):
+    feed = OrderFeed(tmp_path / 'ws')
+    with feed._connect() as conn:
+        conn.execute("UPDATE feed_state SET consumed_seq=10,last_success='2026-06-01',last_error='old error' WHERE id=1")
+    feed._refresh_health({'healthy': True}, 20, 20, 'v20')
+    assert feed.state()['last_success'] == '2026-06-01'
+    feed._refresh_health({'healthy': True}, 10, 10, 'v10')
+    assert feed.state()['last_success'] != '2026-06-01'
+
+
 def _write(root: Path, name: str, frame: pl.DataFrame) -> dict:
     data = root / "objects" / name
     data.parent.mkdir(parents=True, exist_ok=True)

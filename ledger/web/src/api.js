@@ -38,6 +38,7 @@ function query(params) {
 }
 
 export const api = {
+  pricingGaps: (runId, params, options = {}) => call(`/api/runs/${runId}/pricing-gaps${query(params)}`, options),
   navigation: () => call('/api/navigation'),
   bootstrap: () => call('/api/bootstrap'),
 

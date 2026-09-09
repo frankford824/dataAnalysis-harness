@@ -1198,6 +1198,25 @@ def drill(run_id: int, node_id: str, limit: int = view.DRILL_LIMIT,
         raise HTTPException(404, f"这次算账的明细读不了，重算一次就有了：{exc}") from exc
 
 
+@app.get("/api/runs/{run_id}/pricing-gaps")
+def pricing_gaps_page(run_id: int, q: str = "", offset: int = 0, limit: int = 100) -> dict:
+    from . import pricing_gaps
+    path = workspace().pricing_gaps_path(run_id)
+    if not path.exists():
+        raise HTTPException(404, "这次计算没有待核价明细")
+    return pricing_gaps.page(path, q=q, offset=offset, limit=limit)
+
+
+@app.get("/api/runs/{run_id}/pricing-gaps.csv")
+def pricing_gaps_export(run_id: int, q: str = "") -> PlainTextResponse:
+    from . import pricing_gaps
+    path = workspace().pricing_gaps_path(run_id)
+    if not path.exists():
+        raise HTTPException(404, "这次计算没有待核价明细")
+    return PlainTextResponse("\ufeff" + pricing_gaps.csv(path, q), media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="pricing-pending-{run_id}.csv"'})
+
+
 @app.get("/api/runs/{run_id}/fees.csv")
 def fees_export(run_id: int) -> PlainTextResponse:
     """这个账期按订单号列出所有费项，用来和手工表对差异。"""

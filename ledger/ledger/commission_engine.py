@@ -97,7 +97,20 @@ def _match(orders, rules):
     )
 
 
+def pending_pricing(count: int) -> dict:
+    return {"configured": False, "amount_complete": False, "total": None,
+            "base_total": None, "people": [], "products": [],
+            "pricing_pending_count": count,
+            "notes": [f"还有 {count} 条商品成本待核价，暂不能计算提成。"]}
+
+
 def calculate(result, model, store_id: str, period: str, registry: Registry):
+    gaps = getattr(result, "pricing_gaps", pl.DataFrame())
+    if not gaps.is_empty() and not gaps.filter(
+        pl.col("store").is_in(_store_labels(model, store_id))
+        & pl.col("period").is_in([period, "(未知账期)"])
+    ).is_empty():
+        raise ValueError("商品成本待核价，暂不能计算提成")
     revision, versions, people, policy = registry.active(store_id, period)
     if not versions and not policy:
         return None

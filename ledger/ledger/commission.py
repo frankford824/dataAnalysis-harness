@@ -131,6 +131,12 @@ class Commission:
 
 def compute(result: RunResult, model: Model, store: str, period: str) -> Commission:
     """算一个店期的提成。"""
+    gaps = getattr(result, "pricing_gaps", pl.DataFrame())
+    if not gaps.is_empty() and not gaps.filter(
+        pl.col("store").is_in(_store_labels(model, store))
+        & pl.col("period").is_in([period, "(未知账期)"])
+    ).is_empty():
+        raise CommissionError("商品成本待核价，暂不能计算提成")
     node = model.commission_base_node(store)
     if node is None:
         raise CommissionError(

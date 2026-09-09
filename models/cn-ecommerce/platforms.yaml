@@ -25,6 +25,7 @@
 
 - id: pdd
   name: 拼多多
+  cost_pricing: historical
   hints: [拼多多, PDD, pdd]
   # 科目字典已按这个平台导入 27 条。
   note: 2026-08 已有在营店铺（原注「暂无在营店铺」已过期）。

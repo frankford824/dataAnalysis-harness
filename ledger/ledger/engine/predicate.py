@@ -33,11 +33,13 @@ def compile_where(where: tuple[Predicate, ...], frame: pl.DataFrame) -> pl.Expr:
 
 def missing_fields(where: tuple[Predicate, ...], frame: pl.DataFrame) -> list[str]:
     """条件里引用了但表上没有的字段角色。"""
-    return [p.field for p in where if p.field not in frame.columns]
+    return [p.field for p in where if p.field not in frame.columns and not p.allow_missing]
 
 
 def _one(p: Predicate, frame: pl.DataFrame) -> pl.Expr:
     if p.field not in frame.columns:
+        if p.allow_missing:
+            return pl.lit(None, dtype=pl.Boolean)
         raise PredicateError(f"过滤条件引用了不存在的字段角色 {p.field}")
     col = pl.col(p.field).cast(pl.Utf8)
     if p.op == "eq":

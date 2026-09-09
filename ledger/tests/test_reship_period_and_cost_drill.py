@@ -29,7 +29,9 @@ def item(source, rows, roles):
 
 def minimal(original_month=None, reship_month=6, *, direct=False):
     builtin = load_model(MODELS / "cn-ecommerce")
-    metric = builtin.metric("reshipment_cost")
+    # Generic relationship-based posting; PDD's order-number date policy is
+    # verified separately with real-format PDD identifiers.
+    metric = builtin.metric("reshipment_cost").model_copy(update={"by_platform": ()})
     if direct:
         metric = metric.model_copy(update={"link": None, "allocate": None})
     model = Model(id="test", name="test", stores=(Store(id="s", name="shop", platform="pdd"),),

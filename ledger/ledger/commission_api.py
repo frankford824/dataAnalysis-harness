@@ -586,6 +586,7 @@ def install(app, workspace, model):
                            "base_name": c.get("base_name", ""), "on_loss": c.get("on_loss", "deduct"),
                            "engine": c.get("engine", "legacy"), "calculation_id": c.get("calculation_id"),
                            "notes": c.get("notes", []), "unassigned_orders": c.get("unassigned_orders"),
+                           "pricing_pending_count": c.get("pricing_pending_count", 0),
                            "amount_complete": c.get("amount_complete", False), "wage_pending_orders": c.get("wage_pending_orders", 0),
                            "registry_revision": c.get("registry_revision")})
             for p in c.get("people", []):
@@ -594,7 +595,9 @@ def install(app, workspace, model):
                 entry["amount"] += Decimal(str(p["amount"]))
                 entry["stores"] += 1
         return {"stores": stores, "people": sorted(people.values(), key=lambda x: -x["amount"]),
-                "total": money_float(sum(p["amount"] for p in people.values())),
+                "total": (None if any(s["pricing_pending_count"] for s in stores)
+                          else money_float(sum(p["amount"] for p in people.values()))),
+                "calculated_total": money_float(sum(p["amount"] for p in people.values())),
                 "amount_complete": all(s["amount_complete"] for s in stores),
                 "note": "以下合计为已算部分；尚有未分配或工资口径待确认时不代表最终应结算额。已结账月份固定原版本。"}
 

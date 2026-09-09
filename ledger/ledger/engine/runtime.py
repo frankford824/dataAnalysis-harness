@@ -131,6 +131,7 @@ class Slice:
     audit: AuditResult
     link_reports: dict[str, LinkReport]
     classify_report: ClassifyReport
+    pricing_gaps: pl.DataFrame = field(default_factory=pl.DataFrame)
 
     @property
     def can_close(self) -> bool:
@@ -158,6 +159,7 @@ class RunResult:
     #: 而少了多少在事实表里看不出来——完整度那边要用它区分「表里没这个月的数据」
     #: 和「表在这儿但算不出来」。这两句话把人指向完全不同的地方。
     eval_errors: dict[str, list[str]] = field(default_factory=dict)
+    pricing_gaps: pl.DataFrame = field(default_factory=pl.DataFrame)
 
     def slice(self, store: str, period: str) -> Slice | None:
         return self.slices.get((store, period))
@@ -650,6 +652,8 @@ def run(ingestion: Ingestion, platform: str = "*") -> RunResult:
     classify_reports: list[ClassifyReport] = []
     #: 数据源 id → 求值报错。用途见下面 except 分支里的说明。
     eval_errors: dict[str, list[str]] = {"cost_return": return_errors} if return_errors else {}
+    pricing_gaps: list[dict] = []
+    require_history = any(p.id == platform and p.cost_pricing == "historical" for p in model.platforms)
 
     # 平台限定的指标只在对应平台生效。三家店的利润口径互不相同，
     # 全部一起算会让 1688 的收支口径混进淘宝的账。下面两个循环都要按这份名单走。
@@ -688,6 +692,7 @@ def run(ingestion: Ingestion, platform: str = "*") -> RunResult:
                 facts, fnotes = calc.evaluate_metric(
                     frame, metric, item.template, hint_store or "", hint_period or "",
                     store_names, model.source(metric.source).company_wide,
+                    require_historical_pricing=require_history, pricing_gaps=pricing_gaps,
                 )
             except calc.CalculateError as exc:
                 notes.append(f"{item.ref.label()} 算 {metric.name} 出错：{exc}")
@@ -719,7 +724,7 @@ def run(ingestion: Ingestion, platform: str = "*") -> RunResult:
     spine_parts: list[pl.DataFrame] = []
     projections: dict[str, Projection] = {}
     for metric in metrics:
-        if not (metric.link and metric.link.to) or metric.posting_basis == "transaction":
+        if not (metric.link and metric.link.to) or metric.posting_basis in {"transaction", "order_number"}:
             proj = project_transactions(facts, metric, spine)
         elif live_feed or (metric.link is not None and metric.link.grain == "product"):
             proj = _project_scoped_live(facts, metric, spine)
@@ -737,14 +742,16 @@ def run(ingestion: Ingestion, platform: str = "*") -> RunResult:
     result = RunResult(
         model=model, ingestion=ingestion, facts=facts, notes=notes, spine_rows=spine.size,
         spine_facts=spine_facts, projections=projections, spine=spine.frame,
-        eval_errors=eval_errors,
+        eval_errors=eval_errors, pricing_gaps=pl.DataFrame(pricing_gaps) if pricing_gaps else pl.DataFrame(),
     )
     classify_report = merge_reports(classify_reports)
 
-    for store, period in _slice_keys(spine_facts if not spine_facts.is_empty() else facts):
+    slice_keys = set(_slice_keys(spine_facts if not spine_facts.is_empty() else facts))
+    slice_keys.update(_slice_keys(result.pricing_gaps))
+    for store, period in sorted(slice_keys):
         result.slices[(store, period)] = _build_slice(
             model, ingestion, facts, spine_facts, spine.frame, store, period,
-            link_reports, classify_report, platform, eval_errors,
+            link_reports, classify_report, platform, eval_errors, result.pricing_gaps,
         )
     return result
 
@@ -1011,6 +1018,7 @@ def _build_slice(
     classify_report: ClassifyReport,
     platform: str,
     eval_errors: dict[str, list[str]] | None = None,
+    pricing_gaps: pl.DataFrame | None = None,
 ) -> Slice:
     scoped = facts.filter((pl.col("store") == store) & (pl.col("period") == period))
     # 损益从脊柱事实出数；源事实留作证据链与挂钩率统计。
@@ -1030,14 +1038,29 @@ def _build_slice(
         {key: value for key, value in (eval_errors or {}).items() if key != "cost_return"},
     )
 
+    own_gaps = (pricing_gaps.filter((pl.col("store") == store) & pl.col("period").is_in([period, "(未知账期)"]))
+                if pricing_gaps is not None and not pricing_gaps.is_empty() else pl.DataFrame())
+    if not own_gaps.is_empty() and not (eval_errors or {}).get("order_cost"):
+        if "order_cost" in completeness.missing:
+            completeness.missing.remove("order_cost")
+            completeness.reasons.pop("order_cost", None)
+        if "order_cost" not in completeness.arrived:
+            completeness.arrived.append("order_cost")
     unavailable = {
         m.id for m in model.metrics if m.source in completeness.missing
     }
+    if not own_gaps.is_empty():
+        unavailable.update(own_gaps["metric_id"].unique().to_list())
     # 没有合格订单时，零投影就是未入账，不能退回源金额把已拦下的补发成本算回来。
     # 期间级指标也已生成显式投影，因此所有损益只使用实际入账事实。
     totals = calc.totals_by_metric(scoped_spine, only_linked=False)
     inapplicable = {m.id for m in model.metrics if m.for_platform(platform) is None}
     nodes = calc.evaluate_statement(model, totals, unavailable, inapplicable)
+    if not own_gaps.is_empty():
+        for node in nodes.values():
+            if "order_cost" in node.missing_sources:
+                node.value = None
+                node.unavailable_reason = f"{own_gaps.height} 条商品成本待核价"
     own = classify_report.for_rows(_anchors_of(scoped))
     # Legacy spreadsheet baselines intentionally keep their historical report semantics.
     # The scoped denominator is required only when a multi-month live feed is present;
@@ -1051,6 +1074,11 @@ def _build_slice(
         if live_feed else link_reports
     )
     result = audit(model, scoped, scoped_reports, own, completeness, nodes)
+    if not own_gaps.is_empty():
+        from .types import Finding
+        result.findings.append(Finding("historical_cost_evidence", "商品成本待核价", passed=False, blocking=True,
+            message=f"还有 {own_gaps.height} 条商品成本未核实，利润和提成暂不能确认。",
+            detail={"count": own_gaps.height, "items": own_gaps.head(5).to_dicts()}))
     return_issues = (eval_errors or {}).get("cost_return", [])
     if return_issues and any(s.name == store and s.cost_return_posting == "transaction" for s in model.stores):
         from .types import Finding
@@ -1063,6 +1091,7 @@ def _build_slice(
         store=store, period=period, nodes=nodes, facts=scoped,
         completeness=completeness, audit=result,
         link_reports=scoped_reports, classify_report=own,
+        pricing_gaps=own_gaps,
     )
 
 

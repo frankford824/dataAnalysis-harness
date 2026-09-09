@@ -1,0 +1,66 @@
+from types import SimpleNamespace
+
+import polars as pl
+import pytest
+
+from ledger.engine.runtime import Ingestion, run
+from ledger.order_feed import OrderFeed
+from ledger.order_flags import apply
+from test_after_sale_identity import original_cost
+from test_order_feed import _fixture, _model_and_store, _write, FakeClient
+
+
+@pytest.mark.parametrize('platform,flag,expected',[('pdd','蓝色旗帜',0),('pdd','红色旗帜',-9),('pdd',None,-9),('taobao','蓝色旗帜',-9)])
+def test_blue_cost_exclusion_survives_feed_without_changing_other_flags(tmp_path,platform,flag,expected):
+    root=tmp_path/'feed';manifest=_fixture(root,after_sku=None,second_unnamed=True)
+    if platform == 'pdd':
+        for name in ('orders.parquet', 'order_items.parquet', 'order_costs.parquet'):
+            if name not in manifest['objects']:
+                continue
+            frame = pl.read_parquet(root / manifest['objects'][name]['path'])
+            if 'online_order_no' in frame.columns:
+                frame = frame.with_columns(pl.lit('260601-163771850381198').alias('online_order_no'))
+            if name == 'order_costs.parquet':
+                frame = frame.with_columns(pl.lit('2026-06-01').alias('cost_as_of'), pl.lit('history').alias('cost_source'))
+            manifest['objects'][name] = _write(root, name, frame)
+    feed=OrderFeed(tmp_path/'ws',client=FakeClient(manifest),feed_root=root);feed.sync()
+    model,store=_model_and_store(feed)
+    store=store.model_copy(update={'platform':platform})
+    model=model.model_copy(update={'stores':tuple(store if s.id==store.id else s for s in model.stores)})
+    ing=Ingestion(model=model,items=[])
+    old=original_cost(ing,[('1','11','S1','SKU1'),('1','12','S2','SKU2')])
+    old.frame=old.frame.with_columns(pl.lit(flag,dtype=pl.Utf8).alias('order_flag'))
+    feed.append_to(ing,store)
+    if platform == 'pdd':
+        orders = ing.frames_of('order_detail')[0].frame
+        assert orders['order_date'].dt.strftime('%Y-%m-%d').unique().to_list() == ['2026-06-01']
+        assert orders['order_time'].null_count() == orders.height
+    costs=ing.frames_of('order_cost')[0].frame
+    assert costs['quantity'].to_list()==[2,2]
+    assert sorted(costs['unit_cost'].to_list())==[1,3.5]
+    result=run(ing,platform)
+    assert result.facts.filter(pl.col('metric_id')=='goods_cost')['contribution'].sum()==expected
+    if platform=='pdd' and flag=='蓝色旗帜':
+        assert result.spine['order_flag'].unique().to_list()==['蓝色旗帜']
+        for sl in result.slices.values():
+            report=sl.link_reports.get('goods_cost')
+            if report:assert report.spine_keys==0
+
+
+def test_mixed_flags_do_not_exempt_the_entire_merged_order():
+    original=SimpleNamespace(frame=pl.DataFrame({'internal_order_id':['I1','I2'],'order_flag':['蓝色旗帜','红色旗帜']}))
+    ing=SimpleNamespace(frames_of=lambda source:[original])
+    cost=SimpleNamespace(frame=pl.DataFrame({'internal_order_id':['I1','I2'],'order_id':['MAIN','MAIN'],'unit_cost':[4,7]}),notes=[])
+    orders=SimpleNamespace(frame=pl.DataFrame({'order_id':['MAIN']}))
+    apply(ing,SimpleNamespace(platform='pdd',name='shop',aliases=[]),cost,orders)
+    assert cost.frame['order_flag'].to_list()==['蓝色旗帜','红色旗帜']
+    assert orders.frame['order_flag'].item() is None
+
+
+def test_conflicting_flag_evidence_is_not_used_to_zero_cost():
+    original=SimpleNamespace(frame=pl.DataFrame({'internal_order_id':['I','I'],'order_flag':['蓝色旗帜','红色旗帜']}))
+    cost=SimpleNamespace(frame=pl.DataFrame({'internal_order_id':['I'],'order_id':['MAIN']}),notes=[])
+    orders=SimpleNamespace(frame=pl.DataFrame({'order_id':['MAIN']}))
+    apply(SimpleNamespace(frames_of=lambda source:[original]),SimpleNamespace(platform='pdd',name='shop',aliases=[]),cost,orders)
+    assert cost.frame['order_flag'].item() is None
+    assert '不一致' in cost.notes[0]

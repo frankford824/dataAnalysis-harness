@@ -734,6 +734,7 @@
     - {role: order_type, columns: [订单类型], required: false}
     - {role: order_state, columns: [状态], required: false}
     - {role: store_name, columns: [店铺名称], required: false}
+    - {role: order_flag, columns: [旗帜], required: false}
     - {role: sku, columns: [商品编码]}
     - {role: quantity, columns: [数量]}
     - {role: unit_cost, columns: [成本价]}
