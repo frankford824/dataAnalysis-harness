@@ -82,3 +82,12 @@ def test_split_cancellation_does_not_restore_original_parent_cost():
     ing=Ingestion(model=model,items=[item])
     parent=cost.frame.with_columns(pl.lit('PARENT').alias('internal_order_id'),pl.lit(2.0).alias('quantity'))
     assert _exclude_linked(parent,model.metric('goods_cost'),ing,[],'parent').height==0
+
+
+def test_same_sku_on_another_platform_child_keeps_its_cost():
+    cost,after=fixture(ref_qty=2)
+    other=cost.frame.with_columns(pl.lit('OTHER-SUB').alias('sub_order_id'))
+    cost.frame=pl.concat([cost.frame,other])
+    apply(cost,[after])
+    assert cost.frame['quantity'].to_list()==[0,2]
+    assert cost.frame['total_cost'].to_list()==[0,7]
