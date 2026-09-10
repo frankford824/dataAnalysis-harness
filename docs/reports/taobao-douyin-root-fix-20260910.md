@@ -123,3 +123,7 @@ Luckywish 6953393588771493149 的 20 行成本记录已保留，已知部分 22.
 最终审计输出 `CLOSED_REGISTRY_UNCHANGED`：595 份已结账快照、32 个人员、77,196 项提成方案及其版本指纹均与发布前一致。
 
 最终附件：`final-attachment-outcomes.csv`、`final-june-pricing-review.csv`、`final-verification.json`、`final-manual-cost-checks.json`。主子订单交叉验证依据保存在 `final-case-source-identities.json`。
+
+## 后续规则确认（2026-09-10）
+
+用户随后明确确认淘宝天猫、抖店销售退款也按原订单下单月份归集。本报告上文“月份规则待确认”为当时核查状态，现已被新的确认和实施结果替代，详见 [退款月份规则实施报告](refund-order-month-20260910.md)。67 笔缺失历史日期已通过聚水潭原始接口全部查回，并作为独立日期资料留档；原文档 173 行退款引用按新规则重新核对。
