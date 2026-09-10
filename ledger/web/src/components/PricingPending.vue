@@ -19,9 +19,10 @@ const columns = [
   { title: '聚水潭订单号', key: 'internal_order_id', width: 130 },
 ]
 const download = computed(() => `/api/runs/${props.runId}/pricing-gaps.csv?${new URLSearchParams({ q: search.value })}`)
-async function load() {
+async function load(preserve=false) {
   const current = ++serial
-  busy.value = true; error.value = ''; data.value = { ...data.value, items: [] }
+  busy.value = true; error.value = ''
+  if(!preserve)data.value = { ...data.value, items: [] }
   try {
     const result = await request.run(signal => api.pricingGaps(props.runId,
       { q: search.value, offset: (page.value - 1) * 50, limit: 50 }, { signal }))
@@ -30,9 +31,9 @@ async function load() {
   finally { if (current === serial) busy.value = false }
 }
 function submit() { search.value = query.value.trim(); page.value = 1; load() }
-watch(page, load)
+watch(page, () => load())
 watch(show, value => { if (value) load(); else { request.cancel(); ++serial; busy.value = false } })
-watch(() => props.runId, () => { show.value = false; query.value = ''; search.value = ''; page.value = 1 })
+watch(() => props.runId, () => { if(show.value)load(true) })
 </script>
 
 <template>
@@ -48,7 +49,7 @@ watch(() => props.runId, () => { show.value = false; query.value = ''; search.va
         <n-button attr-type="submit" :loading="busy">搜索</n-button>
         <a :href="download" download>导出明细</a>
       </form>
-      <n-alert v-if="error" type="error" style="margin-bottom: 16px">{{ error }} <n-button size="small" @click="load">重试</n-button></n-alert>
+      <n-alert v-if="error" type="error" style="margin-bottom: 16px">{{ error }} <n-button size="small" @click="load()">重试</n-button></n-alert>
       <n-data-table class="pricing-desktop" :columns="columns" :data="data.items" :loading="busy" :scroll-x="995" :max-height="560" size="small" />
       <div class="pricing-mobile" :aria-busy="busy">
         <p v-if="busy">正在加载…</p>

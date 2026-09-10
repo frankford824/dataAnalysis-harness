@@ -9,7 +9,7 @@
  * 要看，竖着铺开就把页面拉到三四屏长，人滚到底就忘了上面的数是多少。
  */
 import { useDialog, useMessage } from 'naive-ui'
-import { computed, ref, watch } from 'vue'
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 
 import { useLatest } from '../components/ui/useLatest'
@@ -36,6 +36,7 @@ const info = ref(null)
 const snap = ref(null)
 const loading = ref(false)
 const failed = ref('')
+const refreshFailed = ref(false)
 const drill = ref(null)
 const pricingPanel = ref(null)
 
@@ -51,9 +52,9 @@ const closed = computed(() => snap.value?.state === 'closed')
 
 const periodRequest=useLatest()
 let loadSerial=0
-async function load(force=false) {
+async function load(force=false, quiet=false) {
   const serial=++loadSerial, id=props.id, requested=period.value
-  loading.value=true;failed.value=''
+  if(!quiet){loading.value=true;failed.value=''}
   try {
     const result=await periodRequest.run(async signal=>{
       const detail=!force&&info.value?.store?.id===id?info.value:await api.store(id,{signal})
@@ -62,13 +63,32 @@ async function load(force=false) {
       return {detail,snapshot,wanted}
     })
     if(!result)return
-    info.value=result.value.detail;snap.value=result.value.snapshot
+    info.value=result.value.detail
+    if(!quiet||JSON.stringify(snap.value)!==JSON.stringify(result.value.snapshot))snap.value=result.value.snapshot
+    refreshFailed.value=false
     if(result.value.wanted)app.pick({store:id,period:result.value.wanted})
-  }catch(e){if(serial===loadSerial)failed.value=e.message}
-  finally{if(serial===loadSerial)loading.value=false}
+  }catch(e){if(serial===loadSerial){if(quiet)refreshFailed.value=true;else failed.value=e.message}}
+  finally{if(serial===loadSerial&&!quiet)loading.value=false}
 }
 watch(()=>[props.id,period.value],()=>{drill.value=null;load()}, {immediate:true})
 watch(()=>app.uiRefresh,()=>load(true))
+
+let refreshTimer, refreshing=false
+async function refreshVisiblePeriod() {
+  if(document.hidden||loading.value||refreshing||app.busy)return
+  refreshing=true
+  try{await load(true,true)}finally{refreshing=false}
+}
+onMounted(()=>{
+  refreshTimer=setInterval(refreshVisiblePeriod,15000)
+  document.addEventListener('visibilitychange',refreshVisiblePeriod)
+  window.addEventListener('focus',refreshVisiblePeriod)
+})
+onUnmounted(()=>{
+  clearInterval(refreshTimer)
+  document.removeEventListener('visibilitychange',refreshVisiblePeriod)
+  window.removeEventListener('focus',refreshVisiblePeriod)
+})
 
 function go(p) {
   app.pick({ period: p })
@@ -224,7 +244,7 @@ watch(
         <template #actions>
           <n-button size="small" @click="fixing = true">核对金额</n-button>
           <n-button v-if="app.ingestMode !== 'nas'" size="small" :loading="!!app.busy" :disabled="loading" @click="recompute">重算</n-button>
-          <n-tag v-else size="small" type="info" :bordered="false">收到新资料后自动更新</n-tag>
+          <n-tag v-else size="small" :type="refreshFailed?'warning':'info'" :bordered="false">{{refreshFailed?'更新失败，请刷新重试':'结果自动更新'}}</n-tag>
           <n-button
             v-if="!closed"
             type="primary"
@@ -314,7 +334,7 @@ watch(
                 @click.stop
               >导出订单费项</a>
             </header>
-            <PricingPending v-if="snap.pricing_pending_count && snap.run_id" ref="pricingPanel" :key="snap.run_id" :run-id="snap.run_id" :count="snap.pricing_pending_count" />
+            <PricingPending v-if="snap.pricing_pending_count && snap.run_id" ref="pricingPanel" :key="`${props.id}:${period}`" :run-id="snap.run_id" :count="snap.pricing_pending_count" />
             <div class="statement">
               <div
                 v-for="row in snap.statement || []"
