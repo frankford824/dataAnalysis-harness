@@ -13,6 +13,7 @@ from __future__ import annotations
 import os
 import json
 import hashlib
+import shutil
 import threading
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -297,6 +298,12 @@ def _recompute_locked(
     账已经报出去了，系统不能因为字典补了一条就把数字悄悄改掉。
     """
     out = Recomputed(store_id=store.id)
+    reserve = 2 * 1024**3
+    storage_failure = {"store": store.name, "kind": "storage",
+                       "why": "服务器可用空间不足，已暂停重算。释放空间后重试，原账期结果保留。"}
+    if shutil.disk_usage(ws.root).free < reserve:
+        out.failure = storage_failure
+        return out
     files = ws.active_files(store.id)
     if not files and not order_feed.enabled():
         out.failure = {"store": store.name, "why": "这家店还没有任何数据"}
@@ -340,6 +347,9 @@ def _recompute_locked(
         }
         return out
 
+    if shutil.disk_usage(ws.root).free < reserve + result.facts.estimated_size():
+        out.failure = storage_failure
+        return out
     shas = [i.ref.sha256 for i in ing.items]
     model_revision = hashlib.sha256(model.model_dump_json().encode("utf-8")).hexdigest()
     fingerprint = hashlib.sha256(

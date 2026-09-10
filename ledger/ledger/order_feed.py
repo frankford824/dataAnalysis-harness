@@ -751,7 +751,8 @@ class OrderFeed:
         frames = self._frames(store, json.loads(state["manifest_json"]),
                               {child: next(iter(parents)) if len(parents) == 1 else None for child, parents in exported.items()},
                               fallback_flags,
-                              any(p.id == store.platform and p.cost_pricing == "historical" for p in ingestion.model.platforms) if ingestion.model else False)
+                              any(p.id == store.platform and p.cost_pricing == "historical" for p in ingestion.model.platforms) if ingestion.model else False,
+                              any(p.id == store.platform and p.cost_pricing in {"required", "historical"} for p in ingestion.model.platforms) if ingestion.model else False)
         if not frames:
             raise OrderFeedError(f"订单台没有 {store.name} 的已确认店铺映射")
         feed_order = next(item for item in frames if item.recognition.source_id == "order_detail")
@@ -930,7 +931,8 @@ class OrderFeed:
                 )
 
     def _frames(self, store: Store, manifest: dict[str, Any], exported_orders: dict[str, str | None] | None = None,
-                fallback_flags: dict[str, str] | None = None, require_history: bool = False) -> list[Ingested]:
+                fallback_flags: dict[str, str] | None = None, require_history: bool = False,
+                require_pricing: bool = False) -> list[Ingested]:
         with self._connect() as conn:
             conn.execute("BEGIN")
             captured = conn.execute("SELECT snapshot_id,consumed_seq FROM feed_state WHERE id=1").fetchone()
@@ -1007,7 +1009,7 @@ class OrderFeed:
 
         reship_origins = self._reshipment_origins(after, items, exported_orders)
         order_frame = self._order_frame(orders, items, after, relations, store, fingerprint, reship_origins)
-        cost_frame = self._cost_frame(orders, items, costs, relations, store, fingerprint, reship_origins, require_history)
+        cost_frame = self._cost_frame(orders, items, costs, relations, store, fingerprint, reship_origins, require_history, require_pricing)
         after_frame = self._after_frame(after, after_items, items, store, fingerprint)
         cost_item = self._item("order_cost", "order_console_cost_v1", "订单台日期时点成本", cost_frame,
                                self._cost_template(), fingerprint)
@@ -1126,12 +1128,17 @@ class OrderFeed:
         # A merged order header can name a different sale. The exact original
         # item referenced by the after-sale retains its own platform order.
         item_orders: dict[tuple[str, str], set[str]] = {}
+        marker_orders: dict[str, set[str]] = {}
+        marker_lines: dict[str, dict[str, set[str]]] = {}
         if items is not None and {"order_id", "sub_order_id", "online_order_no"} <= set(items.columns):
             columns = ["order_id", "sub_order_id", "online_order_no"] + (["outer_sku"] if "outer_sku" in items.columns else [])
             for row in items.select(columns).unique().iter_rows(named=True):
                 key = (normalize_key(row["order_id"]), normalize_key(row["sub_order_id"]))
                 value = normalize_key(row["online_order_no"])
                 child = normalize_key(row.get("outer_sku"))
+                if child.casefold().startswith("$asr-") and ":" in value:
+                    marker_orders.setdefault(child.casefold(), set()).add(value)
+                    marker_lines.setdefault(child.casefold(), {}).setdefault(key[1], set()).add(value)
                 if child in (exported_orders or {}):
                     value = exported_orders[child]
                     item_orders.setdefault(key, set()).add(value or "")
@@ -1144,6 +1151,25 @@ class OrderFeed:
                 continue
             event = normalize_key(row["after_sale_id"])
             original = normalize_key(row["online_order_no"])
+            # The actual replacement item retains its original sale, whereas a
+            # merged after-sale header may refer to a different sibling item.
+            direct = marker_orders.get("$asr-" + event.casefold(), set())
+            if direct:
+                prefix = normalize_key(row.get("order_store_id"))
+                direct = {value[len(prefix) + 1:] if prefix and value.startswith(prefix + ":") else value
+                          for value in direct}
+                if len(direct) > 1:
+                    marker = "$asr-" + event.casefold()
+                    for line, values in marker_lines.get(marker, {}).items():
+                        values = {value[len(prefix) + 1:] if prefix and value.startswith(prefix + ":") else value
+                                  for value in values}
+                        if line and len(values) == 1 and next(iter(values)) and not any(c in next(iter(values)) for c in (":", ",", "，", ";", "；")):
+                            choices.setdefault(marker + "|" + line, set()).update(values)
+                    continue
+                if not next(iter(direct)) or any(c in next(iter(direct)) for c in (":", ",", "，", ";", "；")):
+                    continue
+                choices.setdefault("$asr-" + event.casefold(), set()).update(direct)
+                continue
             candidates = item_orders.get((normalize_key(row.get("order_id")), normalize_key(row.get("sub_order_id"))), set())
             if candidates:
                 if len(candidates) != 1:
@@ -1190,7 +1216,10 @@ class OrderFeed:
             pl.col("tracking_no").fill_null(pl.col("tracking_no_order")).cast(pl.Utf8),
             pl.col("order_status_raw").cast(pl.Utf8).alias("order_state"),
             *([pl.col("order_flag").cast(pl.Utf8)] if store.platform == "pdd" else []),
-            pl.when(pl.col("order_id").cast(pl.Utf8).is_in(reships) | pl.col("outer_sku").cast(pl.Utf8).str.to_lowercase().is_in(list(reship_origins or {})).fill_null(False))
+            pl.when(pl.col("order_id").cast(pl.Utf8).is_in(reships)
+                    | pl.col("outer_sku").cast(pl.Utf8).str.to_lowercase().is_in(list(reship_origins or {})).fill_null(False)
+                    | pl.concat_str([pl.col("outer_sku").cast(pl.Utf8).str.to_lowercase(), pl.lit("|"), pl.col("sub_order_id").cast(pl.Utf8)])
+                      .is_in(list(reship_origins or {})).fill_null(False))
             .then(pl.lit("补发订单")).otherwise(pl.lit("销售订单")).alias("order_type"),
             self._dt("order_time").alias("order_time"),
             self._dt("pay_time").alias("pay_time"),
@@ -1243,9 +1272,11 @@ class OrderFeed:
         self, orders: pl.DataFrame, items: pl.DataFrame, costs: pl.DataFrame,
         relations: pl.DataFrame,
         store: Store, fingerprint: str, reship_origins: dict[str, str] | None = None, require_history: bool = False,
+        require_pricing: bool = False,
     ) -> pl.DataFrame:
+        review_pricing = require_history or require_pricing
         self._retired_cost_rows = 0
-        if require_history:
+        if review_pricing:
             keys = ["order_id", "sub_order_id"]
             live = items.select(pl.col(*keys).cast(pl.Utf8)).unique()
             costs = costs.with_columns(pl.col(*keys).cast(pl.Utf8))
@@ -1264,7 +1295,7 @@ class OrderFeed:
                     pl.lit("awaiting_cost_capture").alias("failure_reason"),
                 )
                 costs = pl.concat([costs, pending], how="diagonal_relaxed")
-        certified = costs if require_history else costs.filter(
+        certified = costs if review_pricing else costs.filter(
             (pl.col("cost_status") == "priced")
             & pl.col("cost_source").is_in(["history", "component_history", "blue_flag", "mirror", "scrape", "unknown_evidence"])
         )
@@ -1293,8 +1324,10 @@ class OrderFeed:
         blue = (pl.col("order_flag") == "蓝色旗帜").fill_null(False) if store.platform == "pdd" else pl.lit(False)
         unpriced = ((unit <= 0) | unit.is_null()) & ~((unit == 0) & (pl.col("is_gift") | blue))
         self._unpriced_cost_rows = int(certified.select(unpriced.sum()).item() or 0)
-        if not require_history:
+        if not review_pricing:
             certified = certified.filter(~unpriced)
+        else:
+            certified = certified.with_columns(unpriced.alias("pricing_missing"))
         certified = certified.drop("is_gift", "is_suspect")
         # 商品行数量写错时成本会被放大几十倍（2026-09-03 见拼多多「定制配件」行数量 2043、
         # 实付 0.03，一行成本 3 万；同批还有 4086、8172 这类 2043 的整数倍）。一行成本
@@ -1323,7 +1356,7 @@ class OrderFeed:
         ).fill_null(False)
         flagged = certified.filter(implausible)
         self._implausible_cost = (flagged.height, float(flagged.select(total.sum()).item() or 0.0))
-        if require_history:
+        if review_pricing:
             certified = certified.with_columns(implausible.alias("pricing_suspect"))
         else:
             certified = certified.filter(~implausible)
@@ -1363,16 +1396,19 @@ class OrderFeed:
             *([
                 (pl.col(name).cast(pl.Utf8) if name in certified.columns else pl.lit(None, dtype=pl.Utf8)).alias(name)
                 for name in ("cost_source", "cost_status", "cost_as_of", "failure_reason", "reference_unit_cost")
-            ] if require_history else []),
-            *([pl.col("pricing_suspect")] if require_history else []),
+            ] if review_pricing else []),
+            *([pl.col("pricing_suspect"), pl.col("pricing_missing")] if review_pricing else []),
             self._dt("order_time").alias("order_time"),
             pl.when(pl.col("order_id").cast(pl.Utf8).is_in(reships))
             .then(pl.lit("补发订单")).otherwise(pl.lit("销售订单")).alias("order_type"),
             pl.lit(store.name).alias("store_name"),
         ).with_columns(pl.col("order_time").alias("order_date"))
         if reship_origins:
-            frame = frame.with_columns(pl.col("sub_order_id").str.to_lowercase().replace_strict(
-                reship_origins, default=None, return_dtype=pl.Utf8).alias("__reship_original"))
+            marker = pl.col("sub_order_id").str.to_lowercase()
+            frame = frame.with_columns(pl.coalesce(
+                pl.concat_str([marker, pl.lit("|"), pl.col("internal_sub_order_id")]).replace_strict(
+                    reship_origins, default=None, return_dtype=pl.Utf8),
+                marker.replace_strict(reship_origins, default=None, return_dtype=pl.Utf8)).alias("__reship_original"))
             frame = frame.with_columns(
                 pl.coalesce("__reship_original", "original_order_id").alias("original_order_id"),
                 pl.when(pl.col("__reship_original").is_not_null()).then(pl.lit("补发订单")).otherwise(pl.col("order_type")).alias("order_type"),

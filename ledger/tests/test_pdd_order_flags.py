@@ -67,7 +67,8 @@ def test_conflicting_flag_evidence_is_not_used_to_zero_cost():
 
 
 @pytest.mark.parametrize('virtual', [False, True])
-def test_absent_cost_row_is_pending_instead_of_an_implicit_zero(tmp_path, virtual):
+@pytest.mark.parametrize('platform', ['pdd', 'taobao', 'douyin'])
+def test_absent_cost_row_is_pending_instead_of_an_implicit_zero(tmp_path, virtual, platform):
     root=tmp_path/'feed';manifest=_fixture(root,after_sku=None,second_unnamed=True)
     for name in ('orders.parquet','order_items.parquet','order_costs.parquet'):
         frame=pl.read_parquet(root/manifest['objects'][name]['path'])
@@ -80,10 +81,10 @@ def test_absent_cost_row_is_pending_instead_of_an_implicit_zero(tmp_path, virtua
         manifest['objects'][name]=_write(root,name,frame)
     feed=OrderFeed(tmp_path/'ws',client=FakeClient(manifest),feed_root=root);feed.sync()
     model,store=_model_and_store(feed)
-    store=store.model_copy(update={'platform':'pdd'})
+    store=store.model_copy(update={'platform':platform})
     model=model.model_copy(update={'stores':tuple(store if s.id==store.id else s for s in model.stores)})
     ing=Ingestion(model=model,items=[]);feed.append_to(ing,store)
-    result=run(ing,'pdd')
+    result=run(ing,platform)
     if virtual:
         assert result.pricing_gaps.is_empty()
     else:
@@ -93,7 +94,8 @@ def test_absent_cost_row_is_pending_instead_of_an_implicit_zero(tmp_path, virtua
         assert result.slices[(store.name,'2026-06')].nodes['net_profit'].value is None
 
 
-def test_replaced_bundle_cost_is_not_added_to_its_current_components(tmp_path):
+@pytest.mark.parametrize('platform', ['pdd', 'taobao', 'douyin'])
+def test_replaced_bundle_cost_is_not_added_to_its_current_components(tmp_path, platform):
     root=tmp_path/'feed';manifest=_fixture(root,after_sku=None,second_unnamed=True)
     for name in ('orders.parquet','order_items.parquet','order_costs.parquet'):
         frame=pl.read_parquet(root/manifest['objects'][name]['path'])
@@ -106,11 +108,34 @@ def test_replaced_bundle_cost_is_not_added_to_its_current_components(tmp_path):
             frame=pl.concat([frame,old])
         manifest['objects'][name]=_write(root,name,frame)
     feed=OrderFeed(tmp_path/'ws',client=FakeClient(manifest),feed_root=root);feed.sync()
-    model,store=_model_and_store(feed);store=store.model_copy(update={'platform':'pdd'})
+    model,store=_model_and_store(feed);store=store.model_copy(update={'platform':platform})
     model=model.model_copy(update={'stores':tuple(store if s.id==store.id else s for s in model.stores)})
     ing=Ingestion(model=model,items=[]);feed.append_to(ing,store)
-    result=run(ing,'pdd')
+    result=run(ing,platform)
     assert result.pricing_gaps.is_empty()
     assert result.facts.filter(pl.col('metric_id')=='goods_cost')['contribution'].sum()==-9
     assert feed._retired_cost_rows==1
     assert '旧商品行' in ' '.join(ing.frames_of('order_cost')[0].notes)
+
+
+@pytest.mark.parametrize('platform', ['taobao', 'douyin'])
+def test_present_order_with_missing_unit_price_is_reviewable_and_blocks_profit(tmp_path, platform):
+    root=tmp_path/'feed';manifest=_fixture(root,after_sku=None,second_unnamed=True)
+    name='order_costs.parquet'
+    frame=pl.read_parquet(root/manifest['objects'][name]['path'])
+    frame=frame.with_columns(
+        pl.when(pl.col('sub_order_id')=='11').then(None).otherwise(pl.col('unit_cost')).alias('unit_cost'),
+        pl.when(pl.col('sub_order_id')=='11').then(pl.lit('missing_price')).otherwise(pl.col('cost_status')).alias('cost_status'))
+    manifest['objects'][name]=_write(root,name,frame)
+    feed=OrderFeed(tmp_path/'ws',client=FakeClient(manifest),feed_root=root);feed.sync()
+    model,store=_model_and_store(feed);store=store.model_copy(update={'platform':platform})
+    model=model.model_copy(update={'stores':tuple(store if s.id==store.id else s for s in model.stores)})
+    ing=Ingestion(model=model,items=[]);feed.append_to(ing,store)
+    result=run(ing,platform)
+    assert result.pricing_gaps.height==1
+    gap=result.pricing_gaps.row(0,named=True)
+    assert gap['sku']=='SKU1'
+    assert gap['reason']=='商品成本单价待核对'
+    assert gap['order_date']=='2026-06-02'
+    assert result.slices[(store.name,'2026-06')].nodes['net_profit'].value is None
+    assert not result.slices[(store.name,'2026-06')].can_close

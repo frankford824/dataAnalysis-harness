@@ -1110,7 +1110,7 @@ class Platform(Base):
 
     id: str
     name: str
-    cost_pricing: Literal["provided", "historical"] = "provided"
+    cost_pricing: Literal["provided", "required", "historical"] = "provided"
     #: 店名或文件名里出现这些词，就猜是这个平台。只用于登记新店时给建议，
     #: 不参与任何计算——猜出来的东西不能进账，登记必须由人确认。
     hints: tuple[str, ...] = ()

@@ -540,10 +540,22 @@ def _inherit_context(frame: pl.DataFrame, spine: Spine, role: str) -> pl.DataFra
 
         return fn
 
-    return frame.with_columns(
+    result = frame.with_columns(
         pl.col(LINK_KEY).map_elements(pick(0), return_dtype=pl.Utf8).alias("__spine_store__"),
         pl.col(LINK_KEY).map_elements(pick(1), return_dtype=pl.Utf8).alias("__spine_period__"),
     )
+    dates = [(pl.col(name).str.slice(0, 10).str.to_date(format="%Y-%m-%d", strict=False)
+              if spine.frame.schema[name] == pl.Utf8 else pl.col(name).cast(pl.Date, strict=False))
+             for name in ("order_date", "order_time") if name in spine.frame.columns]
+    if "unit_cost" in frame.columns and dates and role in spine.frame.columns:
+        days = spine.frame.select(norm_expr(pl.col(role).cast(pl.Utf8)).alias("__date_key"),
+                                  pl.coalesce(dates).alias("__day")).group_by("__date_key").agg(
+            pl.col("__day").drop_nulls().unique())
+        days = days.with_columns(pl.when(pl.col("__day").list.len() == 1)
+                                 .then(pl.col("__day").list.first()).otherwise(None).alias("__spine_order_date__"))
+        result = result.join(days.select("__date_key", "__spine_order_date__"),
+                             left_on=LINK_KEY, right_on="__date_key", how="left")
+    return result
 
 
 # --------------------------------------------------------------------------- #

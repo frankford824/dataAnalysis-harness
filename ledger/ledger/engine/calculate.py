@@ -75,6 +75,7 @@ def evaluate_metric(
     store_names: dict[str, str] | None = None,
     shared_table: bool = False,
     require_historical_pricing: bool = False,
+    require_pricing: bool = False,
     pricing_gaps: list[dict] | None = None,
 ) -> tuple[pl.DataFrame, list[str]]:
     """把一张归一后的数据帧求值成事实行。
@@ -217,7 +218,7 @@ def evaluate_metric(
         source_note = pl.coalesce(source_note, pl.concat_str([pl.lit("发生日期："), pl.col(slot).dt.strftime("%Y-%m-%d")]))
     keep = pl.col(AMOUNT) != 0.0
     pricing_eligible = pl.lit(True)
-    if require_historical_pricing and metric.source == "order_cost" and "unit_cost" in metric.value.of:
+    if (require_historical_pricing or require_pricing) and metric.source == "order_cost" and "unit_cost" in metric.value.of:
         col = lambda name: pl.col(name) if name in frame.columns else pl.lit(None)
         key_columns = [pl.col(k).cast(pl.Utf8) for k in (LINK_KEY, "original_order_id", "order_id") if k in frame.columns]
         key = pl.coalesce(key_columns) if key_columns else pl.lit(None, dtype=pl.Utf8)
@@ -229,6 +230,13 @@ def evaluate_metric(
         known = (col("cost_source").cast(pl.Utf8).is_in(["history", "component_history", "manual", "blue_flag"])
                  & (col("cost_status") == "priced") & (quoted == wanted)
                  & unit.is_finite() & (unit >= 0) & quantity.is_finite() & (quantity >= 0))
+        if not require_historical_pricing:
+            wanted = (col("__spine_order_date__").cast(pl.Date, strict=False) if "__spine_order_date__" in frame.columns
+                      else pl.when(col("order_type") == "补发订单").then(pl.lit(None, dtype=pl.Date)).otherwise(
+                          pl.coalesce([col(name).cast(pl.Date, strict=False) for name in ("order_date", "order_time")])))
+            known = (unit.is_finite() & (unit >= 0) & quantity.is_finite() & (quantity >= 0)
+                     & ~col("pricing_missing").cast(pl.Boolean).fill_null(False)
+                     & ((col("cost_status") == "priced") | col("cost_status").is_null()))
         pending = (~known.fill_null(False) | col("pricing_suspect").cast(pl.Boolean).fill_null(False)) & ((quantity != 0) | quantity.is_null())
         gaps = frame.filter(pending).select(
             store.fill_null("(未知店铺)").alias("store"), period.fill_null("(未知账期)").alias("period"),
@@ -243,6 +251,7 @@ def evaluate_metric(
             .when(col("cost_status") == "pending").then(pl.lit("成本明细尚未同步"))
             .when(col("failure_reason") == "missing_cost_company").then(pl.lit("成本所属公司待核对"))
             .when(col("failure_reason") == "invalid_component_quantity").then(pl.lit("套餐组件数量待核对"))
+            .when(pl.lit(not require_historical_pricing)).then(pl.lit("商品成本单价待核对"))
             .when(quoted.is_not_null() & (quoted != wanted)).then(pl.lit("取价日期与下单日不一致"))
             .when((col("cost_status") == "missing_price") & col("cost_source").is_not_null())
             .then(pl.lit("等待补查下单日历史成本"))

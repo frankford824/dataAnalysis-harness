@@ -654,6 +654,7 @@ def run(ingestion: Ingestion, platform: str = "*") -> RunResult:
     eval_errors: dict[str, list[str]] = {"cost_return": return_errors} if return_errors else {}
     pricing_gaps: list[dict] = []
     require_history = any(p.id == platform and p.cost_pricing == "historical" for p in model.platforms)
+    require_pricing = any(p.id == platform and p.cost_pricing in {"required", "historical"} for p in model.platforms)
 
     # 平台限定的指标只在对应平台生效。三家店的利润口径互不相同，
     # 全部一起算会让 1688 的收支口径混进淘宝的账。下面两个循环都要按这份名单走。
@@ -692,7 +693,7 @@ def run(ingestion: Ingestion, platform: str = "*") -> RunResult:
                 facts, fnotes = calc.evaluate_metric(
                     frame, metric, item.template, hint_store or "", hint_period or "",
                     store_names, model.source(metric.source).company_wide,
-                    require_historical_pricing=require_history, pricing_gaps=pricing_gaps,
+                    require_historical_pricing=require_history, require_pricing=require_pricing, pricing_gaps=pricing_gaps,
                 )
             except calc.CalculateError as exc:
                 notes.append(f"{item.ref.label()} 算 {metric.name} 出错：{exc}")
