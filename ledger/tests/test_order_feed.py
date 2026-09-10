@@ -90,6 +90,30 @@ def test_catalog_pointers_do_not_hydrate_every_sku_link(tmp_path):
         assert json.loads(saved)["catalog_pointer"] is True
 
 
+@pytest.mark.parametrize('wrong_identity',[False,True])
+def test_inline_cost_payload_avoids_individual_fetches_without_weakening_checkpoint(tmp_path,wrong_identity):
+    root=tmp_path/'feed';manifest=_fixture(root);client=FakeClient(manifest);original=client.get
+    def get(path,params=None):
+        if path=='changes':
+            assert params['include_costs']=='true'
+            return {'to_seq':11,'has_more':False,'changes':[{'seq':11,'revision':11,'entity_type':'order_cost',
+                'entity_id':'11','sub_order_id':'11','order_id':'1','order_store_id':'10','operation':'upsert',
+                'entity_payload':{'cost':{'order_id':'1','sub_order_id':'WRONG' if wrong_identity else '11',
+                  'sku_id':'SKU1','quantity':'2','unit_cost':'1.2345','cost_status':'priced'}}}]}
+        return original(path,params)
+    client.get=get
+    client.get_href=lambda href: (_ for _ in ()).throw(AssertionError('must not fetch cost separately'))
+    feed=OrderFeed(tmp_path/'ws',client=client,feed_root=root)
+    if wrong_identity:
+        with pytest.raises(OrderFeedError,match='正文与商品行不匹配'):feed.sync()
+        assert feed.state()['consumed_seq']==10
+    else:
+        assert feed.sync().consumed_seq==11
+        with feed._connect() as c:
+            row=c.execute("SELECT payload_json FROM feed_entity WHERE entity_type='order_cost' AND entity_id='11'").fetchone()
+            assert json.loads(row[0])['cost']['unit_cost']=='1.2345'
+
+
 def test_health_contact_while_behind_does_not_claim_successful_sync(tmp_path):
     feed = OrderFeed(tmp_path / 'ws')
     with feed._connect() as conn:

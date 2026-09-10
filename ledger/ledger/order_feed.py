@@ -263,7 +263,7 @@ class OrderFeed:
         state["enabled"] = True
         return state
 
-    def sync(self, *, max_pages: int = 20, limit: int = 500) -> SyncResult:
+    def sync(self, *, max_pages: int = 20, limit: int = 2000) -> SyncResult:
         """Advance only after a page and every referenced entity are durable locally."""
         with self._guard:
             try:
@@ -375,7 +375,7 @@ class OrderFeed:
                 if s.get("mapping_status") == "confirmed" and s.get("ledger_store_id")
             )
         for _ in range(max_pages):
-            page = self.client.get("changes", {"after_seq": result.consumed_seq, "limit": limit})
+            page = self.client.get("changes", {"after_seq": result.consumed_seq, "limit": limit, "include_costs": "true"})
             changes = page.get("changes") or []
             if not changes:
                 if result.consumed_seq < source_latest_seq:
@@ -389,7 +389,8 @@ class OrderFeed:
                 raise OrderFeedError("增量页序号不连续推进或页尾不匹配，未提交检查点")
             workers = max(1, int(os.environ.get("LEDGER_ORDER_FEED_FETCHERS", "8")))
             hrefs = {self._fetch_href(change) for change in changes
-                     if change.get("operation") != "delete" and change.get("entity_type") not in CATALOG_ENTITIES}
+                     if change.get("operation") != "delete" and change.get("entity_type") not in CATALOG_ENTITIES
+                     and not (change.get('entity_type')=='order_cost' and 'entity_payload' in change)}
             fetched: dict[str, dict[str, Any] | None] = {}
 
             def fetch_href(href: str):
@@ -443,6 +444,15 @@ class OrderFeed:
             return change, {"catalog_pointer": True, "entity_href": change.get("entity_href"),
                             "source_updated_at": change.get("source_updated_at"),
                             "revision": change.get("revision")}
+        if change.get('entity_type')=='order_cost' and 'entity_payload' in change:
+            payload=change['entity_payload']
+            if payload is None:return {**change,'operation':'delete'},None
+            record=payload.get('cost') if isinstance(payload,dict) else None
+            if not isinstance(record,dict) or str(record.get('sub_order_id'))!=str(change.get('entity_id')):
+                raise OrderFeedError('成本增量正文与商品行不匹配，未提交检查点')
+            if change.get('order_id') and str(record.get('order_id'))!=str(change['order_id']):
+                raise OrderFeedError('成本增量所属订单不一致，未提交检查点')
+            return change,{'cost':record}
         href = self._fetch_href(change)
         got = fetched.get(href)
         if got is None:
