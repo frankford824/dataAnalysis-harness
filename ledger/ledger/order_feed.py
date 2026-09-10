@@ -309,7 +309,7 @@ class OrderFeed:
             )
 
         if revision is not None:
-            health = self.client.get("health")
+            health = self.client.get("health", {"details":"false"})
             if not revision.get("healthy") or not health.get("healthy"):
                 self._refresh_health(
                     health, source_revision, source_latest_seq, revision_etag,
