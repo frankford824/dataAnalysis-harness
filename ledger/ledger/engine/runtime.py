@@ -640,6 +640,8 @@ def run(ingestion: Ingestion, platform: str = "*") -> RunResult:
         name: s.name for s in model.stores for name in (s.name, *s.aliases) if name
     }
     spine = _build_spine(ingestion, notes, store_names)
+    from . import refund_dates
+    refund_date_references = refund_dates.lookup(ingestion.items, store_names)
 
     from .cost_returns import build as build_cost_returns
     derived_return, return_errors = build_cost_returns(ingestion, platform, spine=spine)
@@ -690,6 +692,8 @@ def run(ingestion: Ingestion, platform: str = "*") -> RunResult:
 
             hint_store = _first_hint(item.frame, "__hint_store__")
             hint_period = _first_hint(item.frame, "__hint_period__")
+            if metric.id in {"trade_refund", "trade_refund_douyin"} and metric.posting_basis == "order_number":
+                frame = refund_dates.apply(frame, refund_date_references, store_names, hint_store or "")
             try:
                 facts, fnotes = calc.evaluate_metric(
                     frame, metric, item.template, hint_store or "", hint_period or "",

@@ -10,7 +10,8 @@ def test_layout_matches_current_model(tmp_path):
     manifest = build_layout(MODEL)
     assert len(manifest["platforms"]) == 9
     assert len(manifest["stores"]) == 52
-    assert len(manifest["sources"]) == 11
+    assert len(manifest["sources"]) == 12
+    assert any(source["id"] == "refund_order_dates" for source in manifest["sources"])
     assert "00_上传区/00_全公司共享/聚水潭售后单" in manifest["directories"]
     assert "10_已接收/00_全公司共享/运费" in manifest["directories"]
 

@@ -213,3 +213,12 @@
   cadence: monthly
   required_for_close: false
   note: 按已核对的实退数量和进仓日期冲回原销售成本，不采用售后申请数量或申请日期。
+
+- id: refund_order_dates
+  name: 退款原订单日期
+  platform: any
+  owner_role: shop_owner
+  cadence: monthly
+  required_for_close: false
+  provides: []
+  note: 原订单不在当期明细中时，补充退款所需的历史下单日期；不生成销售或成本。

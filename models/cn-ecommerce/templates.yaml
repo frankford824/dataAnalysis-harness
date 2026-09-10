@@ -1308,3 +1308,15 @@
     - {role: product_name, columns: [商品名称], required: false}
     - {role: spend, columns: [总营销花费(元)], kind: number, required: false}
   total_row_marker: product_id
+
+- id: refund_order_dates_v1
+  source: refund_order_dates
+  name: 退款原订单日期核对表
+  match_columns: [退款原订单号, 原订单下单时间, 核对店铺名称, 核对聚水潭订单号]
+  parse: {header_row: 0}
+  time_slots: {order_date: order_time}
+  bindings:
+    - {role: order_id, columns: [退款原订单号]}
+    - {role: order_time, columns: [原订单下单时间]}
+    - {role: store_name, columns: [核对店铺名称]}
+    - {role: internal_order_id, columns: [核对聚水潭订单号]}
