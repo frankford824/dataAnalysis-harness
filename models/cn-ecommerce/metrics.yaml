@@ -46,7 +46,9 @@
     只占 1.8%。钱进了又全额退回，账单上就没有净收款这一行，这不是对账表没交全。
 
 - id: trade_refund
-  posting_basis: transaction
+  # 2026-09-10 确认：退款归原下单月；仅无订单号流水归发生月。
+  posting_basis: order_number
+  orderless_time_basis: settle_date
   name: 销售退款
   occasional: true
   source: settlement
@@ -762,6 +764,9 @@
     真金白银的收款，按子订单挂会漏掉，而漏掉不报错。
 
 - id: trade_refund_douyin
+  # 与淘宝天猫一致；有订单号但缺原订单日期时留待核对。
+  posting_basis: order_number
+  orderless_time_basis: settle_date
   name: 销售退款
   occasional: true
   source: settlement
@@ -770,7 +775,7 @@
   value: {op: sum, of: [income]}
   sign: as_is
   time_basis: settle_date
-  link: {key: base_order_id, to: order.order_id, grain: order, spine_where: [{field: order_type, op: not_in, value: [补发订单], include_null: true}]}
+  link: {key: base_order_id, to: order.order_id, grain: order, fallback_to: [order.sub_order_id], prefer_exported_orders: true, spine_where: [{field: order_type, op: not_in, value: [补发订单], include_null: true}]}
   allocate: {mode: even}
 
 - id: software_fee_douyin

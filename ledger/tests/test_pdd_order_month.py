@@ -44,12 +44,12 @@ def test_unknown_original_date_never_falls_back_to_refund_date():
         assert result.facts['contribution'].sum()==0
 
 
-def test_pdd_policy_does_not_change_other_platform_refund_months():
+def test_confirmed_platform_refunds_follow_original_order_month():
     model=load_model(MODELS/'cn-ecommerce')
     for name in ['trade_receipt_pdd','trade_refund_pdd','software_fee_pdd','trade_compensation_pdd','goods_cost','reshipment_cost','freight_cost']:
         assert model.metric(name).for_platform('pdd').posting_basis=='order_number'
-    assert model.metric('trade_refund').posting_basis=='transaction'
-    assert model.metric('trade_refund_douyin').posting_basis=='order'
+    assert model.metric('trade_refund').posting_basis=='order_number'
+    assert model.metric('trade_refund_douyin').posting_basis=='order_number'
 
 
 def test_actual_zero_refund_remains_traceable_but_missing_amount_does_not_become_zero():
