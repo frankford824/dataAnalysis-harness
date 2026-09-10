@@ -7,10 +7,11 @@ from ledger.engine.runtime import ingest, run
 from test_after_sales_cost import ORDER_HEADER, COST_HEADER, AFTER_HEADER
 
 
-def calculate(tmp_path, returns, *, quantity=3, unit=4, policy="transaction"):
+def calculate(tmp_path, returns, *, quantity=3, unit=4, policy="transaction", pricing="provided"):
     model=load_model(MODELS/"cn-ecommerce")
     stores=tuple(s.model_copy(update={"cost_return_posting":policy}) if s.id=="taobao_xibishun" else s for s in model.stores)
-    model=model.model_copy(update={"stores":stores})
+    model=model.model_copy(update={"stores":stores,'platforms':tuple(p.model_copy(update={'cost_pricing':pricing})
+        if p.id=='taobao' else p for p in model.platforms)})
     orders=write_xlsx(tmp_path/"淘宝喜必顺-订单明细.xlsx",[["说明"],ORDER_HEADER,
         ["S1","O1",100,0,"P1","T1","2026-06-01","2026-06-01",""]])
     costs=write_xlsx(tmp_path/"淘宝喜必顺-聚水潭成本.xlsx",[["说明"],COST_HEADER,
@@ -35,6 +36,18 @@ def test_july_return_keeps_june_sale_and_reverses_original_cost_in_july(tmp_path
     assert source["file_name"].to_list()==["售后单_月份.xlsx"]
     assert source["row_no"].to_list()==[2]
     assert all(not sl.classify_report.unmatched_rows for sl in r.slices.values())
+
+
+def test_unverified_original_price_cannot_create_a_later_month_refund_credit(tmp_path):
+    r=calculate(tmp_path,[("A1","卖家已收到退货",3,3,"2026-07-09")],pricing='historical')
+    assert totals(r,'goods_cost')=={}
+    assert totals(r,'goods_return_cost')=={}
+    assert set(r.pricing_gaps['metric_id'])=={'goods_cost','goods_return_cost'}
+    assert set(r.pricing_gaps['period'])=={'2026-06','2026-07'}
+    for period in ['2026-06','2026-07']:
+        sl=r.slices[('汪学成-天猫喜必顺旗舰店',period)]
+        assert sl.nodes['net_profit'].value is None
+        assert not sl.can_close
 
 
 def test_partial_and_repeated_returns_are_capped_at_original_quantity(tmp_path):

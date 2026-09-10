@@ -29,7 +29,11 @@ AFTER_HEADER = [
 
 @pytest.fixture(scope="module")
 def model():
-    return load_model(MODELS / "cn-ecommerce")
+    model=load_model(MODELS / "cn-ecommerce")
+    # These fixtures assert their original costs; this module tests after-sale
+    # identity/state rules independently of historical quote acquisition.
+    return model.model_copy(update={'platforms':tuple(p.model_copy(update={'cost_pricing':'provided'})
+        if p.id=='taobao' else p for p in model.platforms)})
 
 
 def _cost_row(internal: str, order: str, sub: str, sku: str, cost: float):

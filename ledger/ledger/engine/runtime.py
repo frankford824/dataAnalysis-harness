@@ -628,10 +628,6 @@ def _attach_hints(frame: pl.DataFrame, store: str | None, period: str | None) ->
 def run(ingestion: Ingestion, platform: str = "*") -> RunResult:
     """挂钩 → 归类 → 核算 → 自检。"""
     model = ingestion.model
-    from .cost_returns import build as build_cost_returns
-    derived_return, return_errors = build_cost_returns(ingestion, platform)
-    if derived_return is not None:
-        ingestion = Ingestion(model=model, items=[*ingestion.items, derived_return])
     notes: list[str] = []
     live_feed = any(
         item.template is not None and item.template.id.startswith("order_console_")
@@ -645,6 +641,11 @@ def run(ingestion: Ingestion, platform: str = "*") -> RunResult:
     }
     spine = _build_spine(ingestion, notes, store_names)
 
+    from .cost_returns import build as build_cost_returns
+    derived_return, return_errors = build_cost_returns(ingestion, platform, spine=spine)
+    if derived_return is not None:
+        ingestion = Ingestion(model=model, items=[*ingestion.items, derived_return])
+
     bridges = _build_bridges(ingestion, notes)
 
     fact_parts: list[pl.DataFrame] = []
@@ -652,7 +653,7 @@ def run(ingestion: Ingestion, platform: str = "*") -> RunResult:
     classify_reports: list[ClassifyReport] = []
     #: 数据源 id → 求值报错。用途见下面 except 分支里的说明。
     eval_errors: dict[str, list[str]] = {"cost_return": return_errors} if return_errors else {}
-    pricing_gaps: list[dict] = []
+    pricing_gaps: list[dict] = list(getattr(derived_return,'pricing_gaps',()))
     require_history = any(p.id == platform and p.cost_pricing == "historical" for p in model.platforms)
     require_pricing = any(p.id == platform and p.cost_pricing in {"required", "historical"} for p in model.platforms)
 

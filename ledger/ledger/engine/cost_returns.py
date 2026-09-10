@@ -50,7 +50,7 @@ def day(value):
         return None
 
 
-def build(ingestion, platform):
+def build(ingestion, platform, *, spine=None):
     """Only source-backed receipts; cap quantities across duplicate/repeated returns.
 
     The uploaded ERP export has per-product actual receipts. An Order Console
@@ -66,15 +66,24 @@ def build(ingestion, platform):
     if metric is None:
         return None, []
     costs = defaultdict(list)
+    require_history=any(p.id==platform and p.cost_pricing=='historical' for p in model.platforms)
+    canonical={name:s.name for s in model.stores for name in (s.name,*s.aliases)}
     for item in ingestion.frames_of("order_cost"):
         if not set(KEYS) <= set(item.frame.columns):
             continue
         eligible = item.frame.filter(policy_mask(item.frame, model))
         eligible = eligible.filter(compile_where(metric.where, eligible))
+        if require_history:
+            from .link import link
+            from .calculate import historical_price_evidence
+            if spine is not None:eligible,_=link(eligible,metric,spine,item.template)
+            valid,original_day=historical_price_evidence(eligible)
+            eligible=eligible.with_columns(valid.alias('__return_price_verified'),original_day.alias('__return_order_date'))
         for row in eligible.iter_rows(named=True):
             key = (*[normalize_key(row.get(k)) for k in KEYS], normalize_key(row.get("internal_sub_order_id")))
             quantity, unit = number(row.get("quantity")), number(row.get("unit_cost"))
-            if all(key[:3]) and quantity is not None and quantity > 0 and unit is not None and unit >= 0:
+            if all(key[:3]) and quantity is not None and quantity > 0:
+                if not require_history:row['__return_price_verified']=unit is not None and unit>=0
                 costs[key].append(row)
     if not costs:
         return None, []
@@ -119,8 +128,9 @@ def build(ingestion, platform):
             if not event or quantity is None or quantity < 0 or when is None:
                 errors.append(f"售后单{event or '未填单号'} 商品{row.get('original_sku') or key[2]}缺少有效实退数量或进仓日期")
                 continue
-            sold_dates = [day(c.get("order_time")) or day(c.get("order_date")) for c in costs[key]]
-            if any(d is None or when < d for d in sold_dates):
+            sold_dates = [day(c.get('__return_order_date')) if require_history else day(c.get("order_time")) or day(c.get("order_date")) for c in costs[key]]
+            verified=all(c.get('__return_price_verified') for c in costs[key])
+            if any((d is None and verified) or (d is not None and when<d) for d in sold_dates):
                 errors.append(f"售后单{event}的进仓日期早于销售日期或销售日期缺失")
                 continue
             identity = (event, *key)
@@ -135,15 +145,26 @@ def build(ingestion, platform):
             events[identity] = (when, quantity, row)
     used = defaultdict(lambda: Decimal(0))
     generated = []
+    pending_prices=[]
     for identity, (when, requested, evidence) in sorted(events.items(), key=lambda pair: (pair[1][0], pair[0])):
         key = identity[1:]
         original = costs[key]
         sold_quantity = sum(number(c["quantity"]) for c in original)
-        sold_amount = sum(number(c["quantity"]) * number(c["unit_cost"]) for c in original)
         quantity = min(requested, max(Decimal(0), sold_quantity - used[key]))
         if quantity == 0:
             continue
         used[key] += quantity
+        if not all(c.get('__return_price_verified') for c in original):
+            first=original[0];dates={day(c.get('__return_order_date')) if require_history else day(c.get('order_time')) or day(c.get('order_date')) for c in original}
+            sale_day=next(iter(dates)) if len(dates)==1 else None
+            pending_prices.append({'store':canonical.get(first.get('store_name'),first.get('store_name')),
+                'period':when.strftime('%Y-%m'),'metric_id':'goods_return_cost','order_id':first.get('original_order_id') or first.get('order_id'),
+                'order_date':sale_day.isoformat() if sale_day else None,'internal_order_id':key[0],'sku':key[2],
+                'quantity':float(quantity),'reference_unit_cost':float(number(first.get('unit_cost'))) if number(first.get('unit_cost')) is not None else None,
+                'reason':'原销售成本尚未核实，退货成本暂不能冲回','file_sha':evidence.get(ANCHOR_SHA),'file_name':evidence.get(ANCHOR_FILE),
+                'sheet':evidence.get(ANCHOR_SHEET),'row_no':evidence.get(ANCHOR_ROW)})
+            continue
+        sold_amount = sum(number(c["quantity"]) * number(c["unit_cost"]) for c in original)
         amount = sold_amount * quantity / sold_quantity
         row = {k: evidence.get(k) for k in (ANCHOR_SHA, ANCHOR_FILE, ANCHOR_SHEET, ANCHOR_ROW)}
         row.update(internal_order_id=key[0], sub_order_id=key[1], sku=key[2],
@@ -166,4 +187,5 @@ def build(ingestion, platform):
     item = Ingested(ref=ref, frame=frame, template=template, rows=frame.height,
                     recognition=Recognition(ref=ref, signature=template.signature, header_count=len(schema),
                                             source_id=SOURCE, template_id=template.id))
+    item.pricing_gaps=pending_prices
     return item, sorted(set(errors))

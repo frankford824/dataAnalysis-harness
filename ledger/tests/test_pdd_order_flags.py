@@ -21,10 +21,11 @@ def test_blue_cost_exclusion_survives_feed_without_changing_other_flags(tmp_path
             if 'online_order_no' in frame.columns:
                 frame = frame.with_columns(pl.lit('260601-163771850381198').alias('online_order_no'))
             if name == 'order_costs.parquet':
-                frame = frame.with_columns(pl.lit('2026-06-01').alias('cost_as_of'), pl.lit('history').alias('cost_source'))
+                frame = frame.with_columns(pl.lit('2026-06-01').alias('cost_as_of'), pl.lit('history').alias('cost_source'),
+                                           pl.lit('{"order_date":"2026-06-01"}').alias('pricing_evidence'))
             manifest['objects'][name] = _write(root, name, frame)
     feed=OrderFeed(tmp_path/'ws',client=FakeClient(manifest),feed_root=root);feed.sync()
-    model,store=_model_and_store(feed)
+    model,store=_model_and_store(feed,pricing='required')
     store=store.model_copy(update={'platform':platform})
     model=model.model_copy(update={'stores':tuple(store if s.id==store.id else s for s in model.stores)})
     ing=Ingestion(model=model,items=[])
@@ -77,10 +78,11 @@ def test_absent_cost_row_is_pending_instead_of_an_implicit_zero(tmp_path, virtua
         if name=='order_items.parquet':
             frame=frame.with_columns(pl.Series('is_virtual',[False,virtual]))
         if name=='order_costs.parquet':
-            frame=frame.head(1).with_columns(pl.lit('2026-06-01').alias('cost_as_of'))
+            frame=frame.head(1).with_columns(pl.lit('2026-06-01').alias('cost_as_of'),
+                                           pl.lit('{"order_date":"2026-06-01"}').alias('pricing_evidence'))
         manifest['objects'][name]=_write(root,name,frame)
     feed=OrderFeed(tmp_path/'ws',client=FakeClient(manifest),feed_root=root);feed.sync()
-    model,store=_model_and_store(feed)
+    model,store=_model_and_store(feed,pricing='required')
     store=store.model_copy(update={'platform':platform})
     model=model.model_copy(update={'stores':tuple(store if s.id==store.id else s for s in model.stores)})
     ing=Ingestion(model=model,items=[]);feed.append_to(ing,store)
@@ -102,13 +104,14 @@ def test_replaced_bundle_cost_is_not_added_to_its_current_components(tmp_path, p
         if 'online_order_no' in frame.columns:
             frame=frame.with_columns(pl.lit('260601-163771850381198').alias('online_order_no'))
         if name=='order_costs.parquet':
-            frame=frame.with_columns(pl.lit('2026-06-01').alias('cost_as_of'))
+            frame=frame.with_columns(pl.lit('2026-06-01').alias('cost_as_of'),
+                                    pl.lit('{"order_date":"2026-06-01"}').alias('pricing_evidence'))
             old=frame.head(1).with_columns(pl.lit('999').alias('sub_order_id'),pl.lit('OLD-KIT').alias('sku_id'),
                                          pl.lit('99').alias('unit_cost'),pl.lit('198').alias('cost_amount'))
             frame=pl.concat([frame,old])
         manifest['objects'][name]=_write(root,name,frame)
     feed=OrderFeed(tmp_path/'ws',client=FakeClient(manifest),feed_root=root);feed.sync()
-    model,store=_model_and_store(feed);store=store.model_copy(update={'platform':platform})
+    model,store=_model_and_store(feed,pricing='required');store=store.model_copy(update={'platform':platform})
     model=model.model_copy(update={'stores':tuple(store if s.id==store.id else s for s in model.stores)})
     ing=Ingestion(model=model,items=[]);feed.append_to(ing,store)
     result=run(ing,platform)
@@ -128,7 +131,7 @@ def test_present_order_with_missing_unit_price_is_reviewable_and_blocks_profit(t
         pl.when(pl.col('sub_order_id')=='11').then(pl.lit('missing_price')).otherwise(pl.col('cost_status')).alias('cost_status'))
     manifest['objects'][name]=_write(root,name,frame)
     feed=OrderFeed(tmp_path/'ws',client=FakeClient(manifest),feed_root=root);feed.sync()
-    model,store=_model_and_store(feed);store=store.model_copy(update={'platform':platform})
+    model,store=_model_and_store(feed,pricing='required');store=store.model_copy(update={'platform':platform})
     model=model.model_copy(update={'stores':tuple(store if s.id==store.id else s for s in model.stores)})
     ing=Ingestion(model=model,items=[]);feed.append_to(ing,store)
     result=run(ing,platform)
@@ -139,3 +142,30 @@ def test_present_order_with_missing_unit_price_is_reviewable_and_blocks_profit(t
     assert gap['order_date']=='2026-06-02'
     assert result.slices[(store.name,'2026-06')].nodes['net_profit'].value is None
     assert not result.slices[(store.name,'2026-06')].can_close
+
+
+def test_source_flagged_item_is_pending_instead_of_disappearing_from_cost(tmp_path):
+    root=tmp_path/'feed';manifest=_fixture(root,after_sku=None,second_unnamed=True)
+    name='order_items.parquet'
+    frame=pl.read_parquet(root/manifest['objects'][name]['path']).with_columns(pl.Series('is_suspect',[True,False]))
+    manifest['objects'][name]=_write(root,name,frame)
+    feed=OrderFeed(tmp_path/'ws',client=FakeClient(manifest),feed_root=root);feed.sync()
+    model,store=_model_and_store(feed,pricing='required')
+    ing=Ingestion(model=model,items=[]);feed.append_to(ing,store)
+    result=run(ing,store.platform)
+    assert result.pricing_gaps['sku'].to_list()==['SKU1']
+    assert result.slices[(store.name,'2026-06')].nodes['net_profit'].value is None
+
+
+def test_changed_item_quantity_cannot_reuse_a_stale_cost_assertion(tmp_path):
+    root=tmp_path/'feed';manifest=_fixture(root,after_sku=None,second_unnamed=True)
+    name='order_items.parquet'
+    frame=pl.read_parquet(root/manifest['objects'][name]['path']).with_columns(
+        pl.when(pl.col('sub_order_id')=='11').then(pl.lit('3')).otherwise(pl.col('quantity')).alias('quantity'))
+    manifest['objects'][name]=_write(root,name,frame)
+    feed=OrderFeed(tmp_path/'ws',client=FakeClient(manifest),feed_root=root);feed.sync()
+    model,store=_model_and_store(feed,pricing='required')
+    ing=Ingestion(model=model,items=[]);feed.append_to(ing,store)
+    result=run(ing,store.platform)
+    assert result.pricing_gaps['sku'].to_list()==['SKU1']
+    assert result.pricing_gaps['reason'].item()=='订单商品与成本明细不一致，等待更新'

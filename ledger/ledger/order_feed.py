@@ -755,6 +755,8 @@ class OrderFeed:
                               any(p.id == store.platform and p.cost_pricing in {"required", "historical"} for p in ingestion.model.platforms) if ingestion.model else False)
         if not frames:
             raise OrderFeedError(f"订单台没有 {store.name} 的已确认店铺映射")
+        from .order_date_context import publish as publish_order_dates
+        publish_order_dates(ingestion, store, self.workspace_root)
         feed_order = next(item for item in frames if item.recognition.source_id == "order_detail")
         feed_after = next(item for item in frames if item.recognition.source_id == "after_sales")
         feed_cost = next(item for item in frames if item.recognition.source_id == "order_cost")
@@ -776,7 +778,10 @@ class OrderFeed:
         with self._connect() as conn:
             source_stores = [str(row[0]) for row in conn.execute(
                 "SELECT order_store_id FROM feed_store WHERE ledger_store_id=? AND mapping_status='confirmed'", (store.id,))]
-        components = load_order_components(self.workspace_root, store.id, source_stores, feed_cost.frame)
+        try:
+            components = load_order_components(self.workspace_root, store.id, source_stores, feed_cost.frame)
+        except (ValueError,TypeError,KeyError) as exc:
+            raise OrderFeedError(str(exc)) from exc
         self._align_after_sale_skus(ingestion, feed_cost.frame, components)
         from .engine.component_returns import normalize as normalize_component_returns
         normalize_component_returns(ingestion, feed_cost.frame, components)
@@ -1282,6 +1287,11 @@ class OrderFeed:
             costs = costs.with_columns(pl.col(*keys).cast(pl.Utf8))
             self._retired_cost_rows = costs.join(live, on=keys, how="anti").height
             costs = costs.join(live, on=keys, how="semi")
+            expected=items.select(pl.col(*keys).cast(pl.Utf8),pl.col('sku_id').cast(pl.Utf8).alias('__current_sku'),
+                                  pl.col('quantity').cast(pl.Float64,strict=False).alias('__current_quantity')).unique(subset=keys)
+            costs=costs.join(expected,on=keys,how='left').with_columns(
+                ((pl.col('sku_id').cast(pl.Utf8)!=pl.col('__current_sku'))
+                 |(pl.col('quantity').cast(pl.Float64,strict=False)!=pl.col('__current_quantity'))).fill_null(True).alias('__identity_changed'))
             missing = items.with_columns(pl.col(*keys).cast(pl.Utf8)).join(
                 costs.select(pl.col(*keys).cast(pl.Utf8)).unique(), on=keys, how="anti")
             if "is_virtual" in missing.columns:
@@ -1320,7 +1330,10 @@ class OrderFeed:
         # 件数不可信成本就不可信，整行不计。
         suspect = pl.col("is_suspect")
         self._suspect_cost_rows = int(certified.select(suspect.sum()).item() or 0)
-        certified = certified.filter(~suspect)
+        if review_pricing:
+            certified=certified.with_columns(suspect.alias('__source_pricing_suspect'))
+        else:
+            certified = certified.filter(~suspect)
         blue = (pl.col("order_flag") == "蓝色旗帜").fill_null(False) if store.platform == "pdd" else pl.lit(False)
         unpriced = ((unit <= 0) | unit.is_null()) & ~((unit == 0) & (pl.col("is_gift") | blue))
         self._unpriced_cost_rows = int(certified.select(unpriced.sum()).item() or 0)
@@ -1354,6 +1367,7 @@ class OrderFeed:
             & (price > 0)
             & (total > IMPLAUSIBLE_COST_TO_PRICE * price)
         ).fill_null(False)
+        if review_pricing:implausible=implausible|pl.col('__source_pricing_suspect')|pl.col('__identity_changed').fill_null(False)
         flagged = certified.filter(implausible)
         self._implausible_cost = (flagged.height, float(flagged.select(total.sum()).item() or 0.0))
         if review_pricing:
@@ -1395,9 +1409,11 @@ class OrderFeed:
             pl.col("order_flag").cast(pl.Utf8),
             *([
                 (pl.col(name).cast(pl.Utf8) if name in certified.columns else pl.lit(None, dtype=pl.Utf8)).alias(name)
-                for name in ("cost_source", "cost_status", "cost_as_of", "failure_reason", "reference_unit_cost")
+                for name in ("cost_source", "cost_status", "cost_as_of", "failure_reason", "reference_unit_cost", "pricing_evidence")
             ] if review_pricing else []),
             *([pl.col("pricing_suspect"), pl.col("pricing_missing")] if review_pricing else []),
+            *([pl.col('__identity_changed').fill_null(False).alias('pricing_identity_changed'),
+               pl.col('__source_pricing_suspect').alias('pricing_source_suspect')] if review_pricing else []),
             self._dt("order_time").alias("order_time"),
             pl.when(pl.col("order_id").cast(pl.Utf8).is_in(reships))
             .then(pl.lit("补发订单")).otherwise(pl.lit("销售订单")).alias("order_type"),

@@ -43,3 +43,18 @@ def test_component_evidence_hash_store_and_live_quantity_are_checked(tmp_path):
     doc['payload_json']+=' ';p.write_text(json.dumps(doc))
     assert fingerprint(tmp_path)!=before
     with pytest.raises(ValueError,match='校验失败'):load(tmp_path,'shop',['10'],cost)
+
+
+def test_cost_feed_original_components_are_reused_without_double_counting_files(tmp_path):
+    _,cost,_=data()
+    proof={'source_order_hash':'a'*64,'original_captured_at':'2026-09-10T00:00:00Z',
+           'original_components':[{'oi_id':'L','sku_id':sku,'qty':q,'src_combine_sku_id':'KIT','src_combine_sku_qty':2}
+                                  for sku,q in [('A',4),('B',6),('UNUSED',0)]]}
+    cost=cost.with_columns(pl.lit(json.dumps(proof)).alias('pricing_evidence'))
+    rows=load(tmp_path,'shop',['10'],cost)
+    assert dict(rows.select('sku','quantity').iter_rows())=={'A':4,'B':6}
+    evidence(tmp_path)
+    assert load(tmp_path,'shop',['10'],cost).height==2
+    proof['original_components'][1]['qty']=7
+    with pytest.raises(ValueError,match='证据不一致'):
+        load(tmp_path,'shop',['10'],cost.with_columns(pl.lit(json.dumps(proof)).alias('pricing_evidence')))

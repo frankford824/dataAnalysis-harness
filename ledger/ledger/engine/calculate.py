@@ -66,6 +66,23 @@ class NodeValue:
 # --------------------------------------------------------------------------- #
 
 
+def historical_price_evidence(frame: pl.DataFrame):
+    col=lambda name:pl.col(name) if name in frame.columns else pl.lit(None)
+    keys=[pl.col(k).cast(pl.Utf8) for k in (LINK_KEY,'original_order_id','order_id') if k in frame.columns]
+    key=pl.coalesce(keys) if keys else pl.lit(None,dtype=pl.Utf8)
+    wanted=key.str.extract(r'^(\d{6})-\d{15}(?:_\d+)?$',1).str.strptime(pl.Date,'%y%m%d',strict=False)
+    if '__spine_order_date__' in frame.columns:wanted=pl.coalesce(wanted,col('__spine_order_date__').cast(pl.Date,strict=False))
+    quoted=col('cost_as_of').cast(pl.Utf8).str.slice(0,10).str.strptime(pl.Date,'%Y-%m-%d',strict=False)
+    unit=col('unit_cost').cast(pl.Float64,strict=False);qty=col('quantity').cast(pl.Float64,strict=False)
+    known=(col('cost_source').cast(pl.Utf8).is_in(['history','component_history','manual','blue_flag'])
+           &(col('cost_status')=='priced')&(quoted==wanted)&unit.is_finite()&(unit>=0)&qty.is_finite()&(qty>=0)
+           &~col('pricing_suspect').cast(pl.Boolean).fill_null(False))
+    if 'pricing_evidence' in frame.columns:
+        evidence_day=col('pricing_evidence').cast(pl.Utf8).str.json_path_match('$.order_date')
+        known=known&(evidence_day==wanted.dt.strftime('%Y-%m-%d'))
+    return known.fill_null(False),wanted
+
+
 def evaluate_metric(
     frame: pl.DataFrame,
     metric: Metric,
@@ -222,14 +239,11 @@ def evaluate_metric(
         col = lambda name: pl.col(name) if name in frame.columns else pl.lit(None)
         key_columns = [pl.col(k).cast(pl.Utf8) for k in (LINK_KEY, "original_order_id", "order_id") if k in frame.columns]
         key = pl.coalesce(key_columns) if key_columns else pl.lit(None, dtype=pl.Utf8)
-        wanted = key.str.extract(r"^(\d{6})-\d{15}(?:_\d+)?$", 1).str.strptime(pl.Date, "%y%m%d", strict=False)
+        known,wanted = historical_price_evidence(frame)
         quoted = col("cost_as_of").cast(pl.Utf8).str.slice(0, 10).str.strptime(pl.Date, "%Y-%m-%d", strict=False)
         unit = col("unit_cost").cast(pl.Float64, strict=False)
         quantity = col("quantity").cast(pl.Float64, strict=False)
         reference = pl.coalesce(col("reference_unit_cost"), unit).cast(pl.Float64, strict=False)
-        known = (col("cost_source").cast(pl.Utf8).is_in(["history", "component_history", "manual", "blue_flag"])
-                 & (col("cost_status") == "priced") & (quoted == wanted)
-                 & unit.is_finite() & (unit >= 0) & quantity.is_finite() & (quantity >= 0))
         if not require_historical_pricing:
             wanted = (col("__spine_order_date__").cast(pl.Date, strict=False) if "__spine_order_date__" in frame.columns
                       else pl.when(col("order_type") == "补发订单").then(pl.lit(None, dtype=pl.Date)).otherwise(
@@ -245,10 +259,13 @@ def evaluate_metric(
             col("internal_order_id").cast(pl.Utf8).alias("internal_order_id"),
             col("sku").cast(pl.Utf8).alias("sku"), pl.when(quantity.is_finite()).then(quantity).otherwise(None).alias("quantity"),
             pl.when(reference.is_finite()).then(reference).otherwise(None).alias("reference_unit_cost"),
-            pl.when(col("pricing_suspect").cast(pl.Boolean).fill_null(False)).then(pl.lit("成本与订单金额差异较大，需核对"))
+            pl.when(col('pricing_identity_changed').cast(pl.Boolean).fill_null(False)).then(pl.lit('订单商品与成本明细不一致，等待更新'))
+            .when(col('pricing_source_suspect').cast(pl.Boolean).fill_null(False)).then(pl.lit('原订单商品信息待核对'))
+            .when(col("pricing_suspect").cast(pl.Boolean).fill_null(False)).then(pl.lit("成本与订单金额差异较大，需核对"))
             .when(wanted.is_null()).then(pl.lit("原订单日期待核对"))
             .when(~quantity.is_finite().fill_null(False) | (quantity < 0)).then(pl.lit("原订单数量待核对"))
             .when(col("cost_status") == "pending").then(pl.lit("成本明细尚未同步"))
+            .when(col("failure_reason") == "missing_original_order_date").then(pl.lit("原订单日期待核对"))
             .when(col("failure_reason") == "missing_cost_company").then(pl.lit("成本所属公司待核对"))
             .when(col("failure_reason") == "invalid_component_quantity").then(pl.lit("套餐组件数量待核对"))
             .when(pl.lit(not require_historical_pricing)).then(pl.lit("商品成本单价待核对"))

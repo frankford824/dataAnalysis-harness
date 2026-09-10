@@ -12,7 +12,7 @@
 
 - id: taobao
   name: 淘宝天猫
-  cost_pricing: required
+  cost_pricing: historical
   hints: [淘宝, 天猫, tmall, TB]
 
 - id: alibaba1688
@@ -22,7 +22,7 @@
 
 - id: douyin
   name: 抖音
-  cost_pricing: required
+  cost_pricing: historical
   hints: [抖音, 抖店]
 
 - id: pdd

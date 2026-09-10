@@ -303,10 +303,14 @@ def _uploaded_after_sales(tmp_path: Path, model, store: Store, *rows: tuple[str,
     return ingest([path], model, [store.name])
 
 
-def _model_and_store(feed: OrderFeed):
+def _model_and_store(feed: OrderFeed, pricing="provided"):
     model = ModelRepository(
         Path(__file__).resolve().parents[2] / "models" / "cn-ecommerce"
     ).get().model
+    # This fixture supplies prices for identity/projection tests. Historical
+    # quote validation opts in explicitly instead of fabricating API evidence.
+    model=model.model_copy(update={'platforms':tuple(p.model_copy(update={'cost_pricing':pricing})
+        if p.id in {'taobao','douyin'} else p for p in model.platforms)})
     store = model.store("taobao_msy387nx")
     with feed._connect() as conn:  # noqa: SLF001 - fixture remaps one synthetic shop
         conn.execute(
