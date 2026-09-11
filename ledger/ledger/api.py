@@ -335,7 +335,7 @@ def order_feed_alignment(store_id: str, order_key: str = Query(min_length=1, max
     store = _store(_model(), store_id)
     if not order_feed.enabled():
         return {"available": False, "groups": [], "message": "订单同步未启用"}
-    return order_feed.OrderFeed(workspace().root).alignment(store, order_key.strip())
+    return order_feed.OrderFeed(workspace().root).alignment(store, order_key.strip(), live=True)
 
 
 @app.get("/api/version")

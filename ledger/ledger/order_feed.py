@@ -949,7 +949,37 @@ class OrderFeed:
                     update={"bindings": item.template.bindings + extra}
                 )
 
-    def alignment(self, store: Store, order_key: str) -> dict[str, Any]:
+    def alignment(self, store: Store, order_key: str, *, live: bool = False) -> dict[str, Any]:
+        result = self._cached_alignment(store, order_key)
+        if not live or not result.get('groups'):
+            return result
+        ids = sorted({oid for group in result['groups'] for oid in group['internal_order_ids']})
+        # Only re-read the matched headers; never re-import the shop or reset replay.
+        if len(ids) > 100:
+            return {**result, 'live_refreshed': False, 'message': '关联订单较多，请缩小查询范围'}
+        try:
+            with sqlite3.connect(self.db_path.as_uri() + '?mode=ro', uri=True) as conn:
+                allowed = {str(r[0]) for r in conn.execute(
+                    "SELECT order_store_id FROM feed_store WHERE ledger_store_id=? AND mapping_status='confirmed'",
+                    (store.id,))}
+            with ThreadPoolExecutor(max_workers=min(6, len(ids))) as pool:
+                payloads = list(pool.map(lambda oid: self.client.get(f'entities/order/{oid}'), ids))
+            rows = [normalize_entity('order', p['order']) for p in payloads]
+            for oid, row in zip(ids, rows):
+                if str(row.get('order_id')) != oid or str(row.get('order_store_id')) not in allowed:
+                    raise OrderFeedError('回查订单与请求不一致')
+            # The cache already matched the query (including platform child IDs).
+            # Rebuild each group from fresh headers without treating item rows as money.
+            groups_by_ids = {}
+            for oid in ids:
+                for group in read_groups(rows, [], oid):
+                    groups_by_ids[tuple(group['internal_order_ids'])] = group
+            return {**result, 'groups': list(groups_by_ids.values()), 'live_refreshed': True,
+                    'membership_basis': 'consumed_cache'}
+        except (OrderFeedError, KeyError):
+            return {**result, 'live_refreshed': False, 'message': '实时订单暂未取到，当前显示已同步资料'}
+
+    def _cached_alignment(self, store: Store, order_key: str) -> dict[str, Any]:
         """Inspect cached snapshot plus consumed events without syncing or posting."""
         with sqlite3.connect(self.db_path.as_uri() + '?mode=ro', uri=True) as conn:
             conn.row_factory = sqlite3.Row
@@ -959,22 +989,34 @@ class OrderFeed:
                 "SELECT order_store_id FROM feed_store WHERE ledger_store_id=? AND mapping_status='confirmed'",
                 (store.id,))]
             deltas = [dict(row) for row in conn.execute(
-                "SELECT * FROM feed_entity WHERE entity_type IN ('order','order_item') AND order_store_id IN (%s)"
+                "SELECT * FROM feed_entity WHERE entity_type='order' AND order_store_id IN (%s)"
                 % ','.join('?' for _ in stores), stores)] if stores else []
-        manifest = json.loads(state['manifest_json'] or '{}')
-        if not stores or not manifest.get('objects'):
-            return {'groups': [], 'available': False, 'message': '订单资料尚未同步'}
-        objects = manifest['objects']
-        orders = pl.scan_parquet(self.feed_root / objects['orders.parquet']['path']).filter(
-            pl.col('order_store_id').cast(pl.Utf8).is_in(stores)).collect()
-        orders = self._overlay(orders, deltas, 'order', 'order_id', lambda p: [p.get('order') or {}])
-        ids = orders['order_id'].cast(pl.Utf8).to_list()
-        items = pl.scan_parquet(self.feed_root / objects['order_items.parquet']['path']).filter(
-            pl.col('order_id').cast(pl.Utf8).is_in(ids)).collect()
-        items = self._overlay(items, deltas, 'order_item', 'sub_order_id', lambda p: [p.get('order_item') or {}])
-        return {'available': True, 'snapshot_id': state['snapshot_id'],
-                'consumed_seq': state['consumed_seq'],
-                'groups': read_groups(orders.to_dicts(), items.to_dicts(), order_key)}
+            manifest = json.loads(state['manifest_json'] or '{}')
+            if not stores or not manifest.get('objects'):
+                return {'groups': [], 'available': False, 'message': '订单资料尚未同步'}
+            objects = manifest['objects']
+            scan = pl.scan_parquet(self.feed_root / objects['orders.parquet']['path'])
+            wanted = {'order_id', 'online_order_no', 'order_store_id', 'paid_amount', 'settled_amount', *ORDER_FIELDS}
+            orders = scan.filter(pl.col('order_store_id').cast(pl.Utf8).is_in(stores)).select(
+                [c for c in scan.collect_schema().names() if c in wanted]).collect()
+            orders = self._overlay(orders, deltas, 'order', 'order_id', lambda p: [p.get('order') or {}])
+            rows = orders.to_dicts()
+            groups = read_groups(rows, [], order_key)
+            if groups:
+                return {'available': True, 'snapshot_id': state['snapshot_id'],
+                        'consumed_seq': state['consumed_seq'], 'groups': groups}
+            ids = orders['order_id'].cast(pl.Utf8).to_list()
+            scan = pl.scan_parquet(self.feed_root / objects['order_items.parquet']['path'])
+            wanted = {'order_id', 'sub_order_id', 'outer_sku', 'outer_oi_id', 'platform_sub_order_id'}
+            items = scan.filter(pl.col('order_id').cast(pl.Utf8).is_in(ids)).select(
+                [c for c in scan.collect_schema().names() if c in wanted]).collect()
+            deltas = [dict(row) for row in conn.execute(
+                "SELECT * FROM feed_entity WHERE entity_type='order_item' AND order_store_id IN (%s)"
+                % ','.join('?' for _ in stores), stores)]
+            items = self._overlay(items, deltas, 'order_item', 'sub_order_id', lambda p: [p.get('order_item') or {}])
+            return {'available': True, 'snapshot_id': state['snapshot_id'],
+                    'consumed_seq': state['consumed_seq'],
+                    'groups': read_groups(rows, items.to_dicts(), order_key)}
 
     def _frames(self, store: Store, manifest: dict[str, Any], exported_orders: dict[str, str | None] | None = None,
                 fallback_flags: dict[str, str] | None = None, require_history: bool = False,

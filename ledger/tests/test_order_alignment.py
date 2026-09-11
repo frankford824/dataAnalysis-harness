@@ -77,6 +77,9 @@ def test_reader_preserves_checkpoint_and_old_snapshot_semantics(tmp_path):
     assert result['groups'][0]['payable_amount'] == '21.00'  # latest consumed event
     assert result['groups'][0]['freight_amount'] is None
     assert feed.state() == before
+    live = feed.alignment(Store(id='taobao_test', name='test', platform='taobao'), 'S1', live=True)
+    assert live['live_refreshed'] is True
+    assert feed.state() == before
 
 
 def test_missing_item_payment_stays_unknown_in_read_frame(tmp_path):
