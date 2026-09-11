@@ -79,7 +79,7 @@ def test_refund_without_actual_return_does_not_reverse_cost(tmp_path):
 
 def test_other_store_keeps_existing_policy(tmp_path):
     r=calculate(tmp_path,[("A1","卖家已收到退货",3,3,"2026-07-09")],policy="order")
-    assert totals(r,"goods_cost")=={}
+    assert totals(r,"goods_cost")=={"2026-06":0.0}
     assert totals(r,"goods_return_cost")=={}
 
 

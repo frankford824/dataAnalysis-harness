@@ -81,7 +81,9 @@ def test_split_cancellation_does_not_restore_original_parent_cost():
     item=Ingested(ref=ref,frame=after.frame,template=template,recognition=Recognition(ref,template.signature,len(after.frame.columns),source_id='after_sales',template_id=template.id))
     ing=Ingestion(model=model,items=[item])
     parent=cost.frame.with_columns(pl.lit('PARENT').alias('internal_order_id'),pl.lit(2.0).alias('quantity'))
-    assert _exclude_linked(parent,model.metric('goods_cost'),ing,[],'parent').height==0
+    result=_exclude_linked(parent,model.metric('goods_cost'),ing,[],'parent')
+    from ledger.engine.cost_policy import is_exempt
+    assert result.filter(is_exempt(result)).height==1
 
 
 def test_same_sku_on_another_platform_child_keeps_its_cost():

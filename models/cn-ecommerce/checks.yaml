@@ -4,7 +4,7 @@
 # 不通过就出不了数；为假的项只提示，因为它们不通过是业务常态而不是错误。
 
 - id: chk_goods_coverage
-  name: 订单拿到商品成本
+  name: 商品成本核对
   kind: spine_coverage
   metric: goods_cost
   threshold: 0.98

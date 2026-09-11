@@ -105,13 +105,19 @@ def evaluate_metric(
     if frame.is_empty():
         return _empty_facts(), notes
 
-    frame = frame.filter(_predicates(metric.where, frame, notes)) if metric.where else frame
+    from .cost_policy import is_dropship, is_exempt, is_cancelled
+    is_erp_cost = metric.id in {"goods_cost", "reshipment_cost"}
+    if metric.where:
+        selected = _predicates(metric.where, frame, notes)
+        if is_erp_cost:
+            other_rules = tuple(rule for rule in metric.where if rule.field != "order_state")
+            selected = selected | (is_cancelled(frame) & _predicates(other_rules, frame, notes))
+        frame = frame.filter(selected)
     if frame.is_empty():
         notes.append(f"指标 {metric.id} 的过滤条件筛掉了全部行")
         return _empty_facts(), notes
 
-    from .cost_policy import is_dropship
-    erp_exempt = is_dropship(frame) if metric.id in {"goods_cost", "reshipment_cost"} else pl.lit(False)
+    erp_exempt = is_exempt(frame) if is_erp_cost else pl.lit(False)
     amount = pl.when(erp_exempt).then(pl.lit(0.0)).otherwise(_value_expr(metric.value, frame, notes))
 
     # 父级字段聚合前必须按去重键取首行，否则重复计算。
@@ -126,6 +132,7 @@ def evaluate_metric(
         amount = -amount.abs()
     elif metric.sign == "abs_positive":
         amount = amount.abs()
+    amount = pl.when(erp_exempt).then(pl.lit(0.0)).otherwise(amount)
 
     # 源字段兜底会把一行铺成多行，份额在挂钩时算好。这里乘上，总额不变。
     if LINK_SPLIT in frame.columns:
@@ -274,7 +281,7 @@ def evaluate_metric(
             .when(pl.lit(not require_historical_pricing)).then(pl.lit("商品成本单价待核对"))
             .when(quoted.is_not_null() & (quoted != wanted)).then(pl.lit("取价日期与下单日不一致"))
             .when((col("cost_status") == "missing_price") & col("cost_source").is_not_null())
-            .then(pl.lit("等待补查下单日历史成本"))
+            .then(pl.lit("下单日历史成本待核实"))
             .otherwise(pl.lit("缺少已核实的下单日历史成本")).alias("reason"),
             pl.col(ANCHOR_SHA).alias("file_sha"), pl.col(ANCHOR_FILE).alias("file_name"),
             pl.col(ANCHOR_SHEET).alias("sheet"), pl.col(ANCHOR_ROW).alias("row_no"),
@@ -291,7 +298,9 @@ def evaluate_metric(
         keep = keep | supplied_zero
     keep = keep | erp_exempt
     source_note = pl.when(erp_exempt).then(pl.concat_str([
-        source_note, pl.lit("DF 代发商品：此处计 0，代发支出按代发表单独核算")
+        source_note, pl.when(is_dropship(frame)).then(pl.lit("DF 代发商品：此处计 0，代发支出按代发表单独核算"))
+        .when(is_cancelled(frame)).then(pl.lit("商品已取消，成本计 0"))
+        .otherwise(pl.col("__cost_exempt_reason") if "__cost_exempt_reason" in frame.columns else pl.lit(None, dtype=pl.Utf8))
     ], separator="；", ignore_nulls=True)).otherwise(source_note)
     facts = frame.filter(keep & pricing_eligible).select(
         pl.lit(metric.id).alias("metric_id"),

@@ -831,6 +831,9 @@ def _exclude_linked(
     label: str,
 ) -> pl.DataFrame:
     """按模型声明的另一数据源逐复合键排除，不猜主订单或整单范围。"""
+    zero_costs = []
+    if metric.id in {"goods_cost", "reshipment_cost"}:
+        frame = frame.with_columns(pl.lit(None, dtype=pl.Utf8).alias("__cost_exempt_reason"))
     from .cost_returns import policy_mask
     deferred = frame.filter(policy_mask(frame, ingestion.model)) if metric.id == "goods_cost" else frame.clear()
     out = frame.filter(~policy_mask(frame, ingestion.model)) if metric.id == "goods_cost" else frame
@@ -874,13 +877,15 @@ def _exclude_linked(
 
         excluded = pl.concat(parts, how="vertical_relaxed").unique(maintain_order=True)
         before = out.height
+        keyed = out.with_columns([
+            norm_expr(pl.col(key.field).cast(pl.Utf8)).alias(alias)
+            for key, alias in zip(rule.keys, aliases, strict=True)
+        ])
+        if metric.id in {"goods_cost", "reshipment_cost"}:
+            zero_costs.append(keyed.join(excluded, on=aliases, how="semi", maintain_order="left")
+                .drop(aliases).with_columns(pl.lit("售后已确认，按规则不计商品成本").alias("__cost_exempt_reason")))
         out = (
-            out.with_columns(
-                [
-                    norm_expr(pl.col(key.field).cast(pl.Utf8)).alias(alias)
-                    for key, alias in zip(rule.keys, aliases, strict=True)
-                ]
-            )
+            keyed
             .join(excluded, on=aliases, how="anti", maintain_order="left")
             .drop(aliases)
         )
@@ -889,7 +894,7 @@ def _exclude_linked(
             f"{label} · {metric.name}：按 {ingestion.model.source(rule.source).name}"
             f"逐商品排除 {removed:,} 行" + (f"（{rule.note}）" if rule.note else "")
         )
-    return pl.concat([out, deferred], how="vertical_relaxed") if not deferred.is_empty() else out
+    return pl.concat([out, deferred, *zero_costs], how="vertical_relaxed") if zero_costs or not deferred.is_empty() else out
 
 
 def _mark_counted(facts: pl.DataFrame, spine_facts: pl.DataFrame,

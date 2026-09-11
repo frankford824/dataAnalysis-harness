@@ -95,7 +95,8 @@ def test_only_the_three_confirmed_combinations_zero_the_exact_product(tmp_path, 
         "taobao",
     )
     goods = result.facts.filter(result.facts["metric_id"] == "goods_cost")
-    assert goods.height == 5
+    assert goods.height == 8
+    assert goods.filter(goods["amount"] == 0).height == 3
     assert goods["amount"].sum() == pytest.approx(-(4 + 5 + 6 + 7 + 8))
     assert any("逐商品排除 3 行" in note for note in result.notes)
 

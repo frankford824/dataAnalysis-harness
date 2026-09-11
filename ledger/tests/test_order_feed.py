@@ -359,7 +359,7 @@ def test_feed_after_sales_without_sku_keeps_the_uploaded_export_in_force(tmp_pat
 
     result = run(ingestion, store.platform)
     goods = result.facts.filter(pl.col("metric_id") == "goods_cost")
-    assert goods.is_empty(), "买家未收到货 + 退款成功 的商品成本必须归零"
+    assert goods.height == 1 and goods["amount"].sum() == 0, "确认不计成本的商品应保留为已核实的 0"
     assert any("逐商品排除 1 行" in note for note in result.notes)
 
 
@@ -379,7 +379,8 @@ def test_partially_named_feed_after_sales_and_the_upload_work_together(tmp_path)
     assert any("2 行有 1 行带商品编码" in note for note in live.notes)
 
     result = run(ingestion, store.platform)
-    assert result.facts.filter(pl.col("metric_id") == "goods_cost").is_empty()
+    goods = result.facts.filter(pl.col("metric_id") == "goods_cost")
+    assert goods.height == 2 and goods["amount"].sum() == 0
     assert any("逐商品排除 2 行" in note for note in result.notes)
 
 
@@ -393,7 +394,8 @@ def test_a_fully_named_feed_does_not_double_count_the_same_after_sale(tmp_path):
     ingestion = _uploaded_after_sales(tmp_path, model, store, ("S1", "SKU1"), ("S2", "SKU2"))
     feed.append_to(ingestion, store)
     result = run(ingestion, store.platform)
-    assert result.facts.filter(pl.col("metric_id") == "goods_cost").is_empty()
+    goods = result.facts.filter(pl.col("metric_id") == "goods_cost")
+    assert goods.height == 2 and goods["amount"].sum() == 0
     assert any("逐商品排除 2 行" in note for note in result.notes)
 
 
@@ -409,7 +411,8 @@ def test_feed_after_sales_naming_the_product_zeroes_cost_without_any_upload(tmp_
     labels = [item.ref.label() for item in ingestion.frames_of("after_sales")]
     assert labels == ["订单台实时售后 · 订单台"]
     result = run(ingestion, store.platform)
-    assert result.facts.filter(pl.col("metric_id") == "goods_cost").is_empty()
+    goods = result.facts.filter(pl.col("metric_id") == "goods_cost")
+    assert goods.height == 1 and goods["amount"].sum() == 0
     assert any("逐商品排除 1 行" in note for note in result.notes)
 
 

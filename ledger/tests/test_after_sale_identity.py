@@ -31,7 +31,8 @@ def test_sku_rename_matches_exact_internal_item_and_keeps_other_product_cost(tmp
     assert original.frame["sku"].to_list() == ["OLD-CODE"]
     result = run(ingestion, store.platform)
     goods = result.facts.filter(pl.col("metric_id") == "goods_cost")
-    assert goods["sku"].to_list() == ["SKU2"]
+    assert goods.filter(pl.col("amount") != 0)["sku"].to_list() == ["SKU2"]
+    assert goods.filter(pl.col("sku") == "SKU1")["amount"].item() == 0
     assert goods["amount"].sum() == -2
 
 

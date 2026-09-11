@@ -31,7 +31,9 @@ def test_cancelled_component_contributes_zero_without_erasing_valid_same_order(p
     result = run(Ingestion(model=model, items=inputs), platform)
     assert not result.eval_errors
     assert inputs[1].frame.height == 2  # 原始记录、单价保持可追溯。
-    assert result.facts.filter(pl.col("internal_order_id") == "cancelled").is_empty()
+    cancelled_rows = result.facts.filter(pl.col("internal_order_id") == "cancelled")
+    assert cancelled_rows.height == 1
+    assert cancelled_rows["contribution"].sum() == 0
     assert result.facts.filter(pl.col("internal_order_id") == "valid")["contribution"].sum() == pytest.approx(-10)
     assert result.spine_facts["amount"].sum() == pytest.approx(-10)
 

@@ -9,7 +9,7 @@ from ledger.engine.runtime import Ingestion,run
 from test_reship_period_and_cost_drill import item
 
 
-def calculate(*,sku='SKU',kind='销售订单',copies=1,goods=None,status='退款成功',unit=10.):
+def calculate(*,sku='SKU',kind='销售订单',copies=1,goods=None,status='退款成功',unit=10.,item_state='Sent'):
     full=load_model(MODELS/'cn-ecommerce')
     metrics=tuple(full.metric(n).for_platform('douyin') for n in ['goods_cost','reshipment_cost'])
     model=Model(id='cost-policy',name='cost',stores=(Store(id='s',name='shop',platform='douyin'),),
@@ -17,7 +17,7 @@ def calculate(*,sku='SKU',kind='销售订单',copies=1,goods=None,status='退款
         sources=tuple(SourceContract(id=s,name=s,is_spine=s=='order_detail',owner_role='shop_owner',cadence='monthly') for s in ['order_detail','order_cost','after_sales']),
         metrics=metrics,statement=(StatementNode(id='value',name='成本',formula={'op':'add','of':['goods_cost','reshipment_cost']}),))
     orders=[dict(order_id='MAIN',sub_order_id='SUB',order_type='销售订单',store_name='shop',order_time=datetime(2026,6,1),tracking_no='T') for _ in range(copies)]
-    costs=[dict(order_id='MAIN',original_order_id='MAIN',sub_order_id='SUB',internal_order_id='1',sku=sku,order_type=kind,order_state='Sent',store_name='shop',order_time=datetime(2026,6,1),quantity=1.,unit_cost=unit,cost_source='history',cost_status='priced' if unit is not None else 'missing_price',cost_as_of='2026-06-01',pricing_evidence=json.dumps({'order_date':'2026-06-01'}))]
+    costs=[dict(order_id='MAIN',original_order_id='MAIN',sub_order_id='SUB',internal_order_id='1',sku=sku,order_type=kind,order_state=item_state,store_name='shop',order_time=datetime(2026,6,1),quantity=1.,unit_cost=unit,cost_source='history',cost_status='priced' if unit is not None else 'missing_price',cost_as_of='2026-06-01',pricing_evidence=json.dumps({'order_date':'2026-06-01'}))]
     items=[item('order_detail',orders,orders[0].keys()),item('order_cost',costs,costs[0].keys())]
     if goods:
         after=[dict(order_id='MAIN',sub_order_id='SUB',internal_order_id='1',sku=sku,refund_status=status,goods_status=goods,order_time=datetime(2026,7,1))]
@@ -116,3 +116,27 @@ def test_cost_export_keeps_original_order_and_product_identity():
 @pytest.mark.parametrize('sid',['douyin_mt9sbkne','douyin_luckywish'])
 def test_confirmed_after_sale_costs_are_deducted_from_original_month(sid):
     assert load_model(MODELS/'cn-ecommerce').store(sid).cost_return_posting=='order'
+
+
+def test_confirmed_refund_is_known_zero_cost_not_a_missing_price():
+    r=calculate(goods='买家未收到货',unit=None)
+    assert r.pricing_gaps.is_empty()
+    assert r.facts.height==1
+    assert r.facts['contribution'].item()==0
+    assert r.facts['counted'].item()
+    assert '售后已确认' in r.facts['source_note'].item()
+
+
+def test_reship_after_sale_zeroes_only_its_own_cost():
+    r=calculate(kind='补发订单',goods='买家未收到货',unit=None)
+    assert r.pricing_gaps.is_empty()
+    assert r.facts['metric_id'].to_list()==['reshipment_cost']
+    assert r.facts['contribution'].item()==0
+
+
+def test_cancelled_product_is_known_zero_without_a_price():
+    r=calculate(item_state='Cancelled',unit=None)
+    assert r.pricing_gaps.is_empty()
+    assert r.facts.height==1 and r.facts['counted'].item()
+    assert r.facts['contribution'].item()==0
+    assert '商品已取消' in r.facts['source_note'].item()
