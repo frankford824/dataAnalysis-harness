@@ -258,3 +258,16 @@ def test_split_internal_orders_do_not_flag_other_goods_when_remark_has_a_match()
     out=prepare_dropship(frame)
     assert out.select(is_dropship(out)).to_series().to_list()==[True,False]
     assert out['__dropship_ambiguous'].to_list()==[False,False]
+
+
+def test_supplier_check_uses_real_allocation_instead_of_merged_header_text():
+    from ledger.engine.cost_policy import missing_supplier_costs
+    facts=pl.DataFrame([dict(metric_id='goods_cost',store='s',period='2026-06',link_key='child',
+        order_id='MAIN,store:MAIN',sku='代发',source_note='代发商品：聚水潭成本计 0',counted=True,contribution=0.)])
+    projected=pl.DataFrame([
+        dict(metric_id='goods_cost',store='s',period='2026-06',link_key='child',spine_row=7,amount=0.),
+        dict(metric_id='dropship_cost',store='s',period='2026-06',link_key='MAIN',spine_row=7,amount=-12.),
+    ])
+    assert missing_supplier_costs(facts,projected).is_empty()
+    unrelated=projected.with_columns(pl.when(pl.col('metric_id')=='dropship_cost').then(pl.lit(8)).otherwise(pl.col('spine_row')).alias('spine_row'))
+    assert missing_supplier_costs(facts,unrelated).height==1

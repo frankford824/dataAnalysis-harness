@@ -1097,7 +1097,7 @@ def _build_slice(
     result = audit(model, scoped, scoped_reports, own, completeness, nodes)
     if any(m.id == "dropship_cost" for m in model.metrics):
         from .cost_policy import missing_supplier_costs
-        supplier_gaps = missing_supplier_costs(scoped)
+        supplier_gaps = missing_supplier_costs(scoped, scoped_spine)
         if "source_note" in scoped.columns:
             uncertain = scoped.filter(pl.col("counted") & pl.col("source_note").str.contains("代发范围待确认：",literal=True).fill_null(False))
             if not uncertain.is_empty():

@@ -61,12 +61,26 @@ def is_cancelled(frame):
     return pl.col('order_state').is_in(['Cancelled','已取消','取消']).fill_null(False)
 
 
-def missing_supplier_costs(facts):
+def missing_supplier_costs(facts, projected=None):
     required = {'metric_id','order_id','sku','source_note','counted','contribution'}
     if not required <= set(facts.columns):
         return pl.DataFrame()
     dropship = facts.filter(pl.col('counted') & pl.col('metric_id').is_in(['goods_cost','reshipment_cost'])
         & pl.col('source_note').str.contains('代发商品：聚水潭成本计 0',literal=True).fill_null(False))
+    if dropship.is_empty():
+        return dropship.select([c for c in ['store','period','order_id','sku'] if c in dropship.columns])
+    if projected is not None and {'metric_id','store','period','link_key','spine_row','amount'} <= set(projected.columns):
+        # Use the actual allocation target. ERP may join several original
+        # numbers in a header; comparing that raw header with a supplier's
+        # single original number would falsely report a missing payment.
+        identity = ['metric_id','store','period','link_key','order_id','sku']
+        required_rows = dropship.select(identity).unique()
+        link_keys = ['metric_id','store','period','link_key']
+        destinations = projected.join(required_rows.select(link_keys).unique(),on=link_keys,how='semi').select(*link_keys,'spine_row').unique()
+        supplied_rows = projected.filter((pl.col('metric_id')=='dropship_cost') & (pl.col('amount')!=0)).select('store','period','spine_row').unique()
+        matched = required_rows.join(destinations,on=link_keys,how='inner').join(
+            supplied_rows,on=['store','period','spine_row'],how='semi').select(identity).unique()
+        return required_rows.join(matched,on=identity,how='anti',nulls_equal=True).select('store','period','order_id','sku')
     supplied = facts.filter(pl.col('counted') & (pl.col('metric_id')=='dropship_cost') & (pl.col('contribution')!=0))
     keys = ['order_id']
     for col in ['store','period']:
