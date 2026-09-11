@@ -105,7 +105,7 @@ def evaluate_metric(
     if frame.is_empty():
         return _empty_facts(), notes
 
-    from .cost_policy import is_dropship, is_exempt, is_cancelled
+    from .cost_policy import is_dropship, is_exempt, is_cancelled, prepare_dropship
     is_erp_cost = metric.id in {"goods_cost", "reshipment_cost"}
     if metric.where:
         selected = _predicates(metric.where, frame, notes)
@@ -117,6 +117,8 @@ def evaluate_metric(
         notes.append(f"指标 {metric.id} 的过滤条件筛掉了全部行")
         return _empty_facts(), notes
 
+    if is_erp_cost:
+        frame = prepare_dropship(frame)
     erp_exempt = is_exempt(frame) if is_erp_cost else pl.lit(False)
     amount = pl.when(erp_exempt).then(pl.lit(0.0)).otherwise(_value_expr(metric.value, frame, notes))
 
@@ -298,10 +300,16 @@ def evaluate_metric(
         keep = keep | supplied_zero
     keep = keep | erp_exempt
     source_note = pl.when(erp_exempt).then(pl.concat_str([
-        source_note, pl.when(is_dropship(frame)).then(pl.lit("DF 代发商品：此处计 0，代发支出按代发表单独核算"))
-        .when(is_cancelled(frame)).then(pl.lit("商品已取消，成本计 0"))
-        .otherwise(pl.col("__cost_exempt_reason") if "__cost_exempt_reason" in frame.columns else pl.lit(None, dtype=pl.Utf8))
+        source_note, pl.when(is_cancelled(frame)).then(pl.lit("商品已取消，成本计 0"))
+        .when(pl.col("__cost_exempt_reason").is_not_null() if "__cost_exempt_reason" in frame.columns else pl.lit(False))
+        .then(pl.col("__cost_exempt_reason") if "__cost_exempt_reason" in frame.columns else pl.lit(None,dtype=pl.Utf8))
+        .when(is_dropship(frame)).then(pl.lit("代发商品：聚水潭成本计 0，代发支出按代发表单独核算"))
+        .otherwise(pl.lit(None,dtype=pl.Utf8))
     ], separator="；", ignore_nulls=True)).otherwise(source_note)
+    if is_erp_cost and "__dropship_ambiguous" in frame.columns:
+        source_note = pl.when(pl.col("__dropship_ambiguous") & ~erp_exempt).then(pl.concat_str([
+            source_note, pl.lit("代发范围待确认：备注未明确对应商品，当前保留聚水潭成本")
+        ], separator="；", ignore_nulls=True)).otherwise(source_note)
     facts = frame.filter(keep & pricing_eligible).select(
         pl.lit(metric.id).alias("metric_id"),
         pl.lit(metric.source).alias("source_id"),

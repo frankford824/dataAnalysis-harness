@@ -1063,6 +1063,8 @@ class OrderFeed:
         key: str,
         extract: Callable[[dict[str, Any]], list[dict[str, Any]]],
     ) -> pl.DataFrame:
+        if entity_type == "order" and "order_remark" not in base.columns:
+            base = base.with_columns(pl.lit(None, dtype=pl.Utf8).alias("order_remark"))
         if entity_type == "order_item" and "item_status_raw" not in base.columns:
             base = base.with_columns(pl.lit(None, dtype=pl.Utf8).alias("item_status_raw"))
         selected = [d for d in deltas if d["entity_type"] == entity_type]
@@ -1395,6 +1397,7 @@ class OrderFeed:
         )
         frame = certified.join(
             orders.select("order_id", "online_order_no", "order_time", "order_status_raw", "tracking_no",
+                          pl.col("order_remark").cast(pl.Utf8) if "order_remark" in orders.columns else pl.lit(None, dtype=pl.Utf8).alias("order_remark"),
                           pl.col("ship_time") if "ship_time" in orders.columns else pl.lit(None).alias("ship_time"),
                           pl.col("link_order_id") if "link_order_id" in orders.columns else pl.lit(None).alias("link_order_id")),
             on="order_id", how="left",
@@ -1414,6 +1417,7 @@ class OrderFeed:
             pl.when(pl.col("outer_sku").cast(pl.Utf8).str.strip_chars().fill_null("") != "")
             .then(pl.col("outer_sku")).otherwise(pl.col("sub_order_id")).cast(pl.Utf8).alias("sub_order_id"),
             pl.col("sku_id").cast(pl.Utf8).alias("sku"),
+            pl.col("order_remark"),
             pl.col("link_order_id").cast(pl.Utf8).alias("parent_internal_order_id"),
             pl.col("ship_time").cast(pl.Utf8),
             pl.col("quantity").cast(pl.Float64, strict=False),

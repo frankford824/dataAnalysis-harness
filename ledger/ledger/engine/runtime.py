@@ -930,8 +930,18 @@ def _mark_counted(facts: pl.DataFrame, spine_facts: pl.DataFrame,
     claim = pl.lit(False)
     for metric in metrics:
         claim = claim | claims(metric)
+    # Hosting control rows have no transaction date. Their actual projection
+    # defines the periods and residual shares; a missing source period must not
+    # drop an amount that is already present in the statement from exports.
+    wide = (pl.col("link_key") == STORE_WIDE_PRODUCT).fill_null(False)
+    marked = facts.filter(~wide).join(weights, on=["metric_id", "store", "period", "link_key"], how="left", nulls_equal=True)
+    if facts.filter(wide).height:
+        controls = facts.filter(wide).rename({"period": "__source_period__"}).join(
+            weights, on=["metric_id", "store", "link_key"], how="left", nulls_equal=True)
+        controls = controls.with_columns(pl.coalesce("period", "__source_period__").alias("period")).drop("__source_period__")
+        marked = pl.concat([marked, controls.select(marked.columns)], how="vertical_relaxed")
     return (
-        facts.join(weights, on=["metric_id", "store", "period", "link_key"], how="left", nulls_equal=True)
+        marked
         .with_columns(
             (claim & pl.col("__share__").is_not_null()).alias("counted"),
         )
@@ -1085,6 +1095,22 @@ def _build_slice(
         if live_feed else link_reports
     )
     result = audit(model, scoped, scoped_reports, own, completeness, nodes)
+    if any(m.id == "dropship_cost" for m in model.metrics):
+        from .cost_policy import missing_supplier_costs
+        supplier_gaps = missing_supplier_costs(scoped)
+        if "source_note" in scoped.columns:
+            uncertain = scoped.filter(pl.col("counted") & pl.col("source_note").str.contains("代发范围待确认：",literal=True).fill_null(False))
+            if not uncertain.is_empty():
+                from .types import Finding
+                result.findings.append(Finding("dropship_scope_evidence", "代发商品待确认", passed=False, blocking=True,
+                    message=f"{uncertain['order_id'].n_unique()} 笔订单备注有代发字样，但未明确对应商品。请核对商品编码和代发数量。",
+                    detail={"items": uncertain.select("order_id","sku").unique().head(100).to_dicts()}))
+        if not supplier_gaps.is_empty():
+            from .types import Finding
+            result.findings.append(Finding("dropship_cost_evidence", "代发支出待核对", passed=False, blocking=True,
+                message=f"{supplier_gaps['order_id'].n_unique()} 笔代发订单未找到已入账的代发支出。聚水潭成本已计零，请补齐代发表并核对订单号。",
+                detail={"count": supplier_gaps.height, "items": supplier_gaps.head(100).to_dicts()}))
+
     if not own_gaps.is_empty():
         from .types import Finding
         result.findings.append(Finding("historical_cost_evidence", "商品成本待核价", passed=False, blocking=True,

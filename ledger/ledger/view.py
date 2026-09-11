@@ -921,7 +921,7 @@ def dryrun_dict(run: "DryRun") -> dict[str, Any]:
     }
 
 
-def fees_csv(facts: Path | pl.DataFrame, model: Model) -> str:
+def fees_csv(facts: Path | pl.DataFrame, model: Model, *, review_status: str = "") -> str:
     """按订单号列出本期每条费项，方便和手工表对差异。
 
     一行为源表里的一条记录：订单号（或商品 ID）、科目、金额、进没进账、文件和行号。
@@ -967,6 +967,8 @@ def fees_csv(facts: Path | pl.DataFrame, model: Model) -> str:
             _excel_identifier_cell(row.get("sku")),
             _excel_identifier_cell(row.get("internal_order_id")),
         )) + (("," + csv_cell(row.get("source_note"))) if with_notes else ""))
+    if review_status:
+        lines = [lines[0] + ",核对状态"] + [line + "," + csv_cell(review_status) for line in lines[1:]]
     return "\n".join(lines) + "\n"
 
 

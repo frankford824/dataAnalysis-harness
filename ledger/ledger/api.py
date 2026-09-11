@@ -1228,8 +1228,13 @@ def fees_export(run_id: int) -> PlainTextResponse:
     period = (state.period if state else "period") or "period"
     # Excel 在 Windows 上双击 CSV 时不会可靠遵守 HTTP charset，而是靠文件头判断。
     # UTF-8 BOM 只影响编码识别，不会成为第一列表头的一部分（utf-8-sig 会剥掉）。
-    body = "\ufeff" + view.fees_csv(facts, _model())
-    filename = f"{store}-{period}-费项明细.csv"
+    import polars as pl
+    gaps_path = workspace().pricing_gaps_path(run_id)
+    gap_count = pl.scan_parquet(gaps_path).select(pl.len()).collect().item() if gaps_path.exists() else 0
+    review_status = f"成本未核齐（{gap_count}条待核价），本表金额不完整" if gap_count else ""
+    body = "\ufeff" + view.fees_csv(facts, _model(), review_status=review_status)
+    suffix = "费项明细-成本未核齐" if gap_count else "费项明细"
+    filename = f"{store}-{period}-{suffix}.csv"
     ascii_name = f"{store}-{period}-fees.csv"
     return PlainTextResponse(
         body,
