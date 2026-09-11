@@ -249,3 +249,12 @@ def test_export_retains_hosting_residual_in_its_actual_posted_months():
     assert result['period'].to_list()==['2026-06','2026-07']
     assert result['contribution'].to_list()==[-40.,-60.]
     assert result['counted'].to_list()==[True,True]
+
+
+def test_split_internal_orders_do_not_flag_other_goods_when_remark_has_a_match():
+    from ledger.engine.cost_policy import prepare_dropship,is_dropship
+    frame=pl.DataFrame({'sku':['HZS05153','HQT00053'],'order_remark':['HZS05153采购徐代发']*2,
+        'original_order_id':['MAIN']*2,'internal_order_id':['1','2'],'store_name':['s']*2})
+    out=prepare_dropship(frame)
+    assert out.select(is_dropship(out)).to_series().to_list()==[True,False]
+    assert out['__dropship_ambiguous'].to_list()==[False,False]

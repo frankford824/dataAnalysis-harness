@@ -32,8 +32,10 @@ def prepare_dropship(frame):
     pairs = pairs.with_columns(pl.struct('sku', 'order_remark').map_elements(
         lambda r: remark_dropship(r['sku'], r['order_remark']), return_dtype=pl.Boolean).alias('__remark_dropship'))
     frame = frame.join(pairs, on=['sku', 'order_remark'], how='left', maintain_order='left')
-    if 'internal_order_id' in frame.columns:
-        recognized = is_dropship(frame).any().over('internal_order_id')
+    order_key = next((k for k in ['original_order_id','order_id','internal_order_id'] if k in frame.columns), None)
+    if order_key:
+        scope = (["store_name"] if "store_name" in frame.columns else []) + [order_key]
+        recognized = is_dropship(frame).any().over(scope)
         frame = frame.with_columns((pl.col('order_remark').str.replace_all(r'(不|取消|无需|非).{0,3}代发','').str.contains('代发',literal=True).fill_null(False)
             & ~recognized).alias('__dropship_ambiguous'))
     return frame
