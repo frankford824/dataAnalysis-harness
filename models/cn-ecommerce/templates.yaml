@@ -11,14 +11,14 @@
 - id: taobao_order_detail_v1
   source: order_detail
   name: 淘宝订单明细（千牛宝贝明细）
-  match_columns: [子订单编号, 主订单编号, 买家实付金额, 退款金额, 商品ID, 物流单号]
+  match_columns: [子订单编号, 主订单编号, 退款金额, 商品ID, 物流单号]
   parse: {header_row: 1}
   total_row_marker: sub_order_id
   time_slots: {order_date: order_time, pay_date: pay_time}
   bindings:
     - {role: sub_order_id, columns: [子订单编号]}
     - {role: order_id, columns: [主订单编号]}
-    - {role: buyer_paid, columns: [买家实付金额]}
+    - {role: buyer_paid, columns: [买家实付金额], required: false}
     - {role: refund_amount, columns: [退款金额]}
     - {role: refund_status, columns: [退款状态], required: false}
     - {role: order_time, columns: [订单创建时间]}
@@ -29,6 +29,7 @@
     # 这里先读现成的，好处是能逐行对齐验证分摊逻辑有没有做对。
     - {role: alloc_ratio, columns: [收入分配率], required: false}
   note: >
+    买家实付列可以缺失，订单身份与下单日期仍用于匹配账单；不将缺失付款填零。
     一行一个子订单，子订单编号行级唯一。一个主订单可能有多个子订单，
     所以主订单级的钱（对账、运费、代发、补发）必须分摊，不能直接挂。
 

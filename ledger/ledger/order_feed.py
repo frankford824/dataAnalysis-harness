@@ -1360,11 +1360,13 @@ class OrderFeed:
         # 对账挂得上、销售收入却是 0.00。
         paid = pl.col("buyer_paid").fill_null(0.0)
         refund = pl.col("refund_amount").fill_null(0.0)
-        net = pl.max_horizontal(paid - refund, pl.lit(0.0))
+        sale = pl.col("order_type") != "补发订单"
+        net = pl.when(sale).then(pl.max_horizontal(paid - refund, pl.lit(0.0))).otherwise(0.0)
         total = net.sum().over("order_id")
+        sale_count = sale.sum().over("order_id")
         frame = frame.with_columns(
-            pl.when(total == 0)
-            .then(1.0 / pl.len().over("order_id"))
+            pl.when(~sale).then(0.0)
+            .when(total == 0).then(1.0 / sale_count.clip(lower_bound=1))
             .otherwise(net / total)
             .alias("alloc_ratio")
         )
