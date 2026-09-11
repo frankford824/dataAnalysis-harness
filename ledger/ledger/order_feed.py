@@ -30,6 +30,7 @@ from .engine.link import normalize_key
 from .engine.rules import norm_expr
 from .engine.types import ANCHOR_FILE, ANCHOR_ROW, ANCHOR_SHA, ANCHOR_SHEET, FileRef, Recognition
 from .model.schema import ColumnBinding, Model, Store, Template
+from .order_alignment import ORDER_FIELDS, ITEM_FIELDS, read_groups
 
 SCHEMA_VERSION = "ledger-feed.v1"
 REPLACED_SOURCES = frozenset({"order_cost", "after_sales"})
@@ -103,6 +104,9 @@ def normalize_entity(kind: str, record: dict[str, Any]) -> dict[str, Any]:
     if kind == "order" and "order_date" in row and "pay_amount" in row:
         row["settled_amount"] = row.get("paid_amount")
         row["paid_amount"] = row["pay_amount"]
+    if kind == "order":
+        row.setdefault('payable_amount', row.get('paid_amount'))
+        row.setdefault('collected_amount', row.get('settled_amount'))
     aliases = {
         "order": {"order_time": "order_date", "pay_time": "pay_date",
                   "order_status_raw": "status_code", "order_status_text": "status_text",
@@ -945,6 +949,33 @@ class OrderFeed:
                     update={"bindings": item.template.bindings + extra}
                 )
 
+    def alignment(self, store: Store, order_key: str) -> dict[str, Any]:
+        """Inspect cached snapshot plus consumed events without syncing or posting."""
+        with sqlite3.connect(self.db_path.as_uri() + '?mode=ro', uri=True) as conn:
+            conn.row_factory = sqlite3.Row
+            conn.execute('BEGIN')
+            state = dict(conn.execute('SELECT * FROM feed_state WHERE id=1').fetchone())
+            stores = [str(row[0]) for row in conn.execute(
+                "SELECT order_store_id FROM feed_store WHERE ledger_store_id=? AND mapping_status='confirmed'",
+                (store.id,))]
+            deltas = [dict(row) for row in conn.execute(
+                "SELECT * FROM feed_entity WHERE entity_type IN ('order','order_item') AND order_store_id IN (%s)"
+                % ','.join('?' for _ in stores), stores)] if stores else []
+        manifest = json.loads(state['manifest_json'] or '{}')
+        if not stores or not manifest.get('objects'):
+            return {'groups': [], 'available': False, 'message': '订单资料尚未同步'}
+        objects = manifest['objects']
+        orders = pl.scan_parquet(self.feed_root / objects['orders.parquet']['path']).filter(
+            pl.col('order_store_id').cast(pl.Utf8).is_in(stores)).collect()
+        orders = self._overlay(orders, deltas, 'order', 'order_id', lambda p: [p.get('order') or {}])
+        ids = orders['order_id'].cast(pl.Utf8).to_list()
+        items = pl.scan_parquet(self.feed_root / objects['order_items.parquet']['path']).filter(
+            pl.col('order_id').cast(pl.Utf8).is_in(ids)).collect()
+        items = self._overlay(items, deltas, 'order_item', 'sub_order_id', lambda p: [p.get('order_item') or {}])
+        return {'available': True, 'snapshot_id': state['snapshot_id'],
+                'consumed_seq': state['consumed_seq'],
+                'groups': read_groups(orders.to_dicts(), items.to_dicts(), order_key)}
+
     def _frames(self, store: Store, manifest: dict[str, Any], exported_orders: dict[str, str | None] | None = None,
                 fallback_flags: dict[str, str] | None = None, require_history: bool = False,
                 require_pricing: bool = False) -> list[Ingested]:
@@ -1063,6 +1094,15 @@ class OrderFeed:
         key: str,
         extract: Callable[[dict[str, Any]], list[dict[str, Any]]],
     ) -> pl.DataFrame:
+        # v1.4 is additive. Old snapshots must not drop new live columns.
+        additions = ORDER_FIELDS if entity_type == 'order' else ITEM_FIELDS if entity_type == 'order_item' else ()
+        legacy = ({'payable_amount': 'paid_amount', 'collected_amount': 'settled_amount'}
+                  if entity_type == 'order' else {'item_pay_amount': 'paid_amount'})
+        for name in additions:
+            if name not in base.columns:
+                source = legacy.get(name)
+                value = pl.col(source).cast(pl.Utf8) if source in base.columns else pl.lit(None, dtype=pl.Utf8)
+                base = base.with_columns(value.alias(name))
         if entity_type == "order" and "order_remark" not in base.columns:
             base = base.with_columns(pl.lit(None, dtype=pl.Utf8).alias("order_remark"))
         if entity_type == "order_item" and "item_status_raw" not in base.columns:
@@ -1246,7 +1286,8 @@ class OrderFeed:
             pl.col("product_id").drop_nulls().first(),
             pl.col("product_name").drop_nulls().first(),
             pl.lit(1.0).alias("quantity"),
-            pl.col("buyer_paid").sum(),
+            pl.when(pl.col("buyer_paid").is_not_null().all())
+            .then(pl.col("buyer_paid").sum()).otherwise(None).alias("buyer_paid"),
             pl.col("refund_amount").sum(),
             pl.col("refund_status").drop_nulls().last(),
             pl.col("tracking_no").drop_nulls().first(),

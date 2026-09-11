@@ -27,7 +27,7 @@ from time import perf_counter
 from typing import Annotated, Any, Literal
 
 import anyio.to_thread
-from fastapi import FastAPI, File, HTTPException, Request, Response, UploadFile
+from fastapi import FastAPI, File, HTTPException, Query, Request, Response, UploadFile
 from fastapi.responses import HTMLResponse, PlainTextResponse
 from starlette.middleware.gzip import GZipMiddleware
 from pydantic import BaseModel, ValidationError
@@ -328,6 +328,14 @@ def order_feed_status() -> dict:
         "LEDGER_ORDER_FEED_AUTO_RECOMPUTE", "",
     ).strip().lower() in {"1", "true", "yes", "on"}
     return status
+
+
+@app.get("/api/order-feed/alignment/{store_id}")
+def order_feed_alignment(store_id: str, order_key: str = Query(min_length=1, max_length=200)) -> dict:
+    store = _store(_model(), store_id)
+    if not order_feed.enabled():
+        return {"available": False, "groups": [], "message": "订单同步未启用"}
+    return order_feed.OrderFeed(workspace().root).alignment(store, order_key.strip())
 
 
 @app.get("/api/version")
