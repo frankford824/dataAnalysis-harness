@@ -72,6 +72,8 @@ def build(ingestion, platform, *, spine=None):
         if not set(KEYS) <= set(item.frame.columns):
             continue
         eligible = item.frame.filter(policy_mask(item.frame, model))
+        from .cost_policy import is_dropship
+        eligible = eligible.filter(~is_dropship(eligible))
         eligible = eligible.filter(compile_where(metric.where, eligible))
         if require_history:
             from .link import link

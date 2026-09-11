@@ -1063,6 +1063,8 @@ class OrderFeed:
         key: str,
         extract: Callable[[dict[str, Any]], list[dict[str, Any]]],
     ) -> pl.DataFrame:
+        if entity_type == "order_item" and "item_status_raw" not in base.columns:
+            base = base.with_columns(pl.lit(None, dtype=pl.Utf8).alias("item_status_raw"))
         selected = [d for d in deltas if d["entity_type"] == entity_type]
         ids = [str(d["entity_id"]) for d in selected]
         if ids and key in base.columns:
@@ -1397,7 +1399,9 @@ class OrderFeed:
                           pl.col("link_order_id") if "link_order_id" in orders.columns else pl.lit(None).alias("link_order_id")),
             on="order_id", how="left",
         ).join(
-            items.select("order_id", "sub_order_id", "outer_sku", "tracking_no", "online_order_no").rename(
+            items.select("order_id", "sub_order_id", "outer_sku", "tracking_no", "online_order_no",
+                         pl.col("item_status_raw").cast(pl.Utf8) if "item_status_raw" in items.columns
+                         else pl.lit(None, dtype=pl.Utf8).alias("item_status_raw")).rename(
                 {"tracking_no": "item_tracking_no", "online_order_no": "item_order_no"}),
             on=["order_id", "sub_order_id"], how="left",
         ).select(
@@ -1407,7 +1411,8 @@ class OrderFeed:
              if store.platform == "pdd" else pl.col("online_order_no")).cast(pl.Utf8).alias("order_id"),
             (self._pdd_original(pl.col("outer_sku"), pl.col("item_order_no"), pl.col("online_order_no"))
              if store.platform == "pdd" else pl.col("online_order_no")).cast(pl.Utf8).alias("original_order_id"),
-            pl.col("outer_sku").fill_null(pl.col("sub_order_id")).cast(pl.Utf8).alias("sub_order_id"),
+            pl.when(pl.col("outer_sku").cast(pl.Utf8).str.strip_chars().fill_null("") != "")
+            .then(pl.col("outer_sku")).otherwise(pl.col("sub_order_id")).cast(pl.Utf8).alias("sub_order_id"),
             pl.col("sku_id").cast(pl.Utf8).alias("sku"),
             pl.col("link_order_id").cast(pl.Utf8).alias("parent_internal_order_id"),
             pl.col("ship_time").cast(pl.Utf8),
@@ -1415,7 +1420,8 @@ class OrderFeed:
             pl.col("unit_cost").cast(pl.Float64, strict=False),
             pl.col("cost_amount").cast(pl.Float64, strict=False).alias("total_cost"),
             pl.col("item_tracking_no").fill_null(pl.col("tracking_no")).cast(pl.Utf8).alias("tracking_no"),
-            pl.col("order_status_raw").cast(pl.Utf8).alias("order_state"),
+            pl.when(pl.col("item_status_raw").is_in(["Cancelled", "已取消", "取消"]))
+            .then(pl.col("item_status_raw")).otherwise(pl.col("order_status_raw")).cast(pl.Utf8).alias("order_state"),
             pl.col("order_flag").cast(pl.Utf8),
             *([
                 (pl.col(name).cast(pl.Utf8) if name in certified.columns else pl.lit(None, dtype=pl.Utf8)).alias(name)

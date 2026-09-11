@@ -164,7 +164,7 @@
   commission_on_loss: deduct
   note: 2026-08-26 从 finance 上同步回来的：界面上登记的店，仓库里没有，不写进来下一次部署会把它盖掉。字段照线上 /api/stores 原样抄，id 和 name 不动。
 - id: douyin_mt9sbkne
-  cost_return_posting: transaction
+  cost_return_posting: order
   name: 蔡果-抖店喜品
   platform: douyin
   commission_on_loss: deduct
@@ -338,7 +338,7 @@
   commission_on_loss: deduct
   note: ERP shop_id 20367522。和 taobao_zlvoey「天猫zlvoey旗舰店」同牌子不同平台。
 - id: douyin_luckywish
-  cost_return_posting: transaction
+  cost_return_posting: order
   name: 汪学成-抖店luckywish节日礼品
   platform: douyin
   commission_on_loss: deduct

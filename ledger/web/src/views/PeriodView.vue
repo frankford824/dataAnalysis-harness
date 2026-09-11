@@ -9,7 +9,7 @@
  * 要看，竖着铺开就把页面拉到三四屏长，人滚到底就忘了上面的数是多少。
  */
 import { useDialog, useMessage } from 'naive-ui'
-import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 
 import { useLatest } from '../components/ui/useLatest'
@@ -39,6 +39,14 @@ const failed = ref('')
 const refreshFailed = ref(false)
 const drill = ref(null)
 const pricingPanel = ref(null)
+const checksPanel = ref(null)
+
+async function beginClose() {
+  if (snap.value?.can_close) return close()
+  rail.value = 'checks'
+  await nextTick()
+  checksPanel.value?.scrollIntoView({ behavior: 'smooth', block: 'nearest' })
+}
 
 const period = computed(() => route.query.period || app.period || '')
 
@@ -66,7 +74,7 @@ async function load(force=false, quiet=false) {
     info.value=result.value.detail
     if(!quiet||JSON.stringify(snap.value)!==JSON.stringify(result.value.snapshot))snap.value=result.value.snapshot
     refreshFailed.value=false
-    if(result.value.wanted)app.pick({store:id,period:result.value.wanted})
+    if(result.value.wanted)app.pick({store:id,platform:result.value.detail.store?.platform,period:result.value.wanted})
   }catch(e){if(serial===loadSerial){if(quiet)refreshFailed.value=true;else failed.value=e.message}}
   finally{if(serial===loadSerial&&!quiet)loading.value=false}
 }
@@ -248,11 +256,11 @@ watch(
           <n-button
             v-if="!closed"
             type="primary"
-            :disabled="loading || !!app.busy || !snap?.can_close"
-            :title="snap?.can_close ? `结账 ${period}` : (blockers[0]?.name || '还不能结账')"
-            @click="close"
+            :disabled="loading || !!app.busy || !snap"
+            :title="snap?.can_close ? `结账 ${period}` : '查看本月尚未完成的结账条件'"
+            @click="beginClose"
           >
-            结账 {{ period }}
+            {{ snap?.can_close ? `结账 ${period}` : '查看结账条件' }}
           </n-button>
           <n-button v-else size="small" :disabled="loading || !!app.busy" @click="asking = true">反结账</n-button>
         </template>
@@ -355,7 +363,7 @@ watch(
             </p>
           </div>
 
-          <div class="card rail" style="margin-top: 0">
+          <div ref="checksPanel" class="card rail" style="margin-top: 0">
             <n-tabs v-ledger-tabs v-model:value="rail" type="line" size="small">
               <n-tab-pane name="gaps">
                 <template #tab>

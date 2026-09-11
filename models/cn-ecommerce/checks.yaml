@@ -10,8 +10,7 @@
   threshold: 0.98
   blocking: true
   message: >
-    有订单没有商品成本，毛利会偏高。多半是聚水潭那边订单还没同步，
-    或者「线上子订单编号」这一列的名字变了。
+    部分订单尚未核实商品成本。请查看缺失明细和待核价记录，处理后再结账。
 
 - id: chk_receipt_coverage
   name: 订单拿到销售收入
@@ -32,20 +31,19 @@
     是哪一环失效了——通常是平台改了备注格式。
 
 - id: chk_no_unclassified
-  name: 没有未归类科目
+  name: 费用分类待确认
   kind: no_unclassified
   threshold: 0.995
   blocking: true
   message: >
-    有科目字典里没有的费用名目。平台新增费项是常事，认领一次以后就一直认得。
+    还有收支未确认分类。请核对原账单并选择对应费用类别。
 
 - id: chk_major_has_metric
-  name: 科目有指标接着
+  name: 费用类别需调整
   kind: major_has_metric
   blocking: true
   message: >
-    有费项改判到了这个平台没有指标的科目，钱归上了类却进不了损益表。
-    改判那一栏是按平台各自一套指标算的，配之前先看这个平台有没有这一项。
+    部分收支选择的费用类别不适用于当前平台，尚未计入报表。请重新选择类别。
 
 - id: chk_sources_ready
   name: 数据源到齐

@@ -182,11 +182,12 @@
   sign: negate
   time_basis: order_date
   link: {key: sub_order_id, to: order.sub_order_id, grain: order, fallback_key: original_order_id, fallback_to: [order.order_id]}
+  allocate: {mode: even}
   expect:
     - {field: tracking_no, op: notnull}
   expect_label: 已发货
   note: >
-    子订单级直接挂，不分摊。聚水潭的线上子订单编号与脊柱的子订单编号一一对应。
+    同一子订单的来源成本只计一次；多条订单记录共享子订单号时均分，不能逐行复制金额。
     必须排除补发订单：它们在同一张表里，由补发成本单独归集，两边都算会重复记账。
 
     覆盖率只对已发货的订单要求。没发货就没出库，聚水潭里根本没有这一行——

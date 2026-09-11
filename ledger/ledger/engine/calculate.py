@@ -110,7 +110,9 @@ def evaluate_metric(
         notes.append(f"指标 {metric.id} 的过滤条件筛掉了全部行")
         return _empty_facts(), notes
 
-    amount = _value_expr(metric.value, frame, notes)
+    from .cost_policy import is_dropship
+    erp_exempt = is_dropship(frame) if metric.id in {"goods_cost", "reshipment_cost"} else pl.lit(False)
+    amount = pl.when(erp_exempt).then(pl.lit(0.0)).otherwise(_value_expr(metric.value, frame, notes))
 
     # 父级字段聚合前必须按去重键取首行，否则重复计算。
     if is_parent_only(template, metric.value.of) and PARENT_FIRST in frame.columns:
@@ -237,7 +239,7 @@ def evaluate_metric(
     pricing_eligible = pl.lit(True)
     if (require_historical_pricing or require_pricing) and metric.source == "order_cost" and "unit_cost" in metric.value.of:
         col = lambda name: pl.col(name) if name in frame.columns else pl.lit(None)
-        key_columns = [pl.col(k).cast(pl.Utf8) for k in (LINK_KEY, "original_order_id", "order_id") if k in frame.columns]
+        key_columns = [pl.col(k).cast(pl.Utf8).replace("", None) for k in ("original_order_id", "order_id", LINK_KEY) if k in frame.columns]
         key = pl.coalesce(key_columns) if key_columns else pl.lit(None, dtype=pl.Utf8)
         known,wanted = historical_price_evidence(frame)
         quoted = col("cost_as_of").cast(pl.Utf8).str.slice(0, 10).str.strptime(pl.Date, "%Y-%m-%d", strict=False)
@@ -252,6 +254,7 @@ def evaluate_metric(
                      & ~col("pricing_missing").cast(pl.Boolean).fill_null(False)
                      & ((col("cost_status") == "priced") | col("cost_status").is_null()))
         pending = (~known.fill_null(False) | col("pricing_suspect").cast(pl.Boolean).fill_null(False)) & ((quantity != 0) | quantity.is_null())
+        pending = pending & ~erp_exempt
         gaps = frame.filter(pending).select(
             store.fill_null("(未知店铺)").alias("store"), period.fill_null("(未知账期)").alias("period"),
             pl.lit(metric.id).alias("metric_id"), key.alias("order_id"),
@@ -286,6 +289,10 @@ def evaluate_metric(
         if metric.major and COL_MAJOR in frame.columns:
             supplied_zero = supplied_zero & (pl.col(COL_MAJOR) == metric.major)
         keep = keep | supplied_zero
+    keep = keep | erp_exempt
+    source_note = pl.when(erp_exempt).then(pl.concat_str([
+        source_note, pl.lit("DF 代发商品：此处计 0，代发支出按代发表单独核算")
+    ], separator="；", ignore_nulls=True)).otherwise(source_note)
     facts = frame.filter(keep & pricing_eligible).select(
         pl.lit(metric.id).alias("metric_id"),
         pl.lit(metric.source).alias("source_id"),
