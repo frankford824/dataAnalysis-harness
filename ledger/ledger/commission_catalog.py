@@ -106,7 +106,7 @@ def products(registry: Registry, *, store_id="", search="", missing=False, after
             "next_after": rows[-1]["store_id"] + "\x1f" + rows[-1]["product_id"] if rows and has_more else ""}
 
 
-def iter_settings(registry: Registry, *, store_id="", search="", state="", after="", limit=-1, at=None, person_id="", store_ids=None, person_ids=None):
+def iter_settings(registry: Registry, *, store_id="", search="", state="", after="", limit=-1, at=None, person_id="", store_ids=None, person_ids=None, _count_only=False):
     from datetime import datetime, timezone, timedelta
     moment = at or datetime.now(timezone(timedelta(hours=8))).replace(tzinfo=None).isoformat(timespec="seconds")
     # Include historical bindings even when the live catalogue no longer lists the item.
@@ -122,7 +122,7 @@ def iter_settings(registry: Registry, *, store_id="", search="", state="", after
     condition = ' AND '.join(clauses) or '1'
     # Apply indexed shop/cursor bounds before joining version JSON. For the common
     # unfiltered page, only decode the requested page, not the whole catalogue.
-    candidate_limit = limit if not (state or persons) else -1
+    candidate_limit = limit if not (state or persons or _count_only) else -1
     person_condition = '1' if not persons else "EXISTS (SELECT 1 FROM json_each(coalesce(setting,(SELECT f.value FROM json_each(body,'$.segments') f WHERE json_extract(f.value,'$.valid_from')>? ORDER BY json_extract(f.value,'$.valid_from') LIMIT 1),'{}'),'$.allocations') a WHERE json_extract(a.value,'$.person_id') IN ("+','.join('?' for _ in persons)+'))'
     sql = f"""WITH items AS (
       SELECT store_id,product_id,product_name,payload FROM catalog WHERE {condition}
@@ -150,12 +150,17 @@ def iter_settings(registry: Registry, *, store_id="", search="", state="", after
       AND (?='' OR state=?)
       AND {person_condition}
       ORDER BY store_id,product_id LIMIT ?"""
+    if _count_only:
+        sql = sql.replace("SELECT * FROM rows WHERE", "SELECT count(*) AS total FROM rows WHERE")
     with registry.connect(thread_affine=False) as conn:
         conn.execute("BEGIN")
         people = {r['id']:r['name'] for r in conn.execute('SELECT id,name FROM person')}
         cursor = conn.execute(sql, [*params,*params,search,search,search,candidate_limit,moment,moment,moment,
                               search,search,search,state,state,*([moment,*persons] if persons else []),limit])
         for record in cursor:
+            if _count_only:
+                yield {"total": record["total"]}
+                return
             row = dict(record)
             body = json.loads(row.pop('body') or '{}')
             row['listed'] = json.loads(row.pop('payload') or '{}').get('listed')
@@ -177,4 +182,5 @@ def settings(registry: Registry, *, store_id="", search="", state="", after="", 
     rows = list(iter_settings(registry, store_id=store_id, search=search, state=state, after=after, limit=limit+1, at=at, person_id=person_id, store_ids=store_ids, person_ids=person_ids))
     more = len(rows)>limit
     rows = rows[:limit]
-    return {'rows':rows,'has_more':more,'next_after':rows[-1]['store_id']+'\x1f'+rows[-1]['product_id'] if rows and more else ''}
+    total = next(iter_settings(registry, store_id=store_id, search=search, state=state, at=at, person_id=person_id, store_ids=store_ids, person_ids=person_ids, _count_only=True))["total"]
+    return {'total':total,'total_pages':(total+limit-1)//limit,'page_size':limit,'rows':rows,'has_more':more,'next_after':rows[-1]['store_id']+'\x1f'+rows[-1]['product_id'] if rows and more else ''}

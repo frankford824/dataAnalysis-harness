@@ -31,6 +31,9 @@ export const router = createRouter({
       component: () => import('./views/CommissionView.vue'),
     },
     {
+      path: '/labor', name: 'labor', component: () => import('./views/LaborView.vue'),
+    },
+    {
       path: '/fees',
       name: 'fees',
       component: () => import('./views/FeesView.vue'),

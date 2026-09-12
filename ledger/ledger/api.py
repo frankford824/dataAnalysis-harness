@@ -236,6 +236,8 @@ def workspace() -> Workspace:
 
 
 _commission_actor = commission_api.install(app, lambda: workspace(), lambda: _model())
+from . import labor_api
+labor_api.install(app, lambda: workspace(), lambda: _model(), DEFAULT_MODEL, lambda: _invalidate_model(), _commission_actor)
 
 
 @app.middleware("http")
@@ -1455,7 +1457,7 @@ def commission_summary(period: str = "") -> dict:
         # 兼职费用怎么摊的。摊了多少、按什么摊、有没有摊出来，都要写在页面上：
         # 这一步会让每个人到手的钱变少，不说清楚的话没人对得上账。
         "overhead": {
-            "name": "兼职费用",
+            "name": next((x.name for x in model.overheads if x.period == chosen), "兼职人工费用"),
             "total": spread.total,
             "settled": spread.settled,
             "basis_name": _base_label(model, "revenue") or "交易收款",

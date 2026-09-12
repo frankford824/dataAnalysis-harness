@@ -141,11 +141,12 @@ defineExpose({ take })
       <router-link class="navlink" :class="{ on: $route.name === 'fees' }" to="/fees">
         <Tags class="nav-icon" aria-hidden="true"/>费项
       </router-link>
+      <router-link class="navlink" :class="{on:$route.name==='labor'}" to="/labor"><Coins class="nav-icon" aria-hidden="true"/>兼职人工费用</router-link>
       <div class="grow" />
     </nav>
 
     <div class="body">
-      <header v-if="!['commission', 'commission-reports'].includes($route.name)" class="topbar">
+      <header v-if="!['commission', 'commission-reports', 'labor'].includes($route.name)" class="topbar">
         <FilterBar />
         <n-button quaternary size="small" :disabled="app.loading || !!app.busy" aria-label="刷新当前页面" title="刷新当前页面" @click="refreshCurrent"><RefreshCw :size="16"/></n-button>
         <!-- 上传只有这一个固定入口，每一页都在同一个地方。上一版侧栏最下角那个

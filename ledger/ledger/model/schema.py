@@ -1087,6 +1087,7 @@ class Overhead(Base):
     period: str
     #: 全公司这个月的总额，正数。
     amount: float
+    name: str = "兼职人工费用"
     note: str = ""
 
     @model_validator(mode="after")

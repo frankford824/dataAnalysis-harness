@@ -240,7 +240,7 @@ def _read_overheads(path: Path) -> tuple[Overhead, ...]:
                 raise ModelError(
                     f"{path} 第 {lineno} 行的 amount 不是数字：{text!r}"
                 ) from None
-            rows.append(Overhead(period=period, amount=amount,
+            rows.append(Overhead(period=period, amount=amount, name=(row.get("name") or "兼职人工费用").strip(),
                                  note=(row.get("note") or "").strip()))
     return tuple(rows)
 

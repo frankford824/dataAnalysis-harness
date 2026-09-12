@@ -23,3 +23,15 @@ def test_new_order_product_survives_older_daily_catalog(tmp_path):
     with registry.connect() as conn:
         assert conn.execute("SELECT count(*) FROM catalog").fetchone()[0] == 2
     assert registry.revision() == 0
+
+
+def test_total_pages_follow_filter_and_ignore_cursor(tmp_path):
+    from ledger.commission_catalog import settings
+    registry=Registry(tmp_path);model=_model()
+    observe(registry,model.store('s1'),pl.DataFrame({'store':['测试店']*5,'product_id':['12345678900'+str(i) for i in range(5)],'product_name':['商品']*5}))
+    first=settings(registry,state='pending',limit=2)
+    assert first['total']==5 and first['total_pages']==3
+    second=settings(registry,state='pending',limit=2,after=first['next_after'])
+    assert second['total']==5 and second['total_pages']==3 and len(second['rows'])==2
+    empty=settings(registry,search='不存在',limit=2)
+    assert empty['total']==0 and empty['total_pages']==0

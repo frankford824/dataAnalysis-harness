@@ -169,7 +169,7 @@ defineExpose({edit,menu,busy})
     <div v-if="error" class="commission-error" role="alert">{{ error }}<button class="text-button" @click="load">重试</button></div>
     <div v-if="loading" class="commission-loading-line" />
     <LedgerTable :rows="rows" :columns="tableColumns" :row-key="keyOf" :loading="loading" :checked-keys="visibleChecked" :max-height="520" empty="没有找到商品，可调整筛选条件" @update:checked-keys="checkTableRows" />
-    <div class="commission-paging"><span class="row-count">本页 {{ rows.length }} 件商品</span><n-button size="small" :disabled="!pages.length || locked" @click="previousPage">上一页</n-button><span>{{ pages.length+1 }}</span><n-button size="small" :disabled="!next || locked" @click="nextPage">下一页</n-button></div>
+    <div class="commission-paging"><span class="row-count">共 {{ data?.total ?? "—" }} 件商品 · 本页 {{ rows.length }} 件</span><n-button size="small" :disabled="!pages.length || locked" @click="previousPage">上一页</n-button><span>第 {{ data?.total_pages ? pages.length+1 : 0 }} / {{ data?.total_pages ?? "—" }} 页</span><n-button size="small" :disabled="!next || locked" @click="nextPage">下一页</n-button></div>
 
     <CommissionBatchDialog ref="batchDialog" :stores="app.stores" :people="people" @saved="saved" />
     <CommissionPeople ref="peopleDialog" @changed="shared.changed();load()" @assignments="showAssignments" />
