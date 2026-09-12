@@ -43,7 +43,7 @@ watch(() => props.runId, () => { if(show.value)load(true) })
   </div>
   <n-drawer v-model:show="show" :width="920" style="max-width: 100vw">
     <n-drawer-content title="待核价明细" closable>
-      <p class="pricing-help">等待同步或补查的记录会自动更新。其余记录请按下单日期核价，参考单价尚未计入成本。</p>
+      <p class="pricing-help">请按下单日期核实清单中的价格。已有历史价格的记录随同步更新；缺少历史价格的记录需要另行核价，参考单价不直接计入成本。</p>
       <form class="pricing-search" @submit.prevent="submit">
         <n-input v-model:value="query" clearable placeholder="搜索订单号、商品编码" aria-label="搜索待核价明细" />
         <n-button attr-type="submit" :loading="busy">搜索</n-button>

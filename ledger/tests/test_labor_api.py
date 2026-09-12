@@ -7,7 +7,7 @@ from ledger.labor_api import install
 from ledger.model.loader import load_model
 
 
-def test_edit_total_name_refresh_and_closed_month_guard(tmp_path):
+def test_edit_total_name_refresh_and_closed_month_freeze(tmp_path):
     root=tmp_path/'model';shutil.copytree(Path(__file__).resolve().parents[2]/'models/cn-ecommerce',root)
     model=lambda:load_model(root)
     node=next(n.id for n in model().statement if n.headline=='revenue')
@@ -29,6 +29,15 @@ def test_edit_total_name_refresh_and_closed_month_guard(tmp_path):
     assert sum(r['amount'] for r in changed['rows'])==200
     assert len(audit)==2
     states[0].state='closed'
-    assert client.post('/api/commission-v2/labor',json={'period':'2030-01','name':'兼职','amount':300,'revision':changed['revision']}).status_code==409
-    assert client.get('/api/commission-v2/labor?period=2030-01').json()['amount']==200
+    assert client.post('/api/commission-v2/labor',json={'period':'2030-01','name':'兼职','amount':300,'revision':changed['revision']}).status_code==200
+    assert client.get('/api/commission-v2/labor?period=2030-01').json()['amount']==300
+    assert states[0].state=='closed'
+    assert states[0].result['statement'][0]['value']==100
+    from ledger.labor_api import frozen_shares
+    frozen=frozen_shares(root)
+    assert float(frozen[('2030-01','a','None')]['amount'])==50
+    current=client.get('/api/commission-v2/labor?period=2030-01').json()
+    assert current['locked'] is False and current['closed_stores']==1
+    assert client.post('/api/commission-v2/labor',json={'period':'2030-01','name':'兼职','amount':400,'revision':current['revision']}).status_code==200
+    assert frozen_shares(root)==frozen
     assert client.get('/api/commission-v2/labor?period=2030-13').status_code==400

@@ -1376,6 +1376,7 @@ def commission_summary(period: str = "") -> dict:
         [(st.store_id, _node(st.result or {}, revenue_node) or 0.0) for st in here],
     )
 
+    closed_overhead = labor_api.frozen_shares(DEFAULT_MODEL)
     people: dict[str, dict[str, Any]] = {}
     stores: list[dict[str, Any]] = []
     for st in here:
@@ -1385,7 +1386,8 @@ def commission_summary(period: str = "") -> dict:
         # 摊到的兼职从提成基数里减掉，各人金额按同一个比例缩。业务的口径是
         # 提成利润 = 店铺利润 − 兼职，提成按提成利润算；每人按自己那份等比例缩，
         # 等价于先减后分，而且各人加起来仍然等于缩过的合计。
-        cut = spread.of(st.store_id)
+        saved_cut = closed_overhead.get((chosen, st.store_id, str(st.run_id))) if st.state == 'closed' else None
+        cut = float(saved_cut['amount']) if saved_cut else spread.of(st.store_id)
         base_total = c.get("base_total", 0.0)
         after = money_float(decimal_amount(base_total) - decimal_amount(cut))
         keep = (after / base_total) if base_total else 1.0
