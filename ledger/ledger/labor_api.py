@@ -53,13 +53,14 @@ def install(app, workspace, model, model_root, invalidate, actor):
             return row.get('value') if row and row.get('available',True) else None
         known=[(st,basis(st)) for st in states]
         spread=allocate(period,config.amount if config else None,[(st.store_id,v or 0) for st,v in known])
+        basis_total=float(sum((Decimal(str(max(v or 0,0))) for _,v in known),Decimal(0)))
         names={s.id:s.name for s in m.stores};cuts={s.store_id:s.amount for s in spread.shares}
         locked=any(st.state=='closed' for st in states)
         return {'period':period,'name':config.name if config else '兼职人工费用','amount':config.amount if config else None,
-                'revision':model_revision(model_root),'locked':locked,'basis_total':spread.basis_total,
+                'revision':model_revision(model_root),'locked':locked,'basis_total':basis_total,
                 'settled':spread.settled,'incomplete':any(v is None for _,v in known),
                 'rows':[{'store_id':st.store_id,'store':names.get(st.store_id,st.store_id),'sales':v,
-                         'share':(max(v or 0,0)/spread.basis_total if spread.basis_total else None),
+                         'share':(max(v or 0,0)/basis_total if basis_total and v is not None else None),
                          'amount':cuts.get(st.store_id,0) if spread.settled and v is not None else None} for st,v in known]}
 
     @app.post('/api/commission-v2/labor')

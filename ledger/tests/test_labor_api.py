@@ -18,6 +18,8 @@ def test_edit_total_name_refresh_and_closed_month_guard(tmp_path):
     client=TestClient(app)
     initial=client.get('/api/commission-v2/labor?period=2030-01').json()
     assert initial['amount'] is None
+    assert initial['basis_total']==400
+    assert [r['share'] for r in initial['rows']]==[0.25,0.75]
     response=client.post('/api/commission-v2/labor',json={'period':'2030-01','name':'兼职人工','amount':'100.00','revision':initial['revision']})
     assert response.status_code==200
     result=response.json();assert [r['amount'] for r in result['rows']]==[25,75]
