@@ -95,6 +95,7 @@ class Ingestion:
 
     model: Model
     items: list[Ingested] = field(default_factory=list)
+    source_sync_pending: bool = False
 
     @property
     def known(self) -> list[Ingested]:
@@ -1121,6 +1122,10 @@ def _build_slice(
         if live_feed else link_reports
     )
     result = audit(model, scoped, scoped_reports, own, completeness, nodes)
+    if ingestion.source_sync_pending:
+        from .types import Finding
+        result.findings.append(Finding("source_sync_pending", "订单数据仍在同步", passed=False, blocking=True,
+            message="当前结果按已同步数据试算，暂不能结账；来源追平后会自动重新核算。"))
     if any(m.id == "dropship_cost" for m in model.metrics):
         from .cost_policy import missing_supplier_costs
         supplier_gaps = missing_supplier_costs(scoped, scoped_spine)

@@ -39,10 +39,10 @@ def test_worker_notifies_durable_progress_before_global_catchup(monkeypatch):
                            pending_stores=lambda: pending.copy(), fingerprint=lambda: 'order-feed:s:10',
                            acknowledge_stores=lambda stores, seq: pending.difference_update(stores))
     worker = Worker(feed, lambda stores, fingerprint: callbacks.append((stores, fingerprint)))
-    worker.poll(); assert len(callbacks) == 1 and not pending
+    worker.poll(); assert len(callbacks) == 1 and pending == {'s1'}
     pending.add('s2'); clock[0] = 110; worker.poll()
-    assert len(callbacks) == 1 and pending == {'s2'}
-    clock[0] = 161; worker.poll(); assert len(callbacks) == 2 and not pending
+    assert len(callbacks) == 1 and pending == {'s1', 's2'}
+    clock[0] = 161; worker.poll(); assert len(callbacks) == 2 and pending == {'s1', 's2'}
 
 
 def test_failed_notification_keeps_durable_pending():
@@ -151,3 +151,68 @@ def test_recovered_producer_with_unchanged_revision_can_resume_backlog(tmp_path)
     result = feed.sync()
     assert result.caught_up and result.consumed_seq == 11
     assert 'health' in client.calls and 'changes' in client.calls
+
+
+def test_partial_store_is_notified_again_when_catchup_has_no_new_changes(monkeypatch):
+    calls = []; result = SyncResult(consumed_seq=10, affected_stores={'s1'})
+    feed = SimpleNamespace(sync=lambda: result, pending_stores=lambda: set(), fingerprint=lambda: 'order-feed:s:10',
+                           acknowledge_stores=lambda *args: None)
+    worker = Worker(feed, lambda stores, fp: calls.append(stores))
+    worker.last_notification = -1000
+    worker.poll()
+    result.affected_stores.clear(); result.caught_up = True
+    worker.poll()
+    assert calls == [{'s1'}, {'s1'}]
+    assert not worker.pending_stores
+
+
+def test_restart_preserves_final_recompute_for_provisional_store():
+    pending = {'s1'}; calls = []; result = SyncResult(consumed_seq=10)
+    feed = SimpleNamespace(sync=lambda: result, pending_stores=lambda: pending.copy(), fingerprint=lambda: 'order-feed:s:10',
+                           acknowledge_stores=lambda stores, seq: pending.difference_update(stores))
+    worker = Worker(feed, lambda stores, fp: calls.append(stores)); worker.last_notification = -1000
+    worker.poll(); assert pending == {'s1'}
+    result.caught_up = True
+    restarted = Worker(feed, lambda stores, fp: calls.append(stores))
+    restarted.poll()
+    assert calls == [{'s1'}, {'s1'}] and not pending
+
+
+def test_partial_snapshot_keeps_amounts_but_cannot_close():
+    from test_promotion_dates import calculate
+    from ledger.engine.runtime import run
+    original = calculate([['P1', 10, '2026-06-02']])
+    original.ingestion.source_sync_pending = True
+    partial = run(original.ingestion, 'douyin').slices[('shop', '2026-06')]
+    assert partial.nodes['ad'].value == -10
+    assert not partial.can_close
+    assert any(f.check_id == 'source_sync_pending' and f.blocking for f in partial.audit.findings)
+
+
+def test_source_recovery_without_new_events_clears_old_error(tmp_path):
+    import json
+    from ledger.order_feed import OrderFeed
+    from test_order_feed import FakeClient, _fixture
+    root = tmp_path/'feed'; client = FakeClient(_fixture(root))
+    feed = OrderFeed(tmp_path/'workspace', client=client, feed_root=root)
+    feed.sync()
+    with feed._connect() as conn:
+        conn.execute('UPDATE feed_state SET health_json=?,last_error=?',
+                     (json.dumps({'healthy': False, 'degraded': ['collector']}), 'old error'))
+    feed._last_health_probe = 0
+    assert feed.sync().caught_up
+    assert feed.state()['last_error'] == ''
+
+
+def test_source_worker_survives_error_recording_failure(monkeypatch):
+    calls = []
+    def error(*args): raise sqlite3.OperationalError('error database locked')
+    worker = Worker(SimpleNamespace(record_error=error))
+    def poll():
+        calls.append(1)
+        if len(calls) == 1: raise RuntimeError('source failed')
+        worker.stop_event.set()
+    monkeypatch.setattr(worker, 'poll', poll)
+    monkeypatch.setattr(worker.stop_event, 'wait', lambda *args: None)
+    worker._run()
+    assert calls == [1, 1]

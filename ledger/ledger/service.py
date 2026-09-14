@@ -391,6 +391,9 @@ def _recompute_locked(
                                  else allocation[0] if allocation else _commission(result, model, store, sl.period))
         if allocation:
             c = payload["commission"]
+            if ing.source_sync_pending:
+                c["amount_complete"] = False
+                c["notes"].append("订单来源仍在同步，当前提成仅为阶段试算")
             base = next((n for n in payload.get("statement", []) if n["id"] == c["base_node"]), None)
             if not base or base.get("value") is None:
                 c["amount_complete"] = False

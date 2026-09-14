@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 import sqlite3
 import threading
@@ -287,8 +288,10 @@ class OrderFeed:
             try:
                 return self._sync(max_pages=max_pages, limit=limit)
             except Exception as exc:
-                with self._connect() as conn:
-                    conn.execute("update feed_state set last_error=? where id=1", (str(exc),))
+                try:
+                    self.record_error(str(exc))
+                except Exception:
+                    logging.getLogger(__name__).exception("Unable to persist source failure")
                 raise
 
     def _sync(self, *, max_pages: int, limit: int) -> SyncResult:
@@ -316,7 +319,27 @@ class OrderFeed:
             # source ETag has not moved.  Continue from the durable checkpoint.
             advanced = consumed_seq < source_latest_seq
 
+        if revision is None and health and not health.get("healthy"):
+            # Producer recovery need not create a new business revision. A 304
+            # must not leave the consumer pinned to an old failure forever.
+            if time.monotonic() - self._last_health_probe >= 30:
+                self._last_health_probe = time.monotonic()
+                health = self.client.get("health", {"details": "false"})
+                self._refresh_health(health, source_revision, source_latest_seq, revision_etag)
+                announced = str(health.get("last_successful_snapshot") or "")
+                if announced and announced != str(old.get("snapshot_id") or ""):
+                    with self._connect() as conn:
+                        conn.execute("UPDATE feed_state SET revision_etag='' WHERE id=1")
+                    raise OrderFeedError("订单台快照已更新，等待下一轮验证并切换")
+            if not health.get("healthy"):
+                raise OrderFeedError(
+                    "订单台数据源未就绪：" + "、".join(health.get("degraded") or [])
+                )
+
+
         if not advanced:
+            if old.get("last_error"):
+                self.record_error("")
             if self._stores_due(old):
                 self._refresh_stores(self.client.get("stores"))
             return SyncResult(
@@ -365,22 +388,6 @@ class OrderFeed:
             else:
                 self._refresh_health(
                     health, source_revision, source_latest_seq, revision_etag,
-                )
-        elif health and not health.get("healthy"):
-            # Producer recovery need not create a new business revision. A 304
-            # must not leave the consumer pinned to an old failure forever.
-            if time.monotonic() - self._last_health_probe >= 30:
-                self._last_health_probe = time.monotonic()
-                health = self.client.get("health", {"details": "false"})
-                self._refresh_health(health, source_revision, source_latest_seq, revision_etag)
-                announced = str(health.get("last_successful_snapshot") or "")
-                if announced and announced != str(old.get("snapshot_id") or ""):
-                    with self._connect() as conn:
-                        conn.execute("UPDATE feed_state SET revision_etag='' WHERE id=1")
-                    raise OrderFeedError("订单台快照已更新，等待下一轮验证并切换")
-            if not health.get("healthy"):
-                raise OrderFeedError(
-                    "订单台数据源未就绪：" + "、".join(health.get("degraded") or [])
                 )
 
         current = self.state()
@@ -797,6 +804,11 @@ class OrderFeed:
                               fallback_flags,
                               any(p.id == store.platform and p.cost_pricing == "historical" for p in ingestion.model.platforms) if ingestion.model else False,
                               any(p.id == store.platform and p.cost_pricing in {"required", "historical"} for p in ingestion.model.platforms) if ingestion.model else False)
+        after = self.state()
+        ingestion.source_sync_pending = (
+            int(getattr(self, "_captured_seq", state.get("consumed_seq") or 0)) < int(after.get("source_latest_seq") or 0)
+            or bool(after.get("last_error"))
+        )
         if not frames:
             raise OrderFeedError(f"订单台没有 {store.name} 的已确认店铺映射")
         from .order_date_context import publish as publish_order_dates
@@ -1057,6 +1069,7 @@ class OrderFeed:
             if captured["snapshot_id"] != manifest["snapshot_id"]:
                 raise OrderFeedError("订单快照刚发生切换，本次计算等待重试")
             fingerprint = f"order-feed:{captured['snapshot_id']}:{captured['consumed_seq']}"
+            self._captured_seq = int(captured["consumed_seq"])
             order_store_ids = [
                 str(r[0]) for r in conn.execute(
                     "select order_store_id from feed_store where ledger_store_id=? and mapping_status='confirmed'",
@@ -1684,8 +1697,11 @@ class Worker:
         due = result.caught_up or time.monotonic() - self.last_notification >= 60
         if due and self.pending_stores and self.on_stores:
             self.on_stores(set(self.pending_stores), self.feed.fingerprint())
-            self.feed.acknowledge_stores(self.pending_stores, result.consumed_seq)
-            self.pending_stores.clear()
+            if result.caught_up:
+                self.feed.acknowledge_stores(self.pending_stores, result.consumed_seq)
+                self.pending_stores.clear()
+            # Keep both the in-memory set and durable feed queue until final
+            # catchup, so restarts cannot strand a shop on a provisional run.
             self.last_notification = time.monotonic()
         return result
 
@@ -1706,7 +1722,10 @@ class Worker:
                 self.poll()
             except Exception as exc:
                 # status() carries the exact failure; a transient source outage must not kill Ledger.
-                self.feed.record_error(str(exc))
+                try:
+                    self.feed.record_error(str(exc))
+                except Exception:
+                    logging.getLogger(__name__).exception("Source error recording failed; polling will retry")
             self.stop_event.wait(self.interval)
 
 
