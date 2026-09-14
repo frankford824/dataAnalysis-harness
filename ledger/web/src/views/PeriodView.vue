@@ -342,7 +342,7 @@ watch(
                 @click.stop
               >导出订单费项</a>
             </header>
-            <PricingPending v-if="snap.pricing_pending_count && snap.run_id" ref="pricingPanel" :key="`${props.id}:${period}`" :run-id="snap.run_id" :count="snap.pricing_pending_count" />
+            <PricingPending v-if="snap.pricing_pending_count && snap.run_id" ref="pricingPanel" :key="`${props.id}:${period}`" :run-id="snap.run_id" :count="snap.pricing_pending_count" :store-id="props.id" :period="period" />
             <div class="statement">
               <div
                 v-for="row in snap.statement || []"

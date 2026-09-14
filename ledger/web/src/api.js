@@ -38,6 +38,7 @@ function query(params) {
 }
 
 export const api = {
+  pricingStatus: (id, period, init) => call(`/api/stores/${encodeURIComponent(id)}/pricing-status${query({period})}`, init),
   pricingGaps: (runId, params, options = {}) => call(`/api/runs/${runId}/pricing-gaps${query(params)}`, options),
   navigation: () => call('/api/navigation'),
   bootstrap: () => call('/api/bootstrap'),

@@ -65,9 +65,9 @@ async def lifespan(_app: FastAPI):
     )
     _snapshot()
     workspace()
-    _storage_worker=storage_maintenance.Worker(workspace().root)
-    _storage_worker.start()
     if hasattr(workspace(), "root"):
+        _storage_worker=storage_maintenance.Worker(workspace().root)
+        _storage_worker.start()
         _commission_worker = commission_manager.Manager(lambda: workspace(), lambda: _model())
         _commission_worker.start()
     if nas_status.ingest_mode() == "nas":
@@ -1226,6 +1226,13 @@ def pricing_gaps_page(run_id: int, q: str = "", offset: int = 0, limit: int = 10
     if not path.exists():
         raise HTTPException(404, "这次计算没有待核价明细")
     return pricing_gaps.page(path, q=q, offset=offset, limit=limit)
+
+
+@app.get("/api/stores/{store_id}/pricing-status")
+def pricing_progress(store_id: str, period: str) -> dict:
+    from .pricing_status import status
+    _store(_model(), store_id)
+    return status(workspace(), store_id, period, _commission_worker)
 
 
 @app.get("/api/runs/{run_id}/pricing-gaps.csv")

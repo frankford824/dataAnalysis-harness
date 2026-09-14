@@ -1643,6 +1643,21 @@ class Worker:
         self.stop_event = threading.Event()
         self.thread: threading.Thread | None = None
         self.pending_stores: set[str] = set()
+        self.last_notification = 0.0
+
+    def poll(self) -> SyncResult:
+        result = self.feed.sync()
+        self.pending_stores.update(result.affected_stores)
+        self.pending_stores.update(self.feed.pending_stores())
+        # Publish durable prefixes even while the upstream continues producing
+        # events. Waiting for a moving global head can starve every shop.
+        due = result.caught_up or time.monotonic() - self.last_notification >= 60
+        if due and self.pending_stores and self.on_stores:
+            self.on_stores(set(self.pending_stores), self.feed.fingerprint())
+            self.feed.acknowledge_stores(self.pending_stores, result.consumed_seq)
+            self.pending_stores.clear()
+            self.last_notification = time.monotonic()
+        return result
 
     def start(self) -> None:
         if self.thread and self.thread.is_alive():
@@ -1658,13 +1673,7 @@ class Worker:
     def _run(self) -> None:
         while not self.stop_event.is_set():
             try:
-                result = self.feed.sync()
-                self.pending_stores.update(result.affected_stores)
-                self.pending_stores.update(self.feed.pending_stores())
-                if result.caught_up and self.pending_stores and self.on_stores:
-                    self.on_stores(set(self.pending_stores), self.feed.fingerprint())
-                    self.feed.acknowledge_stores(self.pending_stores, result.consumed_seq)
-                    self.pending_stores.clear()
+                self.poll()
             except Exception as exc:
                 # status() carries the exact failure; a transient source outage must not kill Ledger.
                 self.feed.record_error(str(exc))

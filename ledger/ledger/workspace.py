@@ -737,6 +737,10 @@ class Workspace:
 
     def close_period(self, store_id: str, period: str, by: str = "", note: str = "") -> PeriodState:
         """结账。自检层不放行就不许结——这是整套东西存在的意义。"""
+        from .pricing_status import read_feed
+        feed = read_feed(self.root)
+        if feed and (not feed["snapshot_id"] or feed["last_error"] or feed["consumed_seq"] < feed["source_latest_seq"]):
+            raise WorkspaceError("订单来源仍在同步或存在同步错误，暂不能结账；当前试算结果已保留。")
         run = self.latest_run(store_id, period)
         if run is None:
             raise WorkspaceError(f"{period} 还没算过账，不能结")

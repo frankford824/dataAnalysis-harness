@@ -214,6 +214,7 @@ class Registry:
         with _init_lock:
             if key not in _initialized or not self.path.exists():
                 with self.connect() as conn:
+                    conn.execute("PRAGMA journal_mode=WAL")
                     conn.executescript(SCHEMA)
                 with self.transaction() as conn:
                     fields = {r["name"] for r in conn.execute("PRAGMA table_info(pending)")}

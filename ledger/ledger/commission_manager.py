@@ -5,6 +5,7 @@ import json
 import threading
 import time
 import sqlite3
+import logging
 from contextlib import closing
 
 from . import commission_catalog, commission_import, order_feed, service
@@ -19,6 +20,8 @@ class Manager:
         self.thread = None
         self.last_catalog = 0.0
         self.current_pending = None
+        self.last_error = ""
+        self.last_error_store = None
 
     def start(self):
         registry = Registry(self.workspace().root)
@@ -75,7 +78,9 @@ class Manager:
                     return
                 with closing(sqlite3.connect(f"file:{feed_path.as_posix()}?mode=ro", uri=True)) as source:
                     state = source.execute("SELECT consumed_seq,source_latest_seq,snapshot_id FROM feed_state").fetchone()
-                if not state or not state[2] or state[0] < state[1]:
+                # This job requires its captured source prefix, not a global
+                # head which keeps moving as unrelated shops receive orders.
+                if not state or not state[2] or state[0] < pending["source_seq"]:
                     return
             store_id, revision = pending["store_id"], pending["revision"]
             self.current_pending = (store_id, revision)
@@ -106,16 +111,25 @@ class Manager:
         while not self.stop_event.is_set():
             try:
                 self.once()
+                self.last_error = ""
+                self.last_error_store = None
             except Exception as exc:
                 # Pending rows remain durable. The status endpoint exposes the
                 # failure, and the next attempt never changes frozen results.
-                registry = Registry(self.workspace().root)
-                with registry.transaction() as conn:
-                    if self.current_pending:
-                        conn.execute("UPDATE pending SET next_attempt=?,error=? WHERE store_id=? AND revision<=?",
-                                     (int(time.time()) + 120, str(exc)[:2000], *self.current_pending))
-                    conn.execute("INSERT INTO job VALUES(?,?,?,?,?,?,?,?)",
-                                 (__import__("uuid").uuid4().hex, "recompute", "system",
-                                  __import__("datetime").datetime.now().isoformat(), "failed", "{}", "{}", str(exc)[:2000]))
+                self.last_error = str(exc)[:2000]
+                self.last_error_store = self.current_pending[0] if self.current_pending else None
+                try:
+                    registry = Registry(self.workspace().root)
+                    with registry.transaction() as conn:
+                        if self.current_pending:
+                            conn.execute("UPDATE pending SET next_attempt=?,error=? WHERE store_id=? AND revision<=?",
+                                         (int(time.time()) + 120, str(exc)[:2000], *self.current_pending))
+                        conn.execute("INSERT INTO job VALUES(?,?,?,?,?,?,?,?)",
+                                     (__import__("uuid").uuid4().hex, "recompute", "system",
+                                      __import__("datetime").datetime.now().isoformat(), "failed", "{}", "{}", str(exc)[:2000]))
+                except Exception:
+                    logging.getLogger(__name__).exception("Unable to persist recompute failure; worker will retry")
                 self.stop_event.wait(2)
+            finally:
+                self.current_pending = None
             self.stop_event.wait(2)
