@@ -93,15 +93,20 @@ class Manager:
                     raise ValueError(why)
                 # No order inputs yet is a normal state for a newly registered
                 # listing/store. Its next source revision will enqueue it again.
+            provisional = any(p.get("source_sync_pending") for p in result.periods)
             with registry.transaction() as conn:
-                conn.execute("DELETE FROM pending WHERE store_id=? AND revision<=? AND source_seq<=? AND source_fingerprint=?",
-                             (store_id, revision, pending["source_seq"], pending["source_fingerprint"]))
-                conn.execute("UPDATE pending SET next_attempt=? WHERE store_id=?", (int(time.time()), store_id))
+                if provisional:
+                    conn.execute("UPDATE pending SET next_attempt=? WHERE store_id=? AND revision<=? AND source_seq<=? AND source_fingerprint=?",
+                                 (int(time.time()) + 60, store_id, revision, pending["source_seq"], pending["source_fingerprint"]))
+                else:
+                    conn.execute("DELETE FROM pending WHERE store_id=? AND revision<=? AND source_seq<=? AND source_fingerprint=?",
+                                 (store_id, revision, pending["source_seq"], pending["source_fingerprint"]))
+                    conn.execute("UPDATE pending SET next_attempt=? WHERE store_id=?", (int(time.time()), store_id))
                 conn.execute("INSERT INTO job VALUES(?,?,?,?,?,?,?,?)",
                              (__import__("uuid").uuid4().hex, "recompute", "system",
                               __import__("datetime").datetime.now().isoformat(), "done",
                               json_text({"store_id": store_id}), json_text({"store_id": store_id,
-                              "periods": len(result.periods), "waiting_for_orders": bool(result.failure)}), ""))
+                              "periods": len(result.periods), "waiting_for_orders": bool(result.failure), "provisional": provisional}), ""))
             return
         if order_feed.enabled() and time.time() - self.last_catalog > 12 * 3600:
             self.last_catalog = time.time()

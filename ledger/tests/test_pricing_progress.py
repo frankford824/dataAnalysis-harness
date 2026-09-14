@@ -216,3 +216,20 @@ def test_source_worker_survives_error_recording_failure(monkeypatch):
     monkeypatch.setattr(worker.stop_event, 'wait', lambda *args: None)
     worker._run()
     assert calls == [1, 1]
+
+
+def test_provisional_calculation_stays_queued_until_full_result(tmp_path, monkeypatch):
+    monkeypatch.setenv('LEDGER_ORDER_FEED_ENABLED', '0')
+    ws = Workspace(tmp_path); reg = Registry(tmp_path)
+    reg.enqueue_source({'s1'}, 'order-feed:snapshot:10')
+    result = SimpleNamespace(failure=None, periods=[{'source_sync_pending': True}])
+    monkeypatch.setattr('ledger.commission_manager.service.recompute', lambda *a, **k: result)
+    Manager(lambda: ws, _model).once()
+    with reg.transaction() as conn:
+        assert conn.execute("SELECT next_attempt FROM pending WHERE store_id='s1'").fetchone()[0] > 0
+        conn.execute("UPDATE pending SET next_attempt=0 WHERE store_id='s1'")
+    result.periods[0]['source_sync_pending'] = False
+    Manager(lambda: ws, _model).once()
+    with reg.connect() as conn:
+        assert conn.execute("SELECT count(*) FROM pending").fetchone()[0] == 0
+    ws.close()

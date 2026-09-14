@@ -385,6 +385,7 @@ def _recompute_locked(
     for i, ((_s, _p), sl) in enumerate(slices, 1):
         report(f"存账期 · {where}", i, len(slices))
         payload = slice_dict(sl, store, model)
+        payload["source_sync_pending"] = ing.source_sync_pending
         allocation = commission_engine.calculate(result, model, store.id, sl.period, registry) if registry and sl.pricing_gaps.is_empty() else None
         payload["commission"] = (commission_engine.pending_pricing(sl.pricing_gaps.height)
                                  if not sl.pricing_gaps.is_empty()
