@@ -71,3 +71,19 @@ def test_source_objects_keep_provider_and_consumer_snapshots(tmp_path):
     assert (provider/'objects/cold.parquet').is_symlink()
     assert not (provider/'objects/provider.parquet').is_symlink()
     assert not (provider/'objects/consumer.parquet').is_symlink()
+
+
+
+def test_archived_feed_path_requires_registered_checksum(tmp_path):
+    from ledger.storage_maintenance import archive_one,manifest
+    from ledger.storage_integrity import registered_archive_link
+    root=tmp_path/'feed';(root/'objects').mkdir(parents=True);(root/'current').mkdir()
+    (root/'current/manifest.json').write_text('{}')
+    source=root/'objects/data.parquet';source.write_bytes(b'original bytes')
+    sha=digest(source)
+    with manifest(root) as c:archive_one(root,tmp_path/'cold',source,c)
+    assert registered_archive_link(root,source,sha)
+    assert not registered_archive_link(root,source,'bad')
+    other=root/'objects/unregistered.parquet';other.symlink_to(source.resolve())
+    assert not registered_archive_link(root,other,sha)
+    assert not registered_archive_link(root,root/'../cold'/source.resolve().name,sha)
