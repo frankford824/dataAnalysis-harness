@@ -83,6 +83,10 @@ def preview(registry, model, request, actor):
                 data['expected_revision']=expected
                 catalog=conn.execute('SELECT product_name FROM catalog WHERE store_id=? AND product_id=?',(data['store_id'],data['product_id'])).fetchone()
                 data['product_name']=data.get('product_name') or old.get('product_name') or (catalog[0] if catalog else '')
+                old_body=json.loads(old.get('body') or '{}') if old else {}
+                future_segments=[s for s in old_body.get('segments',[]) if s['valid_from']>data['valid_from']]
+                if operation=='replace' and not data.get('valid_to'):
+                    data['replace_future']=True
                 before=allocations(conn,segment)
                 requested=data.get('allocations',[])
                 if operation!='replace' and data.get('mode','distribute')=='distribute':
@@ -121,6 +125,7 @@ def preview(registry, model, request, actor):
                 display.append({'store_id':data['store_id'],'store':names[data['store_id']],'product_id':data['product_id'],
                                 'product_name':data['product_name'],'before':before,'after':allocations(conn,after),
                                 'mode':after['mode'],'valid_from':after['valid_from'],'valid_to':after['valid_to'],
+                                'future_overwritten':len(future_segments) if data.get('replace_future') else 0,
                                 'new':not old,'source_rows':data.get('source_rows',[]),'catalog_missing':not catalog})
         finally:
             conn.rollback()
@@ -130,7 +135,9 @@ def preview(registry, model, request, actor):
     with registry.transaction() as conn:
         conn.execute('INSERT INTO setting_batch(id,payload,created_at) VALUES(?,?,?)',(bid,json_text(payload),now()))
     return {'id':bid,'count':len(display),'stores':len({r['store_id'] for r in display}),
-            'new_count':sum(r['new'] for r in display),'rows':display,'source':source}
+            'new_count':sum(r['new'] for r in display),
+            'future_overwritten_count':sum(r['future_overwritten'] for r in display),
+            'rows':display,'source':source}
 
 
 def apply(registry, model, bid, actor):

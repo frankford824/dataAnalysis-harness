@@ -376,7 +376,12 @@ class Registry:
         previous = conn.execute("SELECT body FROM scheme_version WHERE id=?", (row["active_version"],)).fetchone() if row else None
         body = json.loads(previous[0]) if previous else {}
         old = body.get("segments", [])
-        future = min((x["valid_from"] for x in old if x["valid_from"] > start), default="")
+        # A bulk "replace" with no end date means one uniform rule from the
+        # chosen time onward. Keeping an older scheduled segment would silently
+        # undo part of that batch later. Single-item edits and merge/remove still
+        # preserve scheduled changes unless the caller explicitly requests this.
+        replace_future = bool(data.get("replace_future"))
+        future = "" if replace_future else min((x["valid_from"] for x in old if x["valid_from"] > start), default="")
         if future and end and end > future:
             raise RegistryError("结束时间不能越过已有的后续设置：" + future.replace("T", " "))
         end = end or future

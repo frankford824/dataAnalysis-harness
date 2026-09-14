@@ -141,3 +141,28 @@ def test_remove_unassigned_person_does_not_create_empty_settings(tmp_path):
         preview(r,m,{'targets':[{'store_id':'s1','product_id':'123456789003'}],
                      'operation':'remove','template':{'valid_from':'2001-01-01','allocations':[{'person_id':a['id']}]}},'test')
     assert r.revision()==revision and len(settings(r)['rows'])==2
+
+
+def test_bulk_replace_without_end_overwrites_scheduled_future_but_single_edit_keeps_it(tmp_path):
+    r,m,a,b=setup(tmp_path)
+    r.save_setting({'store_id':'s1','product_id':'123456789001','expected_revision':1,
+                    'valid_from':'2002-01-01','allocations':[{'person_id':a['id'],'rate':'.05'}]},'test')
+    plan=preview(r,m,{'targets':[{'store_id':'s1','product_id':'123456789001','revision':2}],
+        'operation':'replace','template':{'valid_from':'2001-01-01','mode':'distribute',
+        'allocations':[{'person_id':b['id'],'rate':'.05'}]}},'test')
+    assert plan['future_overwritten_count']==1
+    assert plan['rows'][0]['valid_to']=='' and plan['rows'][0]['future_overwritten']==1
+    apply(r,m,plan['id'],'test')
+    segments=r.active('s1')[1][0]['body']['segments']
+    assert [(x['valid_from'],x['valid_to']) for x in segments]==[
+        ('2000-01-01T00:00:00','2001-01-01T00:00:00'),('2001-01-01T00:00:00','')]
+    assert segments[-1]['allocations'][0]['person_id']==b['id']
+
+    # The ordinary one-item editor still protects an explicitly scheduled change.
+    r.save_setting({'store_id':'s2','product_id':'123456789001','expected_revision':1,
+                    'valid_from':'2002-01-01','allocations':[{'person_id':a['id'],'rate':'.05'}]},'test')
+    kept=r.save_setting({'store_id':'s2','product_id':'123456789001','expected_revision':2,
+                         'valid_from':'2001-01-01','allocations':[{'person_id':b['id'],'rate':'.05'}]},'test')
+    assert [(x['valid_from'],x['valid_to']) for x in kept['body']['segments']]==[
+        ('2000-01-01T00:00:00','2001-01-01T00:00:00'),
+        ('2001-01-01T00:00:00','2002-01-01T00:00:00'),('2002-01-01T00:00:00','')]
