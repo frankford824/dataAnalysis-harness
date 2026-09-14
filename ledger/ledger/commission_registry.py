@@ -110,6 +110,9 @@ CREATE TRIGGER IF NOT EXISTS policy_no_update BEFORE UPDATE ON policy_version
 CREATE TRIGGER IF NOT EXISTS policy_no_delete BEFORE DELETE ON policy_version
  BEGIN SELECT RAISE(ABORT,'commission policy history is immutable'); END;
 """
+from .snapshot_store import SCHEMA as EVIDENCE_SCHEMA
+SCHEMA += EVIDENCE_SCHEMA
+
 _initialized: set[Path] = set()
 _init_lock = threading.RLock()
 
@@ -231,6 +234,16 @@ class Registry:
                 yield conn
         finally:
             conn.close()
+
+    def calculation_evidence(self, calculation_id: str) -> dict | None:
+        from .snapshot_store import resolve
+        with self.connect() as conn:
+            row=conn.execute('SELECT * FROM calculation WHERE id=?',(calculation_id,)).fetchone()
+            if row is None:return None
+            result=dict(row)
+            for column in ('model_json','rules_json'):
+                result[column]=resolve(conn,result[column])
+            return result
 
     @contextmanager
     def transaction(self):

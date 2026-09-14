@@ -541,6 +541,16 @@ class Workspace:
     # 快照
     # ------------------------------------------------------------------ #
 
+    def identical_run(self, store_id, period, result, fingerprint):
+        from .storage_integrity import comparable
+        if not fingerprint:return None
+        row=self.conn.execute("SELECT id,result,evidence_ready,input_fingerprint,engine FROM run "
+                              "WHERE store_id=? AND period=? ORDER BY id DESC LIMIT 1",(store_id,period)).fetchone()
+        if not row or not row['evidence_ready'] or row['input_fingerprint']!=fingerprint or row['engine']!=engine_version():
+            return None
+        old=json.loads(row['result'])
+        return (row['id'],old) if comparable(old)==comparable(result) else None
+
     def record(
         self,
         store_id: str,

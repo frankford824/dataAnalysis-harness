@@ -164,6 +164,9 @@ def test_live_feed_recompute_persists_commission_and_financial_evidence(tmp_path
     details = pl.read_parquet(registry.root / "calculations" / row["path"])
     assert details.height > 0
     assert ws.facts_path(state.run_id).exists()
+    again=service.recompute(ws,model,store)
+    assert not again.failure
+    assert ws.state(store.id,"2026-06").run_id==state.run_id
     from fastapi import FastAPI
     from fastapi.testclient import TestClient
     from ledger.commission_api import install

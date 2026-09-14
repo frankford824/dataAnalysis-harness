@@ -379,6 +379,26 @@ def _recompute_locked(
                     c["amount_complete"] = False
                     c["notes"].append(f"提成基数与损益节点相差{delta:.2f}元，需核对后结算提成")
             allocation[2]["summary_json"] = json.dumps(c, ensure_ascii=False)
+        from .storage_integrity import verified, digest
+        same = ws.identical_run(store.id, sl.period, payload, fingerprint)
+        if same:
+            previous_id, previous_payload = same
+            reusable = (sl.facts.is_empty() or verified(ws.facts_path(previous_id)))
+            if not sl.pricing_gaps.is_empty():
+                reusable = reusable and verified(ws.pricing_gaps_path(previous_id))
+            if allocation:
+                previous_calc=(previous_payload.get('commission') or {}).get('calculation_id')
+                with registry.connect() as conn:
+                    proof=conn.execute('SELECT path,sha FROM calculation WHERE id=? AND finance_run=?',
+                                       (previous_calc,previous_id)).fetchone()
+                candidate=registry.root/'calculations'/Path(proof['path']).name if proof else None
+                reusable = reusable and bool(candidate and candidate.is_file() and digest(candidate)==proof['sha'])
+            if reusable:
+                state=ws.state(store.id,sl.period)
+                shown=state.result if state and state.result else previous_payload
+                out.periods.append({**shown,'run_id':previous_id,'state':state.state if state else 'open',
+                                    'stale':bool(state and state.stale)})
+                continue
         run_id = ws.record(
             store.id, sl.period, payload, shas, evidence_ready=False,
             model_revision=model_revision, input_fingerprint=fingerprint,
@@ -436,6 +456,8 @@ def _keep_facts(ws: Workspace, run_id: int, sl: Slice) -> None:
         pending = getattr(sl, "pricing_gaps", pl.DataFrame())
         if not pending.is_empty():
             pending.write_parquet(pricing_path)
+            from .storage_integrity import seal
+            seal(pricing_path)
         if sl.facts.is_empty():
             ws.mark_evidence(run_id, ready=True)
             return
@@ -447,6 +469,8 @@ def _keep_facts(ws: Workspace, run_id: int, sl: Slice) -> None:
             if order:
                 facts = facts.sort(order)
             facts.write_parquet(path, row_group_size=100_000)
+            from .storage_integrity import seal
+            seal(path)
         else:
             # Test doubles and compatible frame implementations keep the old
             # minimal protocol; their own write error is the evidence to log.
