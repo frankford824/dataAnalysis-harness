@@ -30,6 +30,12 @@
 商品付款全空或部分未知时，读取汇总保留未知。现有引擎 `buyer_paid` 兼容角色不代表
 经过平台确认的实际付款；新增核对入口明确标记 `amount_basis=erp`，不由此产生收入分录。
 
+成本来源只有一个正式账面口径。订单台先按出库历史取 `history` / `component_history`；
+没有出库历史时可返回成本档案的 `register` / `register_first`。台账仅在状态为 `priced`、
+定价日与原订单下单日一致、单价和数量有效、订单商品身份未变化时计入毛利。缺少原订单日、
+货号在历史与档案均无价格、日期不一致或身份冲突时继续列入待核价。`mirror`、`scrape` 和
+`unknown_evidence` 只作核对参考，不形成另一套正式利润。
+
 ## 生产接口验收记录
 
 2026-09-11 核查：`/revision` 返回 `ledger-feed.v1`、`order-console-ledger-feed.v1.4`、`healthy=true`。

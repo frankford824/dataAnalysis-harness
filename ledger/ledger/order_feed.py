@@ -27,6 +27,8 @@ from typing import Any, Callable, Iterator
 
 import polars as pl
 
+from .cost_evidence import CAPTURED_COST_SOURCES
+
 from .engine.runtime import Ingested, Ingestion
 from .engine.link import normalize_key
 from .engine.rules import norm_expr
@@ -1449,7 +1451,7 @@ class OrderFeed:
                 costs = pl.concat([costs, pending], how="diagonal_relaxed")
         certified = costs if review_pricing else costs.filter(
             (pl.col("cost_status") == "priced")
-            & pl.col("cost_source").is_in(["history", "component_history", "blue_flag", "mirror", "scrape", "unknown_evidence"])
+            & pl.col("cost_source").is_in(CAPTURED_COST_SOURCES)
         )
         # ERP 把「没价」写成 0，移动平均被退货打穿会出负数；两者都不是成交成本。
         # 订单台 2026-09-03 起已把 ≤0 改判缺价，这里再守一道：关账月冻结的旧行、

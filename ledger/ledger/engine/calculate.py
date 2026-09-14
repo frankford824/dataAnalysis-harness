@@ -13,6 +13,8 @@ from dataclasses import dataclass, field
 
 import polars as pl
 
+from ..cost_evidence import ORDER_DAY_COST_SOURCES
+
 from ..model.schema import Metric, Model, NodeExpr, Predicate, Template, ValueExpr
 from ..money import decimal_amount, money_float, sum_amounts
 from .classify import COL_COUNT_WITHOUT_ORDER, COL_MAJOR, COL_MINOR, COL_VIA
@@ -74,7 +76,7 @@ def historical_price_evidence(frame: pl.DataFrame):
     if '__spine_order_date__' in frame.columns:wanted=pl.coalesce(wanted,col('__spine_order_date__').cast(pl.Date,strict=False))
     quoted=col('cost_as_of').cast(pl.Utf8).str.slice(0,10).str.strptime(pl.Date,'%Y-%m-%d',strict=False)
     unit=col('unit_cost').cast(pl.Float64,strict=False);qty=col('quantity').cast(pl.Float64,strict=False)
-    known=(col('cost_source').cast(pl.Utf8).is_in(['history','component_history','manual','blue_flag'])
+    known=(col('cost_source').cast(pl.Utf8).is_in(ORDER_DAY_COST_SOURCES)
            &(col('cost_status')=='priced')&(quoted==wanted)&unit.is_finite()&(unit>=0)&qty.is_finite()&(qty>=0)
            &~col('pricing_suspect').cast(pl.Boolean).fill_null(False))
     if 'pricing_evidence' in frame.columns:
