@@ -534,9 +534,12 @@ class OrderFeed:
             raise OrderFeedError("快照缺对象：" + "、".join(sorted(missing)))
         root = self.feed_root.resolve()
         for name, meta in objects.items():
-            path = (root / str(meta["path"])).resolve()
+            original_path = root / str(meta["path"])
+            path = original_path.resolve()
             if path != root and root not in path.parents:
-                raise OrderFeedError(f"快照路径越界：{name}")
+                from .storage_integrity import registered_archive_link
+                if not registered_archive_link(root, original_path, meta.get("sha256")):
+                    raise OrderFeedError(f"快照路径越界：{name}")
             if not path.is_file():
                 raise OrderFeedError(f"快照对象不存在：{name}")
             if path.stat().st_size != int(meta["bytes"]):

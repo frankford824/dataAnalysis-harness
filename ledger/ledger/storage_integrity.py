@@ -31,3 +31,21 @@ def comparable(payload):
         value['commission']=dict(value['commission'])
         value['commission'].pop('calculation_id',None)
     return value
+
+
+
+def registered_archive_link(root, source, expected_sha):
+    """Accept an outside target only for a checksum-bound local archive record."""
+    import sqlite3
+    from pathlib import Path
+    from contextlib import closing
+    try:
+        relative=source.relative_to(root)
+        if '..' in relative.parts or not source.is_symlink():return False
+        db=root/'storage.db'
+        if not db.is_file():return False
+        with closing(sqlite3.connect(db.as_uri()+'?mode=ro',uri=True)) as c:
+            row=c.execute('SELECT target,sha,state FROM artifact_archive WHERE source=?',(str(relative),)).fetchone()
+        return bool(row and row[1]==expected_sha and row[2] in {'copied','archived'}
+                    and Path(row[0]).resolve()==source.resolve())
+    except (OSError,ValueError,sqlite3.Error):return False
