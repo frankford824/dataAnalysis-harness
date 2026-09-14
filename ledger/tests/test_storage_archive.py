@@ -171,3 +171,14 @@ def test_bulk_object_verification_is_shared_for_duplicate_content(tmp_path,monke
     assert len(calls)==count+1  # second source hashed; shared object was already verified
     assert a.read_bytes()==b.read_bytes()==b'identical'
     assert normalized_link_path('\\\\?\\UNC\\server\\share\\file')==normalized_link_path('\\\\server\\share\\file')
+
+
+def test_bulk_counts_zero_byte_files_as_completed(tmp_path):
+    from ledger.storage_bulk import run_bulk
+    w,policy=setup(tmp_path)
+    raw=tmp_path/'empty.csv';raw.write_bytes(b'')
+    kept=w.keep('empty.csv',raw,'s');p=w.path_of(kept.sha)
+    os.utime(p,(time.time()-86400,)*2)
+    result=run_bulk(w.root,policy)
+    assert result['archived_files']==6 and result['remaining_files']==0
+    assert p.is_symlink() and p.read_bytes()==b''

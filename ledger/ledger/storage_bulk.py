@@ -104,7 +104,7 @@ def run_bulk(root,policy,stop_event=None):
                         try:
                             amount=future.result()
                             if isinstance(amount,dict):result['deferred'].append(amount)
-                            elif amount:result['archived_files']+=1;result['archived_bytes']+=amount
+                            elif amount is not None:result['archived_files']+=1;result['archived_bytes']+=amount
                         except Exception as exc:result['errors'].append(str(exc))
                         if not result['errors'] and not (stop_event and stop_event.is_set()):
                             item=next(iterator,None)
