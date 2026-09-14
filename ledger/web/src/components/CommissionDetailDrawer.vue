@@ -14,8 +14,13 @@ async function load(){
   if(!props.target)return
   const attempt=++serial;loading.value=true;error.value=''
   try{
-    const result=await request.run(signal=>commissionRequest('/reports/query',{signal,body:{...current.value.selection,run_ids:current.value.run_ids,view:'breakdown',offset:(page.value-1)*50,limit:50}}))
-    if(result)data.value=result.value
+    if(current.value.report){
+      const rows=current.value.report.rows||[],offset=(page.value-1)*50
+      data.value={...current.value.report,items:rows.slice(offset,offset+50),count:rows.length}
+    }else{
+      const result=await request.run(signal=>commissionRequest('/reports/query',{signal,body:{...current.value.selection,run_ids:current.value.run_ids,view:'breakdown',offset:(page.value-1)*50,limit:50}}))
+      if(result)data.value=result.value
+    }
   }catch(e){if(attempt===serial)error.value=e.message}
   finally{if(attempt===serial)loading.value=false}
 }
@@ -29,7 +34,9 @@ async function download(){
   const target=current.value, snapshot=data.value
   downloading.value=true;error.value=''
   try{
-    const response=await fetch('/api/commission-v2/export/reports/breakdown',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({...snapshot.selection,run_ids:snapshot.run_ids,fingerprint:snapshot.fingerprint,presentation:true})})
+    const response=target.settlement_id
+      ? await fetch(`/api/commission-v2/export/settlements/${target.settlement_id}`)
+      : await fetch('/api/commission-v2/export/reports/breakdown',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({...snapshot.selection,run_ids:snapshot.run_ids,fingerprint:snapshot.fingerprint,presentation:true})})
     if(!response.ok){const body=await response.json().catch(()=>({}));throw new Error(typeof body.detail==='string'?body.detail:'导出失败，请重试')}
     const url=URL.createObjectURL(await response.blob()),link=document.createElement('a')
     link.href=url;link.download=`提成明细-${target.name}-${target.selection.start}至${target.selection.end}.csv`

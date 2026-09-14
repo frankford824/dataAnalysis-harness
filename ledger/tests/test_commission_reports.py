@@ -152,3 +152,48 @@ def test_configured_people_remain_visible_when_pricing_has_no_amount(tmp_path):
     assert store['configured_people']==1
     assert store['people']==0 and store['amount'] is None
     assert '待核价' in store['status']
+
+
+def test_employee_settlement_freezes_viewed_runs_and_reports_later_difference(tmp_path):
+    ws, registry, people, client = fixture(tmp_path)
+    original = record(ws, people, 's1', '2026-06', [10.01, 20.02])
+    scope = {'start': '2026-06', 'end': '2026-06', 'store_ids': ['s1']}
+    viewed = client.post('/api/commission-v2/reports/query', json=scope).json()
+    settled = client.post('/api/commission-v2/settlements', json={
+        **scope, 'run_ids': viewed['run_ids'], 'fingerprint': viewed['fingerprint'], 'note': '已与员工核对并发放',
+    })
+    assert settled.status_code == 200, settled.text
+    body = settled.json()
+    assert body['total'] == 30.03 and body['run_ids'] == [original]
+
+    registry.person_save({**people[0], 'name': '甲（后来改名）'}, 'test', '人员资料更新', people[0]['revision'])
+    record(ws, people, 's1', '2026-06', [15.01, 25.02])
+    detail = client.get('/api/commission-v2/settlements/' + body['id']).json()
+    assert detail['total'] == 30.03
+    assert detail['current_total'] == 40.03
+    assert detail['difference'] == 10
+    assert detail['report']['run_ids'] == [original]
+    assert {row['person'] for row in detail['report']['people']} == {'甲', '乙'}
+    exported = client.get('/api/commission-v2/export/settlements/' + body['id'])
+    assert exported.status_code == 200
+    assert '甲（后来改名）' not in exported.text and '甲' in exported.text
+
+    duplicate = client.post('/api/commission-v2/settlements', json={
+        **scope, 'run_ids': viewed['run_ids'], 'fingerprint': viewed['fingerprint'], 'note': '重复点击',
+    }).json()
+    assert duplicate['id'] == body['id'] and duplicate['duplicate'] is True
+    with pytest.raises(Exception, match='immutable'):
+        with registry.transaction() as conn:
+            conn.execute("UPDATE settlement SET total='1' WHERE id=?", (body['id'],))
+
+
+def test_employee_settlement_rejects_incomplete_amounts(tmp_path):
+    ws, _, people, client = fixture(tmp_path)
+    record(ws, people, 's1', '2026-06', [3.33], complete=False)
+    scope = {'start': '2026-06', 'end': '2026-06', 'store_ids': ['s1']}
+    viewed = client.post('/api/commission-v2/reports/query', json=scope).json()
+    response = client.post('/api/commission-v2/settlements', json={
+        **scope, 'run_ids': viewed['run_ids'], 'fingerprint': viewed['fingerprint'], 'note': '不应结算',
+    })
+    assert response.status_code == 400
+    assert '待核对' in response.json()['detail'] or '未完成' in response.json()['detail']

@@ -88,6 +88,17 @@ CREATE TRIGGER IF NOT EXISTS calculation_no_update BEFORE UPDATE ON calculation
  BEGIN SELECT RAISE(ABORT,'commission calculation history is immutable'); END;
 CREATE TRIGGER IF NOT EXISTS calculation_no_delete BEFORE DELETE ON calculation
  BEGIN SELECT RAISE(ABORT,'commission calculation history is immutable'); END;
+CREATE TABLE IF NOT EXISTS settlement (
+ id TEXT PRIMARY KEY, at TEXT NOT NULL, actor TEXT NOT NULL, note TEXT NOT NULL,
+ start_period TEXT NOT NULL, end_period TEXT NOT NULL,
+ selection_json TEXT NOT NULL, run_ids_json TEXT NOT NULL,
+ fingerprint TEXT NOT NULL UNIQUE, total TEXT NOT NULL, report_json TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS settlement_recent ON settlement(at DESC);
+CREATE TRIGGER IF NOT EXISTS settlement_no_update BEFORE UPDATE ON settlement
+ BEGIN SELECT RAISE(ABORT,'commission settlement history is immutable'); END;
+CREATE TRIGGER IF NOT EXISTS settlement_no_delete BEFORE DELETE ON settlement
+ BEGIN SELECT RAISE(ABORT,'commission settlement history is immutable'); END;
 CREATE TABLE IF NOT EXISTS operator (
  id TEXT PRIMARY KEY, name TEXT NOT NULL, salt TEXT NOT NULL, password_hash TEXT NOT NULL,
  admin INTEGER NOT NULL DEFAULT 0, disabled INTEGER NOT NULL DEFAULT 0

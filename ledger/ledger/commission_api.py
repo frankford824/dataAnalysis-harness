@@ -9,6 +9,7 @@ import io
 import json
 import sqlite3
 import re
+import uuid
 from decimal import Decimal
 from contextlib import closing
 from pathlib import Path
@@ -21,7 +22,7 @@ from starlette.concurrency import run_in_threadpool
 from pydantic import BaseModel, Field
 
 from . import commission_catalog, commission_batch, commission_reports
-from .commission_registry import Registry, RegistryError, RevisionConflict, json_text, local_time
+from .commission_registry import Registry, RegistryError, RevisionConflict, json_text, local_time, now
 from .money import money_float
 
 
@@ -84,6 +85,16 @@ class ReportSelection(BaseModel):
     offset: int = Field(default=0, ge=0)
     limit: int = Field(default=50, ge=1, le=200)
     presentation: bool = False
+
+
+class SettlementCreate(BaseModel):
+    start: str
+    end: str
+    store_ids: list[str] = Field(default_factory=list, max_length=2000)
+    person_ids: list[str] = Field(default_factory=list, max_length=2000)
+    run_ids: list[int] = Field(min_length=1, max_length=240000)
+    fingerprint: str = Field(min_length=1, max_length=128)
+    note: str = Field(min_length=1, max_length=2000)
 
 
 def csv_response(filename, columns, rows):
@@ -475,6 +486,102 @@ def install(app, workspace, model):
             return csv_response(f"commission-{kind}-{selection.start}-{selection.end}.csv", columns, rows)
         return csv_response(f"commission-{kind}-{selection.start}-{selection.end}.csv",
                             commission_reports.COLUMNS[kind], commission_reports.export_rows(report, kind))
+
+    def settlement_row(row):
+        result = dict(row)
+        result["selection"] = json.loads(result.pop("selection_json"))
+        result["run_ids"] = json.loads(result.pop("run_ids_json"))
+        snapshot = json.loads(result.pop("report_json"))
+        result["total"] = money_float(Decimal(result["total"]))
+        result["people_count"] = len(snapshot.get("people") or [])
+        result["store_count"] = len(snapshot.get("stores") or [])
+        result["missing_periods"] = snapshot.get("missing_periods", 0)
+        result["trial_periods"] = snapshot.get("trial_periods", 0)
+        return result
+
+    @router.get("/settlements")
+    def settlements(start: str = "", end: str = "", limit: int = Query(30, ge=1, le=200)):
+        with reg().connect() as conn:
+            rows = [settlement_row(r) for r in conn.execute(
+                "SELECT * FROM settlement WHERE (?='' OR end_period>=?) AND (?='' OR start_period<=?) "
+                "ORDER BY at DESC LIMIT ?", (start, start, end, end, limit))]
+        return {"settlements": rows}
+
+    @router.get("/settlements/{settlement_id}")
+    def settlement_detail(settlement_id: str):
+        with reg().connect() as conn:
+            row = conn.execute("SELECT * FROM settlement WHERE id=?", (settlement_id,)).fetchone()
+        if not row:
+            raise HTTPException(404, "没有这次结算记录")
+        saved = settlement_row(row)
+        selection = saved["selection"]
+        try:
+            current = commission_reports.build(workspace(), reg(), model(), selection["start"], selection["end"],
+                                               selection.get("store_ids"), selection.get("person_ids"))
+            current_total = current.get("total")
+            saved["current_total"] = current_total
+            saved["difference"] = (None if current_total is None else
+                                   money_float(Decimal(str(current_total)) - Decimal(str(saved["total"]))))
+            saved["current_error"] = ""
+        except RegistryError as exc:
+            # Current personnel or store configuration can disappear years later. That must
+            # never make the immutable settlement snapshot itself unreadable.
+            saved["current_total"] = None
+            saved["difference"] = None
+            saved["current_error"] = str(exc)
+        saved["report"] = json.loads(dict(row)["report_json"])
+        return saved
+
+    @router.get("/export/settlements/{settlement_id}")
+    def settlement_export(settlement_id: str):
+        with reg().connect() as conn:
+            row = conn.execute("SELECT report_json,start_period,end_period FROM settlement WHERE id=?",
+                               (settlement_id,)).fetchone()
+        if not row:
+            raise HTTPException(404, "没有这次结算记录")
+        report = json.loads(row["report_json"])
+        columns, rows = commission_reports.business_export(report, "breakdown")
+        return csv_response(f"commission-settlement-{row['start_period']}-{row['end_period']}.csv", columns, rows)
+
+    @router.post("/settlements")
+    def settle_commission(change: SettlementCreate, request: Request):
+        who = actor(request)
+        with reg().connect() as conn:
+            existing = conn.execute("SELECT * FROM settlement WHERE fingerprint=?", (change.fingerprint,)).fetchone()
+        if existing:
+            return {**settlement_row(existing), "duplicate": True}
+        selection = ReportSelection(start=change.start, end=change.end, store_ids=change.store_ids,
+                                    person_ids=change.person_ids, run_ids=change.run_ids,
+                                    fingerprint=change.fingerprint)
+        report = report_result(selection)
+        if report.get("total") is None:
+            raise RegistryError("当前范围还没有可结算的提成金额")
+        if report.get("missing_periods") or report.get("trial_periods"):
+            raise RegistryError("仍有未出金额或待核对账期，不能确认员工结算")
+        if any(not row.get("has_result") or row.get("status") in {"试算", "待核价"}
+               for row in report.get("coverage", [])):
+            raise RegistryError("仍有未完成的店铺账期，不能确认员工结算")
+        stored_selection = {"start": change.start, "end": change.end,
+                            "store_ids": sorted(set(change.store_ids)),
+                            "person_ids": sorted(set(change.person_ids))}
+        settlement_id = str(uuid.uuid4())
+        at = now()
+        snapshot = {k: v for k, v in report.items() if k != "fingerprint"}
+        record = {"id": settlement_id, "at": at, "actor": who["id"], "note": change.note.strip(),
+                  "start_period": change.start, "end_period": change.end,
+                  "selection_json": json_text(stored_selection), "run_ids_json": json_text(change.run_ids),
+                  "fingerprint": change.fingerprint, "total": str(report["total"]),
+                  "report_json": json_text(snapshot)}
+        with reg().transaction() as conn:
+            existing = conn.execute("SELECT * FROM settlement WHERE fingerprint=?", (change.fingerprint,)).fetchone()
+            if existing:
+                return {**settlement_row(existing), "duplicate": True}
+            conn.execute("INSERT INTO settlement VALUES(:id,:at,:actor,:note,:start_period,:end_period,"
+                         ":selection_json,:run_ids_json,:fingerprint,:total,:report_json)", record)
+            Registry.audit(conn, who["id"], "commission.settle", settlement_id, change.note.strip(), None,
+                           {"selection": stored_selection, "run_ids": change.run_ids,
+                            "fingerprint": change.fingerprint, "total": report["total"]})
+        return settlement_row(record)
 
     @router.get("/calculations")
     def calculations(store_id: str = "", period: str = "", after: int = 0, limit: int = Query(50, ge=1, le=500)):
