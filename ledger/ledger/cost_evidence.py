@@ -12,4 +12,3 @@ ORDER_DAY_COST_SOURCES = frozenset({
     "history", "component_history", "manual", "blue_flag",
     "register", "register_first",
 })
-
