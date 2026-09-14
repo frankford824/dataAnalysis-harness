@@ -54,6 +54,7 @@ function Stop-LedgerOnly {
     $Listener = Get-NetTCPConnection -State Listen -LocalPort 8000 -ErrorAction SilentlyContinue | Select-Object -First 1
     if (-not $Listener) { return }
     $Process = Get-CimInstance Win32_Process -Filter ("ProcessId=" + $Listener.OwningProcess)
+    if (-not $Process) { continue }
     if ($Process.CommandLine -notmatch 'ledger\.api:app') { throw 'Port 8000 belongs to another application' }
     Stop-Process -Id $Listener.OwningProcess -Force
     Start-Sleep -Milliseconds 250
@@ -64,8 +65,8 @@ function Start-AndCheck {
   Start-ScheduledTask -TaskName 'LedgerHarness'
   for ($Attempt=0; $Attempt -lt 60; $Attempt++) {
     try {
-      $Response = Invoke-WebRequest -Uri 'http://127.0.0.1:8000/api/commission-v2/status' -TimeoutSec 5 -UseBasicParsing
-      if ($Response.StatusCode -eq 200) { return }
+      $Response = Invoke-WebRequest -Uri 'http://127.0.0.1:8000/api/version' -TimeoutSec 5 -UseBasicParsing
+      if ($Response.StatusCode -eq 200 -and ($Response.Content | ConvertFrom-Json).version -eq $Version) { return }
     } catch { }
     Start-Sleep -Milliseconds 500
   }

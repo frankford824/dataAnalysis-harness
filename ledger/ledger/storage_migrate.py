@@ -73,7 +73,7 @@ def prepare(source: Path, work: Path, output: Path):
 def catch_up(source: Path, candidate: Path):
     """Call only while all registry writers are stopped. Preserve immutable rows."""
     immutable={'calculation','scheme_version','event','policy_version','evidence_blob'}
-    with sqlite3.connect(candidate) as conn:
+    with sqlite3.connect(candidate,uri=True) as conn:
         conn.execute('PRAGMA foreign_keys=OFF')
         conn.execute('ATTACH DATABASE ? AS live',(source.resolve().as_uri()+'?mode=ro',))
         tables=[r[0] for r in conn.execute("SELECT name FROM live.sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")]
