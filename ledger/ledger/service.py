@@ -40,6 +40,17 @@ _RECOMPUTE_LIMIT = max(1, int(os.environ.get("LEDGER_RECOMPUTE_LIMIT", "2")))
 _recompute_slots = threading.Semaphore(_RECOMPUTE_LIMIT)
 _store_locks_guard = threading.Lock()
 _store_locks: dict[str, threading.RLock] = {}
+_recompute_waiters: dict[str, int] = {}
+_recompute_running: dict[str, str] = {}
+
+
+def recompute_activity(store_id: str) -> dict | None:
+    with _store_locks_guard:
+        if store_id in _recompute_running:
+            return {"state": "running", "phase": _recompute_running[store_id]}
+        if _recompute_waiters.get(store_id, 0):
+            return {"state": "queued", "phase": "等待核算资源"}
+        return None
 
 
 def _store_lock(store_id: str) -> threading.RLock:
@@ -270,6 +281,8 @@ def recompute(
 ) -> Recomputed:
     """同店串行、全局最多两个重算，避免目录竞态和内存失控。"""
     lock = _store_lock(store.id)
+    with _store_locks_guard:
+        _recompute_waiters[store.id] = _recompute_waiters.get(store.id, 0) + 1
     if not lock.acquire(blocking=False):
         report(f"排队中 · {note or store.name}")
         lock.acquire()
@@ -278,8 +291,17 @@ def recompute(
             report(f"排队中 · {note or store.name}")
             _recompute_slots.acquire()
         try:
-            return _recompute_locked(ws, model, store, report=report, note=note)
+            with _store_locks_guard:
+                _recompute_waiters[store.id] -= 1
+                _recompute_running[store.id] = "准备核算"
+            def tracked(phase, *args, **kwargs):
+                with _store_locks_guard:
+                    _recompute_running[store.id] = str(phase)
+                return report(phase, *args, **kwargs)
+            return _recompute_locked(ws, model, store, report=tracked, note=note)
         finally:
+            with _store_locks_guard:
+                _recompute_running.pop(store.id, None)
             _recompute_slots.release()
     finally:
         lock.release()
@@ -319,6 +341,7 @@ def _recompute_locked(
     )
     if order_feed.enabled():
         try:
+            report(f"关联订单与历史成本 · {where}")
             order_feed.OrderFeed(ws.root).append_to(ing, store)
         except order_feed.OrderFeedError as exc:
             out.failure = {"store": store.name, "why": f"订单台证据未就绪：{exc}"}

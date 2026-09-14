@@ -3,10 +3,11 @@ import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { NDrawer, NDrawerContent, NInput, NButton, NDataTable, NPagination, NAlert } from 'naive-ui'
 import { api } from '../api'
 import { useLatest } from './ui/useLatest'
-import { stamp } from '../format'
 
 const props = defineProps({ runId: { type: Number, required: true }, count: { type: Number, required: true }, storeId: String, period: String })
 const progress = ref(null), progressError = ref(''), progressRequest = useLatest()
+const calculatedAt = computed(() => progress.value?.calculated_at
+  ? new Date(progress.value.calculated_at).toLocaleString('zh-CN', {timeZone: 'Asia/Shanghai', hour12: false}) : '')
 let progressTimer
 async function loadProgress() {
   if (!props.storeId || !props.period) return
@@ -53,7 +54,7 @@ watch(() => props.runId, () => { if(show.value)load(true) })
   <div class="pricing-notice">
     <div><strong>{{ count }} 条商品成本待核价</strong><p>还有商品成本未核实，相关利润和提成暂不能确认。</p>
       <p v-if="progress" aria-live="polite">{{ progress.message }}</p>
-      <p v-if="progress?.calculated_at" class="pricing-help">最近核算：{{ stamp(progress.calculated_at) }}。上方数量属于已保存的核算结果。</p>
+      <p v-if="calculatedAt" class="pricing-help">最近核算（北京时间）：{{ calculatedAt }}。上方数量属于已保存的核算结果。</p>
       <p v-if="progress?.error" class="pricing-help">后台原因：{{ progress.error }}</p>
       <p v-if="progressError" role="status">{{ progressError }}</p>
     </div>

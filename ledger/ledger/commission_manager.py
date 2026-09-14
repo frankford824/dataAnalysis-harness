@@ -118,6 +118,7 @@ class Manager:
                 # failure, and the next attempt never changes frozen results.
                 self.last_error = str(exc)[:2000]
                 self.last_error_store = self.current_pending[0] if self.current_pending else None
+                logging.getLogger(__name__).exception("Recompute failed for %s; durable work will retry", self.current_pending)
                 try:
                     registry = Registry(self.workspace().root)
                     with registry.transaction() as conn:

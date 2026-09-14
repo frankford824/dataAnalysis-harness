@@ -1232,7 +1232,7 @@ def pricing_gaps_page(run_id: int, q: str = "", offset: int = 0, limit: int = 10
 def pricing_progress(store_id: str, period: str) -> dict:
     from .pricing_status import status
     _store(_model(), store_id)
-    return status(workspace(), store_id, period, _commission_worker)
+    return status(workspace(), store_id, period, _commission_worker, service.recompute_activity(store_id))
 
 
 @app.get("/api/runs/{run_id}/pricing-gaps.csv")

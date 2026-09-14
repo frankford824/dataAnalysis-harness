@@ -14,7 +14,7 @@ def read_feed(root):
         return dict(row) if row else None
 
 
-def status(ws, store_id, period, manager=None):
+def status(ws, store_id, period, manager=None, activity=None):
     result = ws.conn.execute("SELECT id,at FROM run WHERE store_id=? AND period=? ORDER BY id DESC LIMIT 1", (store_id, period)).fetchone()
     frozen = ws.conn.execute("SELECT state,run_id FROM period WHERE store_id=? AND period=?", (store_id, period)).fetchone()
     if frozen and frozen["state"] == "closed" and frozen["run_id"]:
@@ -33,7 +33,10 @@ def status(ws, store_id, period, manager=None):
     feed = read_feed(ws.root)
     running = manager is not None and manager.current_pending and manager.current_pending[0] == store_id
     dead = manager is not None and (manager.thread is None or not manager.thread.is_alive())
-    if dead and pending:
+    if activity:
+        state = activity["state"]
+        out.update(state=state, message=("正在核算：" if state == "running" else "本店已排队：") + activity["phase"] + "。完成后自动更新。")
+    elif dead and pending:
         out.update(state="error", message="自动核算服务未运行，旧结果尚未更新。", error=manager.last_error)
     elif running:
         out.update(state="running", message="正在核算本店数据，完成后自动更新。")

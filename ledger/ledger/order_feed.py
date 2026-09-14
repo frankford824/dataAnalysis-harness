@@ -18,10 +18,11 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Iterator
 
 import polars as pl
 
@@ -33,6 +34,9 @@ from .model.schema import ColumnBinding, Model, Store, Template
 from .order_alignment import ORDER_FIELDS, ITEM_FIELDS, read_groups
 
 SCHEMA_VERSION = "ledger-feed.v1"
+_initialization_lock = threading.Lock()
+_initialized_databases: set[Path] = set()
+_sync_guards: dict[Path, threading.RLock] = {}
 REPLACED_SOURCES = frozenset({"order_cost", "after_sales"})
 ACCOUNTING_ENTITIES = frozenset({"order", "order_item", "order_cost", "order_relation", "after_sale", "after_sale_item"})
 CATALOG_ENTITIES = frozenset({"shop", "shop_group", "user", "shop_item", "department", "sku_cost"})
@@ -232,23 +236,33 @@ class OrderFeed:
         self.feed_root = Path(feed_root) if feed_root is not None else _root()
         self.client = client or Client()
         self.db_path = self.workspace_root / "order-feed.db"
-        self._guard = threading.RLock()
         self._unpriced_cost_rows = 0
         self._suspect_cost_rows = 0
         self._implausible_cost: tuple[int, float] = (0, 0.0)
+        self._last_health_probe = 0.0
         self.workspace_root.mkdir(parents=True, exist_ok=True)
-        with self._connect() as conn:
-            conn.executescript(_DB_SCHEMA)
-            have = {row["name"] for row in conn.execute("pragma table_info(feed_state)")}
-            for name, declaration in _STATE_COLUMNS.items():
-                if name not in have:
-                    conn.execute(f"alter table feed_state add column {name} {declaration}")
+        key = self.db_path.resolve()
+        with _initialization_lock:
+            self._guard = _sync_guards.setdefault(key, threading.RLock())
+            if key not in _initialized_databases or not self.db_path.exists():
+                with self._connect() as conn:
+                    conn.executescript(_DB_SCHEMA)
+                    have = {row["name"] for row in conn.execute("pragma table_info(feed_state)")}
+                    for name, declaration in _STATE_COLUMNS.items():
+                        if name not in have:
+                            conn.execute(f"alter table feed_state add column {name} {declaration}")
+                _initialized_databases.add(key)
 
-    def _connect(self) -> sqlite3.Connection:
+    @contextmanager
+    def _connect(self) -> Iterator[sqlite3.Connection]:
         conn = sqlite3.connect(self.db_path, timeout=30)
         conn.row_factory = sqlite3.Row
         conn.execute("pragma busy_timeout=30000")
-        return conn
+        try:
+            with conn:
+                yield conn
+        finally:
+            conn.close()
 
     def state(self) -> dict[str, Any]:
         with self._connect() as conn:
@@ -314,6 +328,7 @@ class OrderFeed:
 
         if revision is not None:
             health = self.client.get("health", {"details":"false"})
+            self._last_health_probe = time.monotonic()
             if not revision.get("healthy") or not health.get("healthy"):
                 self._refresh_health(
                     health, source_revision, source_latest_seq, revision_etag,
@@ -352,9 +367,21 @@ class OrderFeed:
                     health, source_revision, source_latest_seq, revision_etag,
                 )
         elif health and not health.get("healthy"):
-            raise OrderFeedError(
-                "订单台数据源未就绪：" + "、".join(health.get("degraded") or [])
-            )
+            # Producer recovery need not create a new business revision. A 304
+            # must not leave the consumer pinned to an old failure forever.
+            if time.monotonic() - self._last_health_probe >= 30:
+                self._last_health_probe = time.monotonic()
+                health = self.client.get("health", {"details": "false"})
+                self._refresh_health(health, source_revision, source_latest_seq, revision_etag)
+                announced = str(health.get("last_successful_snapshot") or "")
+                if announced and announced != str(old.get("snapshot_id") or ""):
+                    with self._connect() as conn:
+                        conn.execute("UPDATE feed_state SET revision_etag='' WHERE id=1")
+                    raise OrderFeedError("订单台快照已更新，等待下一轮验证并切换")
+            if not health.get("healthy"):
+                raise OrderFeedError(
+                    "订单台数据源未就绪：" + "、".join(health.get("degraded") or [])
+                )
 
         current = self.state()
         manifest = json.loads(current.get("manifest_json") or "{}")

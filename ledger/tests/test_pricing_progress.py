@@ -95,4 +95,59 @@ def test_syncing_blocks_close_and_status_explains_saved_result(tmp_path):
     assert status(ws, 's1', '2026-06', manager)['state'] == 'running'
     manager.thread = None
     assert status(ws, 's1', '2026-06', manager)['state'] == 'error'
+    assert status(ws, 's1', '2026-06', manager, {'state': 'running', 'phase': '读表'})['state'] == 'running'
     ws.close()
+
+
+def test_manual_recompute_reports_phase_and_clears_on_failure(tmp_path, monkeypatch):
+    from ledger import service
+    ws = Workspace(tmp_path); model = _model(); store = model.stores[0]
+    def compute(*args, report, **kwargs):
+        report('核对历史成本')
+        assert service.recompute_activity(store.id) == {'state': 'running', 'phase': '核对历史成本'}
+        raise RuntimeError('test failure')
+    monkeypatch.setattr(service, '_recompute_locked', compute)
+    with pytest.raises(RuntimeError): service.recompute(ws, model, store)
+    assert service.recompute_activity(store.id) is None
+    ws.close()
+
+
+def test_feed_connection_is_closed_and_repeated_readers_do_not_request_write_lock(tmp_path):
+    from ledger.order_feed import OrderFeed
+    feed = OrderFeed(tmp_path, client=object())
+    with feed._connect() as connection:
+        connection.execute('SELECT 1').fetchone()
+    with pytest.raises(sqlite3.ProgrammingError, match='closed'):
+        connection.execute('SELECT 1')
+    # A status reader used to execute INSERT/DDL and wait on this writer.
+    with feed._connect() as writer:
+        writer.execute('BEGIN IMMEDIATE')
+        another = OrderFeed(tmp_path, client=object())
+        assert another._guard is feed._guard
+        assert another.state()['id'] == 1
+
+
+def test_feed_connection_rolls_back_on_failure(tmp_path):
+    from ledger.order_feed import OrderFeed
+    feed = OrderFeed(tmp_path, client=object())
+    with pytest.raises(RuntimeError):
+        with feed._connect() as conn:
+            conn.execute("UPDATE feed_state SET last_error='not committed'")
+            raise RuntimeError('stop')
+    assert feed.state()['last_error'] == ''
+
+
+def test_recovered_producer_with_unchanged_revision_can_resume_backlog(tmp_path):
+    import json
+    from ledger.order_feed import OrderFeed
+    from test_order_feed import FakeClient, _fixture
+    root = tmp_path/'feed'; client = FakeClient(_fixture(root))
+    feed = OrderFeed(tmp_path/'workspace', client=client, feed_root=root)
+    feed.sync()
+    with feed._connect() as conn:
+        conn.execute('UPDATE feed_state SET consumed_seq=10,source_latest_seq=11,health_json=?',
+                     (json.dumps({'healthy': False, 'degraded': ['cost_api_worker']}),))
+    client.calls.clear(); feed._last_health_probe = 0
+    result = feed.sync()
+    assert result.caught_up and result.consumed_seq == 11
+    assert 'health' in client.calls and 'changes' in client.calls
