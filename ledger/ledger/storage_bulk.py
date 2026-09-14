@@ -13,6 +13,21 @@ from pathlib import Path
 from .storage_maintenance import archive_one, manifest, lease, source_objects
 
 
+def regular_tree_files(folder):
+    """Inspect local reparse metadata before directory tests; never traverse NAS links."""
+    stack=[Path(folder)]
+    while stack:
+        current=stack.pop()
+        with os.scandir(current) as entries:
+            for entry in entries:
+                if entry.is_symlink():continue
+                if entry.name.startswith('.') or entry.name.endswith('.tmp'):continue
+                if entry.is_dir(follow_symlinks=False):
+                    if getattr(entry.stat(follow_symlinks=False),'st_file_attributes',0)&1024:continue
+                    stack.append(Path(entry.path))
+                elif entry.is_file(follow_symlinks=False):yield Path(entry.path)
+
+
 def candidates(root, policy):
     cutoff=time.time()-max(60,int(policy.get('stable_seconds',600)))
     with closing(sqlite3.connect((root/'workspace.db').as_uri()+'?mode=ro',uri=True)) as c:
@@ -38,21 +53,19 @@ def candidates(root, policy):
     for name in ['cache/parse','work','peek']:
         folder=root/name
         if not folder.exists():continue
-        for directory,dirs,files in os.walk(folder,followlinks=False):
-            dirs[:]=[d for d in dirs if not d.startswith('.') and not d.endswith('.tmp') and not (Path(directory)/d).is_symlink()]
-            parent=Path(directory)
-            meta=parent/'meta.json'
-            if name=='cache/parse' and not (meta.is_symlink() or meta.is_file()):continue
-            for filename in files:add(root,parent/filename)
+        ready={}
+        for p in regular_tree_files(folder):
+            if name=='cache/parse':
+                if p.parent not in ready:
+                    meta=p.parent/'meta.json';ready[p.parent]=meta.is_symlink() or meta.is_file()
+                if not ready[p.parent]:continue
+            add(root,p)
     app=root.parent
     for name in ['incoming','model-backups','commission-inputs']:
         folder=app/name
         if not folder.exists():continue
-        for directory,dirs,files in os.walk(folder,followlinks=False):
-            dirs[:]=[d for d in dirs if not (Path(directory)/d).is_symlink()]
-            for filename in files:
-                p=Path(directory)/filename
-                if not p.is_symlink() and p.stat().st_mtime<time.time()-86400:add(app,p)
+        for p in regular_tree_files(folder):
+            if p.stat().st_mtime<time.time()-86400:add(app,p)
     for base,p in source_objects(root,policy,cutoff):add(base,p)
     return sorted(items,key=lambda item:item[2],reverse=True)
 

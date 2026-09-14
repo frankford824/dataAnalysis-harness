@@ -199,3 +199,13 @@ def test_planner_does_not_reopen_archived_cache_metadata(tmp_path,monkeypatch):
         return original(p)
     monkeypatch.setattr(Path,'is_file',check)
     assert candidates(w.root,policy)==[]
+
+
+def test_tree_scan_skips_links_and_incomplete_directories(tmp_path):
+    from ledger.storage_bulk import regular_tree_files
+    folder=tmp_path/'local';folder.mkdir();(folder/'keep.txt').write_text('keep')
+    outside=tmp_path/'outside';outside.mkdir();(outside/'data').write_text('outside')
+    (folder/'remote').symlink_to(outside,target_is_directory=True)
+    (folder/'missing').symlink_to(outside/'missing')
+    temp=folder/'.unfinished.tmp';temp.mkdir();(temp/'partial').write_text('not ready')
+    assert list(regular_tree_files(folder))==[folder/'keep.txt']
