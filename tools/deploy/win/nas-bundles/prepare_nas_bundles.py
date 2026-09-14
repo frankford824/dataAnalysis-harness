@@ -13,6 +13,8 @@ choices+=list((root/'releases').iterdir())
 completed=[];skipped=[];cutoff=time.time()-86400
 for source in choices:
  if source.is_symlink() or not source.exists() or source.name.endswith('.lock'):continue
+ if source.parent==root/'releases' and source.suffix.lower() in {'.py','.mjs','.js','.ps1','.sh','.bat','.cmd','.exe','.dll'}:
+  skipped.append(str(source));continue
  files=[source] if source.is_file() else [p for p in source.rglob('*') if p.is_file()]
  if not files or source.stat().st_mtime>cutoff or any(p.stat().st_mtime>cutoff for p in files):
   skipped.append(str(source));continue

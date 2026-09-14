@@ -7,3 +7,5 @@
 执行顺序：准备 NAS 副本并逐文件比较 SHA-256，重新核验源文件清单，再切换原路径为链接，验证链接读回，最后移除已验证的本地临时副本。Windows PowerShell 5 的 UNC 链接显示可能省略前缀，因此使用 Python 对真实目标路径做比较，不通过放宽路径边界规避。
 
 本次额外做了离线数据库备份的本地恢复检验，SHA-256 与 `PRAGMA quick_check` 均通过。记录见 `nas-backup-restore-test.json`。发布锁 `D:\ledger\releases\ui-release.lock` 已确认仍在本地，见 `nas-runtime-exclusions.json`。
+
+最终兼容性检查还将 139 份顶层运维脚本保留回本地，保证基于脚本自身路径计算工作目录的行为不变；其 NAS 存档副本保留。恢复操作见 `restore_operational_scripts.py`，最终名单见 `nas-runtime-exclusions.json`。准备脚本已排除这些运行脚本，后续清单不会再迁出它们。
