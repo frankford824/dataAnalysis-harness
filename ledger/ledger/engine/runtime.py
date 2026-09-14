@@ -762,6 +762,13 @@ def run(ingestion: Ingestion, platform: str = "*") -> RunResult:
     return result
 
 
+def _promotion_periods(row: dict) -> list[str]:
+    months = sorted({p for key in ("file_name", "sheet") for p in infer_period_range(str(row.get(key) or ""))})
+    if not months and row.get("period") and row["period"] != "(未知账期)":
+        months = [row["period"]]
+    return months
+
+
 def _project_scoped_live(
     source_facts: pl.DataFrame, metric: Metric, spine: Spine,
 ) -> Projection:
@@ -810,9 +817,20 @@ def _project_scoped_live(
             pl.concat(calculated_parts, how="vertical_relaxed")
             if calculated_parts else _empty_spine_facts()
         )
-        parts.append(
-            project(wide, metric, Spine(projection_spine), store_wide_facts=calculated)
-        )
+        # Independent monthly control totals must never share a residual pool.
+        scope_columns = [c for c in ("file_name", "sheet", "period") if c in wide.columns]
+        grouped = wide.with_columns(pl.struct(scope_columns).map_elements(
+            lambda row: "|".join(_promotion_periods(row)), return_dtype=pl.Utf8).alias("__promotion_scope"))
+        for block in grouped.partition_by(["store", "__promotion_scope"], maintain_order=True):
+            store = block["store"][0]
+            months = [p for p in block["__promotion_scope"][0].split("|") if p]
+            targets = projection_spine.filter(pl.col(SPINE_STORE) == store)
+            allocated = calculated.filter(pl.col("store") == store)
+            if months:
+                targets = targets.filter(pl.col(SPINE_PERIOD).is_in(months))
+                allocated = allocated.filter(pl.col("period").is_in(months))
+            parts.append(project(block.drop("__promotion_scope"), metric, Spine(targets),
+                                 store_wide_facts=allocated))
     frames = [part.facts for part in parts if not part.facts.is_empty()]
     return Projection(
         facts=pl.concat(frames, how="vertical_relaxed") if frames else parts[0].facts,
@@ -936,10 +954,18 @@ def _mark_counted(facts: pl.DataFrame, spine_facts: pl.DataFrame,
     wide = (pl.col("link_key") == STORE_WIDE_PRODUCT).fill_null(False)
     marked = facts.filter(~wide).join(weights, on=["metric_id", "store", "period", "link_key"], how="left", nulls_equal=True)
     if facts.filter(wide).height:
-        controls = facts.filter(wide).rename({"period": "__source_period__"}).join(
+        controls = facts.filter(wide)
+        scope_columns = [c for c in ("file_name", "sheet", "period") if c in controls.columns]
+        controls = controls.with_columns(pl.struct(scope_columns).map_elements(
+            _promotion_periods, return_dtype=pl.List(pl.Utf8)).alias("__promotion_periods"))
+        dated = controls.filter(pl.col("__promotion_periods").list.len() > 0).drop("period").explode(
+            "__promotion_periods").rename({"__promotion_periods": "period"}).join(
+            weights, on=["metric_id", "store", "period", "link_key"], how="left", nulls_equal=True)
+        undated = controls.filter(pl.col("__promotion_periods").list.len() == 0).drop(
+            "__promotion_periods").rename({"period": "__source_period__"}).join(
             weights, on=["metric_id", "store", "link_key"], how="left", nulls_equal=True)
-        controls = controls.with_columns(pl.coalesce("period", "__source_period__").alias("period")).drop("__source_period__")
-        marked = pl.concat([marked, controls.select(marked.columns)], how="vertical_relaxed")
+        undated = undated.with_columns(pl.coalesce("period", "__source_period__").alias("period")).drop("__source_period__")
+        marked = pl.concat([marked, dated.select(marked.columns), undated.select(marked.columns)], how="vertical_relaxed")
     return (
         marked
         .with_columns(

@@ -33,7 +33,7 @@ function explanation(row) {
 }
 const columns = computed(() => ({
   people:[['person','人员'],['employee_no','工号'],['amount','提成金额'],['stores','店铺'],['periods','月份'],['status','状态']],
-  stores:[['store','店铺'],['amount','提成金额'],['people','人员'],['periods','已有金额'],['missing','未出金额'],['status','状态']],
+  stores:[['store','店铺'],['amount','提成金额'],['configured_people','提成设置人数'],['people','已出金额人数'],['periods','已有金额'],['missing','未出金额'],['status','状态']],
   breakdown:[['person','人员'],['store','店铺'],['period','月份'],['amount','提成金额'],['status','状态']],
   coverage:[['store','店铺'],['period','月份'],['selected_amount','提成金额'],['status','状态'],['explanation','待办']],
 }[state.reportView]))
@@ -42,7 +42,8 @@ function cell(row,key) {
   if(key==='status')return status(row.status)
   if(key==='explanation')return explanation(row)
   if(key==='stores')return `${row[key]} 家`
-  if(key==='people')return `${row[key]} 人`
+  if(key==='configured_people')return `${row[key] ?? 0} 人`
+  if(key==='people')return row.periods ? `${row[key]} 人` : '未出金额'
   if(key==='periods'||key==='missing')return `${row[key]} 个月`
   return row[key] || '—'
 }
@@ -100,8 +101,9 @@ const tableColumns=computed(()=>{
     <div class="report-months"><span class="month-label">月份</span><input v-model="state.start" type="month" aria-label="开始月份"/><span class="date-separator">至</span><input v-model="state.end" type="month" aria-label="结束月份"/><div class="month-shortcuts"><button class="text-button" @click="shortcut('this')">本月</button><button class="text-button" @click="shortcut('last')">上月</button><button class="text-button" @click="shortcut('three')">最近三个月</button></div></div>
     <div v-if="monthError" class="commission-error" role="alert">{{ monthError }}</div>
     <div v-if="error || downloadError" class="commission-error" role="alert">{{ error || downloadError }}<button class="text-button" @click="downloadError='';load()">重试</button></div>
-    <div class="report-overview" :class="{'commission-stale':stale}"><div class="report-total"><span>{{warnings ? "已出金额合计" : "提成合计"}}</span><strong><small v-if="report?.total!=null">¥</small>{{ money(report?.total) }}</strong></div><div class="report-count"><strong>{{ report?.people_count ?? '—' }}</strong><span>位人员</span></div><div class="report-count"><strong>{{ report?.store_count ?? '—' }}</strong><span>家店铺</span></div><button v-if="warnings" class="report-attention" @click="state.reportView='coverage'"><span class="attention-dot"/>{{ report?.missing_periods ? `${report.missing_periods} 个月份未出金额` : '金额待核对' }} <span>查看</span></button></div>
+    <div class="report-overview" :class="{'commission-stale':stale}"><div class="report-total"><span>{{warnings ? "已出金额合计" : "提成合计"}}</span><strong><small v-if="report?.total!=null">¥</small>{{ money(report?.total) }}</strong></div><div class="report-count"><strong>{{ report?.configured_people_count ?? '—' }}</strong><span>位人员已设置</span></div><div class="report-count"><strong>{{ report?.people_count ?? '—' }}</strong><span>位人员已有金额</span></div><div class="report-count"><strong>{{ report?.store_count ?? '—' }}</strong><span>家店铺</span></div><button v-if="warnings" class="report-attention" @click="state.reportView='coverage'"><span class="attention-dot"/>{{ report?.missing_periods ? `${report.missing_periods} 个月份未出金额` : '金额待核对' }} <span>查看</span></button></div>
     <n-alert v-if="warnings" type="warning" style="margin-bottom:16px">还有店铺月份未出金额或待核对，当前合计不是最终应发金额。</n-alert>
+    <p v-if="state.reportView==='stores'" style="color:#64748b;margin:0 0 12px">提成设置人数按所选月份的有效设置统计；已出金额人数只统计已算出提成的人员。待核价不代表没有配置人员。</p>
     <div class="report-tabs-row"><LedgerTabs v-model="state.reportView" :options="kinds" label="汇总方式" @update:model-value="detail=null" /><n-button type="primary" :disabled="!report || locked" :loading="downloading" @click="download">导出表格</n-button></div>
 
     <div v-if="loading" class="commission-loading-line"/>

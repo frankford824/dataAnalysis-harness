@@ -138,3 +138,17 @@ def test_v2_legacy_name_ids_do_not_merge_across_stores(tmp_path):
         'start': '2026-06', 'end': '2026-06'}).json()
     assert len(report['people']) == 2
     assert sorted(p['amount'] for p in report['people']) == [10, 20]
+
+
+def test_configured_people_remain_visible_when_pricing_has_no_amount(tmp_path):
+    from test_commission_v2 import segment
+    ws,registry,people,client=fixture(tmp_path)
+    registry.save_scheme('s1','p1',{'segments':[segment('2026-06-01',people[0]['id'])]},'test','配置',publish=True)
+    registry.save_scheme('s1','p2',{'segments':[segment('2026-07-01',people[1]['id'])]},'test','下月配置',publish=True)
+    ws.record('s1','2026-06',{'commission':{'engine':'commission-v2','total':None,'people':[],
+        'amount_complete':False,'pricing_pending_count':2}},[])
+    report=client.post('/api/commission-v2/reports/query',json={'start':'2026-06','end':'2026-06','store_ids':['s1']}).json()
+    store=report['stores'][0]
+    assert store['configured_people']==1
+    assert store['people']==0 and store['amount'] is None
+    assert '待核价' in store['status']

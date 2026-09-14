@@ -28,11 +28,29 @@ def decimal(value):
     return result
 
 
+def configured_people(registry, start, end):
+    year, month = map(int, end.split('-'))
+    upper = f"{year + (month == 12):04d}-{month % 12 + 1:02d}-01T00:00:00"
+    lower = start + '-01T00:00:00'
+    with registry.connect() as conn:
+        rows = conn.execute("""SELECT DISTINCT s.store_id,json_extract(a.value,'$.person_id') pid
+          FROM scheme s JOIN scheme_version v ON v.id=s.active_version
+          JOIN json_each(v.body,'$.segments') seg JOIN json_each(seg.value,'$.allocations') a
+          WHERE json_extract(seg.value,'$.mode')='distribute'
+          AND json_extract(seg.value,'$.valid_from')<?
+          AND (coalesce(json_extract(seg.value,'$.valid_to'),'')='' OR json_extract(seg.value,'$.valid_to')>?)""", (upper,lower)).fetchall()
+    out = {}
+    for row in rows:
+        if row['pid']:out.setdefault(row['store_id'],set()).add(row['pid'])
+    return out
+
+
 def build(workspace, registry, model, start, end, store_ids=None, person_ids=None, run_ids=None):
     periods=months(start,end)
     selected_stores=set(store_ids or []); selected_people=set(person_ids or [])
     names={s.id:s.name for s in model.stores}
     roster={p['id']:p for p in registry.people()}
+    configured=configured_people(registry,start,end)
     where=['r.period>=?','r.period<=?']; args=[start,end]
     if selected_stores:
         where.append('r.store_id IN ('+','.join('?' for _ in selected_stores)+')');args.extend(sorted(selected_stores))
@@ -112,12 +130,14 @@ def build(workspace, registry, model, start, end, store_ids=None, person_ids=Non
     person_rows=[{**r,'amount':money_float(r['amount']) if r['amount'] is not None else None,'stores':len(r['stores']),
                   'periods':len(r['periods']),'status':'、'.join(sorted(r['statuses']))} for r in people_totals.values()]
     for r in person_rows:r.pop('statuses')
-    store_rows=[{**r,'amount':money_float(r['amount']) if r['periods'] else None,'people':len(r['people']),
+    store_rows=[{**r,'configured_people':len(configured.get(r['store_id'],set()) & selected_people if selected_people else configured.get(r['store_id'],set())),'amount':money_float(r['amount']) if r['periods'] else None,'people':len(r['people']),
                  'status':'、'.join(sorted(r['statuses']))} for r in store_totals.values()]
     for r in store_rows:r.pop('statuses')
     coverage=[{**r,'selected_amount':money_float(r['selected_amount']) if r['has_result'] else None} for r in scopes.values()]
+    configured_total=set().union(*(configured.get(sid,set()) for sid in covered_stores))
+    if selected_people:configured_total &= selected_people
     return {'people':sorted(person_rows,key=lambda x:x['person']),'stores':store_rows,'rows':lines,'coverage':coverage,
-            'available_people':list(available.values()),'run_ids':[r['id'] for r in records],
+            'configured_people_count':len(configured_total),'available_people':list(available.values()),'run_ids':[r['id'] for r in records],
             'total':money_float(sum((decimal(x['amount']) for x in lines),Decimal(0))) if any(r['has_result'] for r in coverage) else None,
             'missing_periods':sum(not r['has_result'] for r in coverage),
             'trial_periods':sum('试算' in r['status'] for r in coverage),
@@ -126,7 +146,7 @@ def build(workspace, registry, model, start, end, store_ids=None, person_ids=Non
 
 COLUMNS={
  'people':['人员','工号','提成金额','店铺数','账期数','计算状态','人员ID'],
- 'stores':['店铺','提成金额','人员数','已计算账期数','未计算账期数','计算状态'],
+ 'stores':['店铺','提成金额','提成设置人数','已出金额人数','已计算账期数','未计算账期数','计算状态'],
  'breakdown':['人员','工号','店铺','账期','提成金额','本人参与基数','基数名称','计算状态','计算时间','说明','计算记录'],
  'coverage':['店铺','账期','筛选范围提成金额','计算状态','未分配订单数','计算时间','说明','计算记录']}
 
@@ -135,7 +155,7 @@ def export_rows(report, kind):
     if kind=='people':
         for r in report['people']:yield dict(zip(COLUMNS[kind],[r['person'],r['employee_no'],r['amount'],r['stores'],r['periods'],r['status'],r['person_id']]))
     elif kind=='stores':
-        for r in report['stores']:yield dict(zip(COLUMNS[kind],[r['store'],r['amount'],r['people'],r['periods'],r['missing'],r['status']]))
+        for r in report['stores']:yield dict(zip(COLUMNS[kind],[r['store'],r['amount'],r['configured_people'],r['people'] if r['periods'] else None,r['periods'],r['missing'],r['status']]))
     elif kind=='breakdown':
         for r in report['rows']:yield dict(zip(COLUMNS[kind],[r['person'],r['employee_no'],r['store'],r['period'],r['amount'],r['base'],r['base_name'],r['status'],r['calculated_at'],r['notes'],r['finance_run']]))
     elif kind=='coverage':
@@ -146,13 +166,14 @@ def export_rows(report, kind):
 def business_export(report, kind):
     columns = {
         'people': [('人员','person'),('工号','employee_no'),('提成金额','amount'),('店铺数','stores'),('月份数','periods'),('状态','status')],
-        'stores': [('店铺','store'),('提成金额','amount'),('人数','people'),('已有金额月份','periods'),('未出金额月份','missing'),('状态','status')],
+        'stores': [('店铺','store'),('提成金额','amount'),('提成设置人数','configured_people'),('已出金额人数','people'),('已有金额月份','periods'),('未出金额月份','missing'),('状态','status')],
         'breakdown': [('人员','person'),('工号','employee_no'),('店铺','store'),('月份','period'),('提成金额','amount'),('状态','status')],
         'coverage': [('店铺','store'),('月份','period'),('提成金额','selected_amount'),('状态','status'),('未分配人员订单数','unassigned_orders')],
     }[kind]
     def rows():
         for row in report['rows' if kind == 'breakdown' else kind]:
             item = {label:row.get(key) for label,key in columns}
+            if kind=='stores' and not row.get('periods'):item['已出金额人数']=None
             for original, replacement in [('未计算提成','未出金额'),('未计算','未出金额'),('试算','待核对'),('历史口径','历史提成'),('已计算','待结账'),('无对应提成记录','暂无提成'),('合计待核对','金额待核对')]:
                 item['状态'] = item['状态'].replace(original, replacement)
             yield item
