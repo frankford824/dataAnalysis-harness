@@ -121,3 +121,35 @@ def test_archiver_rejects_live_registry(tmp_path):
         with pytest.raises(ValueError,match='Live commission'):
             archive_one(root,tmp_path/'archive',source,c)
     assert source.read_bytes()==b'live'
+
+
+def test_transient_windows_sharing_violation_retries(tmp_path,monkeypatch):
+    from ledger.storage_maintenance import replace_with_retry
+    source=tmp_path/'next';target=tmp_path/'final';source.write_bytes(b'verified')
+    original=os.replace;attempts=[]
+    def replace(a,b):
+        attempts.append(1)
+        if len(attempts)==1:
+            exc=OSError('temporary sharing violation');exc.winerror=32;raise exc
+        original(a,b)
+    monkeypatch.setattr('ledger.storage_maintenance.os.replace',replace)
+    monkeypatch.setattr('ledger.storage_maintenance.time.sleep',lambda _:None)
+    replace_with_retry(source,target)
+    assert target.read_bytes()==b'verified' and len(attempts)==2
+
+
+def test_bulk_defers_locked_file_and_continues(tmp_path,monkeypatch):
+    from ledger.storage_bulk import run_bulk
+    from ledger.storage_maintenance import archive_one
+    w,policy=setup(tmp_path)
+    def locked(root,archive,source,conn,**kwargs):
+        if source.name=='2.parquet':
+            exc=OSError('reader is using file');exc.winerror=32;raise exc
+        return archive_one(root,archive,source,conn,**kwargs)
+    with monkeypatch.context() as m:
+        m.setattr('ledger.storage_bulk.archive_one',locked)
+        result=run_bulk(w.root,policy)
+    assert not result['errors'] and len(result['deferred'])==1
+    assert result['archived_files']==4
+    assert not w.facts_path(2).is_symlink()
+    assert run_bulk(w.root,policy)['archived_files']==1

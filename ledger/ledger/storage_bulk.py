@@ -61,7 +61,7 @@ def run_bulk(root,policy,stop_event=None):
     if archive.is_relative_to(root) or root.is_relative_to(archive):raise ValueError('Archive overlaps workspace')
     archive.mkdir(parents=True,exist_ok=True)
     workers=max(1,min(8,int(policy.get('workers',4))))
-    result={'at':time.time(),'mode':'all_completed','archived_files':0,'archived_bytes':0,'errors':[],
+    result={'at':time.time(),'mode':'all_completed','archived_files':0,'archived_bytes':0,'errors':[],'deferred':[],
             'free_before':shutil.disk_usage(root).free}
     with lease(root):
         plan=candidates(root,policy)
@@ -82,7 +82,10 @@ def run_bulk(root,policy,stop_event=None):
                 c=sqlite3.connect(base/'storage.db',timeout=60,check_same_thread=False)
                 c.execute('PRAGMA synchronous=NORMAL');local.connections[base]=c
                 with guard:connections.append(c)
-            return archive_one(base,archive,p,local.connections[base],verified=verified)
+            try:return archive_one(base,archive,p,local.connections[base],verified=verified)
+            except OSError as exc:
+                if getattr(exc,'winerror',None) in (32,33):return {'path':str(p),'reason':str(exc)}
+                raise
         def progress(done=False):
             result.update(free_after=shutil.disk_usage(root).free,remaining_files=result['eligible_files']-result['archived_files'],finished=done)
             target=root/'storage-status.json';temp=root/'storage-bulk-status.tmp'
@@ -100,7 +103,8 @@ def run_bulk(root,policy,stop_event=None):
                     for future in done:
                         try:
                             amount=future.result()
-                            if amount:result['archived_files']+=1;result['archived_bytes']+=amount
+                            if isinstance(amount,dict):result['deferred'].append(amount)
+                            elif amount:result['archived_files']+=1;result['archived_bytes']+=amount
                         except Exception as exc:result['errors'].append(str(exc))
                         if not result['errors'] and not (stop_event and stop_event.is_set()):
                             item=next(iterator,None)
@@ -117,5 +121,9 @@ if __name__=='__main__':
     policy=json.loads((a.root/'storage-policy.json').read_text(encoding='utf8'))
     policy['workers']=a.workers
     if a.drain:policy.update(max_files=10000000,max_bytes=2**62)
-    result=run_bulk(a.root,policy)
-    if result['errors']:raise SystemExit(1)
+    for attempt in range(4):
+        result=run_bulk(a.root,policy)
+        if result['errors']:raise SystemExit(1)
+        if not result['deferred']:break
+        time.sleep(2)
+    if result['deferred']:raise SystemExit('Files remain temporarily locked; original files retained')

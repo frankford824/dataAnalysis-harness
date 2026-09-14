@@ -54,6 +54,17 @@ def manifest(root):
 _object_locks = [threading.Lock() for _ in range(64)]
 
 
+def replace_with_retry(source, target):
+    deadline=time.monotonic()+12
+    while True:
+        try:
+            os.replace(source,target)
+            return
+        except OSError as exc:
+            if getattr(exc,'winerror',None) not in (32,33) or time.monotonic()>=deadline:raise
+            time.sleep(0.25)
+
+
 def archive_one(root: Path, archive: Path, source: Path, conn, *, verified=None):
     if source.is_symlink():return 0
     relative=source.relative_to(root)
@@ -74,7 +85,7 @@ def archive_one(root: Path, archive: Path, source: Path, conn, *, verified=None)
                 try:
                     shutil.copyfile(source,temp)
                     if digest(temp)!=sha:raise ValueError('Archive copy failed checksum')
-                    temp.replace(target)
+                    replace_with_retry(temp,target)
                 finally:temp.unlink(missing_ok=True)
             elif digest(target)!=sha:
                 raise ValueError('Existing archive object failed checksum')
@@ -93,7 +104,7 @@ def archive_one(root: Path, archive: Path, source: Path, conn, *, verified=None)
         elif link.resolve()!=target.resolve() or link.stat().st_size!=before.st_size:
             raise ValueError('Archive link failed verification')
         # Atomic replacement retains a valid path even for concurrent readers.
-        os.replace(link,source)
+        replace_with_retry(link,source)
     finally:link.unlink(missing_ok=True)
     with conn:conn.execute("UPDATE artifact_archive SET state='archived' WHERE source=?",(str(relative),))
     return before.st_size
