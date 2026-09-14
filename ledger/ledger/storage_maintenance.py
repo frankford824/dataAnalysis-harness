@@ -51,26 +51,34 @@ def manifest(root):
     return conn
 
 
-def archive_one(root: Path, archive: Path, source: Path, conn):
+_object_locks = [threading.Lock() for _ in range(64)]
+
+
+def archive_one(root: Path, archive: Path, source: Path, conn, *, verified=None):
     if source.is_symlink():return 0
     relative=source.relative_to(root)
-    allowed={'runs','commission'}
+    allowed={'runs','commission','files','cache','work','peek','incoming','model-backups','commission-inputs'}
+    if relative.parts[0]=='commission' and relative.parts[1:2]!=('calculations',):
+        raise ValueError('Live commission registry cannot be archived')
     if (root/'current/manifest.json').is_file():allowed.add('objects')
     if relative.parts[0] not in allowed or not source.parent.resolve().is_relative_to(root.resolve()):
         raise ValueError('Artifact outside allowed workspace')
     before=source.stat();sha=digest(source)
     target=archive/'objects'/sha[:2]/(sha+source.suffix)
     target.parent.mkdir(parents=True,exist_ok=True)
-    if not target.exists():
-        temp=target.with_name(target.name+'.'+uuid.uuid4().hex+'.tmp')
-        try:
-            shutil.copyfile(source,temp)
-            if digest(temp)!=sha:raise ValueError('Archive copy failed checksum')
-            temp.replace(target)
-        finally:
-            temp.unlink(missing_ok=True)
-    elif digest(target)!=sha:
-        raise ValueError('Existing archive object failed checksum')
+    with _object_locks[int(sha[:2],16)%len(_object_locks)]:
+        cached=verified is not None and str(target) in verified and target.is_file() and target.stat().st_size==before.st_size
+        if not cached:
+            if not target.exists():
+                temp=target.with_name(target.name+'.'+uuid.uuid4().hex+'.tmp')
+                try:
+                    shutil.copyfile(source,temp)
+                    if digest(temp)!=sha:raise ValueError('Archive copy failed checksum')
+                    temp.replace(target)
+                finally:temp.unlink(missing_ok=True)
+            elif digest(target)!=sha:
+                raise ValueError('Existing archive object failed checksum')
+            if verified is not None:verified.add(str(target))
     after=source.stat()
     if (before.st_size,before.st_mtime_ns,before.st_ino)!=(after.st_size,after.st_mtime_ns,after.st_ino):
         raise ValueError('Artifact changed during archival')
@@ -80,7 +88,10 @@ def archive_one(root: Path, archive: Path, source: Path, conn):
     link=source.with_name(source.name+'.archive-'+uuid.uuid4().hex+'.tmp')
     try:
         link.symlink_to(target)
-        if digest(link)!=sha:raise ValueError('Archive link failed verification')
+        if verified is None:
+            if digest(link)!=sha:raise ValueError('Archive link failed verification')
+        elif link.resolve()!=target.resolve() or link.stat().st_size!=before.st_size:
+            raise ValueError('Archive link failed verification')
         # Atomic replacement retains a valid path even for concurrent readers.
         os.replace(link,source)
     finally:link.unlink(missing_ok=True)
@@ -114,6 +125,9 @@ def source_objects(root, policy, cutoff):
 
 
 def run_once(root: Path, policy: dict, stop_event=None):
+    if policy.get('archive_all_completed'):
+        from .storage_bulk import run_bulk
+        return run_bulk(root,policy,stop_event=stop_event)
     root=root.resolve();archive=Path(policy['archive_root']).resolve()
     if archive.is_relative_to(root) or root.is_relative_to(archive):raise ValueError('Archive must be outside the live workspace')
     archive.mkdir(parents=True,exist_ok=True)

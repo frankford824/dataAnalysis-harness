@@ -87,3 +87,37 @@ def test_archived_feed_path_requires_registered_checksum(tmp_path):
     other=root/'objects/unregistered.parquet';other.symlink_to(source.resolve())
     assert not registered_archive_link(root,other,sha)
     assert not registered_archive_link(root,root/'../cold'/source.resolve().name,sha)
+
+
+def test_bulk_moves_completed_closed_runs_inputs_and_committed_cache(tmp_path):
+    from ledger.storage_bulk import run_bulk
+    w,policy=setup(tmp_path)
+    raw=tmp_path/'input.csv';raw.write_text('amount\n12.34\n')
+    kept=w.keep('input.csv',raw,'s');files=w.active_files('s')
+    parse=w.root/'cache/parse/ab/key';parse.mkdir(parents=True)
+    (parse/'meta.json').write_text('[]');(parse/'frame.parquet').write_bytes(b'cache')
+    pending=w.root/'cache/parse/ab/.pending.tmp';pending.mkdir();(pending/'frame.parquet').write_bytes(b'pending')
+    for p in [w.path_of(kept.sha),*files,parse/'meta.json',parse/'frame.parquet']:
+        os.utime(p,(time.time()-86400,)*2)
+    policy.update(archive_all_completed=True,workers=4,max_files=1000)
+    result=run_bulk(w.root,policy)
+    assert not result['errors'] and result['remaining_files']==0
+    assert all(w.facts_path(i).is_symlink() for i in range(1,6))
+    assert w.state('s','2026-06').run_id==1
+    assert pl.read_parquet(w.facts_path(1))['amount'].item()==12.34
+    assert w.path_of(kept.sha).is_symlink() and files[0].is_symlink()
+    assert files[0].read_text()==raw.read_text()
+    assert (parse/'frame.parquet').is_symlink()
+    assert not (pending/'frame.parquet').is_symlink()
+    assert run_bulk(w.root,policy)['eligible_files']==0
+
+
+def test_archiver_rejects_live_registry(tmp_path):
+    import pytest
+    from ledger.storage_maintenance import archive_one,manifest
+    root=tmp_path/'home';(root/'commission').mkdir(parents=True)
+    source=root/'commission/registry.db';source.write_bytes(b'live')
+    with manifest(root) as c:
+        with pytest.raises(ValueError,match='Live commission'):
+            archive_one(root,tmp_path/'archive',source,c)
+    assert source.read_bytes()==b'live'
