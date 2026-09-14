@@ -34,7 +34,7 @@ from pydantic import BaseModel, ValidationError
 
 from . import assist, fees as fees_mod, gaps, index_client, nas_ingest, nas_status, onboard, order_feed, overhead, ownership, progress, service, view
 from . import search as search_mod
-from . import commission_api, commission_manager
+from . import commission_api, commission_manager, storage_maintenance
 from .model import propose
 from .model.config import (
     COMMISSION_COLUMNS,
@@ -59,12 +59,14 @@ from .workspace import (
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
-    global _nas_worker, _order_feed_worker, _commission_worker
+    global _nas_worker, _order_feed_worker, _commission_worker, _storage_worker
     anyio.to_thread.current_default_thread_limiter().total_tokens = max(
         1, int(os.environ.get("LEDGER_THREAD_TOKENS", "16")),
     )
     _snapshot()
     workspace()
+    _storage_worker=storage_maintenance.Worker(workspace().root)
+    _storage_worker.start()
     if hasattr(workspace(), "root"):
         _commission_worker = commission_manager.Manager(lambda: workspace(), lambda: _model())
         _commission_worker.start()
@@ -86,6 +88,9 @@ async def lifespan(_app: FastAPI):
     try:
         yield
     finally:
+        if _storage_worker is not None:
+            _storage_worker.stop()
+            _storage_worker=None
         if _commission_worker is not None:
             _commission_worker.stop()
             _commission_worker = None
@@ -131,6 +136,7 @@ _model_repo_root: Path | None = None
 _model_repo_guard = threading.Lock()
 _nas_worker: nas_ingest.NasIngestWorker | None = None
 _order_feed_worker: order_feed.Worker | None = None
+_storage_worker: storage_maintenance.Worker | None = None
 _commission_worker: commission_manager.Manager | None = None
 _read_cache_guard = threading.RLock()
 _overview_cache: OrderedDict[tuple, dict] = OrderedDict()
@@ -338,6 +344,11 @@ def order_feed_alignment(store_id: str, order_key: str = Query(min_length=1, max
     if not order_feed.enabled():
         return {"available": False, "groups": [], "message": "订单同步未启用"}
     return order_feed.OrderFeed(workspace().root).alignment(store, order_key.strip(), live=True)
+
+
+@app.get("/api/storage/status")
+def storage_status() -> dict:
+    return storage_maintenance.status(workspace().root)
 
 
 @app.get("/api/version")
