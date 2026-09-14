@@ -1,7 +1,8 @@
 """Verified cold-artifact tiering with transparent, atomic filesystem links.
 
-No run, calculation, close, source file or audit row is deleted. Current/frozen
-runs remain local. Cold artifacts keep their existing paths through symlinks.
+No run, calculation, close, source file or audit row is deleted. The default
+policy retains current runs; the all-completed policy also archives immutable
+current/closed artifacts. All artifacts keep their original paths through links.
 """
 from __future__ import annotations
 import argparse
