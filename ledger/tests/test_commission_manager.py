@@ -3,6 +3,7 @@ from types import SimpleNamespace
 from ledger.commission_manager import Manager
 from ledger.commission_registry import Registry
 from ledger.workspace import Workspace
+from ledger.model.schema import Store
 from test_commission import _model
 
 
@@ -38,3 +39,29 @@ def test_component_fingerprint_does_not_replace_the_numeric_sequence(tmp_path, m
         pending=conn.execute("SELECT * FROM pending WHERE store_id='s1'").fetchone()
         assert pending['source_seq']==10
         assert pending['source_fingerprint']==next_version
+
+
+def test_new_events_keep_worker_lease_so_other_stores_are_not_starved(tmp_path, monkeypatch):
+    monkeypatch.setenv('LEDGER_ORDER_FEED_ENABLED','0')
+    ws=Workspace(tmp_path);registry=Registry(tmp_path)
+    registry.enqueue_source({'s1'},'order-feed:snapshot:10')
+    registry.enqueue_source({'s2'},'order-feed:snapshot:10')
+    with registry.transaction() as conn:
+        conn.execute("UPDATE pending SET next_attempt=0 WHERE store_id='s1'")
+        conn.execute("UPDATE pending SET next_attempt=1 WHERE store_id='s2'")
+    model=_model(stores=(Store(id='s1',name='一店',platform='taobao'),
+                         Store(id='s2',name='二店',platform='taobao')))
+    calls=[]
+    def compute(_ws,_model,store,**_kwargs):
+        calls.append(store.id)
+        if store.id=='s1':
+            registry.enqueue_source({'s1'},'order-feed:snapshot:20')
+            return SimpleNamespace(failure=None,periods=[{'source_sync_pending':True}])
+        return SimpleNamespace(failure=None,periods=[])
+    monkeypatch.setattr('ledger.commission_manager.service.recompute',compute)
+    manager=Manager(lambda:ws,lambda:model)
+    manager.once();manager.once()
+    assert calls==['s1','s2']
+    with registry.connect() as conn:
+        pending=conn.execute("SELECT * FROM pending WHERE store_id='s1'").fetchone()
+        assert pending['source_seq']==20 and pending['next_attempt']>int(__import__('time').time())

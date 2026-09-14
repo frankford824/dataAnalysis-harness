@@ -550,7 +550,10 @@ class Registry:
                 "INSERT INTO pending(store_id,revision,source_seq,source_fingerprint) VALUES(?,?,?,?) "
                 "ON CONFLICT(store_id) DO UPDATE SET revision=max(revision,excluded.revision),"
                 "source_seq=max(source_seq,excluded.source_seq),source_fingerprint=excluded.source_fingerprint,"
-                "next_attempt=min(next_attempt,?),error=''",
+                # Preserve an active worker lease/backoff. A new event makes an
+                # idle row due now, but must not let one noisy store jump ahead
+                # again while its current recomputation is still running.
+                "next_attempt=max(next_attempt,?),error=''",
                 [(sid, revision, seq, fingerprint, int(time.time())) for sid in stores],
             )
 
