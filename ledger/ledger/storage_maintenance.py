@@ -17,6 +17,10 @@ from pathlib import Path
 from .storage_integrity import digest
 
 
+class MaintenanceBusy(Exception):
+    pass
+
+
 @contextmanager
 def lease(root):
     path=root/'storage-maintenance.lock'
@@ -25,10 +29,12 @@ def lease(root):
         f.seek(0)
         if os.name=='nt':
             import msvcrt
-            msvcrt.locking(f.fileno(),msvcrt.LK_NBLCK,1)
+            try:msvcrt.locking(f.fileno(),msvcrt.LK_NBLCK,1)
+            except OSError as exc:raise MaintenanceBusy() from exc
         else:
             import fcntl
-            fcntl.flock(f.fileno(),fcntl.LOCK_EX|fcntl.LOCK_NB)
+            try:fcntl.flock(f.fileno(),fcntl.LOCK_EX|fcntl.LOCK_NB)
+            except BlockingIOError as exc:raise MaintenanceBusy() from exc
         try:yield
         finally:
             f.seek(0)
@@ -206,6 +212,8 @@ class Worker:
                 run_once(self.root,policy,self.stop_event)
                 self.last_run=time.time()
                 self.stop_event.wait(60 if pressure else 1)
+            except MaintenanceBusy:
+                self.stop_event.wait(60)
             except Exception as exc:
                 print('Storage maintenance deferred: '+str(exc),flush=True)
                 try:
