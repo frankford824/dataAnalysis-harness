@@ -12,7 +12,7 @@ try {
  if((Test-Path $manifest) -and (Test-Path $success) -and -not $Force){
   $m=Get-Content $manifest -Raw -Encoding UTF8 | ConvertFrom-Json
   $s=Get-Content $success -Raw -Encoding UTF8 | ConvertFrom-Json
-  if($m.snapshot_id -eq $s.snapshot_id -and ([DateTimeOffset]::UtcNow-[DateTimeOffset]::Parse($m.created_at)).TotalHours -lt 20){Write-Output 'SNAPSHOT_ALREADY_FRESH';return}
+  if($m.snapshot_id -eq $s.snapshot_id -and ([DateTimeOffset]::UtcNow-[DateTimeOffset]::Parse($m.created_at)).TotalHours -lt 2){Write-Output 'SNAPSHOT_ALREADY_FRESH';return}
  }
  if(Test-Path $manifest){
   $before=Get-Content $manifest -Raw -Encoding UTF8 | ConvertFrom-Json
@@ -35,4 +35,5 @@ try {
  Move-Item -LiteralPath ($success+'.next') -Destination $success -Force
  Write-Output ('SNAPSHOT_VERIFIED '+$next.snapshot_id)
 } finally {$lock.Dispose()}
+
 

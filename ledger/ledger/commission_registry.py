@@ -83,6 +83,7 @@ CREATE TABLE IF NOT EXISTS calculation (
  rules_json TEXT NOT NULL, summary_json TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS calculation_scope ON calculation(store_id,period,finance_run);
+CREATE INDEX IF NOT EXISTS calculation_recent ON calculation(finance_run DESC);
 CREATE TRIGGER IF NOT EXISTS calculation_no_update BEFORE UPDATE ON calculation
  BEGIN SELECT RAISE(ABORT,'commission calculation history is immutable'); END;
 CREATE TRIGGER IF NOT EXISTS calculation_no_delete BEFORE DELETE ON calculation
