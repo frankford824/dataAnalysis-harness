@@ -153,3 +153,21 @@ def test_bulk_defers_locked_file_and_continues(tmp_path,monkeypatch):
     assert result['archived_files']==4
     assert not w.facts_path(2).is_symlink()
     assert run_bulk(w.root,policy)['archived_files']==1
+
+
+def test_bulk_object_verification_is_shared_for_duplicate_content(tmp_path,monkeypatch):
+    from ledger.storage_maintenance import archive_one,manifest,normalized_link_path
+    root=tmp_path/'home';(root/'runs').mkdir(parents=True)
+    a=root/'runs/1.parquet';b=root/'runs/2.parquet'
+    a.write_bytes(b'identical');b.write_bytes(b'identical')
+    archive=tmp_path/'nas';calls=[]
+    def checked(p):calls.append(str(p));return digest(p)
+    monkeypatch.setattr('ledger.storage_maintenance.digest',checked)
+    verified=set()
+    with manifest(root) as c:
+        archive_one(root,archive,a,c,verified=verified)
+        count=len(calls)
+        archive_one(root,archive,b,c,verified=verified)
+    assert len(calls)==count+1  # second source hashed; shared object was already verified
+    assert a.read_bytes()==b.read_bytes()==b'identical'
+    assert normalized_link_path('\\\\?\\UNC\\server\\share\\file')==normalized_link_path('\\\\server\\share\\file')

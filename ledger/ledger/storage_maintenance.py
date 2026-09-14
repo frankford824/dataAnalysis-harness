@@ -55,6 +55,15 @@ def manifest(root):
 _object_locks = [threading.Lock() for _ in range(64)]
 
 
+def normalized_link_path(value):
+    # Compare reparse targets without repeatedly resolving NAS directories.
+    unc='\\\\?\\UNC\\'
+    prefix='\\\\?\\'
+    if value.startswith(unc):value='\\\\'+value[len(unc):]
+    elif value.startswith(prefix):value=value[len(prefix):]
+    return os.path.normcase(os.path.normpath(value))
+
+
 def replace_with_retry(source, target):
     deadline=time.monotonic()+12
     while True:
@@ -77,9 +86,12 @@ def archive_one(root: Path, archive: Path, source: Path, conn, *, verified=None)
         raise ValueError('Artifact outside allowed workspace')
     before=source.stat();sha=digest(source)
     target=archive/'objects'/sha[:2]/(sha+source.suffix)
-    target.parent.mkdir(parents=True,exist_ok=True)
     with _object_locks[int(sha[:2],16)%len(_object_locks)]:
-        cached=verified is not None and str(target) in verified and target.is_file() and target.stat().st_size==before.st_size
+        parent_key='directory:'+str(target.parent)
+        if verified is None or parent_key not in verified:
+            target.parent.mkdir(parents=True,exist_ok=True)
+            if verified is not None:verified.add(parent_key)
+        cached=verified is not None and str(target) in verified
         if not cached:
             if not target.exists():
                 temp=target.with_name(target.name+'.'+uuid.uuid4().hex+'.tmp')
@@ -102,7 +114,7 @@ def archive_one(root: Path, archive: Path, source: Path, conn, *, verified=None)
         link.symlink_to(target)
         if verified is None:
             if digest(link)!=sha:raise ValueError('Archive link failed verification')
-        elif link.resolve()!=target.resolve() or link.stat().st_size!=before.st_size:
+        elif normalized_link_path(os.readlink(link))!=normalized_link_path(str(target)):
             raise ValueError('Archive link failed verification')
         # Atomic replacement retains a valid path even for concurrent readers.
         replace_with_retry(link,source)
