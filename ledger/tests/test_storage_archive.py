@@ -182,3 +182,20 @@ def test_bulk_counts_zero_byte_files_as_completed(tmp_path):
     result=run_bulk(w.root,policy)
     assert result['archived_files']==6 and result['remaining_files']==0
     assert p.is_symlink() and p.read_bytes()==b''
+
+
+def test_planner_does_not_reopen_archived_cache_metadata(tmp_path,monkeypatch):
+    from pathlib import Path
+    from ledger.storage_bulk import run_bulk,candidates
+    w,policy=setup(tmp_path)
+    folder=w.root/'cache/parse/ab/key';folder.mkdir(parents=True)
+    meta=folder/'meta.json';meta.write_text('[]')
+    os.utime(meta,(time.time()-86400,)*2)
+    run_bulk(w.root,policy)
+    assert meta.is_symlink()
+    original=Path.is_file
+    def check(p):
+        if p==meta:raise AssertionError('Archived metadata should not be reopened during enumeration')
+        return original(p)
+    monkeypatch.setattr(Path,'is_file',check)
+    assert candidates(w.root,policy)==[]

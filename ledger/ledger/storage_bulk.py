@@ -41,7 +41,8 @@ def candidates(root, policy):
         for directory,dirs,files in os.walk(folder,followlinks=False):
             dirs[:]=[d for d in dirs if not d.startswith('.') and not d.endswith('.tmp') and not (Path(directory)/d).is_symlink()]
             parent=Path(directory)
-            if name=='cache/parse' and not (parent/'meta.json').is_file():continue
+            meta=parent/'meta.json'
+            if name=='cache/parse' and not (meta.is_symlink() or meta.is_file()):continue
             for filename in files:add(root,parent/filename)
     app=root.parent
     for name in ['incoming','model-backups','commission-inputs']:
@@ -51,7 +52,7 @@ def candidates(root, policy):
             dirs[:]=[d for d in dirs if not (Path(directory)/d).is_symlink()]
             for filename in files:
                 p=Path(directory)/filename
-                if p.stat().st_mtime<time.time()-86400:add(app,p)
+                if not p.is_symlink() and p.stat().st_mtime<time.time()-86400:add(app,p)
     for base,p in source_objects(root,policy,cutoff):add(base,p)
     return sorted(items,key=lambda item:item[2],reverse=True)
 
