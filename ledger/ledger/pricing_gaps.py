@@ -19,9 +19,15 @@ def rows(path: Path, q: str = "") -> pl.LazyFrame:
 
 def page(path: Path, *, q: str = "", offset: int = 0, limit: int = 100) -> dict:
     frame = rows(path, q)
-    total = frame.select(pl.len()).collect().item()
-    return {"total": total, "offset": max(0, offset),
-            "items": frame.slice(max(0, offset), max(1, min(limit, 200))).collect().to_dicts()}
+    summary, reasons, items = pl.collect_all([
+        frame.select(pl.len().alias("total"),
+                     pl.col("reference_unit_cost").is_not_null().sum().alias("reference_count")),
+        frame.group_by(pl.col("reason").fill_null("其他待核对事项")).len().sort("len", descending=True),
+        frame.slice(max(0, offset), max(1, min(limit, 200))),
+    ])
+    return {"total": summary["total"][0], "reference_count": summary["reference_count"][0],
+            "reason_counts": [{"reason": row["reason"], "count": row["len"]} for row in reasons.to_dicts()],
+            "offset": max(0, offset), "items": items.to_dicts()}
 
 
 def csv(path: Path, q: str = "") -> str:

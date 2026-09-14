@@ -80,6 +80,8 @@ def test_pending_rows_are_saved_even_without_monetary_facts(tmp_path):
     path = ws.pricing_gaps_path(rid)
     data = pricing_gaps.page(path)
     assert data['total'] == 1
+    assert data['reference_count'] == 0
+    assert sum(item['count'] for item in data['reason_counts']) == 1
     assert data['items'][0]['reference_unit_cost'] is None
     assert data['items'][0]['order_date'] == '2026-05-24'
     assert pricing_gaps.page(path, q='not-found')['total'] == 0
