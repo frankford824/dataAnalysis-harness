@@ -53,3 +53,21 @@ def test_atomic_link_failure_keeps_live_artifact(tmp_path,monkeypatch):
     assert result['errors']
     assert pl.read_parquet(w.facts_path(2))['amount'].item()==12.34
     assert not w.facts_path(2).is_symlink()
+
+
+def test_source_objects_keep_provider_and_consumer_snapshots(tmp_path):
+    import json
+    w,policy=setup(tmp_path)
+    provider=tmp_path/'provider';(provider/'objects').mkdir(parents=True);(provider/'current').mkdir()
+    for name in ['provider','consumer','cold']:
+        p=provider/'objects'/(name+'.parquet');p.write_bytes(name.encode());os.utime(p,(time.time()-4*86400,)*2)
+    (provider/'current/manifest.json').write_text(json.dumps({'objects':{'data':{'path':'objects/provider.parquet'}}}))
+    with sqlite3.connect(w.root/'order-feed.db') as c:
+        c.execute('create table feed_state(id integer,manifest_json text)')
+        c.execute('insert into feed_state values(1,?)',(json.dumps({'objects':{'data':{'path':'objects/consumer.parquet'}}}),))
+    policy['source_snapshot_root']=str(provider)
+    result=run_once(w.root,policy)
+    assert not result['errors'] and result['archived_files']==3
+    assert (provider/'objects/cold.parquet').is_symlink()
+    assert not (provider/'objects/provider.parquet').is_symlink()
+    assert not (provider/'objects/consumer.parquet').is_symlink()

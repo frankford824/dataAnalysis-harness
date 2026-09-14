@@ -124,6 +124,32 @@ def catch_up(source: Path, candidate: Path):
         return {'counts':counts,'calculation_digest':calculation_digest(conn),'candidate_bytes':candidate.stat().st_size}
 
 
+def compact_feed(source: Path, output: Path):
+    if output.exists():raise ValueError('Feed candidate already exists')
+    def signature(c):
+        h=hashlib.sha256();counts={}
+        for table in ['feed_state','feed_store','feed_entity','feed_pending_store']:
+            columns=c.execute('pragma table_info('+table+')').fetchall()
+            keys=[r[1] for r in sorted(columns,key=lambda r:r[5]) if r[5]]
+            counts[table]=0
+            for row in c.execute('SELECT * FROM '+table+' ORDER BY '+','.join(keys)):
+                h.update(json.dumps(tuple(row),ensure_ascii=False,separators=(',',':')).encode());h.update(b'\n');counts[table]+=1
+        return counts,h.hexdigest()
+    with sqlite3.connect(source) as c:
+        checkpoint=c.execute('PRAGMA wal_checkpoint(TRUNCATE)').fetchone()
+        if checkpoint[0]:raise ValueError('Feed writers are still active')
+        before=signature(c)
+        c.execute('PRAGMA auto_vacuum=INCREMENTAL')
+        c.execute('VACUUM INTO ?',(str(output),))
+    with sqlite3.connect(output) as c:
+        if signature(c)!=before:raise ValueError('Feed checkpoint or entities changed')
+        if c.execute('PRAGMA quick_check').fetchone()[0]!='ok':raise ValueError('Feed candidate is corrupt')
+        if c.execute('PRAGMA auto_vacuum').fetchone()[0]!=2:raise ValueError('Incremental vacuum not enabled')
+    result={'counts':before[0],'logical_sha256':before[1],'source_bytes':source.stat().st_size,'candidate_bytes':output.stat().st_size}
+    output.with_suffix('.manifest.json').write_text(json.dumps(result,indent=2),encoding='utf8')
+    return result
+
+
 if __name__=='__main__':
-    p=argparse.ArgumentParser();p.add_argument('operation',choices=['prepare','catch-up']);p.add_argument('--source',type=Path,required=True);p.add_argument('--work',type=Path);p.add_argument('--output',type=Path,required=True);a=p.parse_args()
-    print(json.dumps(prepare(a.source,a.work,a.output) if a.operation=='prepare' else catch_up(a.source,a.output)),flush=True)
+    p=argparse.ArgumentParser();p.add_argument('operation',choices=['prepare','catch-up','compact-feed']);p.add_argument('--source',type=Path,required=True);p.add_argument('--work',type=Path);p.add_argument('--output',type=Path,required=True);a=p.parse_args()
+    print(json.dumps(prepare(a.source,a.work,a.output) if a.operation=='prepare' else catch_up(a.source,a.output) if a.operation=='catch-up' else compact_feed(a.source,a.output)),flush=True)

@@ -48,7 +48,9 @@ def manifest(root):
 def archive_one(root: Path, archive: Path, source: Path, conn):
     if source.is_symlink():return 0
     relative=source.relative_to(root)
-    if relative.parts[0] not in {'runs','commission'} or not source.parent.resolve().is_relative_to(root.resolve()):
+    allowed={'runs','commission'}
+    if (root/'current/manifest.json').is_file():allowed.add('objects')
+    if relative.parts[0] not in allowed or not source.parent.resolve().is_relative_to(root.resolve()):
         raise ValueError('Artifact outside allowed workspace')
     before=source.stat();sha=digest(source)
     target=archive/'objects'/sha[:2]/(sha+source.suffix)
@@ -88,6 +90,23 @@ def protected_runs(root, versions):
     return keep,known
 
 
+def source_objects(root, policy, cutoff):
+    if not policy.get('source_snapshot_root'):return []
+    source_root=Path(policy['source_snapshot_root']).resolve()
+    archive=Path(policy['archive_root']).resolve()
+    if source_root.is_relative_to(archive) or archive.is_relative_to(source_root):
+        raise ValueError('Source snapshots and archive overlap')
+    current=json.loads((source_root/'current/manifest.json').read_text(encoding='utf-8-sig'))
+    with sqlite3.connect((root/'order-feed.db').as_uri()+'?mode=ro',uri=True) as c:
+        row=c.execute('SELECT manifest_json FROM feed_state WHERE id=1').fetchone()
+    active=json.loads(row[0]) if row and row[0] else None
+    if not active or not current.get('objects') or not active.get('objects'):
+        raise ValueError('Cannot archive snapshots without both active manifests')
+    protected={Path(v['path']).name for m in [current,active] for v in m['objects'].values()}
+    return [(source_root,p) for p in (source_root/'objects').glob('*.parquet')
+            if p.name not in protected and not p.is_symlink() and p.stat().st_mtime<cutoff]
+
+
 def run_once(root: Path, policy: dict, stop_event=None):
     root=root.resolve();archive=Path(policy['archive_root']).resolve()
     if archive.is_relative_to(root) or root.is_relative_to(archive):raise ValueError('Archive must be outside the live workspace')
@@ -107,19 +126,24 @@ def run_once(root: Path, policy: dict, stop_event=None):
                 candidates.append(source)
         reg=root/'commission/registry.db'
         if reg.exists():
-            with sqlite3.connect(reg.as_uri()+'?mode=ro',uri=True) as c:
+            with closing(sqlite3.connect(reg.as_uri()+'?mode=ro',uri=True)) as c:
                 for rid,name in c.execute('SELECT finance_run,path FROM calculation'):
                     source=root/'commission/calculations'/Path(name).name
                     if rid in known and rid not in keep and not source.is_symlink() and source.is_file() and source.stat().st_mtime<cutoff:
                         candidates.append(source)
-        candidates.sort(key=lambda p:p.stat().st_mtime)
+        candidates=[(root,p) for p in candidates]+source_objects(root,policy,cutoff)
+        candidates.sort(key=lambda pair:pair[1].stat().st_mtime)
         result['eligible_files']=len(candidates)
-        with closing(manifest(root)) as conn:
-            for source in candidates:
+        from contextlib import ExitStack
+        with ExitStack() as stack:
+            connections={}
+            for artifact_root,source in candidates:
                 if stop_event is not None and stop_event.is_set():break
                 if result['archived_files']>=max_files or result['archived_bytes']>=max_bytes:break
                 try:
-                    size=archive_one(root,archive,source,conn)
+                    if artifact_root not in connections:
+                        connections[artifact_root]=stack.enter_context(closing(manifest(artifact_root)))
+                    size=archive_one(artifact_root,archive,source,connections[artifact_root])
                     result['archived_files']+=1;result['archived_bytes']+=size
                     if result['archived_files']%100==0:print(json.dumps(result),flush=True)
                 except (OSError,ValueError) as exc:
@@ -131,6 +155,18 @@ def run_once(root: Path, policy: dict, stop_event=None):
     return result
 
 
+def reclaim_feed_pages(root):
+    path=Path(root)/'order-feed.db'
+    if not path.exists():return
+    start=time.monotonic()
+    with closing(sqlite3.connect(path,timeout=1)) as c:
+        if c.execute('PRAGMA auto_vacuum').fetchone()[0]!=2:return
+        for _ in range(64):
+            if time.monotonic()-start>5 or not c.execute('PRAGMA freelist_count').fetchone()[0]:break
+            c.execute('PRAGMA incremental_vacuum(1024)').fetchall()
+            c.commit()
+
+
 def status(root):
     root=Path(root);policy=root/'storage-policy.json';last=root/'storage-status.json'
     config=json.loads(policy.read_text(encoding='utf8')) if policy.exists() else {}
@@ -138,6 +174,13 @@ def status(root):
     result.update(enabled=bool(config.get('enabled')),free_bytes=shutil.disk_usage(root).free,
                   reserve_bytes=int(config.get('reserve_bytes',15*1024**3)))
     result['low_space']=result['free_bytes']<result['reserve_bytes']
+    if config.get('source_snapshot_root'):
+        try:
+            from datetime import datetime,timezone
+            m=json.loads((Path(config['source_snapshot_root'])/'current/manifest.json').read_text(encoding='utf-8-sig'))
+            age=(datetime.now(timezone.utc)-datetime.fromisoformat(m['created_at'])).total_seconds()/3600
+            result.update(source_snapshot_id=m['snapshot_id'],source_snapshot_age_hours=round(age,2),source_snapshot_stale=age>48)
+        except (OSError,ValueError,KeyError):result['source_snapshot_stale']=True
     return result
 
 
@@ -158,11 +201,18 @@ class Worker:
                 interval=max(300,int(policy.get('interval_seconds',3600)))
                 pressure=shutil.disk_usage(self.root).free<int(policy.get('reserve_bytes',15*1024**3))
                 if time.time()-self.last_run<interval and not pressure:continue
+                try:reclaim_feed_pages(self.root)
+                except sqlite3.OperationalError:pass
                 run_once(self.root,policy,self.stop_event)
                 self.last_run=time.time()
                 self.stop_event.wait(60 if pressure else 1)
             except Exception as exc:
                 print('Storage maintenance deferred: '+str(exc),flush=True)
+                try:
+                    pending=self.root/'storage-status.error.tmp'
+                    pending.write_text(json.dumps({'at':time.time(),'errors':[str(exc)]}),encoding='utf8')
+                    pending.replace(self.root/'storage-status.json')
+                except OSError:pass
                 self.stop_event.wait(300)
 
 

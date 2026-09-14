@@ -59,3 +59,20 @@ def test_reuse_requires_exact_payload_fingerprint_and_sealed_files(tmp_path):
     path=w.facts_path(ident);path.parent.mkdir(exist_ok=True);path.write_bytes(b'facts');seal(path)
     assert verified(path)
     path.write_bytes(b'corrupt');assert not verified(path)
+
+
+def test_feed_compaction_preserves_checkpoint_and_enables_reclaim(tmp_path):
+    from ledger.storage_migrate import compact_feed
+    source=tmp_path/'feed.db';target=tmp_path/'compact.db'
+    with sqlite3.connect(source) as c:
+        for name in ['feed_state','feed_store','feed_entity','feed_pending_store']:
+            c.execute('CREATE TABLE '+name+'(id INTEGER PRIMARY KEY, payload TEXT)')
+            c.executemany('INSERT INTO '+name+' VALUES(?,?)',[(i,'x'*10000) for i in range(80)])
+            c.execute('DELETE FROM '+name+' WHERE id>2')
+        c.execute("UPDATE feed_state SET payload='checkpoint-17929491' WHERE id=1")
+    result=compact_feed(source,target)
+    assert result['candidate_bytes']<result['source_bytes']
+    with sqlite3.connect(target) as c:
+        assert c.execute('PRAGMA auto_vacuum').fetchone()[0]==2
+        assert c.execute('SELECT payload FROM feed_state WHERE id=1').fetchone()[0]=='checkpoint-17929491'
+    assert all(n==3 for n in result['counts'].values())
