@@ -11,6 +11,7 @@ const coverageTitle = computed(() => props.coverage?.expected
   ? `商品成本覆盖率 ${percentage(props.coverage.coverage)}，结账门槛 ${percentage(props.coverage.threshold)}`
   : `${props.count} 条商品成本未覆盖`)
 const needed = computed(() => Math.max(0, Math.ceil((props.coverage?.expected || 0) * (props.coverage?.threshold || 0)) - (props.coverage?.covered || 0)))
+const uncoveredOrders = computed(() => props.coverage?.uncovered ?? props.count)
 const reasonName = value => ({
   '下单日历史成本待核实':'成本尚未确认',
   '缺少已核实的下单日历史成本':'没有可用成本',
@@ -67,7 +68,7 @@ watch(() => props.runId, () => { if(show.value)load(true) })
 
 <template>
   <div class="pricing-notice" :class="{passed:thresholdMet}">
-    <div><strong>{{ coverageTitle }}</strong><p v-if="thresholdMet">已达到结账门槛。还有 {{ integer(count) }} 条未覆盖成本，本期暂不计入。</p><p v-else>尚未达到结账门槛，还差 {{ integer(needed) }} 笔订单覆盖。</p>
+    <div><strong>{{ coverageTitle }}</strong><p v-if="thresholdMet">已达到结账门槛。还有 {{ integer(uncoveredOrders) }} 笔订单未覆盖商品成本，本期暂不计入。</p><p v-else>尚未达到结账门槛，还差 {{ integer(needed) }} 笔订单覆盖。</p>
       <p v-if="progress" aria-live="polite">{{ progress.message }}</p>
       <p v-if="calculatedAt" class="pricing-help">最近核算（北京时间）：{{ calculatedAt }}。上方数量属于已保存的核算结果。</p>
       <p v-if="progressError" role="status">{{ progressError }}</p>
