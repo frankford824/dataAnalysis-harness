@@ -279,6 +279,7 @@ function amount(v, display) {
 function label(c) {
   if (!c) return ''
   if (c.state === 'closed') return c.stale ? '已结账 · 有新数据' : '已结账'
+  if (c.cost_review?.requires_human) return '成本待人工确认'
   if (c.blocking?.length) return `${c.blocking.length} 项待处理`
   if (c.missing?.length) return `缺 ${c.missing.length} 项`
   if (c.can_close) return '可结账'

@@ -66,6 +66,7 @@ function statusOf(p) {
   if (p.state === 'closed' && p.stale) return { mark: 'evidence', text: '有新资料' }
   if (p.state === 'closed') return { mark: 'closed', text: '已结账' }
   if (p.can_close) return { mark: 'ready', text: '可确认' }
+  if (p.cost_decision_required) return { mark: 'pending', text: '成本待人工确认' }
   return { mark: 'pending', text: '待补资料' }
 }
 

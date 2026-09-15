@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import re
+import json
 import os
 import ntpath
 import threading
@@ -21,6 +22,7 @@ from urllib.parse import quote
 from collections import Counter, OrderedDict
 from contextlib import asynccontextmanager
 from datetime import datetime
+from decimal import Decimal
 from hashlib import sha256
 from pathlib import Path
 from time import perf_counter
@@ -32,7 +34,7 @@ from fastapi.responses import HTMLResponse, PlainTextResponse
 from starlette.middleware.gzip import GZipMiddleware
 from pydantic import BaseModel, Field, ValidationError
 
-from . import assist, fees as fees_mod, gaps, index_client, nas_ingest, nas_status, onboard, order_feed, overhead, ownership, progress, service, view
+from . import assist, fees as fees_mod, gaps, index_client, manual_cost, nas_ingest, nas_status, onboard, order_feed, overhead, ownership, progress, service, view
 from . import search as search_mod
 from . import commission_api, commission_manager, storage_maintenance
 from .model import propose
@@ -618,12 +620,15 @@ def _build_overview(
             "at": st.at,
             "run_id": st.run_id,
             "can_close": bool(payload.get("can_close")),
+            "cost_coverage": payload.get("cost_coverage") or {},
+            "cost_review": payload.get("cost_review") or {},
             "revenue": _node(payload, headline.get("revenue")),
             "profit": _node(payload, headline.get("profit")),
             "margin": _node(payload, headline.get("margin")),
             "missing": payload.get("missing_sources") or [],
             "blocking": [
-                f["message"] for f in payload.get("findings", [])
+                view.human_cost_copy(f["message"]) if f.get("id") == "chk_goods_coverage" else f["message"]
+                for f in payload.get("findings", [])
                 if f.get("blocking") and not f.get("passed")
             ],
             # 这一格有几处不对。总览摆不下清单本身，但摆得下这个数——没有它，
@@ -871,6 +876,7 @@ def _build_store_detail(ws: Workspace, store: Store) -> dict:
             "period": st.period, "state": st.state, "stale": st.stale,
             "at": st.at, "run_id": st.run_id, "by": st.by, "note": st.note,
             "can_close": bool((st.result or {}).get("can_close")),
+            "cost_decision_required": bool((st.result or {}).get("cost_review", {}).get("requires_human")),
         }
         for st in _periods_of_store(ws, store.id)
     ]
@@ -1002,10 +1008,52 @@ def recompute(store_id: str) -> dict:
     }
 
 
+@app.get("/api/recompute/progress")
+def recompute_progress() -> dict:
+    model = _model()
+    names = {store.id: store.name for store in model.stores}
+    items = service.recompute_activities()
+    pending = getattr(_commission_worker, "current_pending", None)
+    if pending and pending[0] not in {item["store_id"] for item in items}:
+        items.append({"store_id": pending[0], "state": "queued",
+                      "phase": "等待自动核算", "percent": 0})
+    return {"items": [{**item, "store": names.get(item["store_id"], item["store_id"])}
+                      for item in items]}
+
+
 class PeriodAction(BaseModel):
     note: str = ""
     run_id: int | None = None
     ignored_blockers: list[str] = Field(default_factory=list, max_length=100)
+    costs: dict[str, Decimal] | None = None
+    payouts: list[dict[str, Any]] = Field(default_factory=list, max_length=100)
+    no_payout: bool = False
+
+
+def _manual_source_run(ws: Workspace, model: Model, store_id: str,
+                       period: str, run_id: int | None) -> dict:
+    run = ws.latest_run(store_id, period)
+    if not run or run_id is None or run["id"] != run_id:
+        raise WorkspaceError("计算结果已更新，请刷新后重新确认")
+    state = ws.state(store_id, period)
+    if state and state.closed:
+        raise WorkspaceError("本期已结账，请先反结账")
+    if run["model_revision"] != sha256(model.model_dump_json().encode("utf-8")).hexdigest():
+        raise WorkspaceError("成本核算模型已更新，请先重算本店")
+    if not run["evidence_ready"]:
+        raise WorkspaceError("原始事实证据尚未完成留档，不能人工确认")
+    return run
+
+
+@app.post("/api/stores/{store_id}/periods/{period}/manual-cost-preview")
+def manual_cost_preview(store_id: str, period: str, action: PeriodAction) -> dict:
+    model = _model()
+    _store(model, store_id)
+    try:
+        run = _manual_source_run(workspace(), model, store_id, period, action.run_id)
+        return manual_cost.preview(model, json.loads(run["result"]), action.costs or {})
+    except WorkspaceError as exc:
+        raise HTTPException(409, str(exc)) from exc
 
 
 @app.post("/api/stores/{store_id}/periods/{period}/close")
@@ -1017,15 +1065,24 @@ def close_period(store_id: str, period: str, action: PeriodAction) -> dict:
             model = _model()
             _store(model, store_id)
             ws = workspace()
+            manual_result = manual_decision = None
+            if action.costs is not None:
+                run = _manual_source_run(ws, model, store_id, period, action.run_id)
+                manual_result, manual_decision = manual_cost.certified(
+                    model, json.loads(run["result"]), run["id"], action.costs,
+                    action.payouts, action.no_payout, action.note,
+                )
             labor_cut = labor_api.share_at_close(ws, model, period, store_id)
             st = ws.close_period(
                 store_id,
                 period,
-                by="人工操作" if action.ignored_blockers else ANONYMOUS,
+                by="人工操作" if action.ignored_blockers or manual_result else ANONYMOUS,
                 note=action.note,
                 ignored_blockers=tuple(action.ignored_blockers),
                 expected_run_id=action.run_id,
                 labor_cut=labor_cut,
+                manual_result=manual_result,
+                manual_decision=manual_decision,
             )
     except WorkspaceError as exc:
         raise HTTPException(409, str(exc)) from exc
@@ -1241,7 +1298,7 @@ def pricing_gaps_page(run_id: int, q: str = "", offset: int = 0, limit: int = 10
     from . import pricing_gaps
     path = workspace().pricing_gaps_path(run_id)
     if not path.exists():
-        raise HTTPException(404, "这次计算没有待核价明细")
+        raise HTTPException(404, "这次计算没有未覆盖成本明细")
     return pricing_gaps.page(path, q=q, offset=offset, limit=limit)
 
 
@@ -1257,7 +1314,7 @@ def pricing_gaps_export(run_id: int, q: str = "") -> PlainTextResponse:
     from . import pricing_gaps
     path = workspace().pricing_gaps_path(run_id)
     if not path.exists():
-        raise HTTPException(404, "这次计算没有待核价明细")
+        raise HTTPException(404, "这次计算没有未覆盖成本明细")
     return PlainTextResponse("\ufeff" + pricing_gaps.csv(path, q), media_type="text/csv; charset=utf-8",
         headers={"Content-Disposition": f'attachment; filename="pricing-pending-{run_id}.csv"'})
 
@@ -1276,9 +1333,12 @@ def fees_export(run_id: int) -> PlainTextResponse:
     import polars as pl
     gaps_path = workspace().pricing_gaps_path(run_id)
     gap_count = pl.scan_parquet(gaps_path).select(pl.len()).collect().item() if gaps_path.exists() else 0
-    review_status = f"成本未核齐（{gap_count}条待核价），本表金额不完整" if gap_count else ""
+    state = workspace().state_by_run(run_id)
+    manual = bool((state.result or {}).get("manual_cost")) if state else False
+    review_status = ("订单源行不含人工确认成本差额，请以结账快照为准" if manual
+                     else f"{gap_count}条成本未覆盖，现有源行金额需人工确认" if gap_count else "")
     body = "\ufeff" + view.fees_csv(facts, _model(), review_status=review_status)
-    suffix = "费项明细-成本未核齐" if gap_count else "费项明细"
+    suffix = "源费项明细-人工成本确认" if manual else "费项明细-成本需确认" if gap_count else "费项明细"
     filename = f"{store}-{period}-{suffix}.csv"
     ascii_name = f"{store}-{period}-fees.csv"
     return PlainTextResponse(

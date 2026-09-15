@@ -101,6 +101,7 @@ def platform_options(model: Model) -> list[dict[str, str]]:
 
 def slice_dict(sl: Slice, store: Store, model: Model) -> dict[str, Any]:
     """一个账期的完整对外结构。快照存的就是这个，所以字段只增不改语义。"""
+    from .manual_cost import observed
     return {
         "store": store.name,
         "store_id": store.id,
@@ -110,6 +111,9 @@ def slice_dict(sl: Slice, store: Store, model: Model) -> dict[str, Any]:
         "can_close": sl.can_close,
         "pricing_pending_count": sl.pricing_gaps.height,
         "cost_coverage": sl.cost_coverage,
+        "cost_review": {"observed": observed({"calculation_inputs": sl.calculation_inputs}),
+                        "requires_human": not sl.cost_coverage.get("passed", False)},
+        "calculation_inputs": sl.calculation_inputs,
         "statement": _statement(sl, model),
         "findings": [
             {"id": f.check_id, "name": f.name, "passed": f.passed,
@@ -422,9 +426,23 @@ def finding_action(finding: dict[str, Any], model: Model,
             drill = f"{METRIC_PREFIX}{mid}"
             only = "uncounted"
     out = {**finding, "kind": kind, "drill": drill, "only": only, "tab": tab}
+    if finding.get("id") == "chk_goods_coverage":
+        for field in ("message", "head"):
+            if out.get(field):
+                out[field] = human_cost_copy(out[field])
+        if out.get("lines"):
+            out["lines"] = [human_cost_copy(line) for line in out["lines"]]
     if buckets:
         out["buckets"] = buckets
     return out
+
+
+def human_cost_copy(value: str) -> str:
+    """Explain old stored cost findings with the current manual-close option."""
+    return (value.replace("结账门槛", "自动放行参考")
+            .replace("待核价记录", "未覆盖成本明细")
+            .replace("部分订单尚未核实商品成本", "部分订单没有系统成本，金额可由人工确认")
+            .replace("处理后再结账", "可补资料或人工确认金额后结账"))
 
 
 #: 一页下钻明细的行数。再多人也看不完，而且会把浏览器拖死。

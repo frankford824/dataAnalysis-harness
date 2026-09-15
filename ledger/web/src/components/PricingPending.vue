@@ -4,12 +4,12 @@ import { NDrawer, NDrawerContent, NInput, NButton, NDataTable, NPagination, NAle
 import { api } from '../api'
 import { useLatest } from './ui/useLatest'
 
-const props = defineProps({ runId: { type: Number, required: true }, count: { type: Number, required: true }, coverage: { type: Object, default: () => ({}) }, storeId: String, period: String })
-const emit = defineEmits(['show-quality'])
+const props = defineProps({ runId: { type: Number, required: true }, count: { type: Number, required: true }, coverage: { type: Object, default: () => ({}) }, observed: {type:Object,default:()=>({})}, manualDecision: {type:Object,default:null}, storeId: String, period: String })
+const emit = defineEmits(['show-quality','request-manual'])
 const percentage = value => value == null ? '—' : `${(Number(value) * 100).toFixed(1)}%`
 const thresholdMet = computed(() => !!props.coverage?.passed)
 const coverageTitle = computed(() => props.coverage?.expected
-  ? `商品成本覆盖率 ${percentage(props.coverage.coverage)}，结账门槛 ${percentage(props.coverage.threshold)}`
+  ? `商品成本覆盖 ${percentage(props.coverage.coverage)} · 自动放行参考 ${percentage(props.coverage.threshold)}`
   : `${props.count} 条商品成本未覆盖`)
 const needed = computed(() => Math.max(0, Math.ceil((props.coverage?.expected || 0) * (props.coverage?.threshold || 0)) - (props.coverage?.covered || 0)))
 const uncoveredOrders = computed(() => props.coverage?.uncovered ?? props.count)
@@ -68,18 +68,19 @@ watch(() => props.runId, () => { if(show.value)load(true) })
 </script>
 
 <template>
-  <div class="pricing-notice" :class="{passed:thresholdMet}">
-    <div><strong>{{ coverageTitle }}</strong><p v-if="thresholdMet">已达到结账门槛。还有 {{ integer(uncoveredOrders) }} 笔订单未覆盖商品成本，本期暂不计入。</p><p v-else>尚未达到结账门槛，还差 {{ integer(needed) }} 笔订单覆盖。</p>
+  <div class="pricing-notice" :class="{passed:thresholdMet || manualDecision}">
+    <div><strong>{{ manualDecision ? '本期成本已由人工确认' : coverageTitle }}</strong><p v-if="manualDecision">原始覆盖率 {{ percentage(coverage.coverage) }}，人工确认金额与原因已和结账记录一起冻结。</p><p v-else-if="thresholdMet">还有 {{ integer(uncoveredOrders) }} 笔订单未覆盖商品成本，当前只计入已识别金额。</p><p v-else>还有 {{ integer(uncoveredOrders) }} 笔订单未覆盖；系统已完成现有资料的计算，人工可确认或修改金额后结账。自动放行还差 {{ integer(needed) }} 笔覆盖。</p>
+      <p v-if="observed && Object.hasOwn(observed,'goods') && !manualDecision" class="pricing-help">现有资料识别：商品成本 {{ Number(observed.goods).toLocaleString('zh-CN',{minimumFractionDigits:2}) }} 元 · 代发 {{ Number(observed.dropship).toLocaleString('zh-CN',{minimumFractionDigits:2}) }} 元 · 补发 {{ Number(observed.reshipment).toLocaleString('zh-CN',{minimumFractionDigits:2}) }} 元</p>
       <p v-if="progress" aria-live="polite">{{ progress.message }}</p>
+      <div v-if="['running','queued'].includes(progress?.state)" class="pricing-work-bar" role="progressbar" :aria-valuenow="progress.percent ?? 0" aria-valuemin="0" aria-valuemax="100" aria-label="本店后台核算进度"><span :style="{width:`${progress.percent ?? 0}%`}" /></div>
       <p v-if="calculatedAt" class="pricing-help">最近核算（北京时间）：{{ calculatedAt }}。上方数量属于已保存的核算结果。</p>
       <p v-if="progressError" role="status">{{ progressError }}</p>
     </div>
-    <n-button v-if="count" size="small" @click="show = true">查看未覆盖明细</n-button>
-    <n-button v-else size="small" @click="emit('show-quality')">查看成本覆盖</n-button>
+    <div class="pricing-actions"><n-button v-if="count" size="small" @click="show = true">查看未覆盖明细</n-button><n-button v-else size="small" @click="emit('show-quality')">查看成本覆盖</n-button><n-button v-if="!manualDecision" size="small" type="primary" @click="emit('request-manual')">人工确认成本</n-button></div>
   </div>
   <n-drawer v-model:show="show" :width="920" style="max-width: 100vw">
     <n-drawer-content title="未覆盖成本明细" closable>
-      <p class="pricing-help">这些行暂未计入商品成本。资料补齐后会自动更新；当前覆盖率达到结账门槛时，不影响结账。</p>
+      <p class="pricing-help">这些行没有被系统计入商品成本。人工确认会单独记录金额与依据，原行继续保留供复核。</p>
       <div v-if="data.reason_counts?.length" class="pricing-summary" aria-label="未覆盖原因汇总">
         <span v-for="item in data.reason_counts" :key="item.reason"><b>{{ integer(item.count) }}</b>{{ reasonName(item.reason) }}</span>
       </div>
@@ -94,9 +95,9 @@ watch(() => props.runId, () => { if(show.value)load(true) })
         <p v-if="busy">正在加载…</p>
         <p v-else-if="!data.items.length && !error">没有找到对应记录</p>
         <article v-for="(row, index) in data.items" :key="index">
-          <strong>{{ row.sku || '商品编码待核对' }}</strong><span>数量 {{ row.quantity ?? '待核对' }}</span>
-          <p>下单日期 {{ row.order_date || '待核对' }}</p>
-          <p>平台订单 {{ row.order_id || '待核对' }}</p>
+          <strong>{{ row.sku || '未提供商品编码' }}</strong><span>数量 {{ row.quantity ?? '未提供' }}</span>
+          <p>下单日期 {{ row.order_date || '未提供' }}</p>
+          <p>平台订单 {{ row.order_id || '未提供' }}</p>
           <p>聚水潭订单 {{ row.internal_order_id || '—' }}</p>
           <p class="pricing-reason">{{ reasonName(row.reason) }}</p>
         </article>
@@ -109,6 +110,9 @@ watch(() => props.runId, () => { if(show.value)load(true) })
 <style scoped>
 .pricing-notice { display: flex; align-items: center; gap: 16px; justify-content: space-between; padding: 16px; margin-bottom: 16px; background: #fff8e8; border: 1px solid #f0dcb0; border-radius: 8px; color: #715020; }
 .pricing-notice.passed { background:#edf8f2;border-color:#bee2ce;color:#17623f; }
+.pricing-actions { display:flex;flex-wrap:wrap;gap:8px;justify-content:flex-end; }
+.pricing-work-bar { height:5px; max-width:320px; margin-top:8px; overflow:hidden; border-radius:999px; background:#ebeff6; }
+.pricing-work-bar span { display:block;height:100%;border-radius:inherit;background:#4783f4;transition:width .2s ease; }
 .pricing-notice p { margin: 4px 0 0; font-size: 13px; }
 .pricing-help { color: #657184; margin: 0 0 16px; }
 .pricing-search { display: flex; align-items: center; gap: 10px; margin-bottom: 16px; }

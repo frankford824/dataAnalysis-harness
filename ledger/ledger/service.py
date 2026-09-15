@@ -41,16 +41,39 @@ _recompute_slots = threading.Semaphore(_RECOMPUTE_LIMIT)
 _store_locks_guard = threading.Lock()
 _store_locks: dict[str, threading.RLock] = {}
 _recompute_waiters: dict[str, int] = {}
-_recompute_running: dict[str, str] = {}
+_recompute_running: dict[str, dict[str, Any]] = {}
 
 
 def recompute_activity(store_id: str) -> dict | None:
     with _store_locks_guard:
         if store_id in _recompute_running:
-            return {"state": "running", "phase": _recompute_running[store_id]}
+            return {"state": "running", **_recompute_running[store_id]}
         if _recompute_waiters.get(store_id, 0):
-            return {"state": "queued", "phase": "等待核算资源"}
+            return {"state": "queued", "phase": "等待核算资源", "percent": 0}
         return None
+
+
+def recompute_activities() -> list[dict[str, Any]]:
+    """One read-only progress snapshot for every active manual or background run."""
+    with _store_locks_guard:
+        result = [{"store_id": sid, "state": "running", **body}
+                  for sid, body in _recompute_running.items()]
+        result.extend({"store_id": sid, "state": "queued", "phase": "等待核算资源", "percent": 0}
+                      for sid, count in _recompute_waiters.items()
+                      if count and sid not in _recompute_running)
+    return sorted(result, key=lambda row: (row["state"] != "running", row["store_id"]))
+
+
+def _batch_report(report, index: int, count: int):
+    """Keep upload progress honest when one intake recalculates several stores."""
+    def relay(phase, done=0, total=0):
+        local = progress.work_percent(str(phase), done, total)
+        overall = round(5 + 94 * ((index - 1) + local / 100) / max(count, 1))
+        if isinstance(report, progress.Reporter):
+            report(phase, done, total, percent=min(99, overall))
+        else:
+            report(phase, done, total)
+    return relay
 
 
 def _store_lock(store_id: str) -> threading.RLock:
@@ -165,7 +188,8 @@ def intake(
         # 报店名而不是「第 2 家店」：交表的人认得店名，认不得序号。
         done = recompute(
             ws, model, store,
-            report=report, note=f"{store.name}（{i}/{len(touched)} 家店）",
+            report=_batch_report(report, i, len(touched)),
+            note=f"{store.name}（{i}/{len(touched)} 家店）",
         )
         out.periods.extend(done.periods)
         out.unknown_tables.extend(done.unknown_tables)
@@ -223,7 +247,8 @@ def intake_assigned(
         store = model.store(store_id)
         done = recompute(
             ws, model, store,
-            report=report, note=f"{store.name}（{i}/{len(touched)} 家店）",
+            report=_batch_report(report, i, len(touched)),
+            note=f"{store.name}（{i}/{len(touched)} 家店）",
         )
         out.periods.extend(done.periods)
         out.unknown_tables.extend(done.unknown_tables)
@@ -295,10 +320,16 @@ def recompute(
         try:
             with _store_locks_guard:
                 _recompute_waiters[store.id] -= 1
-                _recompute_running[store.id] = "准备核算"
+                _recompute_running[store.id] = {"phase": "准备核算", "percent": 0}
             def tracked(phase, *args, **kwargs):
+                done = args[0] if args else 0
+                total = args[1] if len(args) > 1 else 0
+                percent = progress.work_percent(str(phase), done, total)
                 with _store_locks_guard:
-                    _recompute_running[store.id] = str(phase)
+                    previous = _recompute_running.get(store.id, {}).get("percent", 0)
+                    _recompute_running[store.id] = {
+                        "phase": str(phase), "percent": max(previous, percent),
+                    }
                 return report(phase, *args, **kwargs)
             return _recompute_locked(ws, model, store, report=tracked, note=note)
         finally:
@@ -404,7 +435,7 @@ def _recompute_locked(
             c = payload["commission"]
             c["people"] = commission_engine.participation_only(result, model, store.id, sl.period, registry)
             c["participation_basis"] = "complete_link_output_per_assigned_person"
-            c["notes"].append("提成所需商品成本覆盖率不足；已入账的个人参与销售额仍可查看。")
+            c["notes"].append("已算个人参与产出；本期提成金额由人工逐人确认。")
             sales_node = next((n for n in payload.get("statement", []) if n["name"] == "销售收入"), None)
             gross_node = next((n for n in payload.get("statement", []) if n["name"] == "毛利"), None)
             for person in c["people"]:

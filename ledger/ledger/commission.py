@@ -137,7 +137,7 @@ def compute(result: RunResult, model: Model, store: str, period: str,
         pl.col("store").is_in(_store_labels(model, store))
         & pl.col("period").is_in([period, "(未知账期)"])
     ).is_empty():
-        raise CommissionError("商品成本待核价，暂不能计算提成")
+        raise CommissionError("未覆盖商品成本需要人工确认，提成金额请逐人确认")
     node = model.commission_base_node(store)
     if node is None:
         raise CommissionError(

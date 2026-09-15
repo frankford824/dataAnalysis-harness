@@ -118,7 +118,7 @@ def _blocking(payload: dict[str, Any], model: Model) -> list[dict[str, Any]]:
         hit = finding_action(f, model, payload)
         node = "__sources__" if hit.get("tab") == "sources" else (hit.get("drill") or "")
         out.append(_gap(
-            "blocking", "blocking", f["name"], f.get("message") or "",
+            "blocking", "blocking", hit.get("name") or f["name"], hit.get("message") or "",
             node=node, only=hit.get("only") or "counted",
         ))
     return out

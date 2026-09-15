@@ -5,6 +5,7 @@ import { computed, defineAsyncComponent, onMounted, onUnmounted, ref, watch } fr
 import { useRouter } from 'vue-router'
 
 import { useApp } from '../store'
+import { api } from '../api'
 import FilterBar from './FilterBar.vue'
 
 const IntakeResult = defineAsyncComponent(() => import('./IntakeResult.vue'))
@@ -44,6 +45,30 @@ function preloadDeliver() {
 const readyCount = computed(
   () => (app.overview?.cells || []).filter((c) => c.can_close && c.state !== 'closed').length,
 )
+const workJobs = ref([])
+const completedJobs = new Map()
+let workTimer = null, workInFlight = false
+async function loadWorkJobs() {
+  if (document.hidden || workInFlight) return
+  workInFlight = true
+  try {
+    const current = (await api.recomputeProgress()).items || []
+    const active = new Set(current.map(job => job.store_id))
+    const now = Date.now()
+    for (const job of workJobs.value) {
+      if (job.state === 'running' && !active.has(job.store_id))
+        completedJobs.set(job.store_id, {...job,state:'done',phase:'核算已完成',percent:100,until:now+3500})
+    }
+    for (const [id, job] of completedJobs) if (job.until <= now || active.has(id)) completedJobs.delete(id)
+    workJobs.value = [...current,...completedJobs.values()]
+  }
+  catch { workJobs.value = [] }
+  finally { workInFlight = false }
+}
+const busyPercent = computed(() => app.busy?.percent ??
+  (app.busy?.label?.includes('重算')
+    ? workJobs.value.find(job => job.store_id === app.storeId)?.percent ?? 0
+    : null))
 
 // 上传要多久取决于表有多大，淘宝一个月的表能跑十几秒。不显示已用秒数的话，人会
 // 以为卡死了，然后刷新——刷新会让这次上传的结果看不见。
@@ -59,6 +84,7 @@ watch(
 )
 onUnmounted(() => {
   clearInterval(tick)
+  clearInterval(workTimer)
   clearTimeout(routeTimer)
   stopBefore()
   stopAfter()
@@ -96,6 +122,8 @@ const explaining = ref(false)
 onMounted(() => {
   window.addEventListener('ledger:page-load-error',pageFailed)
   app.loadNavigation().catch((e) => message.error(e.message, { duration: 6000 }))
+  loadWorkJobs()
+  workTimer = setInterval(loadWorkJobs, 2500)
   if ('requestIdleCallback' in window) window.requestIdleCallback(preloadDeliver, { timeout: 1500 })
   else setTimeout(preloadDeliver, 500)
 })
@@ -183,10 +211,23 @@ defineExpose({ take })
       <!-- 阶段和百分比是这条提示存在的理由：转圈只能证明「还没返回」，证明不了
            「还在干活」。人分不出这两件事就会去刷新，一刷新这次交表的结果就没了。 -->
       <span v-if="app.busy.phase" class="dim">{{ app.busy.phase }}</span>
-      <span v-if="app.busy.percent != null" class="num">{{ app.busy.percent }}%</span>
+      <span v-if="busyPercent != null" class="num">{{ busyPercent }}%</span>
       <span class="num">{{ secs }}s</span>
       <span v-if="secs > 20" class="dim">别刷新</span>
+      <div v-if="busyPercent != null" class="busy-progress" role="progressbar" :aria-valuenow="busyPercent" aria-valuemin="0" aria-valuemax="100" :aria-label="app.busy.label">
+        <span :style="{width: `${busyPercent}%`}" />
+      </div>
     </div>
+
+    <section v-if="workJobs.length" class="work-jobs" :class="{withBusy: !!app.busy}" aria-label="后台核算进度" aria-live="polite">
+      <header><span class="work-jobs-mark"/>后台核算 <small>{{ workJobs.length }} 家店铺</small></header>
+      <article v-for="job in workJobs.slice(0, 3)" :key="job.store_id">
+        <div class="work-jobs-row"><strong :title="job.store">{{ job.store }}</strong><b>{{ job.percent }}%</b></div>
+        <div class="work-jobs-bar" role="progressbar" :aria-valuenow="job.percent" aria-valuemin="0" aria-valuemax="100" :aria-label="`${job.store}核算进度`"><span :style="{width: `${job.percent}%`}" /></div>
+        <p>{{ job.state === 'queued' ? '等待核算资源' : job.state === 'done' ? '核算已完成' : job.phase }}</p>
+      </article>
+      <footer v-if="workJobs.length > 3">另有 {{ workJobs.length - 3 }} 家店铺正在排队或核算</footer>
+    </section>
 
     <UploadPanel v-if="explaining && app.ingestMode !== 'nas'" v-model:show="explaining" />
     <IntakeResult v-if="app.showIntake || app.intake" />

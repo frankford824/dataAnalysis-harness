@@ -20,9 +20,11 @@ def status(ws, store_id, period, manager=None, activity=None):
     if frozen and frozen["state"] == "closed" and frozen["run_id"]:
         saved = ws.conn.execute("SELECT id,at FROM run WHERE id=?", (frozen["run_id"],)).fetchone()
         return {"run_id": saved["id"], "calculated_at": saved["at"], "state": "closed",
+                "percent": 100,
                 "message": "已结账，当前展示冻结结果；后续核价不会改写这份历史账。"}
     out = {"run_id": result["id"] if result else None, "calculated_at": result["at"] if result else None,
-           "state": "review", "message": "已完成最近一次核算。未覆盖成本可在明细中查看。"}
+           "state": "review", "percent": 100,
+           "message": "已完成最近一次核算。未覆盖成本可在明细中查看。"}
     pending = None
     path = ws.root / "commission" / "registry.db"
     if path.exists():
@@ -35,11 +37,12 @@ def status(ws, store_id, period, manager=None, activity=None):
     dead = manager is not None and (manager.thread is None or not manager.thread.is_alive())
     if activity:
         state = activity["state"]
-        out.update(state=state, message=("正在核算：" if state == "running" else "本店已排队：") + activity["phase"] + "。完成后自动更新。")
+        out.update(state=state, percent=activity.get("percent", 0),
+                   message=("正在核算：" if state == "running" else "本店已排队：") + activity["phase"] + "。完成后自动更新。")
     elif dead and pending:
         out.update(state="error", message="自动核算服务未运行，旧结果尚未更新。", error=manager.last_error)
     elif running:
-        out.update(state="running", message="正在核算本店数据，完成后自动更新。")
+        out.update(state="running", percent=0, message="正在核算本店数据，完成后自动更新。")
     elif pending and manager is not None and manager.last_error and getattr(manager, "last_error_store", None) in (None, store_id):
         out.update(state="error", message="自动核算遇到错误，服务会重试；当前显示已保存的结果。", error=manager.last_error)
     elif pending and pending["error"]:
@@ -49,5 +52,5 @@ def status(ws, store_id, period, manager=None, activity=None):
     elif feed and feed["consumed_seq"] < feed["source_latest_seq"]:
         out.update(state="syncing", message="订单数据仍在同步，当前为已同步数据的试算，暂不可结账。")
     elif pending:
-        out.update(state="queued", message="新数据已收到，本店正在等待自动核算。")
+        out.update(state="queued", percent=0, message="新数据已收到，本店正在等待自动核算。")
     return out

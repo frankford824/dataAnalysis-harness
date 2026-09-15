@@ -69,6 +69,7 @@ function prettyPeriod(period) {
 function taskStatus(cell) {
   if (cell.state === 'closed' && cell.stale) return { id: 'evidence', label: '有新资料', priority: 1 }
   if (cell.can_close) return { id: 'ready', label: '可确认', priority: 2 }
+  if (cell.cost_review?.requires_human) return { id: 'pending', label: '成本待人工确认', priority: 0 }
   return { id: 'pending', label: '待补资料', priority: 0 }
 }
 
@@ -80,7 +81,7 @@ function shortReason(cell) {
   const coverage = /(商品成本|销售收入|发货运费).*?覆盖\s*([\d.]+)%/.exec(msg)
   if (coverage) return `${coverage[1]}覆盖 ${coverage[2]}%`
   if (msg) return msg.split(/[。；]/)[0]
-  if (cell.profit === null) return '关键金额还没有算齐'
+  if (cell.profit === null) return cell.cost_review?.requires_human ? '现有资料已计算，请人工确认成本金额' : '关键金额还没有算齐'
   return '仍有资料需要核对'
 }
 

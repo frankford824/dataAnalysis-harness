@@ -544,8 +544,8 @@ class TestDrill:
         assert response.content.startswith(b"\xef\xbb\xbf")
         assert response.content.decode("utf-8-sig").startswith("订单号,科目,")
         if pending:
-            assert "本表金额不完整" in response.content.decode("utf-8-sig")
-            assert "2条待核价" in response.content.decode("utf-8-sig")
+            assert "2条成本未覆盖" in response.content.decode("utf-8-sig")
+            assert "现有源行金额需人工确认" in response.content.decode("utf-8-sig")
 
 
 # --------------------------------------------------------------------------- #

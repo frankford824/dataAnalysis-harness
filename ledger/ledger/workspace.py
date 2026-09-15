@@ -124,6 +124,24 @@ create trigger if not exists run_labor_no_delete before delete on run_labor begi
   select raise(abort, 'immutable run labor');
 end;
 
+-- 人工确认成本/提成只附在原计算上，不改原始事实或原 run 结果。
+create table if not exists manual_finance (
+  run_id integer primary key,
+  store_id text not null,
+  period text not null,
+  result_json text not null,
+  decision_json text not null,
+  original_sha text not null,
+  at text not null,
+  by text not null
+);
+create trigger if not exists manual_finance_no_update before update on manual_finance begin
+  select raise(abort, 'immutable manual finance');
+end;
+create trigger if not exists manual_finance_no_delete before delete on manual_finance begin
+  select raise(abort, 'immutable manual finance');
+end;
+
 create table if not exists config_log (
   id integer primary key,
   at text not null,
@@ -169,6 +187,9 @@ create trigger if not exists bump_period_update after update on period begin
   update workspace_meta set generation=generation+1 where id=1;
 end;
 create trigger if not exists bump_config_log_insert after insert on config_log begin
+  update workspace_meta set generation=generation+1 where id=1;
+end;
+create trigger if not exists bump_manual_finance_insert after insert on manual_finance begin
   update workspace_meta set generation=generation+1 where id=1;
 end;
 """
@@ -677,12 +698,13 @@ class Workspace:
         row = self.conn.execute(
             "select p.store_id, p.period, p.state, p.changed_at, p.by, p.note, "
             "rl.amount as labor_cut, "
-            "r.id as shown_id, r.result as shown_result, r.at as shown_at, "
+            "r.id as shown_id, coalesce(mf.result_json,r.result) as shown_result, r.at as shown_at, "
             "r.engine as shown_engine, "
             "case when p.state=? and exists (select 1 from version nv "
             "where nv.store_id in (p.store_id, ?) and nv.id>p.at_version) then 1 else 0 end as stale "
             "from run r left join period p on p.store_id=r.store_id and p.period=r.period "
             "left join run_labor rl on rl.run_id=p.run_id "
+            "left join manual_finance mf on mf.run_id=r.id "
             "where r.id=?",
             (CLOSED, SHARED_STORE_ID, run_id),
         ).fetchone()
@@ -718,7 +740,7 @@ class Workspace:
             "select p.store_id, p.period, p.state, p.changed_at, p.by, p.note, "
             "rl.amount as labor_cut, "
             "p.run_id as frozen_run_id, p.at_version, "
-            "r.id as shown_id, r.result as shown_result, r.at as shown_at, "
+            "r.id as shown_id, coalesce(mf.result_json,r.result) as shown_result, r.at as shown_at, "
             "r.engine as shown_engine, "
             "case when p.state=? and exists (select 1 from version nv "
             "where nv.store_id in (p.store_id, ?) and nv.id>p.at_version) then 1 else 0 end as stale "
@@ -726,7 +748,8 @@ class Workspace:
             "when p.state=? and p.run_id is not null then p.run_id else "
             "(select lr.id from run lr where lr.store_id=p.store_id and lr.period=p.period "
             "order by lr.id desc limit 1) end "
-            "left join run_labor rl on rl.run_id=p.run_id"
+            "left join run_labor rl on rl.run_id=p.run_id "
+            "left join manual_finance mf on mf.run_id=r.id and p.state='closed'"
             + clause
             + " order by p.period desc, p.store_id"
         )
@@ -768,6 +791,8 @@ class Workspace:
         ignored_blockers: tuple[str, ...] = (),
         expected_run_id: int | None = None,
         labor_cut: str | None = None,
+        manual_result: dict[str, Any] | None = None,
+        manual_decision: dict[str, Any] | None = None,
     ) -> PeriodState:
         """结账；允许人工确认无法追溯的业务事项，但不允许绕过证据留档。"""
         from .pricing_status import read_feed
@@ -780,6 +805,12 @@ class Workspace:
             why = run["evidence_error"] or "事实证据尚未完成留档"
             raise WorkspaceError(f"{period} 结不了账：{why}")
         result = json.loads(run["result"])
+        if manual_result is not None:
+            if expected_run_id is None or not note.strip() or manual_decision is None:
+                raise WorkspaceError("人工确认成本需要当前运行号、金额和原因")
+            if manual_result.get("manual_cost", {}).get("source_run_id") != run["id"]:
+                raise WorkspaceError("人工确认来源运行号不一致，请刷新后重试")
+            result = manual_result
         profit = next((row for row in result.get("statement", [])
                        if row.get("id") == "net_profit" or row.get("name") == "利润"), None)
         if profit and (profit.get("value") is None or not profit.get("available", True)):
@@ -809,7 +840,7 @@ class Workspace:
             raise WorkspaceError("人工结账必须填写说明")
         remaining = [item for key, item in active.items() if key not in ignored]
         missing = result.get("missing_sources") or []
-        if remaining or missing or (not run["can_close"] and not active):
+        if remaining or missing or (not run["can_close"] and not active and manual_result is None):
             blockers = [str(item.get("message") or item.get("name") or "待处理事项") for item in remaining]
             if missing:
                 blockers.append("还缺：" + "、".join(missing))
@@ -852,6 +883,15 @@ class Workspace:
                 conn.execute(
                     "insert into run_labor (run_id,store_id,period,amount,at,by) values (?,?,?,?,?,?)",
                     (run["id"], store_id, period, labor_cut, _now(), by),
+                )
+            if manual_result is not None:
+                conn.execute(
+                    "insert into manual_finance(run_id,store_id,period,result_json,decision_json,original_sha,at,by) "
+                    "values (?,?,?,?,?,?,?,?)",
+                    (run["id"], store_id, period,
+                     json.dumps(manual_result, ensure_ascii=False),
+                     json.dumps(manual_decision, ensure_ascii=False),
+                     hashlib.sha256(run["result"].encode("utf-8")).hexdigest(), _now(), by),
                 )
             if ignored_names:
                 conn.execute(

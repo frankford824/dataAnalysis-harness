@@ -151,7 +151,7 @@ def test_configured_people_remain_visible_when_pricing_has_no_amount(tmp_path):
     store=report['stores'][0]
     assert store['configured_people']==1
     assert store['people']==0 and store['amount'] is None
-    assert '成本覆盖不足' in store['status']
+    assert '成本待人工确认' in store['status']
 
 
 def test_threshold_met_cost_gaps_keep_commission_amount_available(tmp_path):
@@ -166,7 +166,7 @@ def test_threshold_met_cost_gaps_keep_commission_amount_available(tmp_path):
     ws.conn.execute('UPDATE run SET result=? WHERE id=?',(json.dumps(payload),rid));ws.conn.commit()
     report=client.post('/api/commission-v2/reports/query',json={'start':'2026-06','end':'2026-06','store_ids':['s1']}).json()
     assert report['total']==12.34
-    assert '成本覆盖不足' not in report['stores'][0]['status']
+    assert '成本待人工确认' not in report['stores'][0]['status']
 
 
 def test_labor_edit_changes_current_commission_report_and_is_visible_by_store(tmp_path):

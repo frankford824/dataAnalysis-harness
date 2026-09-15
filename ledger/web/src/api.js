@@ -51,11 +51,17 @@ export const api = {
     call(`/api/stores/${encodeURIComponent(id)}/periods/${encodeURIComponent(period)}`, options),
   recompute: (id) =>
     call(`/api/stores/${encodeURIComponent(id)}/recompute`, { method: 'POST' }),
-  close: (id, period, note = '', ignoredBlockers = [], runId = null) =>
+  manualCostPreview: (id, period, runId, costs) =>
+    call(`/api/stores/${encodeURIComponent(id)}/periods/${encodeURIComponent(period)}/manual-cost-preview`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({run_id: runId, costs}),
+    }),
+  close: (id, period, note = '', ignoredBlockers = [], runId = null, decision = null) =>
     call(`/api/stores/${encodeURIComponent(id)}/periods/${encodeURIComponent(period)}/close`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ note, ignored_blockers: ignoredBlockers, run_id: runId }),
+      body: JSON.stringify({ note, ignored_blockers: ignoredBlockers, run_id: runId,
+        ...(decision || {}) }),
     }),
   reopen: (id, period, note) =>
     call(`/api/stores/${encodeURIComponent(id)}/periods/${encodeURIComponent(period)}/reopen`, {
@@ -95,6 +101,7 @@ export const api = {
       xhr.send(form)
     }),
   uploadProgress: (token) => call(`/api/upload/progress/${encodeURIComponent(token)}`),
+  recomputeProgress: () => call('/api/recompute/progress'),
   dropFile: (storeId, name) =>
     call(`/api/stores/${encodeURIComponent(storeId)}/files${query({ name })}`, {
       method: 'DELETE',

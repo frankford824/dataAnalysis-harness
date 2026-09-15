@@ -100,11 +100,10 @@ def _match(orders, rules):
 def pending_pricing(count: int, coverage: dict | None = None) -> dict:
     coverage = coverage or {}
     if coverage.get("expected"):
-        note = (f"商品成本覆盖率{coverage['coverage']:.1%}，低于"
-                f"{coverage['threshold']:.0%}结账门槛；还有"
-                f"{coverage['uncovered']}笔订单未覆盖，提成暂不计算。")
+        note = (f"商品成本覆盖率{coverage['coverage']:.1%}；还有"
+                f"{coverage['uncovered']}笔订单未覆盖。已算现有资料，提成金额交人工逐人确认。")
     else:
-        note = f"商品成本覆盖率未达到结账门槛，还有 {count} 条未覆盖。"
+        note = f"还有 {count} 条商品成本未覆盖；提成金额交人工逐人确认。"
     return {"configured": False, "amount_complete": False, "total": None,
             "base_total": None, "people": [], "products": [],
             "pricing_pending_count": count, "pricing_threshold_met": False,
@@ -191,7 +190,7 @@ def calculate(result, model, store_id: str, period: str, registry: Registry,
         pl.col("store").is_in(_store_labels(model, store_id))
         & pl.col("period").is_in([period, "(未知账期)"])
     ).is_empty():
-        raise ValueError("商品成本待核价，暂不能计算提成")
+        raise ValueError("未覆盖商品成本需要人工确认，提成金额请逐人确认")
     revision, versions, people, policy = registry.active(store_id, period)
     if not versions and not policy:
         return None

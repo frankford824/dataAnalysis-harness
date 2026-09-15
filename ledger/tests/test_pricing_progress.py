@@ -116,7 +116,12 @@ def test_manual_recompute_reports_phase_and_clears_on_failure(tmp_path, monkeypa
     ws = Workspace(tmp_path); model = _model(); store = model.stores[0]
     def compute(*args, report, **kwargs):
         report('核对历史成本')
-        assert service.recompute_activity(store.id) == {'state': 'running', 'phase': '核对历史成本'}
+        assert service.recompute_activity(store.id) == {
+            'state': 'running', 'phase': '核对历史成本', 'percent': 1,
+        }
+        assert service.recompute_activities() == [{
+            'store_id': store.id, 'state': 'running', 'phase': '核对历史成本', 'percent': 1,
+        }]
         raise RuntimeError('test failure')
     monkeypatch.setattr(service, '_recompute_locked', compute)
     with pytest.raises(RuntimeError): service.recompute(ws, model, store)

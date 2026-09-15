@@ -99,7 +99,8 @@ def build(workspace, registry, model, start, end, store_ids=None, person_ids=Non
         if len(run_ids)!=len(set(run_ids)):raise RegistryError('计算记录不能重复')
         source='FROM run r LEFT JOIN period p ON p.store_id=r.store_id AND p.period=r.period'
         where.append('r.id IN ('+','.join('?' for _ in run_ids)+')' if run_ids else '0');args.extend(run_ids)
-    records=[dict(r) for r in workspace.conn.execute("SELECT r.id,r.store_id,r.period,r.at,json_extract(r.result,'$.commission') commission_json,json_extract(r.result,'$.statement') statement_json,json_extract(r.result,'$.store') store_name,p.state,p.run_id frozen_id,rl.amount frozen_labor_cut "+source+' LEFT JOIN run_labor rl ON rl.run_id=r.id WHERE '+' AND '.join(where)+' ORDER BY r.period DESC,r.store_id',args)]
+    manual_join=' LEFT JOIN manual_finance mf ON mf.run_id=r.id' if run_ids is not None else " LEFT JOIN manual_finance mf ON mf.run_id=r.id AND p.state='closed'"
+    records=[dict(r) for r in workspace.conn.execute("SELECT r.id,r.store_id,r.period,r.at,json_extract(coalesce(mf.result_json,r.result),'$.commission') commission_json,json_extract(coalesce(mf.result_json,r.result),'$.statement') statement_json,json_extract(coalesce(mf.result_json,r.result),'$.store') store_name,p.state,p.run_id frozen_id,rl.amount frozen_labor_cut "+source+' LEFT JOIN run_labor rl ON rl.run_id=r.id'+manual_join+' WHERE '+' AND '.join(where)+' ORDER BY r.period DESC,r.store_id',args)]
     if run_ids is not None and len(records)!=len(run_ids):raise RegistryError('部分计算记录已不存在或不在所选范围，请重新查询')
     keys=[(r['store_id'],r['period']) for r in records]
     if len(keys)!=len(set(keys)):raise RegistryError('同店同账期只能选择一份计算结果')
@@ -115,7 +116,7 @@ def build(workspace, registry, model, start, end, store_ids=None, person_ids=Non
         has_result=c.get('total') is not None or any(p.get('amount') is not None for p in c.get('people',[]))
         if not has_result:status='未计算提成'
         if c.get('pricing_threshold_met') is False or (c.get('pricing_pending_count') and not c.get('pricing_threshold_met')):
-            status='成本覆盖不足'
+            status='成本待人工确认'
         all_total=sum((decimal(p['amount']) for p in c.get('people',[]) if p.get('amount') is not None),Decimal(0))
         if c.get('total') is not None and abs(all_total-decimal(c['total']))>Decimal('.01'):
             notes.append('原记录的人员合计与店铺提成合计不一致');status+=' · 合计待核对'
@@ -126,7 +127,8 @@ def build(workspace, registry, model, start, end, store_ids=None, person_ids=Non
                    else decimal(saved['amount']) if (closed or run_ids is not None) and saved
                    else decimal(spread.of(sid)))
         base_total=decimal(c.get('base_total') or 0)
-        keep=(base_total-labor_cut)/base_total if base_total else Decimal(1)
+        keep=(Decimal(1) if c.get('manual_amounts_after_labor')
+              else (base_total-labor_cut)/base_total if base_total else Decimal(1))
         if spread.total is not None:
             notes.append(f"{next((x.name for x in model.overheads if x.period==period),'兼职人工费用')}已分摊 {money_float(labor_cut):,.2f} 元")
         scope={'store_id':sid,'store':names[sid],'period':period,'finance_run':record['id'],'calculated_at':record['at'],

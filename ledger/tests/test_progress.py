@@ -15,6 +15,7 @@ from fastapi.testclient import TestClient
 
 import ledger.api as api
 from ledger import progress
+from ledger.service import _batch_report
 
 
 @pytest.fixture
@@ -44,7 +45,39 @@ class TestTheLane:
         progress.step("t1", "留档", 2, 5)
         got = progress.read("t1")
         assert (got["phase"], got["done"], got["total"]) == ("留档", 2, 5)
+        assert got["percent"] == 3
         progress.forget("t1")
+
+    def test_stage_progress_is_bounded_monotonic_and_finishes_at_100(self) -> None:
+        progress.open("stage")
+        observed = []
+        for phase, done, total in [
+            ("排队中", 0, 0), ("读表 · 店铺", 1, 4),
+            ("读表 · 店铺", 4, 4), ("关联订单与历史成本", 0, 0),
+            ("归类核算", 0, 0), ("存账期", 1, 2),
+            ("读表 · 新店", 0, 4),
+        ]:
+            progress.step("stage", phase, done, total)
+            observed.append(progress.read("stage")["percent"])
+        assert observed == sorted(observed)
+        assert all(0 <= value <= 99 for value in observed)
+        progress.close("stage")
+        assert progress.read("stage")["percent"] == 100
+        progress.forget("stage")
+
+    def test_multiple_store_upload_advances_between_stores(self) -> None:
+        progress.open('batch')
+        reports = [_batch_report(progress.Reporter('batch'), i, 3) for i in (1, 2, 3)]
+        reports[0]('存账期', 1, 1)
+        first = progress.read('batch')['percent']
+        reports[1]('读表', 0, 2)
+        second = progress.read('batch')['percent']
+        reports[2]('存账期', 1, 1)
+        third = progress.read('batch')['percent']
+        assert 0 < first < second < third < 100
+        progress.close('batch')
+        assert progress.read('batch')['percent'] == 100
+        progress.forget('batch')
 
     def test_the_same_step_reported_twice_stays_one_line(self) -> None:
         """一份份报留档不该在流水账里刷出五行「留档」。"""
@@ -80,6 +113,18 @@ class TestTheLane:
 
 class TestWhileTakingFiles:
     ROWS = [["订单号", "商品ID", "金额"], ["A1", "P1", "100"]]
+
+    def test_background_progress_lists_every_active_store(self, client, monkeypatch) -> None:
+        monkeypatch.setattr(api.service, 'recompute_activities', lambda: [
+            {'store_id':'s1','state':'running','phase':'归类核算','percent':55},
+            {'store_id':'s2','state':'queued','phase':'等待核算资源','percent':0},
+        ])
+        monkeypatch.setattr(api, '_commission_worker', None)
+        result = client.get('/api/recompute/progress')
+        assert result.status_code == 200
+        assert [(item['store_id'],item['percent']) for item in result.json()['items']] == [
+            ('s1',55),('s2',0),
+        ]
 
     def test_it_walks_through_the_real_steps(self, client) -> None:
         """交完表去问那个号，能看到它走过留档、读表、核算、存账期。"""

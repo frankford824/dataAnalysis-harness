@@ -30,6 +30,7 @@ class Lane:
     #: 干完几件、总共几件。总数为零表示这一步说不出份数，界面就只显示阶段。
     done: int = 0
     total: int = 0
+    percent: int = 0
     #: 已经干完的事，按顺序。界面把它当流水账显示，人能看出卡在哪一步。
     trail: list[str] = field(default_factory=list)
     started: float = field(default_factory=time.time)
@@ -50,7 +51,27 @@ def open(token: str) -> None:  # noqa: A001 — 这里的「打开」就是最�
         _lanes[token] = Lane()
 
 
-def step(token: str, phase: str, done: int = 0, total: int = 0) -> None:
+def work_percent(phase: str, done: int = 0, total: int = 0) -> int:
+    """Completion of known workflow milestones, never an elapsed-time guess."""
+    label = phase.split(" · ", 1)[0]
+    fraction = max(0.0, min(1.0, done / total)) if total > 0 else 0.0
+    if label.startswith("排队") or label.startswith("等待"):
+        return 0
+    if label.startswith("留档"):
+        return round(2 + 3 * fraction)
+    if label.startswith("读表"):
+        return round(5 + 30 * fraction)
+    if label.startswith("关联订单"):
+        return 40
+    if label.startswith("归类核算"):
+        return 55
+    if label.startswith("存账期"):
+        return round(75 + 23 * fraction)
+    return 1
+
+
+def step(token: str, phase: str, done: int = 0, total: int = 0,
+         *, percent: int | None = None) -> None:
     """报一步。同一个阶段反复报只更新数字，不会在流水账里重复出现。"""
     if not token:
         return
@@ -64,6 +85,8 @@ def step(token: str, phase: str, done: int = 0, total: int = 0) -> None:
             lane.phase = phase
         lane.done = done
         lane.total = total
+        lane.percent = max(lane.percent, max(0, min(99,
+            percent if percent is not None else work_percent(phase, done, total))))
         lane.touched = time.time()
 
 
@@ -78,6 +101,7 @@ def close(token: str, phase: str = "算完了") -> None:
             lane.trail.append(lane.phase)
         lane.phase = phase
         lane.finished = True
+        lane.percent = 100
         lane.touched = time.time()
 
 
@@ -90,6 +114,7 @@ def read(token: str) -> dict | None:
             "phase": lane.phase,
             "done": lane.done,
             "total": lane.total,
+            "percent": lane.percent,
             "trail": list(lane.trail),
             "seconds": round(time.time() - lane.started, 1),
             "finished": lane.finished,
@@ -118,8 +143,9 @@ class Reporter:
     def __init__(self, token: str = "") -> None:
         self.token = token
 
-    def __call__(self, phase: str, done: int = 0, total: int = 0) -> None:
-        step(self.token, phase, done, total)
+    def __call__(self, phase: str, done: int = 0, total: int = 0,
+                 *, percent: int | None = None) -> None:
+        step(self.token, phase, done, total, percent=percent)
 
 
 #: 不报进度时用它，省得每一层都写 `if report is not None`。

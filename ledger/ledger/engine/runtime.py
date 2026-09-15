@@ -135,6 +135,7 @@ class Slice:
     classify_report: ClassifyReport
     pricing_gaps: pl.DataFrame = field(default_factory=pl.DataFrame)
     cost_coverage: dict = field(default_factory=dict)
+    calculation_inputs: dict = field(default_factory=dict)
 
     @property
     def can_close(self) -> bool:
@@ -1126,7 +1127,7 @@ def _build_slice(
         for node in nodes.values():
             if "order_cost" in node.missing_sources:
                 node.value = None
-                node.unavailable_reason = "商品成本覆盖率未达到结账门槛"
+                node.unavailable_reason = "已算现有成本，支持人工确认金额"
     result = audit(model, scoped, scoped_reports, own, completeness, nodes)
     if ingestion.source_sync_pending:
         from .types import Finding
@@ -1151,11 +1152,11 @@ def _build_slice(
     if not own_gaps.is_empty():
         from .types import Finding
         if cost_coverage["passed"]:
-            message = (f"商品成本覆盖率 {cost_coverage['coverage']:.1%}，结账门槛 "
+            message = (f"商品成本覆盖率 {cost_coverage['coverage']:.1%}，自动放行参考 "
                        f"{cost_coverage['threshold']:.0%}，已达到；剩余 {own_gaps.height} 条未覆盖成本暂未计入。")
         else:
-            message = (f"商品成本覆盖率 {cost_coverage['coverage']:.1%}，低于结账门槛 "
-                       f"{cost_coverage['threshold']:.0%}；还有 {cost_coverage['uncovered']:,} 笔订单未覆盖。")
+            message = (f"商品成本覆盖率 {cost_coverage['coverage']:.1%}，未达自动放行参考 "
+                       f"{cost_coverage['threshold']:.0%}；还有 {cost_coverage['uncovered']:,} 笔订单未覆盖，可人工确认金额。")
         result.findings.append(Finding("historical_cost_evidence", "未覆盖商品成本",
             passed=cost_coverage["passed"], blocking=False, message=message,
             detail={**cost_coverage, "count": own_gaps.height, "items": own_gaps.head(5).to_dicts()}))
@@ -1172,6 +1173,11 @@ def _build_slice(
         completeness=completeness, audit=result,
         link_reports=scoped_reports, classify_report=own,
         pricing_gaps=own_gaps, cost_coverage=cost_coverage,
+        calculation_inputs={
+            "metric_totals": totals,
+            "unavailable_metrics": sorted(unavailable),
+            "inapplicable_metrics": sorted(inapplicable),
+        },
     )
 
 

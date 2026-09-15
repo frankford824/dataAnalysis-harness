@@ -212,13 +212,14 @@ export const useApp = defineStore('app', () => {
           busy.value.percent = Math.round((loaded / total) * 100)
           // 传完了就交给服务端，这时候才开始问它解析到哪儿。早问只会问到空。
           if (loaded >= total && !poll) {
-            busy.value.phase = '收到了，正在解析'
-            busy.value.percent = null
+            busy.value.phase = '上传完成，开始核算'
+            busy.value.percent = 0
             poll = setInterval(async () => {
               try {
                 const p = await api.uploadProgress(token)
                 if (busy.value && p?.phase && !p.finished) {
                   busy.value.phase = p.total > 1 ? `${p.phase} ${p.done}/${p.total}` : p.phase
+                  busy.value.percent = p.percent ?? 0
                 }
               } catch {
                 // 问不到就不显示，别把一次轮询失败弹成上传失败。
