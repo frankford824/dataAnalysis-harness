@@ -917,7 +917,9 @@ def _build_period_detail(
     return {
         "state": st.state, "stale": st.stale, "at": st.at, "run_id": st.run_id,
         "by": st.by, "note": st.note, "engine": st.engine,
+        "labor_cut": st.labor_cut,
         "history": ws.history(store_id, period),
+        "period_actions": ws.period_actions(store_id, period),
         "gaps": gaps.gaps(st.result, model, _previous(store_id, period)),
         **_period_payload(st.result, model),
     }
@@ -1009,19 +1011,25 @@ class PeriodAction(BaseModel):
 @app.post("/api/stores/{store_id}/periods/{period}/close")
 def close_period(store_id: str, period: str, action: PeriodAction) -> dict:
     """结账。自检层不放行就结不了，这是整套东西存在的意义。"""
-    _store(_model(), store_id)
     try:
-        st = workspace().close_period(
-            store_id,
-            period,
-            by="人工操作" if action.ignored_blockers else ANONYMOUS,
-            note=action.note,
-            ignored_blockers=tuple(action.ignored_blockers),
-            expected_run_id=action.run_id,
-        )
+        from .model.transaction import model_lock
+        with model_lock(DEFAULT_MODEL):
+            model = _model()
+            _store(model, store_id)
+            ws = workspace()
+            labor_cut = labor_api.share_at_close(ws, model, period, store_id)
+            st = ws.close_period(
+                store_id,
+                period,
+                by="人工操作" if action.ignored_blockers else ANONYMOUS,
+                note=action.note,
+                ignored_blockers=tuple(action.ignored_blockers),
+                expected_run_id=action.run_id,
+                labor_cut=labor_cut,
+            )
     except WorkspaceError as exc:
         raise HTTPException(409, str(exc)) from exc
-    return {"state": st.state, "at": st.at, "run_id": st.run_id}
+    return {"state": st.state, "at": st.at, "run_id": st.run_id, "labor_cut": st.labor_cut}
 
 
 @app.post("/api/stores/{store_id}/periods/{period}/reopen")
@@ -1029,7 +1037,7 @@ def reopen_period(store_id: str, period: str, action: PeriodAction) -> dict:
     """反结账。为什么反必须留痕——理由这一栏是必填的。"""
     _store(_model(), store_id)
     try:
-        st = workspace().reopen_period(store_id, period, by=ANONYMOUS, note=action.note)
+        st = workspace().reopen_period(store_id, period, by="人工操作", note=action.note)
     except WorkspaceError as exc:
         raise HTTPException(409, str(exc)) from exc
     return {"state": st.state, "note": st.note}
@@ -1414,7 +1422,8 @@ def commission_summary(period: str = "") -> dict:
         # 提成利润 = 店铺利润 − 兼职，提成按提成利润算；每人按自己那份等比例缩，
         # 等价于先减后分，而且各人加起来仍然等于缩过的合计。
         saved_cut = closed_overhead.get((chosen, st.store_id, str(st.run_id))) if st.state == 'closed' else None
-        cut = float(saved_cut['amount']) if saved_cut else spread.of(st.store_id)
+        cut = (float(st.labor_cut) if st.state == 'closed' and st.labor_cut is not None
+               else float(saved_cut['amount']) if saved_cut else spread.of(st.store_id))
         base_total = c.get("base_total", 0.0)
         after = money_float(decimal_amount(base_total) - decimal_amount(cut))
         keep = (after / base_total) if base_total else 1.0

@@ -313,6 +313,13 @@ watch(
       />
 
       <template v-if="snap">
+        <details v-if="snap.period_actions?.length" class="small muted" style="margin-bottom: var(--s3)">
+          <summary>查看反结账记录</summary>
+          <p v-for="(action, index) in snap.period_actions" :key="index" style="margin-top: 6px">
+            {{ stamp(action.at) }} · {{ action.by || '人工操作' }}：{{ action.reason }}
+            <span v-if="action.previous_run"> · 原结账记录 {{ action.previous_run }}</span>
+          </p>
+        </details>
         <n-alert
           v-if="closed"
           type="success"
@@ -320,6 +327,7 @@ watch(
           style="margin-bottom: var(--s4)"
         >
           已结账{{ snap.at ? `于 ${stamp(snap.at)}` : '' }}{{ snap.by ? ` · ${snap.by}` : '' }}
+          <template v-if="snap.labor_cut != null"> · 兼职分摊 ¥{{ money(snap.labor_cut) }} 已固定</template>
           <template v-if="snap.stale"> · 有新资料，当前仍显示结账金额</template>
           <details v-if="snap.note" class="small" style="margin-top: 6px"><summary>结账备注</summary><p>{{ snap.note }}</p></details>
         </n-alert>

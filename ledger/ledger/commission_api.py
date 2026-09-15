@@ -520,7 +520,8 @@ def install(app, workspace, model, model_root: Path | None = None):
         selection = saved["selection"]
         try:
             current = commission_reports.build(workspace(), reg(), model(), selection["start"], selection["end"],
-                                               selection.get("store_ids"), selection.get("person_ids"))
+                                               selection.get("store_ids"), selection.get("person_ids"),
+                                               model_root=model_root)
             current_total = current.get("total")
             saved["current_total"] = current_total
             saved["difference"] = (None if current_total is None else

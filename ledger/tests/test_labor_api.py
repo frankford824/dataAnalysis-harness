@@ -1,9 +1,12 @@
 from pathlib import Path
 from types import SimpleNamespace
 import shutil
+import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from ledger.labor_api import install
+from ledger.labor_api import share_at_close
+from ledger.workspace import WorkspaceError
 from ledger.model.loader import load_model
 
 
@@ -41,3 +44,29 @@ def test_edit_total_name_refresh_and_closed_month_freeze(tmp_path):
     assert client.post('/api/commission-v2/labor',json={'period':'2030-01','name':'兼职','amount':400,'revision':current['revision']}).status_code==200
     assert frozen_shares(root)==frozen
     assert client.get('/api/commission-v2/labor?period=2030-13').status_code==400
+
+
+def test_share_at_close_uses_current_store_revenue_and_requires_evidence(tmp_path):
+    root=tmp_path/'model';shutil.copytree(Path(__file__).resolve().parents[2]/'models/cn-ecommerce',root)
+    base=load_model(root)
+    from ledger.model.schema import Overhead
+    model=base.model_copy(update={'overheads':(*base.overheads,Overhead(period='2030-01',amount=100))})
+    node=next(n.id for n in model.statement if n.headline=='revenue')
+    states=[SimpleNamespace(period='2030-01',store_id=sid,result={
+        'statement':[{'id':node,'value':sales,'available':True}]})
+        for sid,sales in [('a',100),('b',300)]]
+    ws=SimpleNamespace(overview=lambda:states)
+    assert share_at_close(ws,model,'2030-01','a')=='25.00'
+    assert share_at_close(ws,model,'2030-01','b')=='75.00'
+    states[0].result['statement'][0]['available']=False
+    with pytest.raises(WorkspaceError,match='销售收入尚未确定'):
+        share_at_close(ws,model,'2030-01','a')
+
+
+def test_new_closed_share_is_not_rewritten_into_legacy_csv(tmp_path):
+    from ledger.labor_api import save, frozen_shares, LaborChange
+    root=tmp_path/'model';shutil.copytree(Path(__file__).resolve().parents[2]/'models/cn-ecommerce',root)
+    from ledger.model.transaction import model_revision
+    body=LaborChange(period='2030-01',name='兼职人工费用',amount='100.00',revision=model_revision(root))
+    save(root,body,[{'store_id':'s1','run_id':7,'amount':25,'frozen_amount':'20.00'}])
+    assert frozen_shares(root)=={}

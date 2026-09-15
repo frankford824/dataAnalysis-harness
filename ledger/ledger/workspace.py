@@ -34,6 +34,7 @@ import threading
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import IO, Any, Iterator
 
@@ -106,6 +107,22 @@ create table if not exists period (
   at_version integer not null default 0,
   primary key (store_id, period)
 );
+
+-- 兼职公摊跟当次结账快照绑定，反结账也不删除旧金额。
+create table if not exists run_labor (
+  run_id   integer primary key,
+  store_id text not null,
+  period   text not null,
+  amount   text not null,
+  at       text not null,
+  by       text not null default ''
+);
+create trigger if not exists run_labor_no_update before update on run_labor begin
+  select raise(abort, 'immutable run labor');
+end;
+create trigger if not exists run_labor_no_delete before delete on run_labor begin
+  select raise(abort, 'immutable run labor');
+end;
 
 create table if not exists config_log (
   id integer primary key,
@@ -212,6 +229,7 @@ class PeriodState:
     changed_at: str = ""
     by: str = ""
     note: str = ""
+    labor_cut: str | None = None
     #: 当前展示的是哪一次算账。开着的时候是最近一次，结账后是被冻住的那一次。
     #:
     #: 事实明细按 run_id 落档，下钻要靠它取回来。所以这里必须给出「正在看的那一次」，
@@ -658,11 +676,13 @@ class Workspace:
         """按运行号读取冻结结果，不扫描其他店期。"""
         row = self.conn.execute(
             "select p.store_id, p.period, p.state, p.changed_at, p.by, p.note, "
+            "rl.amount as labor_cut, "
             "r.id as shown_id, r.result as shown_result, r.at as shown_at, "
             "r.engine as shown_engine, "
             "case when p.state=? and exists (select 1 from version nv "
             "where nv.store_id in (p.store_id, ?) and nv.id>p.at_version) then 1 else 0 end as stale "
             "from run r left join period p on p.store_id=r.store_id and p.period=r.period "
+            "left join run_labor rl on rl.run_id=p.run_id "
             "where r.id=?",
             (CLOSED, SHARED_STORE_ID, run_id),
         ).fetchone()
@@ -696,6 +716,7 @@ class Workspace:
         clause = " where " + " and ".join(where) if where else ""
         sql = (
             "select p.store_id, p.period, p.state, p.changed_at, p.by, p.note, "
+            "rl.amount as labor_cut, "
             "p.run_id as frozen_run_id, p.at_version, "
             "r.id as shown_id, r.result as shown_result, r.at as shown_at, "
             "r.engine as shown_engine, "
@@ -704,7 +725,8 @@ class Workspace:
             "from period p left join run r on r.id = case "
             "when p.state=? and p.run_id is not null then p.run_id else "
             "(select lr.id from run lr where lr.store_id=p.store_id and lr.period=p.period "
-            "order by lr.id desc limit 1) end"
+            "order by lr.id desc limit 1) end "
+            "left join run_labor rl on rl.run_id=p.run_id"
             + clause
             + " order by p.period desc, p.store_id"
         )
@@ -724,6 +746,7 @@ class Workspace:
             changed_at=row["changed_at"] or "",
             by=row["by"] or "",
             note=row["note"] or "",
+            labor_cut=row["labor_cut"] if "labor_cut" in row.keys() else None,
             run_id=int(row["shown_id"]) if row["shown_id"] else None,
             result=json.loads(row["shown_result"]) if row["shown_result"] else None,
             at=row["shown_at"] or "",
@@ -744,6 +767,7 @@ class Workspace:
         *,
         ignored_blockers: tuple[str, ...] = (),
         expected_run_id: int | None = None,
+        labor_cut: str | None = None,
     ) -> PeriodState:
         """结账；允许人工确认无法追溯的业务事项，但不允许绕过证据留档。"""
         from .pricing_status import read_feed
@@ -791,7 +815,21 @@ class Workspace:
         close_note = note.strip()
         if ignored_names:
             close_note = f"人工结账：{close_note}；已确认忽略：{'、'.join(ignored_names)}"
+        if labor_cut is not None:
+            try:
+                amount = Decimal(str(labor_cut))
+                if not amount.is_finite() or amount < 0 or amount != amount.quantize(Decimal("0.01")):
+                    raise ValueError()
+                labor_cut = str(amount.quantize(Decimal("0.01")))
+            except (InvalidOperation, ValueError) as exc:
+                raise WorkspaceError("兼职分摊金额无效，不能冻结结账") from exc
         with self.conn as conn:
+            current = conn.execute(
+                "select state from period where store_id=? and period=?",
+                (store_id, period),
+            ).fetchone()
+            if current and current["state"] == CLOSED:
+                raise WorkspaceError(f"{period} 已结账；请先反结账再修改")
             version = conn.execute(
                 "select coalesce(max(id), 0) as v from version where store_id in (?,?)",
                 (store_id, SHARED_STORE_ID),
@@ -803,6 +841,14 @@ class Workspace:
                 "note=excluded.note, run_id=excluded.run_id, at_version=excluded.at_version",
                 (store_id, period, CLOSED, _now(), by, close_note, run["id"], version),
             )
+            if labor_cut is not None:
+                saved = conn.execute("select run_id from run_labor where run_id=?", (run["id"],)).fetchone()
+                if saved:
+                    raise WorkspaceError("这次计算结果曾被结账；请先重新核算，再确认新结账")
+                conn.execute(
+                    "insert into run_labor (run_id,store_id,period,amount,at,by) values (?,?,?,?,?,?)",
+                    (run["id"], store_id, period, labor_cut, _now(), by),
+                )
             if ignored_names:
                 conn.execute(
                     "insert into config_log (at,by,kind,summary,before_json,after_json) values (?,?,?,?,?,?)",
@@ -945,13 +991,28 @@ class Workspace:
         if not note.strip():
             raise WorkspaceError("反结账要写原因")
         with self.conn as conn:
+            before = conn.execute(
+                "select p.state,p.changed_at,p.by,p.note,p.run_id,rl.amount as labor_cut "
+                "from period p left join run_labor rl on rl.run_id=p.run_id "
+                "where p.store_id=? and p.period=? and p.state=?",
+                (store_id, period, CLOSED),
+            ).fetchone()
+            if before is None:
+                raise WorkspaceError(f"{period} 本来就没结账")
             changed = conn.execute(
                 "update period set state=?, changed_at=?, by=?, note=?, run_id=null "
                 "where store_id=? and period=? and state=?",
                 (OPEN, _now(), by, note, store_id, period, CLOSED),
             ).rowcount
-        if not changed:
-            raise WorkspaceError(f"{period} 本来就没结账")
+            if changed != 1:
+                raise WorkspaceError("结账状态已变化，请刷新后再操作")
+            conn.execute(
+                "insert into config_log (at,by,kind,summary,before_json,after_json) "
+                "values (?,?,?,?,?,?)",
+                (_now(), by, "period-reopen", f"反结账 {store_id} {period}",
+                 json.dumps(dict(before), ensure_ascii=False),
+                 json.dumps({"state": OPEN, "reason": note.strip()}, ensure_ascii=False)),
+            )
         state = self.state(store_id, period)
         assert state is not None
         return state
@@ -964,6 +1025,25 @@ class Workspace:
             (store_id, period),
         ).fetchall()
         return [dict(r) for r in rows]
+
+    def period_actions(self, store_id: str, period: str) -> list[dict[str, Any]]:
+        """Read state transitions separately from recalculation snapshots."""
+        rows = self.conn.execute(
+            "select at,by,before_json,after_json from config_log "
+            "where kind='period-reopen' and summary=? order by id desc limit 50",
+            (f"反结账 {store_id} {period}",),
+        ).fetchall()
+        actions = []
+        for row in rows:
+            before = json.loads(row["before_json"] or "{}")
+            after = json.loads(row["after_json"] or "{}")
+            actions.append({
+                "at": row["at"], "by": row["by"],
+                "reason": after.get("reason") or "",
+                "previous_run": before.get("run_id"),
+                "previous_closed_at": before.get("changed_at") or "",
+            })
+        return actions
 
     def log_config(
         self,

@@ -10,6 +10,7 @@ from .model.transaction import model_lock, model_revision
 from .model.loader import load_model
 from .model.config import _atomic_text
 from .overhead import allocate
+from .workspace import WorkspaceError
 
 class LaborChange(BaseModel):
     period: str
@@ -30,6 +31,30 @@ def frozen_shares(root):
         return {(r['period'],r['store_id'],r['run_id']):r for r in csv.DictReader(f)}
 
 
+def share_at_close(workspace, model, period: str, store_id: str) -> str | None:
+    """Calculate the current monthly allocation before freezing a period in SQLite."""
+    total = model.overhead(period)
+    if total is None:
+        return None
+    revenue = next((node.id for node in model.statement if node.headline == 'revenue'), '')
+    states = [state for state in workspace.overview() if state.period == period]
+    basis = []
+    target_revenue = None
+    for state in states:
+        node = next((item for item in (state.result or {}).get('statement', [])
+                     if item.get('id') == revenue), None)
+        value = node.get('value') if node and node.get('available', True) else None
+        if state.store_id == store_id:
+            target_revenue = value
+        basis.append((state.store_id, value or 0))
+    if target_revenue is None:
+        raise WorkspaceError("这家店的销售收入尚未确定，兼职费用不能冻结结账")
+    spread = allocate(period, total, basis)
+    if not spread.settled:
+        raise WorkspaceError("本月兼职费用尚无可分摊的销售收入，不能冻结结账")
+    return str(Decimal(str(spread.of(store_id))).quantize(Decimal('0.01')))
+
+
 def save(root, body, closed_rows=()):
     check_period(body.period)
     with model_lock(root):
@@ -38,6 +63,8 @@ def save(root, body, closed_rows=()):
         frozen_path=root/'labor-closed-shares.csv'; frozen_old=frozen_path.read_bytes() if frozen_path.exists() else None
         frozen=frozen_shares(root)
         for row in closed_rows:
+            if row.get('frozen_amount') is not None:
+                continue  # New closed periods freeze their share in the period row.
             key=(body.period,row['store_id'],str(row['run_id']))
             frozen.setdefault(key,{'period':body.period,'store_id':row['store_id'],'run_id':str(row['run_id']),'amount':str(row['amount'] or 0)})
         model=load_model(root)
@@ -76,7 +103,9 @@ def install(app, workspace, model, model_root, invalidate, actor):
         return {'period':period,'name':config.name if config else '兼职人工费用','amount':config.amount if config else None,
                 'revision':model_revision(model_root),'locked':False,'closed_stores':sum(st.state=='closed' for st in states),'basis_total':basis_total,
                 'settled':spread.settled,'incomplete':any(v is None for _,v in known),
-                'rows':[{'store_id':st.store_id,'closed':st.state=='closed','run_id':getattr(st,'run_id',None),'store':names.get(st.store_id,st.store_id),'sales':v,
+                'rows':[{'store_id':st.store_id,'closed':st.state=='closed','run_id':getattr(st,'run_id',None),
+                         'frozen_amount':getattr(st,'labor_cut',None) if st.state=='closed' else None,
+                         'store':names.get(st.store_id,st.store_id),'sales':v,
                          'share':(max(v or 0,0)/basis_total if basis_total and v is not None else None),
                          'amount':cuts.get(st.store_id,0) if spread.settled and v is not None else None} for st,v in known]}
 

@@ -301,6 +301,40 @@ def test_closed_store_uses_frozen_labor_share(tmp_path):
     assert report['stores'][0]['labor_cost'] == 20
 
 
+def test_new_close_labor_cut_overrides_old_csv_and_later_config(tmp_path):
+    ws = Workspace(tmp_path)
+    registry = Registry(tmp_path)
+    root = tmp_path / 'model'; root.mkdir()
+    model = _model(stores=(Store(id='s1', name='店铺1', platform='taobao'),))
+    model = model.model_copy(update={
+        'overheads': (Overhead(period='2026-06', amount=100, name='兼职人工费用'),),
+        'statement': (model.statement[0].model_copy(update={'headline': 'revenue'}), *model.statement[1:]),
+    })
+    person = registry.person_save({'name': '甲'}, 'test', '登记')
+    run_id = ws.record('s1', '2026-06', {
+        'can_close': True, 'findings': [], 'missing_sources': [],
+        'statement': [{'id': model.statement[0].id, 'value': 1000, 'available': True}],
+        'commission': {'engine': 'commission-v2', 'base_total': 100,
+                       'total': 10, 'amount_complete': True, 'people': [
+                           {'person_id': person['id'], 'person': '甲', 'amount': 10},
+                       ]},
+    }, [])
+    ws.close_period('s1', '2026-06', labor_cut='30.00')
+    (root / 'labor-closed-shares.csv').write_text(
+        f'period,store_id,run_id,amount\n2026-06,s1,{run_id},20\n', encoding='utf-8',
+    )
+    app = FastAPI(); install(app, lambda: ws, lambda: model, root)
+    report = TestClient(app).post('/api/commission-v2/reports/query', json={
+        'start': '2026-06', 'end': '2026-06', 'store_ids': ['s1'],
+    }).json()
+    assert report['total'] == 7 and report['stores'][0]['labor_cost'] == 30
+    ws.reopen_period('s1', '2026-06', note='回看旧结账金额')
+    pinned = TestClient(app).post('/api/commission-v2/reports/query', json={
+        'start': '2026-06', 'end': '2026-06', 'store_ids': ['s1'], 'run_ids': [run_id],
+    }).json()
+    assert pinned['total'] == 7 and pinned['stores'][0]['labor_cost'] == 30
+
+
 def test_employee_settlement_freezes_viewed_runs_and_reports_later_difference(tmp_path):
     ws, registry, people, client = fixture(tmp_path)
     original = record(ws, people, 's1', '2026-06', [10.01, 20.02])

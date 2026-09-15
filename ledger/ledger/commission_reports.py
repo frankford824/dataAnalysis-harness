@@ -85,7 +85,7 @@ def build(workspace, registry, model, start, end, store_ids=None, person_ids=Non
         if len(run_ids)!=len(set(run_ids)):raise RegistryError('计算记录不能重复')
         source='FROM run r LEFT JOIN period p ON p.store_id=r.store_id AND p.period=r.period'
         where.append('r.id IN ('+','.join('?' for _ in run_ids)+')' if run_ids else '0');args.extend(run_ids)
-    records=[dict(r) for r in workspace.conn.execute("SELECT r.id,r.store_id,r.period,r.at,json_extract(r.result,'$.commission') commission_json,json_extract(r.result,'$.statement') statement_json,json_extract(r.result,'$.store') store_name,p.state,p.run_id frozen_id "+source+' WHERE '+' AND '.join(where)+' ORDER BY r.period DESC,r.store_id',args)]
+    records=[dict(r) for r in workspace.conn.execute("SELECT r.id,r.store_id,r.period,r.at,json_extract(r.result,'$.commission') commission_json,json_extract(r.result,'$.statement') statement_json,json_extract(r.result,'$.store') store_name,p.state,p.run_id frozen_id,rl.amount frozen_labor_cut "+source+' LEFT JOIN run_labor rl ON rl.run_id=r.id WHERE '+' AND '.join(where)+' ORDER BY r.period DESC,r.store_id',args)]
     if run_ids is not None and len(records)!=len(run_ids):raise RegistryError('部分计算记录已不存在或不在所选范围，请重新查询')
     keys=[(r['store_id'],r['period']) for r in records]
     if len(keys)!=len(set(keys)):raise RegistryError('同店同账期只能选择一份计算结果')
@@ -105,8 +105,11 @@ def build(workspace, registry, model, start, end, store_ids=None, person_ids=Non
         if c.get('total') is not None and abs(all_total-decimal(c['total']))>Decimal('.01'):
             notes.append('原记录的人员合计与店铺提成合计不一致');status+=' · 合计待核对'
         spread=labor_spreads[period]
-        saved=frozen.get((period,sid,str(record['id']))) if closed else None
-        labor_cut=decimal(saved['amount']) if saved else decimal(spread.of(sid))
+        saved=frozen.get((period,sid,str(record['id'])))
+        labor_cut=(decimal(record['frozen_labor_cut'])
+                   if (closed or run_ids is not None) and record['frozen_labor_cut'] is not None
+                   else decimal(saved['amount']) if (closed or run_ids is not None) and saved
+                   else decimal(spread.of(sid)))
         base_total=decimal(c.get('base_total') or 0)
         keep=(base_total-labor_cut)/base_total if base_total else Decimal(1)
         if spread.total is not None:

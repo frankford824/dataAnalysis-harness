@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import io
+import sqlite3
 
 import pytest
 
@@ -300,6 +301,42 @@ def test_reopen_returns_to_latest(ws):
     assert state.state == OPEN
     assert state.result["profit"] == 999
     assert state.note == "退款漏了"
+
+
+def test_reopen_preserves_old_close_evidence_and_next_close_freezes_new_labor(ws):
+    original = ws.record("s1", "2026-06", _result(profit=100), ["a"])
+    closed = ws.close_period("s1", "2026-06", by="原结账人", note="原月结", labor_cut="0.00")
+    assert closed.run_id == original and closed.labor_cut == "0.00"
+    with pytest.raises(WorkspaceError, match="先反结账"):
+        ws.close_period("s1", "2026-06", labor_cut="10.00")
+    ws.reopen_period("s1", "2026-06", by="核算员", note="补入兼职公摊后统一重算")
+    audit = ws.conn.execute("select before_json,after_json from config_log where kind='period-reopen'").fetchone()
+    import json
+    assert json.loads(audit["before_json"])["run_id"] == original
+    assert json.loads(audit["before_json"])["labor_cut"] == "0.00"
+    assert "补入兼职" in audit["after_json"]
+    actions = ws.period_actions("s1", "2026-06")
+    assert len(actions) == 1
+    assert actions[0]["previous_run"] == original
+    assert actions[0]["reason"] == "补入兼职公摊后统一重算"
+    assert ws.state("s1", "2026-06").labor_cut is None
+    updated = ws.record("s1", "2026-06", _result(profit=200), ["b"])
+    frozen = ws.close_period("s1", "2026-06", by="新结账人", labor_cut="12.34")
+    assert frozen.run_id == updated and frozen.labor_cut == "12.34"
+    assert [(row["run_id"], row["amount"]) for row in ws.conn.execute(
+        "select run_id,amount from run_labor order by run_id"
+    )] == [(original, "0.00"), (updated, "12.34")]
+    with pytest.raises(sqlite3.IntegrityError, match="immutable"):
+        with ws.conn as conn:
+            conn.execute("update run_labor set amount='99' where run_id=?", (original,))
+    assert {row["id"] for row in ws.history("s1", "2026-06")} == {original, updated}
+
+
+def test_close_rejects_inexact_labor_cents(ws):
+    ws.record("s1", "2026-06", _result(), ["a"])
+    with pytest.raises(WorkspaceError, match="兼职分摊金额无效"):
+        ws.close_period("s1", "2026-06", labor_cut="12.345")
+    assert ws.state("s1", "2026-06").state == OPEN
 
 
 def test_reopen_what_is_not_closed_is_refused(ws):
