@@ -840,7 +840,8 @@ class Workspace:
         if manual_result is not None:
             if expected_run_id is None or not note.strip() or manual_decision is None:
                 raise WorkspaceError("人工确认成本需要当前运行号、金额和原因")
-            if manual_result.get("manual_cost", {}).get("source_run_id") != run["id"]:
+            source = (manual_result.get("manual_cost") or manual_result.get("manual_payout") or {}).get("source_run_id")
+            if source != run["id"] or (bool(manual_result.get("manual_cost")) == bool(manual_result.get("manual_payout"))):
                 raise WorkspaceError("人工确认来源运行号不一致，请刷新后重试")
             result = manual_result
         profit = next((row for row in result.get("statement", [])

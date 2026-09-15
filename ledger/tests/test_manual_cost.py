@@ -93,6 +93,43 @@ def test_manual_preview_and_payout_refuse_unverified_or_ambiguous_values():
             {'goods': '1.001', 'dropship': '0.00', 'reshipment': '0.00'})
 
 
+def test_payout_only_freezes_confirmed_amount_without_changing_profit_or_raw_run(tmp_path):
+    m = model(); ws = Workspace(tmp_path); registry = Registry(tmp_path)
+    person = registry.person_save({'name': '甲'}, 'test', '登记')
+    raw = result(m, person)
+    raw.update(can_close=True, findings=[], statement=[
+        {'id': 'n_receipt', 'value': 1000, 'available': True},
+        {'id': 'net_profit', 'value': 13269.90, 'available': True},
+    ])
+    raw['commission'].update(total=-140.95, base_total=13269.90,
+                             amount_complete=False, unassigned_orders=2401,
+                             unassigned_base=16087.19)
+    raw['commission']['people'][0]['amount'] = -140.95
+    run = ws.record(raw['store_id'], raw['period'], raw, [],
+                    model_revision=hashlib.sha256(m.model_dump_json().encode()).hexdigest())
+    with pytest.raises(WorkspaceError, match='全部提成人员'):
+        manual_cost.payout_only(raw, run, [{'person_id': 'other', 'amount': '17.00'}],
+                                False, '核对提成')
+    confirmed, audit = manual_cost.payout_only(
+        raw, run, [{'person_id': person['id'], 'amount': '17.00'}], False,
+        '原商品关系未覆盖，本人提成由人工确认')
+    audit['line_revision'] = 0
+    ws.close_period(raw['store_id'], raw['period'], note=audit['reason'],
+                    expected_run_id=run, labor_cut='30.00',
+                    manual_result=confirmed, manual_decision=audit)
+    frozen = ws.state(raw['store_id'], raw['period']).result
+    assert frozen['statement'] == raw['statement']
+    assert frozen['commission']['total'] == 17
+    assert frozen['commission']['unassigned_orders'] == 2401
+    assert frozen['manual_payout']['source_run_id'] == run
+    assert frozen.get('manual_cost') is None
+    assert json.loads(ws.conn.execute('SELECT result FROM run WHERE id=?', (run,)).fetchone()[0]) == raw
+    report = build(ws, registry, m, '2026-06', '2026-06', [raw['store_id']], model_root=tmp_path)
+    assert report['total'] == 17  # Already includes labor; no second deduction.
+    assert report['trial_periods'] == 0
+    ws.close()
+
+
 def test_http_preview_and_manual_close_require_current_run(tmp_path, monkeypatch):
     from contextlib import nullcontext
     from fastapi.testclient import TestClient
@@ -123,4 +160,48 @@ def test_http_preview_and_manual_close_require_current_run(tmp_path, monkeypatch
     assert closed.status_code == 200, closed.text
     assert closed.json()['state'] == 'closed'
     assert ws.state(raw['store_id'], raw['period']).result['manual_cost']['profit'] == 220
+    ws.close()
+
+
+def test_http_payout_only_rejects_stale_run_and_does_not_change_store_profit(tmp_path, monkeypatch):
+    from contextlib import nullcontext
+    from fastapi.testclient import TestClient
+    from ledger import api
+    from ledger.model import transaction
+
+    m = model(); ws = Workspace(tmp_path); registry = Registry(tmp_path)
+    person = registry.person_save({'name': '甲'}, 'test', '登记')
+    raw = result(m, person)
+    raw.update(can_close=True, findings=[], statement=[
+        {'id': 'n_receipt', 'value': 39777.59, 'available': True},
+        {'id': 'net_profit', 'value': 13269.90, 'available': True},
+    ])
+    raw['commission'].update(total=-140.95, base_total=13269.90,
+                             amount_complete=False, unassigned_orders=2401)
+    raw['commission']['people'][0]['amount'] = -140.95
+    run = ws.record(raw['store_id'], raw['period'], raw, [],
+                    model_revision=hashlib.sha256(m.model_dump_json().encode()).hexdigest())
+    monkeypatch.setattr(api, 'WORKSPACE_ROOT', tmp_path)
+    monkeypatch.setattr(api, '_ws', ws)
+    monkeypatch.setattr(api, '_model', lambda: m)
+    monkeypatch.setattr(transaction, 'model_lock', lambda _: nullcontext())
+    client = TestClient(api.app)
+    endpoint = f"/api/stores/{raw['store_id']}/periods/{raw['period']}/close"
+    body = {'run_id': run, 'payout_only': True,
+            'note': '核对未分配商品后人工确认本人提成',
+            'payouts': [{'person_id': person['id'], 'amount': '17.00'}],
+            'line_revision': 0}
+    assert client.post(endpoint, json={**body, 'run_id': run - 1}).status_code == 409
+    assert client.post(endpoint, json={**body, 'payouts': [{'person_id': 'other', 'amount': '17.00'}]}).status_code == 409
+    response = client.post(endpoint, json=body)
+    assert response.status_code == 200, response.text
+    frozen = ws.state(raw['store_id'], raw['period']).result
+    assert frozen['statement'] == raw['statement']
+    assert frozen['commission']['total'] == 17
+    assert frozen.get('manual_cost') is None
+    report = client.post('/api/commission-v2/reports/query', json={
+        'start': '2026-06', 'end': '2026-06', 'store_ids': [raw['store_id']],
+        'view': 'store_people'})
+    assert report.status_code == 200, report.text
+    assert report.json()['assignment_gaps'] == []  # Human payout is no longer a partial trial.
     ws.close()

@@ -477,6 +477,10 @@ def install(app, workspace, model, model_root: Path | None = None):
             'people_count':len(report['people']), 'store_count':visible_stores,
             'view':selection.view, 'offset':selection.offset,
             'run_scopes':[{'run_id':row['finance_run'],'store_id':row['store_id'],'period':row['period']} for row in report['coverage'] if row['finance_run'] is not None],
+            'assignment_gaps':[{'store_id':row['store_id'],'store':row['store'],'period':row['period'],
+                                'orders':row['unassigned_orders'],'base':row.get('unassigned_base')}
+                               for row in report['coverage'] if row.get('unassigned_orders')
+                               and '试算' in row['status']],
         }
 
     @router.post("/export/reports/{kind}")

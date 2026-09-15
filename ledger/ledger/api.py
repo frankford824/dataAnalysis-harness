@@ -1043,6 +1043,7 @@ class PeriodAction(BaseModel):
     ignored_blockers: list[str] = Field(default_factory=list, max_length=100)
     costs: dict[str, Decimal] | None = None
     payouts: list[dict[str, Any]] = Field(default_factory=list, max_length=100)
+    payout_only: bool = False
     no_payout: bool = False
     line_revision: int | None = Field(default=None, ge=0)
 
@@ -1155,6 +1156,8 @@ def close_period(store_id: str, period: str, action: PeriodAction) -> dict:
             _store(model, store_id)
             ws = workspace()
             manual_result = manual_decision = None
+            if action.payout_only and action.costs is not None:
+                raise WorkspaceError("只确认提成时不能同时修改成本")
             if action.costs is not None:
                 run = _manual_source_run(ws, model, store_id, period, action.run_id)
                 lines = _line_snapshot(ws, run['id'], store_id, period, action.line_revision)
@@ -1168,6 +1171,15 @@ def close_period(store_id: str, period: str, action: PeriodAction) -> dict:
                 manual_decision['line_reviews'] = lines['reviewed']
                 manual_result['manual_cost']['line_supplement'] = lines['supplement_total']
                 manual_result['manual_cost']['line_count'] = lines['reviewed_count']
+            elif action.payout_only:
+                run = _manual_source_run(ws, model, store_id, period, action.run_id)
+                lines = _line_snapshot(ws, run['id'], store_id, period, action.line_revision)
+                if lines['reviewed_count']:
+                    raise WorkspaceError("已有人工补录成本，请同时预览并确认成本与提成")
+                manual_result, manual_decision = manual_cost.payout_only(
+                    json.loads(run['result']), run['id'], action.payouts,
+                    action.no_payout, action.note)
+                manual_decision['line_revision'] = lines['line_revision']
             labor_cut = labor_api.share_at_close(ws, model, period, store_id)
             st = ws.close_period(
                 store_id,

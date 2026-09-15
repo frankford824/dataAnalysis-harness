@@ -131,3 +131,39 @@ def certified(model, result: dict, source_run_id: int, confirmed: dict,
                 "original_findings": [finding for finding in result.get("findings") or []
                                       if finding.get("id") in {"chk_goods_coverage", "historical_cost_evidence"}]}
     return decided, decision
+
+
+def payout_only(result: dict, source_run_id: int, payouts: list[dict],
+                no_payout: bool, reason: str) -> tuple[dict, dict]:
+    """Confirm payouts while keeping the computed store statement unchanged."""
+    if not reason.strip():
+        raise WorkspaceError("人工确认提成必须填写原因")
+    if not isinstance(result.get("commission"), dict):
+        raise WorkspaceError("本期尚无提成计算记录，请先重算")
+    people = list((result.get("commission") or {}).get("people") or [])
+    identities = [str(person.get("person_id") or "") for person in people]
+    if len(identities) != len(set(identities)) or any(not pid for pid in identities):
+        raise WorkspaceError("提成人员身份不完整，不能人工确认金额")
+    if no_payout and (payouts or identities):
+        raise WorkspaceError("已有提成人员时，请分别确认其提成金额")
+    if not identities and not no_payout:
+        raise WorkspaceError("本期没有提成人员，请明确确认无需提成")
+    entered = [str(item.get("person_id") or "") for item in payouts]
+    if not no_payout and (len(entered) != len(set(entered)) or set(entered) != set(identities)):
+        raise WorkspaceError("请分别填写全部提成人员的确认金额")
+    amounts = {str(item["person_id"]): _cents(item.get("amount")) for item in payouts}
+    decided = deepcopy(result)
+    for person in decided["commission"].get("people") or []:
+        person["amount"] = money_float(amounts[person["person_id"]])
+    decided["commission"].update(total=money_float(sum(amounts.values(), Decimal(0))),
+                                   amount_complete=True, manual_confirmed=True,
+                                   manual_amounts_after_labor=True)
+    decided["commission"].setdefault("notes", []).append(
+        "提成由人工逐人确认，已含兼职分摊；原订单试算与未分配订单保留")
+    decided["manual_payout"] = {"source_run_id": source_run_id, "reason": reason.strip(),
+                                 "method": "人工确认提成，不调整成本或经营利润"}
+    decision = {"source_run_id": source_run_id, "reason": reason.strip(),
+                "payouts": [{"person_id": pid, "amount": money_float(amount)}
+                            for pid, amount in sorted(amounts.items())],
+                "no_payout": no_payout}
+    return decided, decision

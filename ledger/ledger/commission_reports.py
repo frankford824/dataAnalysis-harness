@@ -159,7 +159,9 @@ def build(workspace, registry, model, start, end, store_ids=None, person_ids=Non
             notes.append(f"{next((x.name for x in model.overheads if x.period==period),'兼职人工费用')}已分摊 {money_float(labor_cut):,.2f} 元")
         scope={'store_id':sid,'store':names[sid],'period':period,'finance_run':record['id'],'calculated_at':record['at'],
                'status':status,'has_result':has_result,'notes':'；'.join(notes),'selected_amount':Decimal(0),
-               'unassigned_orders':c.get('unassigned_orders'),'base_name':c.get('base_name') or c.get('base_node',''),
+               'unassigned_orders':c.get('unassigned_orders'),
+               'unassigned_base':c.get('unassigned_base'),
+               'base_name':c.get('base_name') or c.get('base_node',''),
                'labor_cost':money_float(labor_cut)}
         statement=json.loads(record['statement_json'] or '[]')
         sales=statement_amount(statement,sales_node) if sales_node else None

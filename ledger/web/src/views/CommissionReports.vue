@@ -23,6 +23,7 @@ const rows = computed(() => report.value?.view === state.reportView ? report.val
 const money = value => value == null ? '—' : Number(value).toLocaleString('zh-CN',{minimumFractionDigits:2,maximumFractionDigits:2})
 const locked = computed(() => stale.value || loading.value || !!monthError.value)
 const warnings = computed(() => (report.value?.missing_periods || 0) + (report.value?.trial_periods || 0))
+const assignmentGaps = computed(() => report.value?.assignment_gaps || [])
 const canSettle = computed(() => !!report.value && report.value.total != null && !locked.value && !warnings.value)
 const labels = {store_people:'店铺人员构成',people:'人员汇总',stores:'店铺汇总',breakdown:'按月明细',coverage:'月份进度'}
 function status(value='') { return value.replaceAll('未计算提成','未出金额').replaceAll('未计算','未出金额').replaceAll('试算','待核对').replaceAll('历史口径','历史提成').replaceAll('已计算','待结账').replaceAll('无对应提成记录','暂无提成').replaceAll('合计待核对','金额待核对') }
@@ -164,6 +165,13 @@ const tableColumns=computed(()=>{
     <div v-if="error || downloadError || settlementError" class="commission-error" role="alert">{{ error || downloadError || settlementError }}<button class="text-button" @click="downloadError='';settlementError='';load();loadSettlements()">重试</button></div>
     <div class="report-overview" :class="{'commission-stale':stale}"><div class="report-total"><span>{{warnings ? "已出金额合计" : "提成合计"}}</span><strong><small v-if="report?.total!=null">¥</small>{{ money(report?.total) }}</strong></div><div class="report-count"><strong>{{ report?.configured_people_count ?? '—' }}</strong><span>位人员已设置</span></div><div class="report-count"><strong>{{ report?.people_count ?? '—' }}</strong><span>位人员已有金额</span></div><div class="report-count"><strong>{{ report?.store_count ?? '—' }}</strong><span>家店铺</span></div><button v-if="warnings" class="report-attention" @click="state.reportView='coverage'"><span class="attention-dot"/>{{ state.reportView==='store_people'&&state.personIds.length ? (report?.missing_periods ? `全公司另有 ${report.missing_periods} 个店铺月份未出金额` : '全公司金额待核对') : (report?.missing_periods ? `${report.missing_periods} 个月份未出金额` : '金额待核对') }} <span>查看</span></button></div>
     <n-alert v-if="warnings" type="warning" style="margin-bottom:16px"><template v-if="state.reportView==='store_people'&&state.personIds.length">当前个人产出可查看；全公司仍有店铺月份未出金额或待核对，提成合计还不是最终应发金额。</template><template v-else>还有店铺月份未出金额或待核对，当前合计不是最终应发金额。</template></n-alert>
+    <n-alert v-if="assignmentGaps.length" type="warning" style="margin-bottom:16px">
+      <template v-for="gap in assignmentGaps.slice(0,3)" :key="`${gap.store_id}:${gap.period}`">
+        <span>{{ gap.store }} {{ gap.period }}：{{ gap.orders }} 笔订单尚未分配人，未分配利润基数 ¥{{ money(gap.base) }}。表内提成额只算已分配订单，是试算，不是最终应发金额。</span>
+        <router-link :to="{name:'period',params:{id:gap.store_id},query:{period:gap.period}}" class="text-button">到店铺人工确认提成 →</router-link>
+      </template>
+      <span v-if="assignmentGaps.length>3">另有 {{ assignmentGaps.length-3 }} 个店铺月份未分配完整，可在月份进度中查看。</span>
+    </n-alert>
     <n-alert v-else-if="latestSettlement" :type="settlementDifference ? 'warning' : 'success'" style="margin-bottom:16px">
       本范围最近一次结算为 {{ displayTime(latestSettlement.at) }}，金额 ¥{{ money(latestSettlement.total) }}。
       <template v-if="settlementDifference">当前金额比该次结算{{settlementDifference>0?'增加':'减少'}} ¥{{money(Math.abs(settlementDifference))}}，原结算记录未改变。</template>

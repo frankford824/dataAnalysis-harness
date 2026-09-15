@@ -129,6 +129,26 @@ def test_empty_commission_and_unknown_export_kind(tmp_path):
     assert c.post('/api/commission-v2/export/reports/unknown', json=scope).status_code == 400
 
 
+def test_report_names_unassigned_profit_behind_partial_negative_payout(tmp_path):
+    ws, _, people, client = fixture(tmp_path)
+    ws.record('s1', '2026-06', {'statement': [], 'commission': {
+        'engine': 'commission-v2', 'total': -140.95, 'base_total': 13269.90,
+        'amount_complete': False, 'unassigned_orders': 2401,
+        'unassigned_base': 16087.19,
+        'people': [{'person_id': people[0]['id'], 'person': '甲',
+                    'amount': -140.95, 'base': -2817.29}]}}, [])
+    reply = client.post('/api/commission-v2/reports/query', json={
+        'start': '2026-06', 'end': '2026-06', 'store_ids': ['s1'],
+        'view': 'store_people'})
+    assert reply.status_code == 200, reply.text
+    report = reply.json()
+    assert report['trial_periods'] == 1
+    assert report['assignment_gaps'] == [
+        {'store_id': 's1', 'store': '店铺1', 'period': '2026-06',
+         'orders': 2401, 'base': 16087.19}]
+    assert report['total'] == -140.95  # Audit preserves the partial trial amount.
+
+
 def test_v2_legacy_name_ids_do_not_merge_across_stores(tmp_path):
     ws, _, _, c = fixture(tmp_path)
     historical = [{'id': 'legacy:same-name-hash', 'name': '同名人员'}]
