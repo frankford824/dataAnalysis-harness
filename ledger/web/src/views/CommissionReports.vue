@@ -36,7 +36,7 @@ function explanation(row) {
   return row.status==='已结账'?'本月已结账':''
 }
 const columns = computed(() => ({
-  store_people:[['store','店铺'],['person','分配人'],['period','月份'],['sales','销售额'],['gross','毛利额'],
+  store_people:[['store','店铺'],['person','分配人'],['period','月份'],['sales','销售额'],['gross','毛利额'],['profit_after_labor','利润额'],
     ['labor_cost','兼职额'],['amount','提成额'],['status','状态']],
   people:[['person','人员'],['employee_no','工号'],['amount','提成金额'],['stores','店铺'],['periods','月份'],['status','状态']],
   stores:[['store','店铺'],['amount','提成金额'],['labor_cost','兼职分摊'],['configured_people','提成设置人数'],['people','已出金额人数'],['periods','已有金额'],['missing','未出金额'],['status','状态']],
@@ -44,7 +44,7 @@ const columns = computed(() => ({
   coverage:[['store','店铺'],['period','月份'],['selected_amount','提成金额'],['status','状态'],['explanation','待办']],
 }[state.reportView]))
 function cell(row,key) {
-  if(['amount','selected_amount','labor_cost','sales','gross','base','store_amount'].includes(key))return money(row[key])
+  if(['amount','selected_amount','labor_cost','sales','gross','profit_after_labor','base','store_amount'].includes(key))return money(row[key])
   if(key==='status')return status(row.status)
   if(key==='explanation')return explanation(row)
   if(key==='stores')return `${row[key]} 家`
@@ -141,12 +141,13 @@ const tableColumns=computed(()=>{
   const composition=state.reportView==='store_people'
   const list=columns.value.map(([key,title],index)=>({title,key,
     width:composition?(key==='store'?180:key==='person'?92:key==='period'?86:key==='status'?92:112):
-      ['amount','selected_amount','labor_cost','sales','gross','base','store_amount'].includes(key)?145:key==='employee_no'?90:key==='period'?100:index===0?undefined:key==='store'?240:125,
-    minWidth:index===0?180:undefined,mobileWidth:['amount','selected_amount','labor_cost','sales','gross','base','store_amount'].includes(key)?115:key==='period'?84:index===0?135:undefined,
-    mobile:index===0||['amount','selected_amount','sales','gross','labor_cost','period','person'].includes(key),align:['amount','selected_amount','labor_cost','sales','gross','base','store_amount'].includes(key)?'right':'left',
+      ['amount','selected_amount','labor_cost','sales','gross','profit_after_labor','base','store_amount'].includes(key)?145:key==='employee_no'?90:key==='period'?100:index===0?undefined:key==='store'?240:125,
+    minWidth:index===0?180:undefined,mobileWidth:['amount','selected_amount','labor_cost','sales','gross','profit_after_labor','base','store_amount'].includes(key)?115:key==='period'?84:index===0?135:undefined,
+    mobile:index===0||['amount','selected_amount','sales','gross','profit_after_labor','labor_cost','period','person'].includes(key),align:['amount','selected_amount','labor_cost','sales','gross','profit_after_labor','base','store_amount'].includes(key)?'right':'left',
     render:row=>key==='status'?h(NTag,{bordered:false,size:'small',type:row.status?.includes('试算')?'warning':'default'},()=>status(row.status)):
-      h('div',{class:['amount','selected_amount','labor_cost','sales','gross','base','store_amount'].includes(key)?['table-money',row[key]<0?'negative':'']:undefined,
+      h('div',{class:['amount','selected_amount','labor_cost','sales','gross','profit_after_labor','base','store_amount'].includes(key)?['table-money',row[key]<0?'negative':'']:undefined,
                title:state.reportView==='store_people'&&row.kind==='person'&&['sales','gross'].includes(key)?'参与链接的完整产出，多人参与时会重复':
+                 state.reportView==='store_people'&&key==='profit_after_labor'?row.kind==='person'?'参与毛利减按参与销售额占店铺销售额估算的兼职额；多人参与时会重复':'店铺毛利减店铺兼职额；不同于经营账的利润':
                  state.reportView==='store_people'&&row.kind==='person'&&key==='labor_cost'?'兼职额按店铺分摊':undefined},
         index===0?[h('span',{class:row.kind==='store'?'store-total-name':''},cell(row,key)),h('div',{class:'table-secondary table-mobile-only'},status(row.status))]:
           key==='person'&&row.kind==='store'?h('strong','店铺合计'):
@@ -170,7 +171,7 @@ const tableColumns=computed(()=>{
     </n-alert>
     <p v-if="state.reportView==='stores'" style="color:#64748b;margin:0 0 12px">提成设置人数按所选月份的有效设置统计；已出金额人数只统计已有结算金额的人员。</p>
     <div class="report-tabs-row"><LedgerTabs v-model="state.reportView" :options="kinds" label="汇总方式" @update:model-value="detail=null" /><div class="report-actions"><n-button :disabled="!canSettle" @click="openSettlement">确认员工结算</n-button><n-button type="primary" :disabled="!report || locked" :loading="downloading" @click="download">导出表格</n-button></div></div>
-    <p v-if="state.reportView==='store_people'" class="report-grain-note"><template v-if="state.personIds.length">当前仅显示所选人员参与的店铺。 </template>店铺合计是实际总额；个人销售额和毛利额记其参与链接的完整产出。同一链接多人会重复，店铺也包含未分配人员的订单，所以个人金额不能相加当作店铺总额。兼职额只按店铺分摊；个人提成基数可点“查看明细”。</p>
+    <p v-if="state.reportView==='store_people'" class="report-grain-note"><template v-if="state.personIds.length">当前仅显示所选人员参与的店铺。 </template>店铺合计是实际总额；个人销售额和毛利额记其参与链接的完整产出。同一链接多人会重复，店铺也包含未分配人员的订单，所以个人金额不能相加当作店铺总额。利润额是毛利扣兼职：店铺行扣本店兼职额，个人行按参与销售额占店铺销售额估算，参与重复时也会重复；它不同于经营账的利润。兼职额仍只在店铺行显示；个人提成基数可点“查看明细”。</p>
 
     <div v-if="loading" class="commission-loading-line"/>
     <LedgerTable :rows="rows" :columns="tableColumns" :row-key="rowKey" :loading="loading" :max-height="440" empty="没有找到提成记录，可调整店铺、人员或月份" />

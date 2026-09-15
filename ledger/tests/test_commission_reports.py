@@ -245,6 +245,54 @@ def test_store_person_composition_shows_store_amounts_once_and_filters_people(tm
     assert [r['提成额'] for r in export_rows] == ['', '12.34', '3.21']
 
 
+def test_store_person_profit_after_labor_keeps_full_participation_and_export(tmp_path):
+    ws = Workspace(tmp_path)
+    registry = Registry(tmp_path)
+    model = _model(stores=(Store(id='s1', name='店铺1', platform='taobao'),
+                           Store(id='s2', name='店铺2', platform='taobao')))
+    model = model.model_copy(update={
+        'overheads': (Overhead(period='2026-06', amount=100, name='兼职人工费用'),),
+        'statement': (model.statement[0].model_copy(update={'headline': 'revenue'}), *model.statement[1:]),
+    })
+    people = [registry.person_save({'name': name}, 'test', '登记') for name in ('甲', '乙')]
+    ws.record('s2', '2026-06', {
+        'statement': [{'id': model.statement[0].id, 'value': 1000, 'available': True}],
+    }, [])
+    ws.record('s1', '2026-06', {
+        'statement': [{'id': model.statement[0].id, 'value': 1000, 'available': True},
+                      {'id': 'gross', 'value': 400, 'available': True}],
+        'commission': {'engine': 'commission-v2', 'base_total': 100, 'total': 15,
+                       'amount_complete': True, 'people': [
+                           {'person_id': p['id'], 'person': p['name'], 'amount': amount,
+                            'sales': 1000, 'gross': 400} for p, amount in zip(people, (10, 5))]},
+    }, [])
+    app = FastAPI(); install(app, lambda: ws, lambda: model)
+    client = TestClient(app)
+    scope = {'start': '2026-06', 'end': '2026-06', 'store_ids': ['s1'], 'view': 'store_people'}
+    report = client.post('/api/commission-v2/reports/query', json=scope).json()
+    store, first, second = report['items']
+    assert store['gross'] == 400 and store['labor_cost'] == 50
+    assert store['profit_after_labor'] == 350
+    assert [(p['gross'], p['profit_after_labor'], p['labor_cost']) for p in (first, second)] == [
+        (400, 350, None), (400, 350, None)]
+    assert report['total'] == 7.5  # existing payout calculation remains unchanged
+    filtered = client.post('/api/commission-v2/reports/query', json={
+        **scope, 'person_ids': [people[0]['id']],
+    }).json()['items']
+    assert len(filtered) == 2 and filtered[0]['profit_after_labor'] == 350
+    export = client.post('/api/commission-v2/export/reports/store_people', json={
+        **scope, 'presentation': True,
+    })
+    assert export.status_code == 200, export.text
+    exported = list(csv.DictReader(io.StringIO(export.text.lstrip('\ufeff'))))
+    assert [r['利润额'] for r in exported] == ['350.0', '350.0', '350.0']
+    assert [r['兼职额'] for r in exported] == ['50.0', '', '']
+    raw_export = client.post('/api/commission-v2/export/reports/store_people', json=scope)
+    assert raw_export.status_code == 200
+    raw_rows = list(csv.DictReader(io.StringIO(raw_export.text.lstrip('\ufeff'))))
+    assert [r['利润额'] for r in raw_rows] == ['350.0', '350.0', '350.0']
+
+
 def test_pending_payout_keeps_personal_sales_without_inventing_commission(tmp_path):
     ws, _, people, client = fixture(tmp_path)
     ws.record('s1', '2026-06', {
@@ -268,6 +316,8 @@ def test_pending_payout_keeps_personal_sales_without_inventing_commission(tmp_pa
     assert result['items'][1]['person'] == '甲'
     assert result['items'][1]['sales'] == 1000
     assert result['items'][1]['amount'] is None and result['items'][1]['gross'] is None
+    assert result['items'][0]['profit_after_labor'] is None
+    assert result['items'][1]['profit_after_labor'] is None
 
 
 def test_closed_store_uses_frozen_labor_share(tmp_path):
