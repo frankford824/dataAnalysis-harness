@@ -51,9 +51,9 @@ def test_missing_history_never_becomes_zero_profit_or_commission(changes):
     payload = view.slice_dict(sl, model.store('s'), model)
     assert payload['pricing_pending_count'] == 1
     assert payload['statement'][-1]['unavailable_reason']
-    with pytest.raises(ValueError, match='待核价'):
+    with pytest.raises(ValueError, match='提成金额请逐人确认'):
         commission_engine.calculate(result, model, 's', '2026-05', None)
-    with pytest.raises(commission.CommissionError, match='待核价'):
+    with pytest.raises(commission.CommissionError, match='提成金额请逐人确认'):
         commission.compute(result, model, 's', '2026-05')
     assert service._commission(result, model, model.store('s'), '2026-05')['total'] is None
 

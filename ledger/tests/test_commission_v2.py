@@ -94,7 +94,7 @@ def test_commission_can_use_business_approved_partial_cost_coverage(tmp_path):
     r.save_scheme('s1','p1',{'segments':[segment('2026-05-01',a)]},'tester','分点',publish=True)
     result=_run([('a','p1','2026-05-02',100)])
     result.pricing_gaps=pl.DataFrame({'store':['s1'],'period':['2026-05']})
-    with pytest.raises(ValueError,match='待核价'):
+    with pytest.raises(ValueError,match='提成金额请逐人确认'):
         calculate(result,_model(),'s1','2026-05',r)
     summary,_,_=calculate(result,_model(),'s1','2026-05',r,allow_partial_pricing=True)
     assert summary['total']==5 and summary['amount_complete'] is True
