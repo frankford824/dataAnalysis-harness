@@ -170,7 +170,7 @@ const tableColumns=computed(()=>{
     </n-alert>
     <p v-if="state.reportView==='stores'" style="color:#64748b;margin:0 0 12px">提成设置人数按所选月份的有效设置统计；已出金额人数只统计已有结算金额的人员。</p>
     <div class="report-tabs-row"><LedgerTabs v-model="state.reportView" :options="kinds" label="汇总方式" @update:model-value="detail=null" /><div class="report-actions"><n-button :disabled="!canSettle" @click="openSettlement">确认员工结算</n-button><n-button type="primary" :disabled="!report || locked" :loading="downloading" @click="download">导出表格</n-button></div></div>
-    <p v-if="state.reportView==='store_people'" class="report-grain-note">店铺合计是实际总额；个人销售额和毛利额记其参与链接的完整产出，同一链接多人会重复，不能把个人列相加当作店铺总额。兼职额只按店铺分摊；个人提成基数可点“查看明细”。</p>
+    <p v-if="state.reportView==='store_people'" class="report-grain-note">店铺合计是实际总额；个人销售额和毛利额记其参与链接的完整产出。同一链接多人会重复，店铺也包含未分配人员的订单，所以个人金额不能相加当作店铺总额。兼职额只按店铺分摊；个人提成基数可点“查看明细”。</p>
 
     <div v-if="loading" class="commission-loading-line"/>
     <LedgerTable :rows="rows" :columns="tableColumns" :row-key="rowKey" :loading="loading" :max-height="440" empty="没有找到提成记录，可调整店铺、人员或月份" />
