@@ -224,7 +224,7 @@ defineExpose({ take })
       <article v-for="job in workJobs.slice(0, 3)" :key="job.store_id">
         <div class="work-jobs-row"><strong :title="job.store">{{ job.store }}</strong><b>{{ job.percent }}%</b></div>
         <div class="work-jobs-bar" role="progressbar" :aria-valuenow="job.percent" aria-valuemin="0" aria-valuemax="100" :aria-label="`${job.store}核算进度`"><span :style="{width: `${job.percent}%`}" /></div>
-        <p>{{ job.state === 'queued' ? '等待核算资源' : job.state === 'done' ? '核算已完成' : job.phase }}</p>
+        <p>{{ job.state === 'queued' ? '等待核算资源' : job.state === 'done' ? '核算已完成' : `${job.phase} · 已运行 ${Math.round(job.seconds || 0)} 秒` }}</p>
       </article>
       <footer v-if="workJobs.length > 3">另有 {{ workJobs.length - 3 }} 家店铺正在排队或核算</footer>
     </section>

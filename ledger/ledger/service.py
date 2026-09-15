@@ -14,6 +14,7 @@ import os
 import json
 import hashlib
 import shutil
+import time
 import threading
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -47,7 +48,10 @@ _recompute_running: dict[str, dict[str, Any]] = {}
 def recompute_activity(store_id: str) -> dict | None:
     with _store_locks_guard:
         if store_id in _recompute_running:
-            return {"state": "running", **_recompute_running[store_id]}
+            body = _recompute_running[store_id]
+            return {"state": "running", "phase": body["phase"],
+                    "percent": body["percent"],
+                    "seconds": round(time.monotonic() - body["started"], 1)}
         if _recompute_waiters.get(store_id, 0):
             return {"state": "queued", "phase": "等待核算资源", "percent": 0}
         return None
@@ -56,7 +60,9 @@ def recompute_activity(store_id: str) -> dict | None:
 def recompute_activities() -> list[dict[str, Any]]:
     """One read-only progress snapshot for every active manual or background run."""
     with _store_locks_guard:
-        result = [{"store_id": sid, "state": "running", **body}
+        result = [{"store_id": sid, "state": "running", "phase": body["phase"],
+                   "percent": body["percent"],
+                   "seconds": round(time.monotonic() - body["started"], 1)}
                   for sid, body in _recompute_running.items()]
         result.extend({"store_id": sid, "state": "queued", "phase": "等待核算资源", "percent": 0}
                       for sid, count in _recompute_waiters.items()
@@ -320,15 +326,18 @@ def recompute(
         try:
             with _store_locks_guard:
                 _recompute_waiters[store.id] -= 1
-                _recompute_running[store.id] = {"phase": "准备核算", "percent": 0}
+                _recompute_running[store.id] = {"phase": "准备核算", "percent": 0,
+                                                "started": time.monotonic()}
             def tracked(phase, *args, **kwargs):
                 done = args[0] if args else 0
                 total = args[1] if len(args) > 1 else 0
                 percent = progress.work_percent(str(phase), done, total)
                 with _store_locks_guard:
-                    previous = _recompute_running.get(store.id, {}).get("percent", 0)
+                    current = _recompute_running.get(store.id, {})
+                    previous = current.get("percent", 0)
                     _recompute_running[store.id] = {
                         "phase": str(phase), "percent": max(previous, percent),
+                        "started": current.get("started", time.monotonic()),
                     }
                 return report(phase, *args, **kwargs)
             return _recompute_locked(ws, model, store, report=tracked, note=note)
