@@ -51,11 +51,11 @@ export const api = {
     call(`/api/stores/${encodeURIComponent(id)}/periods/${encodeURIComponent(period)}`, options),
   recompute: (id) =>
     call(`/api/stores/${encodeURIComponent(id)}/recompute`, { method: 'POST' }),
-  close: (id, period, note = '') =>
+  close: (id, period, note = '', ignoredBlockers = [], runId = null) =>
     call(`/api/stores/${encodeURIComponent(id)}/periods/${encodeURIComponent(period)}/close`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ note }),
+      body: JSON.stringify({ note, ignored_blockers: ignoredBlockers, run_id: runId }),
     }),
   reopen: (id, period, note) =>
     call(`/api/stores/${encodeURIComponent(id)}/periods/${encodeURIComponent(period)}/reopen`, {

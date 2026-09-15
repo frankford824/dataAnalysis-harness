@@ -8,7 +8,7 @@ from fastapi.testclient import TestClient
 
 from ledger.commission_api import install
 from ledger.commission_registry import Registry
-from ledger.model.schema import Store
+from ledger.model.schema import Overhead, Store
 from ledger.workspace import Workspace
 from test_commission import _model
 
@@ -167,6 +167,66 @@ def test_threshold_met_cost_gaps_keep_commission_amount_available(tmp_path):
     report=client.post('/api/commission-v2/reports/query',json={'start':'2026-06','end':'2026-06','store_ids':['s1']}).json()
     assert report['total']==12.34
     assert '成本覆盖不足' not in report['stores'][0]['status']
+
+
+def test_labor_edit_changes_current_commission_report_and_is_visible_by_store(tmp_path):
+    ws = Workspace(tmp_path)
+    registry = Registry(tmp_path)
+    stores = tuple(Store(id=f's{i}', name=f'店铺{i}', platform='taobao') for i in range(1, 3))
+    model = _model(stores=stores)
+    model = model.model_copy(update={
+        'overheads': (Overhead(period='2026-06', amount=100, name='兼职人工费用'),),
+        'statement': (model.statement[0].model_copy(update={'headline': 'revenue'}), *model.statement[1:]),
+    })
+    person = registry.person_save({'name': '甲', 'employee_no': '001'}, 'test', '登记')
+    revenue = next(n.id for n in model.statement if n.headline == 'revenue')
+    for sid in ('s1', 's2'):
+        ws.record(sid, '2026-06', {
+            'can_close': True, 'findings': [], 'missing_sources': [],
+            'statement': [{'id': revenue, 'value': 1000, 'available': True}],
+            'commission': {'engine': 'commission-v2', 'base_total': 100, 'total': 10,
+                           'amount_complete': True, 'people': [
+                               {'person_id': person['id'], 'person': '甲', 'amount': 10, 'base': 100},
+                           ]},
+        }, [])
+    app = FastAPI(); install(app, lambda: ws, lambda: model)
+    report = TestClient(app).post('/api/commission-v2/reports/query', json={
+        'start': '2026-06', 'end': '2026-06', 'store_ids': ['s1'],
+    }).json()
+    assert report['total'] == 5
+    assert report['stores'][0]['labor_cost'] == 50
+    assert '兼职人工费用已分摊 50.00 元' in report['coverage'][0]['notes']
+
+
+def test_closed_store_uses_frozen_labor_share(tmp_path):
+    ws = Workspace(tmp_path)
+    registry = Registry(tmp_path)
+    model_root = tmp_path / 'model'; model_root.mkdir()
+    model = _model(stores=(Store(id='s1', name='店铺1', platform='taobao'),))
+    model = model.model_copy(update={
+        'overheads': (Overhead(period='2026-06', amount=50, name='兼职人工费用'),),
+        'statement': (model.statement[0].model_copy(update={'headline': 'revenue'}), *model.statement[1:]),
+    })
+    person = registry.person_save({'name': '甲'}, 'test', '登记')
+    revenue = next(n.id for n in model.statement if n.headline == 'revenue')
+    run_id = ws.record('s1', '2026-06', {
+        'can_close': True, 'findings': [], 'missing_sources': [],
+        'statement': [{'id': revenue, 'value': 1000, 'available': True}],
+        'commission': {'engine': 'commission-v2', 'base_total': 100, 'total': 10,
+                       'amount_complete': True, 'people': [
+                           {'person_id': person['id'], 'person': '甲', 'amount': 10, 'base': 100},
+                       ]},
+    }, [])
+    ws.close_period('s1', '2026-06', by='test', note='结账')
+    (model_root / 'labor-closed-shares.csv').write_text(
+        f'period,store_id,run_id,amount\n2026-06,s1,{run_id},20\n', encoding='utf-8',
+    )
+    app = FastAPI(); install(app, lambda: ws, lambda: model, model_root)
+    report = TestClient(app).post('/api/commission-v2/reports/query', json={
+        'start': '2026-06', 'end': '2026-06', 'store_ids': ['s1'],
+    }).json()
+    assert report['total'] == 8
+    assert report['stores'][0]['labor_cost'] == 20
 
 
 def test_employee_settlement_freezes_viewed_runs_and_reports_later_difference(tmp_path):

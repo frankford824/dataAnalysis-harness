@@ -37,12 +37,12 @@ function explanation(row) {
 }
 const columns = computed(() => ({
   people:[['person','人员'],['employee_no','工号'],['amount','提成金额'],['stores','店铺'],['periods','月份'],['status','状态']],
-  stores:[['store','店铺'],['amount','提成金额'],['configured_people','提成设置人数'],['people','已出金额人数'],['periods','已有金额'],['missing','未出金额'],['status','状态']],
+  stores:[['store','店铺'],['amount','提成金额'],['labor_cost','兼职分摊'],['configured_people','提成设置人数'],['people','已出金额人数'],['periods','已有金额'],['missing','未出金额'],['status','状态']],
   breakdown:[['person','人员'],['store','店铺'],['period','月份'],['amount','提成金额'],['status','状态']],
   coverage:[['store','店铺'],['period','月份'],['selected_amount','提成金额'],['status','状态'],['explanation','待办']],
 }[state.reportView]))
 function cell(row,key) {
-  if(key==='amount'||key==='selected_amount')return money(row[key])
+  if(key==='amount'||key==='selected_amount'||key==='labor_cost')return money(row[key])
   if(key==='status')return status(row.status)
   if(key==='explanation')return explanation(row)
   if(key==='stores')return `${row[key]} 家`
@@ -132,11 +132,11 @@ async function viewSettlement(item){
 const rowKey=row=>[row.person_id,row.store_id,row.period].filter(Boolean).join(':')
 const tableColumns=computed(()=>{
   const list=columns.value.map(([key,title],index)=>({title,key,
-    width:key==='amount'||key==='selected_amount'?145:key==='employee_no'?90:key==='period'?100:index===0?undefined:key==='store'?240:125,
-    minWidth:index===0?180:undefined,mobileWidth:key==='amount'||key==='selected_amount'?115:key==='period'?84:index===0?135:undefined,
-    mobile:index===0||['amount','selected_amount','period'].includes(key),align:['amount','selected_amount'].includes(key)?'right':'left',
+    width:['amount','selected_amount','labor_cost'].includes(key)?145:key==='employee_no'?90:key==='period'?100:index===0?undefined:key==='store'?240:125,
+    minWidth:index===0?180:undefined,mobileWidth:['amount','selected_amount','labor_cost'].includes(key)?115:key==='period'?84:index===0?135:undefined,
+    mobile:index===0||['amount','selected_amount','labor_cost','period'].includes(key),align:['amount','selected_amount','labor_cost'].includes(key)?'right':'left',
     render:row=>key==='status'?h(NTag,{bordered:false,size:'small',type:row.status?.includes('试算')?'warning':'default'},()=>status(row.status)):
-      h('div',{class:['amount','selected_amount'].includes(key)?['table-money',row[key]<0?'negative':'']:undefined},
+      h('div',{class:['amount','selected_amount','labor_cost'].includes(key)?['table-money',row[key]<0?'negative':'']:undefined},
         index===0?[h('span',cell(row,key)),h('div',{class:'table-secondary table-mobile-only'},status(row.status))]:cell(row,key))
   }))
   if(['people','stores'].includes(state.reportView))list.push({title:'操作',key:'action',width:96,mobileWidth:78,fixed:'right',render:row=>h(NButton,{text:true,type:'primary',size:'small',disabled:locked.value||row.amount==null,onClick:()=>drill(row)},()=> '查看明细')})

@@ -230,6 +230,39 @@ def test_cannot_close_what_engine_refuses(ws):
         ws.close_period("s1", "2025-05")
 
 
+def test_manual_close_requires_current_run_reason_and_every_selected_blocker(ws):
+    run_id = ws.record("s1", "2025-05", _result(
+        False,
+        findings=[
+            {"id": "fees", "name": "费用分类待确认", "blocking": True, "passed": False, "message": "有一笔未分类"},
+            {"id": "dropship", "name": "代发支出待核对", "blocking": True, "passed": False, "message": "有一笔代发待核对"},
+        ],
+    ), ["a"])
+    with pytest.raises(WorkspaceError, match="代发待核对"):
+        ws.close_period("s1", "2025-05", note="已确认", ignored_blockers=("fees",), expected_run_id=run_id)
+    with pytest.raises(WorkspaceError, match="必须填写说明"):
+        ws.close_period("s1", "2025-05", ignored_blockers=("fees", "dropship"), expected_run_id=run_id)
+    state = ws.close_period(
+        "s1", "2025-05", by="测试员", note="无法追溯，按当前金额结账",
+        ignored_blockers=("fees", "dropship"), expected_run_id=run_id,
+    )
+    assert state.closed
+    assert "费用分类待确认" in state.note and "代发支出待核对" in state.note
+    audit = ws.conn.execute("select * from config_log where kind='manual-close'").fetchone()
+    assert audit and "无法追溯" in audit["after_json"]
+
+
+def test_manual_close_rejects_stale_or_unarchived_result(ws):
+    run_id = ws.record("s1", "2025-05", _result(False, findings=[
+        {"id": "fees", "name": "费用分类", "blocking": True, "passed": False, "message": "待分类"},
+    ]), ["a"])
+    with pytest.raises(WorkspaceError, match="已经更新"):
+        ws.close_period("s1", "2025-05", note="确认", ignored_blockers=("fees",), expected_run_id=run_id - 1)
+    ws.mark_evidence(run_id, ready=False, error="留档失败")
+    with pytest.raises(WorkspaceError, match="留档失败"):
+        ws.close_period("s1", "2025-05", note="确认", ignored_blockers=("fees",), expected_run_id=run_id)
+
+
 def test_missing_sources_explain_refusal(ws):
     ws.record("s1", "2025-05", _result(False, missing_sources=["运费表"]), ["a"])
     with pytest.raises(WorkspaceError, match="运费表"):

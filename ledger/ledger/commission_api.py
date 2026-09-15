@@ -125,7 +125,7 @@ def csv_response(filename, columns, rows):
                              headers={"Content-Disposition": f'attachment; filename="{filename}"'})
 
 
-def install(app, workspace, model):
+def install(app, workspace, model, model_root: Path | None = None):
     router = APIRouter(prefix="/api/commission-v2")
 
     def reg():
@@ -455,7 +455,8 @@ def install(app, workspace, model):
 
     def report_result(selection: ReportSelection):
         report = commission_reports.build(workspace(), reg(), model(), selection.start, selection.end,
-                                          selection.store_ids, selection.person_ids, selection.run_ids)
+                                          selection.store_ids, selection.person_ids, selection.run_ids,
+                                          model_root=model_root)
         fingerprint = hashlib.sha256(json_text(report).encode()).hexdigest()
         if selection.fingerprint and selection.fingerprint != fingerprint:
             raise RevisionConflict("计算状态或人员信息已变化，请重新查询后导出")

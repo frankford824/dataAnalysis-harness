@@ -735,29 +735,62 @@ class Workspace:
     # 账期
     # ------------------------------------------------------------------ #
 
-    def close_period(self, store_id: str, period: str, by: str = "", note: str = "") -> PeriodState:
-        """结账。自检层不放行就不许结——这是整套东西存在的意义。"""
+    def close_period(
+        self,
+        store_id: str,
+        period: str,
+        by: str = "",
+        note: str = "",
+        *,
+        ignored_blockers: tuple[str, ...] = (),
+        expected_run_id: int | None = None,
+    ) -> PeriodState:
+        """结账；允许人工确认无法追溯的业务事项，但不允许绕过证据留档。"""
         from .pricing_status import read_feed
-        feed = read_feed(self.root)
-        if feed and (not feed["snapshot_id"] or feed["last_error"] or feed["consumed_seq"] < feed["source_latest_seq"]):
-            raise WorkspaceError("订单来源仍在同步或存在同步错误，暂不能结账；当前试算结果已保留。")
         run = self.latest_run(store_id, period)
         if run is None:
             raise WorkspaceError(f"{period} 还没算过账，不能结")
+        if expected_run_id is not None and int(run["id"]) != expected_run_id:
+            raise WorkspaceError("计算结果已经更新，请刷新页面后重新确认")
         if not run["evidence_ready"]:
             why = run["evidence_error"] or "事实证据尚未完成留档"
             raise WorkspaceError(f"{period} 结不了账：{why}")
-        if not run["can_close"]:
-            result = json.loads(run["result"])
-            blockers = [
-                f["message"] for f in result.get("findings", [])
-                if f.get("blocking") and not f.get("passed")
-            ]
-            missing = result.get("missing_sources") or []
+        result = json.loads(run["result"])
+        active = {
+            str(f.get("id") or f"__blocker_{index}"): f
+            for index, f in enumerate(result.get("findings", []))
+            if f.get("blocking") and not f.get("passed")
+        }
+        feed = read_feed(self.root)
+        feed_blocked = bool(feed and (
+            not feed["snapshot_id"] or feed["last_error"]
+            or feed["consumed_seq"] < feed["source_latest_seq"]
+        ))
+        if feed_blocked:
+            active.setdefault("source_sync_pending", {
+                "id": "source_sync_pending", "name": "订单数据仍在同步",
+                "message": "订单数据仍在同步，当前结果按已保存数据计算。",
+            })
+        ignored = {str(item).strip() for item in ignored_blockers if str(item).strip()}
+        unknown = ignored - set(active)
+        if unknown:
+            raise WorkspaceError("结账事项已经变化，请刷新页面后重新确认")
+        if "evidence_archive" in ignored:
+            raise WorkspaceError("账目证据未完成留档，不能人工忽略")
+        if ignored and not note.strip():
+            raise WorkspaceError("人工结账必须填写说明")
+        remaining = [item for key, item in active.items() if key not in ignored]
+        missing = result.get("missing_sources") or []
+        if remaining or missing or (not run["can_close"] and not active):
+            blockers = [str(item.get("message") or item.get("name") or "待处理事项") for item in remaining]
             if missing:
                 blockers.append("还缺：" + "、".join(missing))
             why = blockers[0] if blockers else "自检没通过"
             raise WorkspaceError(f"{period} 结不了账：{why}")
+        ignored_names = [str(active[key].get("name") or active[key].get("message") or key) for key in sorted(ignored)]
+        close_note = note.strip()
+        if ignored_names:
+            close_note = f"人工结账：{close_note}；已确认忽略：{'、'.join(ignored_names)}"
         with self.conn as conn:
             version = conn.execute(
                 "select coalesce(max(id), 0) as v from version where store_id in (?,?)",
@@ -768,8 +801,23 @@ class Workspace:
                 "values (?,?,?,?,?,?,?,?) on conflict(store_id, period) do update set "
                 "state=excluded.state, changed_at=excluded.changed_at, by=excluded.by, "
                 "note=excluded.note, run_id=excluded.run_id, at_version=excluded.at_version",
-                (store_id, period, CLOSED, _now(), by, note, run["id"], version),
+                (store_id, period, CLOSED, _now(), by, close_note, run["id"], version),
             )
+            if ignored_names:
+                conn.execute(
+                    "insert into config_log (at,by,kind,summary,before_json,after_json) values (?,?,?,?,?,?)",
+                    (
+                        _now(), by, "manual-close", f"人工结账 {store_id} {period}",
+                        json.dumps({
+                            "run_id": run["id"],
+                            "blockers": [
+                                {"id": key, "name": item.get("name"), "message": item.get("message")}
+                                for key, item in active.items()
+                            ],
+                        }, ensure_ascii=False),
+                        json.dumps({"ignored": sorted(ignored), "reason": note.strip()}, ensure_ascii=False),
+                    ),
+                )
         state = self.state(store_id, period)
         assert state is not None
         return state

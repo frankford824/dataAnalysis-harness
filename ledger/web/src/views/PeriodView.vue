@@ -116,12 +116,43 @@ async function recompute() {
 
 async function close() {
   try {
-    await app.run('正在结账', () => api.close(props.id, period.value))
+    await app.run('正在结账', () => api.close(props.id, period.value, '', [], snap.value?.run_id))
     app.invalidate()
     await load(true)
     message.success('已结账')
   } catch (e) {
     message.error(`结不了：${e.message}`, { duration: 6000 })
+  }
+}
+
+const manualClosing = ref(false)
+const ignoredBlockers = ref([])
+const manualCloseNote = ref('')
+
+function openManualClose() {
+  ignoredBlockers.value = []
+  manualCloseNote.value = ''
+  manualClosing.value = true
+}
+
+async function confirmManualClose() {
+  if (!manualCloseNote.value.trim()) return false
+  try {
+    await app.run('正在人工结账', () => api.close(
+      props.id,
+      period.value,
+      manualCloseNote.value.trim(),
+      ignoredBlockers.value,
+      snap.value?.run_id,
+    ))
+    manualClosing.value = false
+    app.invalidate()
+    await load(true)
+    message.success('已人工结账，忽略事项已留档')
+    return true
+  } catch (e) {
+    message.error(`结不了：${e.message}`, { duration: 6000 })
+    return false
   }
 }
 
@@ -157,6 +188,15 @@ const historicalArchive = computed(() => snap.value?.archive?.kind === 'legacy_f
 const historicalChecks = computed(() => historicalArchive.value ? (snap.value?.findings || []) : [])
 //: 真正待处理的那几条。灰掉的结账按钮不说明理由，人只能猜是不是坏了。
 const blockers = computed(() => bad.value.filter((f) => f.blocking))
+const manualBlockers = computed(() => blockers.value.filter((f) => f.id !== 'evidence_archive'))
+const hardBlockers = computed(() => blockers.value.filter((f) => f.id === 'evidence_archive'))
+const manualCloseReady = computed(() =>
+  !!manualCloseNote.value.trim()
+  && !hardBlockers.value.length
+  && !(snap.value?.missing_sources || []).length
+  && manualBlockers.value.length > 0
+  && manualBlockers.value.every((f) => ignoredBlockers.value.includes(f.id)),
+)
 const fixing = ref(false)
 const missingSources = computed(() =>
   (snap.value?.sources || []).filter((s) => s.arrived === false && s.status !== 'not_applicable').length,
@@ -325,6 +365,12 @@ watch(
           <div class="row" style="margin-top: var(--s3)">
             <n-button size="tiny" @click="rail = 'checks'">查看核对结果</n-button>
             <n-button size="tiny" @click="fixing = true">怎么改</n-button>
+            <n-button
+              v-if="manualBlockers.length && !hardBlockers.length && !(snap.missing_sources || []).length"
+              size="tiny"
+              type="primary"
+              @click="openManualClose"
+            >人工结账</n-button>
           </div>
         </n-alert>
 
@@ -646,6 +692,35 @@ watch(
         <template #extra><DropZone /></template>
       </n-empty>
     </template>
+
+    <n-modal
+      v-model:show="manualClosing"
+      preset="dialog"
+      title="人工结账"
+      positive-text="确认结账"
+      negative-text="取消"
+      :positive-button-props="{ disabled: !manualCloseReady }"
+      @positive-click="confirmManualClose"
+    >
+      <p class="small muted" style="margin-bottom: var(--s3)">
+        勾选确认无法追溯、同意本期忽略的事项。系统会保存操作时间、说明和本次结账金额。
+      </p>
+      <n-checkbox-group v-model:value="ignoredBlockers">
+        <div v-for="f in manualBlockers" :key="f.id" style="margin-bottom: var(--s2)">
+          <n-checkbox :value="f.id">
+            <b>{{ f.name }}</b>：{{ f.head || f.message }}
+          </n-checkbox>
+        </div>
+      </n-checkbox-group>
+      <n-input
+        v-model:value="manualCloseNote"
+        type="textarea"
+        :rows="3"
+        maxlength="500"
+        show-count
+        placeholder="填写原因，例如：少量代发支出无法追溯，经运营负责人确认按当前金额结账"
+      />
+    </n-modal>
 
     <n-modal
       v-model:show="asking"

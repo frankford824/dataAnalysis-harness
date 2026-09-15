@@ -99,6 +99,18 @@ def test_syncing_blocks_close_and_status_explains_saved_result(tmp_path):
     ws.close()
 
 
+def test_syncing_can_be_acknowledged_for_manual_close(tmp_path):
+    ws = Workspace(tmp_path); feed_db(tmp_path)
+    run_id = ws.record('s1', '2026-06', {
+        'can_close': True, 'findings': [], 'missing_sources': [],
+    }, [])
+    state = ws.close_period(
+        's1', '2026-06', by='人工操作', note='按已保存结果结账',
+        ignored_blockers=('source_sync_pending',), expected_run_id=run_id,
+    )
+    assert state.closed and '订单数据仍在同步' in state.note
+
+
 def test_manual_recompute_reports_phase_and_clears_on_failure(tmp_path, monkeypatch):
     from ledger import service
     ws = Workspace(tmp_path); model = _model(); store = model.stores[0]

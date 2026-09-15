@@ -30,7 +30,7 @@ import anyio.to_thread
 from fastapi import FastAPI, File, HTTPException, Query, Request, Response, UploadFile
 from fastapi.responses import HTMLResponse, PlainTextResponse
 from starlette.middleware.gzip import GZipMiddleware
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel, Field, ValidationError
 
 from . import assist, fees as fees_mod, gaps, index_client, nas_ingest, nas_status, onboard, order_feed, overhead, ownership, progress, service, view
 from . import search as search_mod
@@ -241,7 +241,7 @@ def workspace() -> Workspace:
     return _ws
 
 
-_commission_actor = commission_api.install(app, lambda: workspace(), lambda: _model())
+_commission_actor = commission_api.install(app, lambda: workspace(), lambda: _model(), DEFAULT_MODEL)
 from . import labor_api
 labor_api.install(app, lambda: workspace(), lambda: _model(), DEFAULT_MODEL, lambda: _invalidate_model(), _commission_actor)
 
@@ -1002,6 +1002,8 @@ def recompute(store_id: str) -> dict:
 
 class PeriodAction(BaseModel):
     note: str = ""
+    run_id: int | None = None
+    ignored_blockers: list[str] = Field(default_factory=list, max_length=100)
 
 
 @app.post("/api/stores/{store_id}/periods/{period}/close")
@@ -1009,7 +1011,14 @@ def close_period(store_id: str, period: str, action: PeriodAction) -> dict:
     """结账。自检层不放行就结不了，这是整套东西存在的意义。"""
     _store(_model(), store_id)
     try:
-        st = workspace().close_period(store_id, period, by=ANONYMOUS, note=action.note)
+        st = workspace().close_period(
+            store_id,
+            period,
+            by="人工操作" if action.ignored_blockers else ANONYMOUS,
+            note=action.note,
+            ignored_blockers=tuple(action.ignored_blockers),
+            expected_run_id=action.run_id,
+        )
     except WorkspaceError as exc:
         raise HTTPException(409, str(exc)) from exc
     return {"state": st.state, "at": st.at, "run_id": st.run_id}
