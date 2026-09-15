@@ -154,6 +154,31 @@ def test_configured_people_remain_visible_when_pricing_has_no_amount(tmp_path):
     assert '成本待人工确认' in store['status']
 
 
+def test_configured_people_scan_is_reused_and_published_changes_invalidate_it(tmp_path, monkeypatch):
+    from ledger import commission_reports
+    from test_commission_v2 import segment
+    _, registry, people, _ = fixture(tmp_path)
+    registry.save_scheme('s1','p1',{'segments':[segment('2026-06-01',people[0]['id'])]},
+                         'tester','初版',publish=True)
+    original = commission_reports._scan_configured_people
+    scans = []
+    def counted(*args, **kwargs):
+        scans.append(1)
+        return original(*args, **kwargs)
+    monkeypatch.setattr(commission_reports,'_scan_configured_people',counted)
+    for _ in range(2):
+        assert commission_reports.configured_people(registry,'2026-06','2026-06',('s1',)) == {
+            's1':{people[0]['id']},
+        }
+    assert len(scans) == 1
+    registry.save_scheme('s1','p1',{'segments':[segment('2026-06-01',people[1]['id'])]},
+                         'tester','已改人员',expected=1,publish=True)
+    assert commission_reports.configured_people(registry,'2026-06','2026-06',('s1',)) == {
+        's1':{people[1]['id']},
+    }
+    assert len(scans) == 2
+
+
 def test_threshold_met_cost_gaps_keep_commission_amount_available(tmp_path):
     ws,_,people,client=fixture(tmp_path)
     rid=record(ws,people,'s1','2026-06',[12.34])

@@ -4,6 +4,8 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import threading
+from collections import OrderedDict
 from datetime import date
 from decimal import Decimal
 from pathlib import Path
@@ -51,21 +53,45 @@ def gross_after_labor(gross, labor, *, personal=False, person_sales=None, store_
     return money_float(decimal(gross) - cut)
 
 
-def configured_people(registry, start, end):
+_configured_lock = threading.RLock()
+_configured_cache: OrderedDict[tuple, dict[str, frozenset[str]]] = OrderedDict()
+_CONFIGURED_CACHE_LIMIT = 64
+
+
+def _scan_configured_people(registry, start, end, store_ids=()):
     year, month = map(int, end.split('-'))
     upper = f"{year + (month == 12):04d}-{month % 12 + 1:02d}-01T00:00:00"
     lower = start + '-01T00:00:00'
+    where = (' AND s.store_id IN (' + ','.join('?' for _ in store_ids) + ')') if store_ids else ''
     with registry.connect() as conn:
         rows = conn.execute("""SELECT DISTINCT s.store_id,json_extract(a.value,'$.person_id') pid
           FROM scheme s JOIN scheme_version v ON v.id=s.active_version
           JOIN json_each(v.body,'$.segments') seg JOIN json_each(seg.value,'$.allocations') a
           WHERE json_extract(seg.value,'$.mode')='distribute'
           AND json_extract(seg.value,'$.valid_from')<?
-          AND (coalesce(json_extract(seg.value,'$.valid_to'),'')='' OR json_extract(seg.value,'$.valid_to')>?)""", (upper,lower)).fetchall()
+          AND (coalesce(json_extract(seg.value,'$.valid_to'),'')='' OR json_extract(seg.value,'$.valid_to')>?)"""+where,
+          (upper,lower,*store_ids)).fetchall()
     out = {}
     for row in rows:
         if row['pid']:out.setdefault(row['store_id'],set()).add(row['pid'])
     return out
+
+
+def configured_people(registry, start, end, store_ids=()):
+    """Amortize the 100k-scheme scan across reads; business audit revision invalidates it."""
+    scope=tuple(sorted(store_ids))
+    key=(str(registry.root.resolve()), registry.revision(), start, end, scope)
+    with _configured_lock:
+        saved=_configured_cache.get(key)
+        if saved is None:
+            fresh=_scan_configured_people(registry,start,end,scope)
+            saved={sid:frozenset(people) for sid,people in fresh.items()}
+            _configured_cache[key]=saved
+            if len(_configured_cache)>_CONFIGURED_CACHE_LIMIT:
+                _configured_cache.popitem(last=False)
+        else:
+            _configured_cache.move_to_end(key)
+    return {sid:set(people) for sid,people in saved.items()}
 
 
 def build(workspace, registry, model, start, end, store_ids=None, person_ids=None, run_ids=None,
@@ -74,7 +100,7 @@ def build(workspace, registry, model, start, end, store_ids=None, person_ids=Non
     selected_stores=set(store_ids or []); selected_people=set(person_ids or [])
     names={s.id:s.name for s in model.stores}
     roster={p['id']:p for p in registry.people()}
-    configured=configured_people(registry,start,end)
+    configured=configured_people(registry,start,end,selected_stores)
     revenue_node=next((n.id for n in model.statement if n.headline=='revenue'),'')
     sales_node=next((n.id for n in model.statement if n.name=='销售收入' and n.level==2),'')
     gross_node=next((n.id for n in model.statement if n.name=='毛利' and n.is_total),'')
