@@ -146,7 +146,8 @@ const tableColumns=computed(()=>{
     mobile:index===0||['amount','selected_amount','sales','gross','labor_cost','period','person'].includes(key),align:['amount','selected_amount','labor_cost','sales','gross','base','store_amount'].includes(key)?'right':'left',
     render:row=>key==='status'?h(NTag,{bordered:false,size:'small',type:row.status?.includes('试算')?'warning':'default'},()=>status(row.status)):
       h('div',{class:['amount','selected_amount','labor_cost','sales','gross','base','store_amount'].includes(key)?['table-money',row[key]<0?'negative':'']:undefined,
-               title:state.reportView==='store_people'&&row.kind==='person'&&['sales','gross','labor_cost'].includes(key)?'店铺合计见上行':undefined},
+               title:state.reportView==='store_people'&&row.kind==='person'&&['sales','gross'].includes(key)?'参与链接的完整产出，多人参与时会重复':
+                 state.reportView==='store_people'&&row.kind==='person'&&key==='labor_cost'?'兼职额按店铺分摊':undefined},
         index===0?[h('span',{class:row.kind==='store'?'store-total-name':''},cell(row,key)),h('div',{class:'table-secondary table-mobile-only'},status(row.status))]:
           key==='person'&&row.kind==='store'?h('strong','店铺合计'):
           key==='amount'&&row.kind==='store'?h('strong',money(row.store_amount)):cell(row,key))
@@ -169,7 +170,7 @@ const tableColumns=computed(()=>{
     </n-alert>
     <p v-if="state.reportView==='stores'" style="color:#64748b;margin:0 0 12px">提成设置人数按所选月份的有效设置统计；已出金额人数只统计已有结算金额的人员。</p>
     <div class="report-tabs-row"><LedgerTabs v-model="state.reportView" :options="kinds" label="汇总方式" @update:model-value="detail=null" /><div class="report-actions"><n-button :disabled="!canSettle" @click="openSettlement">确认员工结算</n-button><n-button type="primary" :disabled="!report || locked" :loading="downloading" @click="download">导出表格</n-button></div></div>
-    <p v-if="state.reportView==='store_people'" class="report-grain-note">销售额、毛利额和兼职额按店铺显示一次；“店铺合计”的提成额是下方各人的合计。每人参与的基数可点“查看明细”。</p>
+    <p v-if="state.reportView==='store_people'" class="report-grain-note">店铺合计是实际总额；个人销售额和毛利额记其参与链接的完整产出，同一链接多人会重复，不能把个人列相加当作店铺总额。兼职额只按店铺分摊；个人提成基数可点“查看明细”。</p>
 
     <div v-if="loading" class="commission-loading-line"/>
     <LedgerTable :rows="rows" :columns="tableColumns" :row-key="rowKey" :loading="loading" :max-height="440" empty="没有找到提成记录，可调整店铺、人员或月份" />

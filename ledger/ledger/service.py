@@ -398,8 +398,27 @@ def _recompute_locked(
                                  else allocation[0] if allocation else _commission(
                                      result, model, store, sl.period,
                                      allow_partial_pricing=partial_pricing))
+        if not pricing_allowed and registry:
+            c = payload["commission"]
+            c["people"] = commission_engine.participation_only(result, model, store.id, sl.period, registry)
+            c["participation_basis"] = "complete_link_output_per_assigned_person"
+            c["notes"].append("提成所需商品成本覆盖率不足；已入账的个人参与销售额仍可查看。")
+            sales_node = next((n for n in payload.get("statement", []) if n["name"] == "销售收入"), None)
+            gross_node = next((n for n in payload.get("statement", []) if n["name"] == "毛利"), None)
+            for person in c["people"]:
+                if not sales_node or not sales_node.get("available"):
+                    person["sales"] = None
+                if not gross_node or not gross_node.get("available"):
+                    person["gross"] = None
         if allocation:
             c = payload["commission"]
+            sales_node = next((n for n in payload.get("statement", []) if n["name"] == "销售收入"), None)
+            gross_node = next((n for n in payload.get("statement", []) if n["name"] == "毛利"), None)
+            for person in c.get("people", []):
+                if not sales_node or not sales_node.get("available"):
+                    person["sales"] = None
+                if not gross_node or not gross_node.get("available"):
+                    person["gross"] = None
             if partial_pricing:
                 c["pricing_pending_count"] = sl.pricing_gaps.height
                 c["pricing_threshold_met"] = True

@@ -6,7 +6,7 @@ import sqlite3
 import pytest
 import polars as pl
 
-from ledger.commission_engine import calculate, persist
+from ledger.commission_engine import calculate, participation_only, persist
 from ledger.commission_registry import Registry, RegistryError, RevisionConflict
 from test_commission import _model, _run, _rule
 from ledger.model.schema import Metric, StatementNode, ValueExpr
@@ -53,6 +53,40 @@ def test_same_name_separate_identity_and_exact_cent_allocation(tmp_path):
     assert len(summary["people"]) == 2
     assert summary["total"] == .02
     assert sum(p["amount"] for p in summary["people"]) == summary["total"]
+
+
+def test_shared_link_credits_complete_posted_output_to_each_person(tmp_path):
+    r, a, b = registry(tmp_path)
+    r.save_scheme("s1", "p1", {"segments": [{
+        "valid_from": "2026-05-01", "total_rate": ".05", "allocations": [
+            {"person_id": a, "role": "运营", "rate": ".03"},
+            {"person_id": b, "role": "运营", "rate": ".02"},
+        ],
+    }]}, "tester", "共同参与", publish=True)
+    run = _run([("assigned", "p1", "2026-05-02", 100),
+                ("unassigned", "p2", "2026-05-02", 50)])
+    goods = run.spine_facts.with_columns(
+        pl.lit("goods").alias("metric_id"),
+        (pl.col("amount") * -.2).alias("amount"),
+    )
+    run.spine_facts = pl.concat([run.spine_facts, goods], how="vertical_relaxed")
+    summary, details, _ = calculate(run, _model(), "s1", "2026-05", r)
+    assigned = {p["person_id"]: p for p in summary["people"]}
+    assert assigned[a]["sales"] == assigned[b]["sales"] == 100
+    assert assigned[a]["gross"] == assigned[b]["gross"] == 80
+    assert assigned[a]["amount"] == 2.4 and assigned[b]["amount"] == 1.6
+    assert summary["participation_basis"] == "complete_link_output_per_assigned_person"
+    assert details.filter(pl.col("status") == "distribute")["participation_sales"].to_list() == [100, 100]
+
+
+def test_participation_sales_remains_visible_when_payout_cannot_be_calculated(tmp_path):
+    r, a, _ = registry(tmp_path)
+    r.save_scheme("s1", "p1", {"segments": [segment("2026-05-01", a)]},
+                  "tester", "运营归属", publish=True)
+    run = _run([("assigned", "p1", "2026-05-02", 100)])
+    output = participation_only(run, _model(), "s1", "2026-05", r)
+    assert output == [{"person_id": a, "person": "甲", "amount": None,
+                       "base": None, "sales": 100, "gross": 100}]
 
 
 def test_commission_can_use_business_approved_partial_cost_coverage(tmp_path):

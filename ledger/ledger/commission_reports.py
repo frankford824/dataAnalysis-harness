@@ -120,7 +120,6 @@ def build(workspace, registry, model, start, end, store_ids=None, person_ids=Non
         gross=statement_amount(statement,gross_node) if gross_node else None
         member_rows=[]
         for person in c.get('people',[]):
-            if person.get('amount') is None:continue
             name=person.get('person') or '未命名人员'
             pid=person.get('person_id')
             # The v2 legacy bridge also emits name-derived IDs, shared across stores.
@@ -131,16 +130,27 @@ def build(workspace, registry, model, start, end, store_ids=None, person_ids=Non
             if pid not in roster:label+=f'（历史记录 · {names[sid]}）'
             available.setdefault(pid,{'id':pid,'name':label})
             if selected_people and pid not in selected_people:continue
+            if person.get('amount') is None:
+                if person.get('sales') is not None or person.get('gross') is not None:
+                    member_rows.append({'kind':'person','person_id':pid,'person':name,
+                                        'employee_no':roster.get(pid,{}).get('employee_no',''),
+                                        'store_id':sid,'store':names[sid],'period':period,
+                                        'sales':person.get('sales'),'gross':person.get('gross'),
+                                        'labor_cost':None,'base':None,'base_name':'',
+                                        'amount':None,'store_amount':None,
+                                        'status':status,'finance_run':record['id']})
+                continue
             amount=decimal(money_float(decimal(person['amount'])*keep));scope['selected_amount']+=amount
             store_people.setdefault(sid,set()).add(pid)
             lines.append({'person_id':pid,'person':name,'employee_no':roster.get(pid,{}).get('employee_no',''),
                           'store_id':sid,'store':names[sid],'period':period,'amount':money_float(amount),
-                          'base':person.get('base'),'base_name':scope['base_name'],'status':status,
+                          'base':person.get('base'),'base_name':scope['base_name'],
+                          'sales':person.get('sales'),'gross':person.get('gross'),'status':status,
                           'calculated_at':record['at'],'finance_run':record['id'],'notes':scope['notes']})
             member_rows.append({'kind':'person','person_id':pid,'person':name,
                                 'employee_no':roster.get(pid,{}).get('employee_no',''),
                                 'store_id':sid,'store':names[sid],'period':period,
-                                'sales':None,'gross':None,'labor_cost':None,
+                                'sales':person.get('sales'),'gross':person.get('gross'),'labor_cost':None,
                                 'base':person.get('base'),'base_name':scope['base_name'],
                                 'amount':money_float(amount),'store_amount':None,
                                 'status':status,'finance_run':record['id']})
@@ -199,7 +209,7 @@ def build(workspace, registry, model, start, end, store_ids=None, person_ids=Non
 COLUMNS={
  'people':['人员','工号','提成金额','店铺数','账期数','计算状态','人员ID'],
  'stores':['店铺','提成金额','兼职分摊','提成设置人数','已出金额人数','已计算账期数','未计算账期数','计算状态'],
- 'store_people':['店铺','分配人','月份','销售额','毛利额','兼职额','本人参与基数','基数名称','提成额','店铺提成合计','状态'],
+ 'store_people':['店铺','分配人','月份','销售额/参与销售额','毛利额/参与毛利额','兼职额','本人参与基数','基数名称','提成额','店铺提成合计','状态'],
  'breakdown':['人员','工号','店铺','账期','提成金额','本人参与基数','基数名称','计算状态','计算时间','说明','计算记录'],
  'coverage':['店铺','账期','筛选范围提成金额','计算状态','未分配订单数','计算时间','说明','计算记录']}
 
@@ -224,7 +234,7 @@ def business_export(report, kind):
     columns = {
         'people': [('人员','person'),('工号','employee_no'),('提成金额','amount'),('店铺数','stores'),('月份数','periods'),('状态','status')],
         'stores': [('店铺','store'),('提成金额','amount'),('兼职分摊','labor_cost'),('提成设置人数','configured_people'),('已出金额人数','people'),('已有金额月份','periods'),('未出金额月份','missing'),('状态','status')],
-        'store_people': [('店铺','store'),('分配人','person'),('月份','period'),('销售额','sales'),('毛利额','gross'),
+        'store_people': [('店铺','store'),('分配人','person'),('月份','period'),('销售额/参与销售额','sales'),('毛利额/参与毛利额','gross'),
                          ('兼职额','labor_cost'),('本人参与提成基数','base'),('提成额','amount'),
                          ('店铺提成合计','store_amount'),('状态','status')],
         'breakdown': [('人员','person'),('工号','employee_no'),('店铺','store'),('月份','period'),('提成金额','amount'),('状态','status')],
