@@ -111,8 +111,8 @@ def pending_pricing(count: int, coverage: dict | None = None) -> dict:
             "notes": [note]}
 
 
-def _participation_facts(result, model, store_id: str, period: str) -> tuple[pl.DataFrame, bool, bool]:
-    """Per-order posted sales and gross profit for people assigned to the link.
+def _participation_facts(result, model, store_id: str, period: str) -> tuple[pl.DataFrame, bool, bool, bool]:
+    """Per-order posted sales, gross and operating profit for assigned links.
 
     The relationship only establishes participation. A shared link gives each
     assigned person its complete posted output; these figures are not additive
@@ -120,20 +120,22 @@ def _participation_facts(result, model, store_id: str, period: str) -> tuple[pl.
     """
     sales_node = next((n for n in model.statement if n.name == "销售收入" and n.level == 2), None)
     gross_node = next((n for n in model.statement if n.name == "毛利" and n.is_total), None)
+    profit_node = next((n for n in model.statement if n.headline == "profit" and n.is_total), None)
     sales_metrics = model.commission_base_metrics(sales_node.id) if sales_node else ()
     gross_metrics = model.commission_base_metrics(gross_node.id) if gross_node else ()
+    profit_metrics = model.commission_base_metrics(profit_node.id) if profit_node else ()
     schema = {"spine_row": pl.UInt32, "participation_sales": pl.Float64,
-              "participation_gross": pl.Float64}
+              "participation_gross": pl.Float64, "participation_profit": pl.Float64}
     facts = result.spine_facts
     if facts.is_empty():
-        return pl.DataFrame(schema=schema), bool(sales_metrics), bool(gross_metrics)
+        return pl.DataFrame(schema=schema), bool(sales_metrics), bool(gross_metrics), bool(profit_metrics)
     facts = facts.filter(
         pl.col("store").is_in(_store_labels(model, store_id))
         & (pl.col("period") == period)
         & pl.col("spine_row").is_not_null()
     )
     if facts.is_empty():
-        return pl.DataFrame(schema=schema), bool(sales_metrics), bool(gross_metrics)
+        return pl.DataFrame(schema=schema), bool(sales_metrics), bool(gross_metrics), bool(profit_metrics)
 
     def metric_rows(metrics, name):
         if not metrics:
@@ -144,8 +146,10 @@ def _participation_facts(result, model, store_id: str, period: str) -> tuple[pl.
 
     sales = metric_rows(sales_metrics, "participation_sales")
     gross = metric_rows(gross_metrics, "participation_gross")
+    profit = metric_rows(profit_metrics, "participation_profit")
     combined = sales.join(gross, on="spine_row", how="full", coalesce=True)
-    return combined, bool(sales_metrics), bool(gross_metrics)
+    combined = combined.join(profit, on="spine_row", how="full", coalesce=True)
+    return combined, bool(sales_metrics), bool(gross_metrics), bool(profit_metrics)
 
 
 def participation_only(result, model, store_id: str, period: str, registry: Registry) -> list[dict]:
@@ -168,17 +172,20 @@ def participation_only(result, model, store_id: str, period: str, registry: Regi
     assigned = matched.filter(pl.col("status") == "distribute").join(af, on="rule_key", how="inner")
     if assigned.is_empty():
         return []
-    facts, has_sales, has_gross = _participation_facts(result, model, store_id, period)
+    facts, has_sales, has_gross, has_profit = _participation_facts(result, model, store_id, period)
     assigned = assigned.join(facts, on="spine_row", how="left").with_columns(
         pl.col("participation_sales").fill_null(0.0),
         pl.col("participation_gross").fill_null(0.0),
+        pl.col("participation_profit").fill_null(0.0),
     )
     return [
         {"person_id": row["person_id"], "person": row["person"], "amount": None,
          "base": None, "sales": money_float(row["participation_sales"]) if has_sales else None,
-         "gross": money_float(row["participation_gross"]) if has_gross else None}
+         "gross": money_float(row["participation_gross"]) if has_gross else None,
+         "profit": money_float(row["participation_profit"]) if has_profit else None}
         for row in assigned.group_by("person_id", "person").agg(
-            pl.col("participation_sales").sum(), pl.col("participation_gross").sum()
+            pl.col("participation_sales").sum(), pl.col("participation_gross").sum(),
+            pl.col("participation_profit").sum()
         ).iter_rows(named=True)
     ]
 
@@ -226,10 +233,11 @@ def calculate(result, model, store_id: str, period: str, registry: Registry,
     paid = matched.filter(pl.col("status") == "distribute").join(af, on="rule_key", how="inner")
     paid = paid.with_columns(pl.col("share").cast(pl.Decimal(16, 8)))
     paid = paid.with_columns((pl.col("base") * pl.col("share")).round(2, mode="half_away_from_zero").alias("amount"))
-    output_facts, has_sales, has_gross = _participation_facts(result, model, store_id, period)
+    output_facts, has_sales, has_gross, has_profit = _participation_facts(result, model, store_id, period)
     paid = paid.join(output_facts, on="spine_row", how="left").with_columns(
         pl.col("participation_sales").fill_null(0.0),
         pl.col("participation_gross").fill_null(0.0),
+        pl.col("participation_profit").fill_null(0.0),
     )
     unpaid = matched.filter(pl.col("status") != "distribute").with_columns(
         pl.lit("", dtype=pl.Utf8).alias("person_id"), pl.lit("", dtype=pl.Utf8).alias("person"),
@@ -238,6 +246,7 @@ def calculate(result, model, store_id: str, period: str, registry: Registry,
         .otherwise(pl.lit(None, dtype=paid.schema["amount"])).alias("amount"),
         pl.lit(None, dtype=pl.Float64).alias("participation_sales"),
         pl.lit(None, dtype=pl.Float64).alias("participation_gross"),
+        pl.lit(None, dtype=pl.Float64).alias("participation_profit"),
     )
     details = pl.concat([paid, unpaid], how="diagonal_relaxed").with_columns(
         pl.lit(store_id).alias("store_id"), pl.lit(period).alias("period"),
@@ -247,17 +256,20 @@ def calculate(result, model, store_id: str, period: str, registry: Registry,
     people_lines = paid.group_by("person_id", "person").agg(
         pl.col("amount").sum(), pl.col("base").sum(),
         pl.col("participation_sales").sum(), pl.col("participation_gross").sum(),
+        pl.col("participation_profit").sum(),
         pl.col("product_id").n_unique().alias("products"),
     ).sort("amount", descending=True)
     person_rows = [
         {**r, "amount": money_float(r["amount"]), "base": money_float(r["base"]),
          "sales": money_float(r["participation_sales"]) if has_sales else None,
-         "gross": money_float(r["participation_gross"]) if has_gross else None}
+         "gross": money_float(r["participation_gross"]) if has_gross else None,
+         "profit": money_float(r["participation_profit"]) if has_profit else None}
         for r in people_lines.iter_rows(named=True)
     ]
     for row in person_rows:
         row.pop("participation_sales")
         row.pop("participation_gross")
+        row.pop("participation_profit")
     by_product = defaultdict(list)
     for r in paid.group_by("product_id", "person_id", "person").agg(pl.col("amount").sum()).iter_rows(named=True):
         by_product[r["product_id"]].append({"person_id": r["person_id"], "person": r["person"], "amount": money_float(r["amount"])})

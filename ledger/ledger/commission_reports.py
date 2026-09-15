@@ -39,18 +39,29 @@ def statement_amount(statement, node_id):
     return row.get('value') if row and row.get('available', True) else None
 
 
-def gross_after_labor(gross, labor, *, personal=False, person_sales=None, store_sales=None):
-    """Display gross less the store labor cut at the existing participation grain."""
-    if gross is None or labor is None:
+def profit_after_labor(profit, labor, *, personal=False, person_sales=None, store_sales=None):
+    """Display operating profit less the store labor cut."""
+    if profit is None:
         return None
-    cut = decimal(labor)
+    cut = decimal(labor or 0)
     if personal:
         if cut == 0:
-            return money_float(decimal(gross))
+            return money_float(decimal(profit))
         if person_sales is None or store_sales is None or decimal(store_sales) <= 0:
             return None
         cut *= max(decimal(person_sales), Decimal(0)) / decimal(store_sales)
-    return money_float(decimal(gross) - cut)
+    return money_float(decimal(profit) - cut)
+
+
+def personal_profit(person, commission, *, manual_cost=False):
+    if person.get('profit') is not None and not manual_cost:
+        return person['profit']
+    # Older net-profit calculations already retained the complete assigned
+    # order basis. Do not use a skipped-loss or manually adjusted basis here.
+    if (not manual_cost and commission.get('base_node') == 'net_profit'
+            and commission.get('on_loss') == 'deduct'):
+        return person.get('base')
+    return None
 
 
 _configured_lock = threading.RLock()
@@ -104,6 +115,7 @@ def build(workspace, registry, model, start, end, store_ids=None, person_ids=Non
     revenue_node=next((n.id for n in model.statement if n.headline=='revenue'),'')
     sales_node=next((n.id for n in model.statement if n.name=='销售收入' and n.level==2),'')
     gross_node=next((n.id for n in model.statement if n.name=='毛利' and n.is_total),'')
+    profit_node=next((n.id for n in model.statement if n.headline=='profit' and n.is_total),'')
     basis_rows=workspace.conn.execute("""SELECT r.store_id,r.period,
       CASE WHEN coalesce(json_extract(node.value,'$.available'),1)=1
            THEN json_extract(node.value,'$.value') ELSE NULL END revenue
@@ -126,7 +138,7 @@ def build(workspace, registry, model, start, end, store_ids=None, person_ids=Non
         source='FROM run r LEFT JOIN period p ON p.store_id=r.store_id AND p.period=r.period'
         where.append('r.id IN ('+','.join('?' for _ in run_ids)+')' if run_ids else '0');args.extend(run_ids)
     manual_join=' LEFT JOIN manual_finance mf ON mf.run_id=r.id' if run_ids is not None else " LEFT JOIN manual_finance mf ON mf.run_id=r.id AND p.state='closed'"
-    records=[dict(r) for r in workspace.conn.execute("SELECT r.id,r.store_id,r.period,r.at,json_extract(coalesce(mf.result_json,r.result),'$.commission') commission_json,json_extract(coalesce(mf.result_json,r.result),'$.statement') statement_json,json_extract(coalesce(mf.result_json,r.result),'$.store') store_name,p.state,p.run_id frozen_id,rl.amount frozen_labor_cut "+source+' LEFT JOIN run_labor rl ON rl.run_id=r.id'+manual_join+' WHERE '+' AND '.join(where)+' ORDER BY r.period DESC,r.store_id',args)]
+    records=[dict(r) for r in workspace.conn.execute("SELECT r.id,r.store_id,r.period,r.at,json_extract(coalesce(mf.result_json,r.result),'$.commission') commission_json,json_extract(coalesce(mf.result_json,r.result),'$.statement') statement_json,json_extract(coalesce(mf.result_json,r.result),'$.manual_cost') manual_cost_json,json_extract(coalesce(mf.result_json,r.result),'$.store') store_name,p.state,p.run_id frozen_id,rl.amount frozen_labor_cut "+source+' LEFT JOIN run_labor rl ON rl.run_id=r.id'+manual_join+' WHERE '+' AND '.join(where)+' ORDER BY r.period DESC,r.store_id',args)]
     if run_ids is not None and len(records)!=len(run_ids):raise RegistryError('部分计算记录已不存在或不在所选范围，请重新查询')
     keys=[(r['store_id'],r['period']) for r in records]
     if len(keys)!=len(set(keys)):raise RegistryError('同店同账期只能选择一份计算结果')
@@ -166,7 +178,8 @@ def build(workspace, registry, model, start, end, store_ids=None, person_ids=Non
         statement=json.loads(record['statement_json'] or '[]')
         sales=statement_amount(statement,sales_node) if sales_node else None
         gross=statement_amount(statement,gross_node) if gross_node else None
-        visible_labor=labor_cut if spread.total is not None else None
+        operating=statement_amount(statement,profit_node) if profit_node else None
+        visible_labor=labor_cut if spread.total is not None else Decimal(0)
         member_rows=[]
         for person in c.get('people',[]):
             name=person.get('person') or '未命名人员'
@@ -185,8 +198,8 @@ def build(workspace, registry, model, start, end, store_ids=None, person_ids=Non
                                         'employee_no':roster.get(pid,{}).get('employee_no',''),
                                         'store_id':sid,'store':names[sid],'period':period,
                                         'sales':person.get('sales'),'gross':person.get('gross'),
-                                        'profit_after_labor':gross_after_labor(
-                                            person.get('gross'), visible_labor,
+                                        'profit_after_labor':profit_after_labor(
+                                            personal_profit(person,c,manual_cost=bool(record['manual_cost_json'])), visible_labor,
                                             personal=True, person_sales=person.get('sales'), store_sales=sales),
                                         'labor_cost':None,'base':None,'base_name':'',
                                         'amount':None,'store_amount':None,
@@ -203,8 +216,8 @@ def build(workspace, registry, model, start, end, store_ids=None, person_ids=Non
                                 'employee_no':roster.get(pid,{}).get('employee_no',''),
                                 'store_id':sid,'store':names[sid],'period':period,
                                 'sales':person.get('sales'),'gross':person.get('gross'),
-                                'profit_after_labor':gross_after_labor(
-                                    person.get('gross'), visible_labor,
+                                'profit_after_labor':profit_after_labor(
+                                    personal_profit(person,c,manual_cost=bool(record['manual_cost_json'])), visible_labor,
                                     personal=True, person_sales=person.get('sales'), store_sales=sales),
                                 'labor_cost':None,
                                 'base':person.get('base'),'base_name':scope['base_name'],
@@ -218,7 +231,7 @@ def build(workspace, registry, model, start, end, store_ids=None, person_ids=Non
             store_person_rows.append({'kind':'store','person':'店铺合计','person_id':None,
                                       'employee_no':'','store_id':sid,'store':names[sid],
                                       'period':period,'sales':sales,'gross':gross,
-                                      'profit_after_labor':gross_after_labor(gross, visible_labor),
+                                      'profit_after_labor':profit_after_labor(operating, visible_labor),
                                       'labor_cost':money_float(labor_cut) if spread.total is not None else None,
                                       'base':None,'base_name':'','amount':None,
                                       'store_amount':money_float(scope['selected_amount']) if has_result else None,

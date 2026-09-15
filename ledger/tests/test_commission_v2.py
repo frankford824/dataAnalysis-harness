@@ -79,6 +79,25 @@ def test_shared_link_credits_complete_posted_output_to_each_person(tmp_path):
     assert details.filter(pl.col("status") == "distribute")["participation_sales"].to_list() == [100, 100]
 
 
+def test_june_store_default_covers_unassigned_links_preserving_existing_products(tmp_path):
+    r, owner, _ = registry(tmp_path)
+    r.save_scheme('s1', 'p1', {'segments':[segment('2026-06-01',owner,rate='.05')]},
+                  'tester','逐商品已确认',publish=True)
+    r.save_scheme('s1', '*', {'segments':[segment('2026-06-01',owner,
+                    end='2026-07-01',rate='.05')]},
+                  'tester','六月未分配链接统一归本人',publish=True)
+    June=_run([('configured','p1','2026-06-03',-10),
+               ('previously-unassigned','p2','2026-06-03',100)],period='2026-06')
+    summary,details,_=calculate(June,_model(),'s1','2026-06',r)
+    assert summary['total']==4.5 and summary['fallback_base']==100
+    assert summary['unassigned_orders']==0
+    assert details.filter(pl.col('product_id')=='p1')['fallback'].item() is False
+    assert details.filter(pl.col('product_id')=='p2')['fallback'].item() is True
+    July=_run([('later','p2','2026-07-03',100)],period='2026-07')
+    later,_,_=calculate(July,_model(),'s1','2026-07',r)
+    assert later['unassigned_base']==100 and later['total']==0
+
+
 def test_participation_sales_remains_visible_when_payout_cannot_be_calculated(tmp_path):
     r, a, _ = registry(tmp_path)
     r.save_scheme("s1", "p1", {"segments": [segment("2026-05-01", a)]},
@@ -86,7 +105,7 @@ def test_participation_sales_remains_visible_when_payout_cannot_be_calculated(tm
     run = _run([("assigned", "p1", "2026-05-02", 100)])
     output = participation_only(run, _model(), "s1", "2026-05", r)
     assert output == [{"person_id": a, "person": "甲", "amount": None,
-                       "base": None, "sales": 100, "gross": 100}]
+                       "base": None, "sales": 100, "gross": 100, "profit": None}]
 
 
 def test_commission_can_use_business_approved_partial_cost_coverage(tmp_path):
@@ -148,6 +167,7 @@ def test_profit_policy_is_month_effective_and_wage_preview_is_explicit(tmp_path)
     model = _model()
     model = model.model_copy(update={"metrics": (*model.metrics, Metric(id="fees", name="费用", source="cost", value=ValueExpr(op="sum", of=["amount"]))),
                                     "statement": (*model.statement, StatementNode(id="profit", name="利润", commission_base=True,
+                                                                                 is_total=True, headline="profit",
                                                                                  formula={"op":"add","of":["gross","fees"]}))})
     r.save_policy({"base_node":"profit","on_loss":"inherit","wages":"skip_preview"}, "2026-06-01", "tester", "六月利润口径")
     run = _run([("a", "p1", "2026-06-02", 100.0)], period="2026-06")
@@ -158,6 +178,8 @@ def test_profit_policy_is_month_effective_and_wage_preview_is_explicit(tmp_path)
     assert result["base_node"] == "profit"
     assert result["base_total"] == 50
     assert result["total"] == 2.5
+    assert result['people'][0]['gross'] == 70 and result['people'][0]['profit'] == 50
+    assert details['participation_profit'].item() == 50
     assert result["wage_preview_orders"] == 1
     assert result["amount_complete"] is False
     assert r.policy("2026-05", "s1") is None
