@@ -70,7 +70,6 @@ watch(() => props.runId, () => { if(show.value)load(true) })
     <div><strong>{{ coverageTitle }}</strong><p v-if="thresholdMet">已达到结账门槛。还有 {{ integer(count) }} 条未覆盖成本，本期暂不计入。</p><p v-else>尚未达到结账门槛，还差 {{ integer(needed) }} 笔订单覆盖。</p>
       <p v-if="progress" aria-live="polite">{{ progress.message }}</p>
       <p v-if="calculatedAt" class="pricing-help">最近核算（北京时间）：{{ calculatedAt }}。上方数量属于已保存的核算结果。</p>
-      <p v-if="progress?.error" class="pricing-help">后台原因：{{ progress.error }}</p>
       <p v-if="progressError" role="status">{{ progressError }}</p>
     </div>
     <n-button size="small" @click="show = true">查看未覆盖明细</n-button>
