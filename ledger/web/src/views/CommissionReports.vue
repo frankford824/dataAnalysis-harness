@@ -12,7 +12,7 @@ const state = useCommission()
 const page = ref(1), downloading = ref(false), downloadError = ref(''), detail = ref(null)
 const settlements = ref([]), settlementLoading = ref(false), settlementOpen = ref(false)
 const settlementNote = ref(''), settling = ref(false), settlementError = ref('')
-const kinds = [{key:'people',label:'按人员'},{key:'stores',label:'按店铺'},{key:'breakdown',label:'按月明细'},{key:'coverage',label:'月份进度'}]
+const kinds = [{key:'store_people',label:'店铺与分配人'},{key:'people',label:'按人员'},{key:'stores',label:'按店铺'},{key:'breakdown',label:'按月明细'},{key:'coverage',label:'月份进度'}]
 const scope = computed(() => ({start:state.start,end:state.end,...state.scope}))
 const monthError = computed(() => state.start && state.end && state.start > state.end ? '结束月份不能早于开始月份' : '')
 const queryKey = computed(() => JSON.stringify({...scope.value,view:state.reportView,offset:(page.value-1)*50}))
@@ -24,7 +24,7 @@ const money = value => value == null ? '—' : Number(value).toLocaleString('zh-
 const locked = computed(() => stale.value || loading.value || !!monthError.value)
 const warnings = computed(() => (report.value?.missing_periods || 0) + (report.value?.trial_periods || 0))
 const canSettle = computed(() => !!report.value && report.value.total != null && !locked.value && !warnings.value)
-const labels = {people:'人员汇总',stores:'店铺汇总',breakdown:'按月明细',coverage:'月份进度'}
+const labels = {store_people:'店铺人员构成',people:'人员汇总',stores:'店铺汇总',breakdown:'按月明细',coverage:'月份进度'}
 function status(value='') { return value.replaceAll('未计算提成','未出金额').replaceAll('未计算','未出金额').replaceAll('试算','待核对').replaceAll('历史口径','历史提成').replaceAll('已计算','待结账').replaceAll('无对应提成记录','暂无提成').replaceAll('合计待核对','金额待核对') }
 function explanation(row) {
   if(!row.has_result)return '本月还没有提成金额'
@@ -36,13 +36,15 @@ function explanation(row) {
   return row.status==='已结账'?'本月已结账':''
 }
 const columns = computed(() => ({
+  store_people:[['store','店铺'],['person','分配人'],['period','月份'],['sales','销售额'],['gross','毛利额'],
+    ['labor_cost','兼职额'],['base','本人参与基数'],['amount','提成额'],['store_amount','店铺提成合计'],['status','状态']],
   people:[['person','人员'],['employee_no','工号'],['amount','提成金额'],['stores','店铺'],['periods','月份'],['status','状态']],
   stores:[['store','店铺'],['amount','提成金额'],['labor_cost','兼职分摊'],['configured_people','提成设置人数'],['people','已出金额人数'],['periods','已有金额'],['missing','未出金额'],['status','状态']],
   breakdown:[['person','人员'],['store','店铺'],['period','月份'],['amount','提成金额'],['status','状态']],
   coverage:[['store','店铺'],['period','月份'],['selected_amount','提成金额'],['status','状态'],['explanation','待办']],
 }[state.reportView]))
 function cell(row,key) {
-  if(key==='amount'||key==='selected_amount'||key==='labor_cost')return money(row[key])
+  if(['amount','selected_amount','labor_cost','sales','gross','base','store_amount'].includes(key))return money(row[key])
   if(key==='status')return status(row.status)
   if(key==='explanation')return explanation(row)
   if(key==='stores')return `${row[key]} 家`
@@ -62,6 +64,11 @@ function drill(row) {
   const selection={...report.value.selection}
   let runIds=report.value.run_ids
   if(state.reportView==='people')selection.person_ids=[row.person_id]
+  else if(state.reportView==='store_people'){
+    selection.store_ids=[row.store_id]
+    selection.person_ids=[row.person_id]
+    runIds=[row.finance_run]
+  }
   else{
     selection.store_ids=[row.store_id]
     runIds=(report.value.run_scopes||[]).filter(run=>run.store_id===row.store_id).map(run=>run.run_id)
@@ -129,17 +136,19 @@ async function viewSettlement(item){
   finally{settlementLoading.value=false}
 }
 
-const rowKey=row=>[row.person_id,row.store_id,row.period].filter(Boolean).join(':')
+const rowKey=row=>[row.kind||'',row.person_id||'',row.store_id,row.period].filter(Boolean).join(':')
 const tableColumns=computed(()=>{
   const list=columns.value.map(([key,title],index)=>({title,key,
-    width:['amount','selected_amount','labor_cost'].includes(key)?145:key==='employee_no'?90:key==='period'?100:index===0?undefined:key==='store'?240:125,
-    minWidth:index===0?180:undefined,mobileWidth:['amount','selected_amount','labor_cost'].includes(key)?115:key==='period'?84:index===0?135:undefined,
-    mobile:index===0||['amount','selected_amount','labor_cost','period'].includes(key),align:['amount','selected_amount','labor_cost'].includes(key)?'right':'left',
+    width:['amount','selected_amount','labor_cost','sales','gross','base','store_amount'].includes(key)?145:key==='employee_no'?90:key==='period'?100:index===0?undefined:key==='store'?240:125,
+    minWidth:index===0?180:undefined,mobileWidth:['amount','selected_amount','labor_cost','sales','gross','base','store_amount'].includes(key)?115:key==='period'?84:index===0?135:undefined,
+    mobile:index===0||['amount','selected_amount','sales','gross','labor_cost','period','person'].includes(key),align:['amount','selected_amount','labor_cost','sales','gross','base','store_amount'].includes(key)?'right':'left',
     render:row=>key==='status'?h(NTag,{bordered:false,size:'small',type:row.status?.includes('试算')?'warning':'default'},()=>status(row.status)):
-      h('div',{class:['amount','selected_amount','labor_cost'].includes(key)?['table-money',row[key]<0?'negative':'']:undefined},
-        index===0?[h('span',cell(row,key)),h('div',{class:'table-secondary table-mobile-only'},status(row.status))]:cell(row,key))
+      h('div',{class:['amount','selected_amount','labor_cost','sales','gross','base','store_amount'].includes(key)?['table-money',row[key]<0?'negative':'']:undefined,
+               title:state.reportView==='store_people'&&row.kind==='person'&&['sales','gross','labor_cost'].includes(key)?'店铺合计见上行':undefined},
+        index===0?[h('span',{class:row.kind==='store'?'store-total-name':''},cell(row,key)),h('div',{class:'table-secondary table-mobile-only'},status(row.status))]:
+          key==='person'&&row.kind==='store'?h('strong','店铺合计'):cell(row,key))
   }))
-  if(['people','stores'].includes(state.reportView))list.push({title:'操作',key:'action',width:96,mobileWidth:78,fixed:'right',render:row=>h(NButton,{text:true,type:'primary',size:'small',disabled:locked.value||row.amount==null,onClick:()=>drill(row)},()=> '查看明细')})
+  if(['people','stores','store_people'].includes(state.reportView))list.push({title:'操作',key:'action',width:96,mobileWidth:78,fixed:'right',render:row=>h(NButton,{text:true,type:'primary',size:'small',disabled:locked.value||row.amount==null,onClick:()=>drill(row)},()=> '查看明细')})
   return list
 })
 </script>
@@ -157,6 +166,7 @@ const tableColumns=computed(()=>{
     </n-alert>
     <p v-if="state.reportView==='stores'" style="color:#64748b;margin:0 0 12px">提成设置人数按所选月份的有效设置统计；已出金额人数只统计已有结算金额的人员。</p>
     <div class="report-tabs-row"><LedgerTabs v-model="state.reportView" :options="kinds" label="汇总方式" @update:model-value="detail=null" /><div class="report-actions"><n-button :disabled="!canSettle" @click="openSettlement">确认员工结算</n-button><n-button type="primary" :disabled="!report || locked" :loading="downloading" @click="download">导出表格</n-button></div></div>
+    <p v-if="state.reportView==='store_people'" class="report-grain-note">销售额、毛利额和兼职额按店铺显示一次；各人显示本人参与基数和提成额。店铺提成合计按当前人员筛选范围统计。</p>
 
     <div v-if="loading" class="commission-loading-line"/>
     <LedgerTable :rows="rows" :columns="tableColumns" :row-key="rowKey" :loading="loading" :max-height="440" empty="没有找到提成记录，可调整店铺、人员或月份" />

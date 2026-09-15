@@ -198,6 +198,43 @@ def test_labor_edit_changes_current_commission_report_and_is_visible_by_store(tm
     assert '兼职人工费用已分摊 50.00 元' in report['coverage'][0]['notes']
 
 
+def test_store_person_composition_shows_store_amounts_once_and_filters_people(tmp_path):
+    ws, _, people, client = fixture(tmp_path)
+    rid = ws.record('s1', '2026-06', {
+        'can_close': True, 'findings': [], 'missing_sources': [],
+        'statement': [
+            {'id': 'n_receipt', 'value': 1000, 'available': True},
+            {'id': 'gross', 'value': 400, 'available': True},
+        ],
+        'commission': {'engine': 'commission-v2', 'people': [
+            {'person_id': people[0]['id'], 'person': '甲', 'amount': 12.34, 'base': 250},
+            {'person_id': people[1]['id'], 'person': '乙', 'amount': 3.21, 'base': 100},
+        ], 'total': 15.55, 'amount_complete': True, 'base_name': '利润'},
+    }, [])
+    scope = {'start': '2026-06', 'end': '2026-06', 'store_ids': ['s1'], 'view': 'store_people'}
+    query = client.post('/api/commission-v2/reports/query', json=scope)
+    assert query.status_code == 200, query.text
+    rows = query.json()['items']
+    assert len(rows) == 3
+    assert rows[0]['kind'] == 'store' and rows[0]['sales'] == 1000 and rows[0]['gross'] == 400
+    assert rows[0]['amount'] is None and rows[0]['store_amount'] == 15.55
+    assert [r['amount'] for r in rows[1:]] == [12.34, 3.21]
+    assert all(r['sales'] is None and r['gross'] is None and r['labor_cost'] is None for r in rows[1:])
+    assert all(r['finance_run'] == rid for r in rows)
+    filtered = client.post('/api/commission-v2/reports/query', json={
+        **scope, 'person_ids': [people[0]['id']],
+    }).json()['items']
+    assert len(filtered) == 2 and filtered[0]['store_amount'] == 12.34
+    assert filtered[0]['sales'] == 1000 and filtered[1]['amount'] == 12.34
+    export = client.post('/api/commission-v2/export/reports/store_people', json={
+        'start': '2026-06', 'end': '2026-06', 'store_ids': ['s1'], 'presentation': True,
+    })
+    assert export.status_code == 200, export.text
+    export_rows = list(csv.DictReader(io.StringIO(export.text.lstrip('\ufeff'))))
+    assert [r['销售额'] for r in export_rows] == ['1000', '', '']
+    assert [r['提成额'] for r in export_rows] == ['', '12.34', '3.21']
+
+
 def test_closed_store_uses_frozen_labor_share(tmp_path):
     ws = Workspace(tmp_path)
     registry = Registry(tmp_path)

@@ -8,7 +8,7 @@ export const useCommission = defineStore('commission', () => {
   const storeIds = ref([]), personIds = ref([]), people = ref([])
   const reportPeople = ref([])
   const start = ref(''), end = ref(''), ready = ref(false), refreshTick = ref(0)
-  const settingsSearch = ref(''), settingsState = ref(''), reportView = ref('people')
+  const settingsSearch = ref(''), settingsState = ref(''), reportView = ref('store_people')
   const updated = ref({}), loading = ref({}), initError = ref('')
   let bootstrap, rosterLoad
   const storeOptions = computed(() => app.stores.map(s => ({ value: s.id, label: s.name, group:app.platforms.find(p=>p.id===s.platform)?.name || s.platform || '' })))
@@ -39,7 +39,7 @@ export const useCommission = defineStore('commission', () => {
         personIds.value = query.people ? String(query.people).split(',').filter(Boolean) : []
         start.value = /^\d{4}-\d{2}$/.test(query.from || '') ? query.from : month
         end.value = /^\d{4}-\d{2}$/.test(query.to || '') ? query.to : start.value
-        if(['people','stores','breakdown','coverage'].includes(query.view))reportView.value=query.view
+        if(['store_people','people','stores','breakdown','coverage'].includes(query.view))reportView.value=query.view
         ready.value = true
       } catch (error) { initError.value = error.message }
       finally { bootstrap = null }

@@ -31,6 +31,12 @@ def decimal(value):
     return result
 
 
+def statement_amount(statement, node_id):
+    """Read a displayed snapshot amount, preserving missing evidence as None."""
+    row = next((item for item in statement if item.get('id') == node_id), None)
+    return row.get('value') if row and row.get('available', True) else None
+
+
 def configured_people(registry, start, end):
     year, month = map(int, end.split('-'))
     upper = f"{year + (month == 12):04d}-{month % 12 + 1:02d}-01T00:00:00"
@@ -56,6 +62,8 @@ def build(workspace, registry, model, start, end, store_ids=None, person_ids=Non
     roster={p['id']:p for p in registry.people()}
     configured=configured_people(registry,start,end)
     revenue_node=next((n.id for n in model.statement if n.headline=='revenue'),'')
+    sales_node=next((n.id for n in model.statement if n.name=='销售收入' and n.level==2),'')
+    gross_node=next((n.id for n in model.statement if n.name=='毛利' and n.is_total),'')
     basis_rows=workspace.conn.execute("""SELECT r.store_id,r.period,
       CASE WHEN coalesce(json_extract(node.value,'$.available'),1)=1
            THEN json_extract(node.value,'$.value') ELSE NULL END revenue
@@ -77,11 +85,11 @@ def build(workspace, registry, model, start, end, store_ids=None, person_ids=Non
         if len(run_ids)!=len(set(run_ids)):raise RegistryError('计算记录不能重复')
         source='FROM run r LEFT JOIN period p ON p.store_id=r.store_id AND p.period=r.period'
         where.append('r.id IN ('+','.join('?' for _ in run_ids)+')' if run_ids else '0');args.extend(run_ids)
-    records=[dict(r) for r in workspace.conn.execute("SELECT r.id,r.store_id,r.period,r.at,json_extract(r.result,'$.commission') commission_json,json_extract(r.result,'$.store') store_name,p.state,p.run_id frozen_id "+source+' WHERE '+' AND '.join(where)+' ORDER BY r.period DESC,r.store_id',args)]
+    records=[dict(r) for r in workspace.conn.execute("SELECT r.id,r.store_id,r.period,r.at,json_extract(r.result,'$.commission') commission_json,json_extract(r.result,'$.statement') statement_json,json_extract(r.result,'$.store') store_name,p.state,p.run_id frozen_id "+source+' WHERE '+' AND '.join(where)+' ORDER BY r.period DESC,r.store_id',args)]
     if run_ids is not None and len(records)!=len(run_ids):raise RegistryError('部分计算记录已不存在或不在所选范围，请重新查询')
     keys=[(r['store_id'],r['period']) for r in records]
     if len(keys)!=len(set(keys)):raise RegistryError('同店同账期只能选择一份计算结果')
-    scopes={}; lines=[]; available={}; people_totals={}; store_totals={}; store_people={}
+    scopes={}; lines=[]; store_person_rows=[]; available={}; people_totals={}; store_totals={}; store_people={}
     for record in records:
         c=json.loads(record['commission_json'] or '{}');sid=record['store_id'];period=record['period']
         names.setdefault(sid,record['store_name'] or sid)
@@ -107,6 +115,10 @@ def build(workspace, registry, model, start, end, store_ids=None, person_ids=Non
                'status':status,'has_result':has_result,'notes':'；'.join(notes),'selected_amount':Decimal(0),
                'unassigned_orders':c.get('unassigned_orders'),'base_name':c.get('base_name') or c.get('base_node',''),
                'labor_cost':money_float(labor_cut)}
+        statement=json.loads(record['statement_json'] or '[]')
+        sales=statement_amount(statement,sales_node) if sales_node else None
+        gross=statement_amount(statement,gross_node) if gross_node else None
+        member_rows=[]
         for person in c.get('people',[]):
             if person.get('amount') is None:continue
             name=person.get('person') or '未命名人员'
@@ -125,10 +137,25 @@ def build(workspace, registry, model, start, end, store_ids=None, person_ids=Non
                           'store_id':sid,'store':names[sid],'period':period,'amount':money_float(amount),
                           'base':person.get('base'),'base_name':scope['base_name'],'status':status,
                           'calculated_at':record['at'],'finance_run':record['id'],'notes':scope['notes']})
+            member_rows.append({'kind':'person','person_id':pid,'person':name,
+                                'employee_no':roster.get(pid,{}).get('employee_no',''),
+                                'store_id':sid,'store':names[sid],'period':period,
+                                'sales':None,'gross':None,'labor_cost':None,
+                                'base':person.get('base'),'base_name':scope['base_name'],
+                                'amount':money_float(amount),'store_amount':None,
+                                'status':status,'finance_run':record['id']})
             total=people_totals.setdefault(pid,{'person_id':pid,'person':label,'employee_no':roster.get(pid,{}).get('employee_no',''),
                                                'amount':Decimal(0),'stores':set(),'periods':set(),'statuses':set()})
             total['amount']+=amount;total['stores'].add(sid);total['periods'].add(period);total['statuses'].add(status)
         scopes[(sid,period)]=scope
+        store_person_rows.append({'kind':'store','person':'店铺合计','person_id':None,
+                                  'employee_no':'','store_id':sid,'store':names[sid],
+                                  'period':period,'sales':sales,'gross':gross,
+                                  'labor_cost':money_float(labor_cut) if spread.total is not None else None,
+                                  'base':None,'base_name':'','amount':None,
+                                  'store_amount':money_float(scope['selected_amount']) if has_result else None,
+                                  'status':status,'finance_run':record['id']})
+        store_person_rows.extend(member_rows)
     invalid=selected_people-set(roster)-set(available)
     if invalid:raise RegistryError('所选人员不存在，请重新选择')
     if selected_stores-set(names):raise RegistryError('所选店铺不存在，请重新选择')
@@ -160,7 +187,8 @@ def build(workspace, registry, model, start, end, store_ids=None, person_ids=Non
     coverage=[{**r,'selected_amount':money_float(r['selected_amount']) if r['has_result'] else None} for r in scopes.values()]
     configured_total=set().union(*(configured.get(sid,set()) for sid in covered_stores))
     if selected_people:configured_total &= selected_people
-    return {'people':sorted(person_rows,key=lambda x:x['person']),'stores':store_rows,'rows':lines,'coverage':coverage,
+    return {'people':sorted(person_rows,key=lambda x:x['person']),'stores':store_rows,'rows':lines,
+            'store_people':store_person_rows,'coverage':coverage,
             'configured_people_count':len(configured_total),'available_people':list(available.values()),'run_ids':[r['id'] for r in records],
             'total':money_float(sum((decimal(x['amount']) for x in lines),Decimal(0))) if any(r['has_result'] for r in coverage) else None,
             'missing_periods':sum(not r['has_result'] for r in coverage),
@@ -171,6 +199,7 @@ def build(workspace, registry, model, start, end, store_ids=None, person_ids=Non
 COLUMNS={
  'people':['人员','工号','提成金额','店铺数','账期数','计算状态','人员ID'],
  'stores':['店铺','提成金额','兼职分摊','提成设置人数','已出金额人数','已计算账期数','未计算账期数','计算状态'],
+ 'store_people':['店铺','分配人','月份','销售额','毛利额','兼职额','本人参与基数','基数名称','提成额','店铺提成合计','状态'],
  'breakdown':['人员','工号','店铺','账期','提成金额','本人参与基数','基数名称','计算状态','计算时间','说明','计算记录'],
  'coverage':['店铺','账期','筛选范围提成金额','计算状态','未分配订单数','计算时间','说明','计算记录']}
 
@@ -180,6 +209,10 @@ def export_rows(report, kind):
         for r in report['people']:yield dict(zip(COLUMNS[kind],[r['person'],r['employee_no'],r['amount'],r['stores'],r['periods'],r['status'],r['person_id']]))
     elif kind=='stores':
         for r in report['stores']:yield dict(zip(COLUMNS[kind],[r['store'],r['amount'],r['labor_cost'],r['configured_people'],r['people'] if r['periods'] else None,r['periods'],r['missing'],r['status']]))
+    elif kind=='store_people':
+        for r in report['store_people']:
+            yield dict(zip(COLUMNS[kind],[r['store'],r['person'],r['period'],r['sales'],r['gross'],r['labor_cost'],
+                                          r['base'],r['base_name'],r['amount'],r['store_amount'],r['status']]))
     elif kind=='breakdown':
         for r in report['rows']:yield dict(zip(COLUMNS[kind],[r['person'],r['employee_no'],r['store'],r['period'],r['amount'],r['base'],r['base_name'],r['status'],r['calculated_at'],r['notes'],r['finance_run']]))
     elif kind=='coverage':
@@ -191,6 +224,9 @@ def business_export(report, kind):
     columns = {
         'people': [('人员','person'),('工号','employee_no'),('提成金额','amount'),('店铺数','stores'),('月份数','periods'),('状态','status')],
         'stores': [('店铺','store'),('提成金额','amount'),('兼职分摊','labor_cost'),('提成设置人数','configured_people'),('已出金额人数','people'),('已有金额月份','periods'),('未出金额月份','missing'),('状态','status')],
+        'store_people': [('店铺','store'),('分配人','person'),('月份','period'),('销售额','sales'),('毛利额','gross'),
+                         ('兼职额','labor_cost'),('本人参与提成基数','base'),('提成额','amount'),
+                         ('店铺提成合计','store_amount'),('状态','status')],
         'breakdown': [('人员','person'),('工号','employee_no'),('店铺','store'),('月份','period'),('提成金额','amount'),('状态','status')],
         'coverage': [('店铺','store'),('月份','period'),('提成金额','selected_amount'),('状态','status'),('未分配人员订单数','unassigned_orders')],
     }[kind]
