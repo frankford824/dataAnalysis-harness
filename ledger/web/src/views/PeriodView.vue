@@ -190,8 +190,12 @@ const historicalChecks = computed(() => historicalArchive.value ? (snap.value?.f
 const blockers = computed(() => bad.value.filter((f) => f.blocking))
 const manualBlockers = computed(() => blockers.value.filter((f) => f.id !== 'evidence_archive'))
 const hardBlockers = computed(() => blockers.value.filter((f) => f.id === 'evidence_archive'))
+const profitUnavailable = computed(() => (snap.value?.statement || []).some(
+  (row) => (row.id === 'net_profit' || row.name === '利润') && (!row.available || row.value == null),
+))
 const manualCloseReady = computed(() =>
   !!manualCloseNote.value.trim()
+  && !profitUnavailable.value
   && !hardBlockers.value.length
   && !(snap.value?.missing_sources || []).length
   && manualBlockers.value.length > 0
@@ -374,7 +378,7 @@ watch(
             <n-button size="tiny" @click="rail = 'checks'">查看核对结果</n-button>
             <n-button size="tiny" @click="fixing = true">怎么改</n-button>
             <n-button
-              v-if="manualBlockers.length && !hardBlockers.length && !(snap.missing_sources || []).length"
+              v-if="manualBlockers.length && !hardBlockers.length && !profitUnavailable && !(snap.missing_sources || []).length"
               size="tiny"
               type="primary"
               @click="openManualClose"
@@ -396,7 +400,7 @@ watch(
                 @click.stop
               >导出订单费项</a>
             </header>
-            <PricingPending v-if="snap.pricing_pending_count && snap.run_id" ref="pricingPanel" :key="`${props.id}:${period}`" :run-id="snap.run_id" :count="snap.pricing_pending_count" :coverage="snap.cost_coverage" :store-id="props.id" :period="period" />
+            <PricingPending v-if="snap.run_id && (snap.pricing_pending_count || (snap.cost_coverage?.expected && !snap.cost_coverage?.passed))" ref="pricingPanel" :key="`${props.id}:${period}`" :run-id="snap.run_id" :count="snap.pricing_pending_count || 0" :coverage="snap.cost_coverage" :store-id="props.id" :period="period" @show-quality="rail = 'quality'" />
             <div class="statement">
               <div
                 v-for="row in snap.statement || []"

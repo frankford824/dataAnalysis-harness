@@ -5,6 +5,7 @@ import { api } from '../api'
 import { useLatest } from './ui/useLatest'
 
 const props = defineProps({ runId: { type: Number, required: true }, count: { type: Number, required: true }, coverage: { type: Object, default: () => ({}) }, storeId: String, period: String })
+const emit = defineEmits(['show-quality'])
 const percentage = value => value == null ? '—' : `${(Number(value) * 100).toFixed(1)}%`
 const thresholdMet = computed(() => !!props.coverage?.passed)
 const coverageTitle = computed(() => props.coverage?.expected
@@ -37,7 +38,7 @@ watch(() => props.runId, loadProgress)
 const show = ref(false), query = ref(''), search = ref(''), page = ref(1)
 const data = ref({ total: 0, reference_count: 0, reason_counts: [], items: [] }), busy = ref(false), error = ref('')
 const request = useLatest()
-defineExpose({ open: () => { show.value = true } })
+defineExpose({ open: () => { if (props.count) show.value = true; else emit('show-quality') } })
 let serial = 0
 const columns = [
   { title: '平台订单号', key: 'order_id', width: 230 },
@@ -73,7 +74,8 @@ watch(() => props.runId, () => { if(show.value)load(true) })
       <p v-if="calculatedAt" class="pricing-help">最近核算（北京时间）：{{ calculatedAt }}。上方数量属于已保存的核算结果。</p>
       <p v-if="progressError" role="status">{{ progressError }}</p>
     </div>
-    <n-button size="small" @click="show = true">查看未覆盖明细</n-button>
+    <n-button v-if="count" size="small" @click="show = true">查看未覆盖明细</n-button>
+    <n-button v-else size="small" @click="emit('show-quality')">查看成本覆盖</n-button>
   </div>
   <n-drawer v-model:show="show" :width="920" style="max-width: 100vw">
     <n-drawer-content title="未覆盖成本明细" closable>

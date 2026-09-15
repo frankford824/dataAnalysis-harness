@@ -252,7 +252,7 @@ def test_pending_payout_keeps_personal_sales_without_inventing_commission(tmp_pa
         'statement': [{'id': 'n_receipt', 'value': 1000, 'available': True},
                       {'id': 'gross', 'value': None, 'available': False}],
         'commission': {'engine': 'commission-v2', 'total': None,
-                       'pricing_pending_count': 10, 'people': [
+                       'pricing_pending_count': 0, 'pricing_threshold_met': False, 'people': [
                            {'person_id': people[0]['id'], 'person': '甲',
                             'amount': None, 'sales': 1000, 'gross': None},
                        ]},

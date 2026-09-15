@@ -264,6 +264,15 @@ def test_manual_close_rejects_stale_or_unarchived_result(ws):
         ws.close_period("s1", "2025-05", note="确认", ignored_blockers=("fees",), expected_run_id=run_id)
 
 
+def test_manual_close_cannot_freeze_unknown_profit(ws):
+    ws.record("s1", "2026-06", _result(False,
+        findings=[{'id':'fees','name':'费用待确认','blocking':True,'passed':False,'message':'费用待确认'}],
+        statement=[{'id':'net_profit','name':'利润','value':None,'available':False}]), ["a"])
+    with pytest.raises(WorkspaceError, match="利润尚未算出金额"):
+        ws.close_period("s1", "2026-06", note="人工确认", ignored_blockers=("fees",))
+    assert ws.state("s1", "2026-06").state == OPEN
+
+
 def test_missing_sources_explain_refusal(ws):
     ws.record("s1", "2025-05", _result(False, missing_sources=["运费表"]), ["a"])
     with pytest.raises(WorkspaceError, match="运费表"):

@@ -388,12 +388,14 @@ def _recompute_locked(
         report(f"存账期 · {where}", i, len(slices))
         payload = slice_dict(sl, store, model)
         payload["source_sync_pending"] = ing.source_sync_pending
-        pricing_allowed = sl.pricing_gaps.is_empty() or bool(sl.cost_coverage.get("passed"))
+        pricing_allowed = bool(sl.cost_coverage.get("passed")) or (
+            not sl.cost_coverage.get("expected") and sl.pricing_gaps.is_empty()
+        )
         partial_pricing = not sl.pricing_gaps.is_empty() and pricing_allowed
         allocation = (commission_engine.calculate(result, model, store.id, sl.period, registry,
                                                    allow_partial_pricing=partial_pricing)
                       if registry and pricing_allowed else None)
-        payload["commission"] = (commission_engine.pending_pricing(sl.pricing_gaps.height)
+        payload["commission"] = (commission_engine.pending_pricing(sl.pricing_gaps.height, sl.cost_coverage)
                                  if not pricing_allowed
                                  else allocation[0] if allocation else _commission(
                                      result, model, store, sl.period,

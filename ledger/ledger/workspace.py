@@ -780,6 +780,10 @@ class Workspace:
             why = run["evidence_error"] or "事实证据尚未完成留档"
             raise WorkspaceError(f"{period} 结不了账：{why}")
         result = json.loads(run["result"])
+        profit = next((row for row in result.get("statement", [])
+                       if row.get("id") == "net_profit" or row.get("name") == "利润"), None)
+        if profit and (profit.get("value") is None or not profit.get("available", True)):
+            raise WorkspaceError("利润尚未算出金额，不能人工结账")
         active = {
             str(f.get("id") or f"__blocker_{index}"): f
             for index, f in enumerate(result.get("findings", []))

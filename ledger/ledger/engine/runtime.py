@@ -1108,12 +1108,15 @@ def _build_slice(
         if live_feed else link_reports
     )
     cost_coverage = _cost_coverage(model, scoped_reports)
-    pricing_blocks = not own_gaps.is_empty() and not cost_coverage["passed"]
+    pricing_blocks = (cost_coverage["expected"] > 0 or not own_gaps.is_empty()) and not cost_coverage["passed"]
     unavailable = {
         m.id for m in model.metrics if m.source in completeness.missing
     }
     if pricing_blocks:
-        unavailable.update(own_gaps["metric_id"].unique().to_list())
+        if cost_coverage["expected"] > 0:
+            unavailable.add("goods_cost")
+        if not own_gaps.is_empty():
+            unavailable.update(own_gaps["metric_id"].unique().to_list())
     # 没有合格订单时，零投影就是未入账，不能退回源金额把已拦下的补发成本算回来。
     # 期间级指标也已生成显式投影，因此所有损益只使用实际入账事实。
     totals = calc.totals_by_metric(scoped_spine, only_linked=False)

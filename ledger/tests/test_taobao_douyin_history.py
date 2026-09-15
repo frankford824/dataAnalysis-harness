@@ -61,3 +61,27 @@ def test_small_uncovered_cost_share_is_visible_without_blocking_profit_or_close(
     assert sl.nodes['profit'].value==-95
     assert sl.can_close
     assert slice_dict(sl,model.store('s'),model)['cost_coverage']['passed'] is True
+
+
+def test_coverage_below_threshold_blocks_profit_even_without_pricing_gap_rows():
+    full=load_model(MODELS/'cn-ecommerce')
+    metric=full.metric('goods_cost').for_platform('taobao').model_copy(update={'by_platform':()})
+    model=Model(id='coverage-without-row-gaps',name='coverage',
+        platforms=(Platform(id='taobao',name='淘宝',cost_pricing='historical'),),
+        stores=(Store(id='s',name='shop',platform='taobao'),),
+        sources=(SourceContract(id='order_detail',name='订单',is_spine=True,owner_role='shop_owner',cadence='monthly'),
+                 SourceContract(id='order_cost',name='成本',owner_role='shop_owner',cadence='monthly')),
+        metrics=(metric,),statement=(StatementNode(id='profit',name='利润',formula={'op':'add','of':['goods_cost']}),),
+        checks=(Check(id='chk_goods_coverage',name='成本覆盖',kind='spine_coverage',metric='goods_cost',threshold=.95,blocking=True),))
+    orders=[dict(order_id=f'O{i}',sub_order_id=f'S{i}',store_name='shop',order_time=datetime(2026,6,5),
+                 order_type='销售订单',order_state='Sent') for i in range(2)]
+    cost={**orders[0],'original_order_id':'O0','internal_order_id':'I0','sku':'SKU0',
+          'quantity':1.,'unit_cost':5.,'cost_source':'history','cost_status':'priced',
+          'cost_as_of':'2026-06-05','pricing_evidence':json.dumps({'order_date':'2026-06-05'})}
+    result=run(Ingestion(model=model,items=[item('order_detail',orders,orders[0]),
+                                            item('order_cost',[cost],cost)]),'taobao')
+    sl=result.slices[('shop','2026-06')]
+    assert sl.pricing_gaps.is_empty()
+    assert sl.cost_coverage['coverage']==.5 and sl.cost_coverage['passed'] is False
+    assert sl.nodes['profit'].value is None and not sl.can_close
+    assert slice_dict(sl,model.store('s'),model)['pricing_pending_count']==0

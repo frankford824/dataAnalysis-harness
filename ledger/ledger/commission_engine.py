@@ -97,11 +97,19 @@ def _match(orders, rules):
     )
 
 
-def pending_pricing(count: int) -> dict:
+def pending_pricing(count: int, coverage: dict | None = None) -> dict:
+    coverage = coverage or {}
+    if coverage.get("expected"):
+        note = (f"商品成本覆盖率{coverage['coverage']:.1%}，低于"
+                f"{coverage['threshold']:.0%}结账门槛；还有"
+                f"{coverage['uncovered']}笔订单未覆盖，提成暂不计算。")
+    else:
+        note = f"商品成本覆盖率未达到结账门槛，还有 {count} 条未覆盖。"
     return {"configured": False, "amount_complete": False, "total": None,
             "base_total": None, "people": [], "products": [],
-            "pricing_pending_count": count,
-            "notes": [f"商品成本覆盖率未达到结账门槛，还有 {count} 条未覆盖。"]}
+            "pricing_pending_count": count, "pricing_threshold_met": False,
+            "cost_coverage": coverage,
+            "notes": [note]}
 
 
 def _participation_facts(result, model, store_id: str, period: str) -> tuple[pl.DataFrame, bool, bool]:
