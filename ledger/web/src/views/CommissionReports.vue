@@ -155,7 +155,7 @@ const tableColumns=computed(()=>{
       <template v-if="settlementDifference">当前金额比该次结算{{settlementDifference>0?'增加':'减少'}} ¥{{money(Math.abs(settlementDifference))}}，原结算记录未改变。</template>
       <template v-else>当前金额与该次结算一致。</template>
     </n-alert>
-    <p v-if="state.reportView==='stores'" style="color:#64748b;margin:0 0 12px">提成设置人数按所选月份的有效设置统计；已出金额人数只统计已算出提成的人员。待核价不代表没有配置人员。</p>
+    <p v-if="state.reportView==='stores'" style="color:#64748b;margin:0 0 12px">提成设置人数按所选月份的有效设置统计；已出金额人数只统计已有结算金额的人员。</p>
     <div class="report-tabs-row"><LedgerTabs v-model="state.reportView" :options="kinds" label="汇总方式" @update:model-value="detail=null" /><div class="report-actions"><n-button :disabled="!canSettle" @click="openSettlement">确认员工结算</n-button><n-button type="primary" :disabled="!report || locked" :loading="downloading" @click="download">导出表格</n-button></div></div>
 
     <div v-if="loading" class="commission-loading-line"/>

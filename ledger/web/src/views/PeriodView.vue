@@ -342,7 +342,7 @@ watch(
                 @click.stop
               >导出订单费项</a>
             </header>
-            <PricingPending v-if="snap.pricing_pending_count && snap.run_id" ref="pricingPanel" :key="`${props.id}:${period}`" :run-id="snap.run_id" :count="snap.pricing_pending_count" :store-id="props.id" :period="period" />
+            <PricingPending v-if="snap.pricing_pending_count && snap.run_id" ref="pricingPanel" :key="`${props.id}:${period}`" :run-id="snap.run_id" :count="snap.pricing_pending_count" :coverage="snap.cost_coverage" :store-id="props.id" :period="period" />
             <div class="statement">
               <div
                 v-for="row in snap.statement || []"
@@ -352,7 +352,7 @@ watch(
                 :role="row.drillable?'button':undefined" :tabindex="row.drillable?0:undefined" :aria-label="row.drillable?`查看${row.name}明细`:undefined" @keydown.enter="openDrill(row)" @keydown.space.prevent="openDrill(row)" @click="openDrill(row)"
               >
                 <span>{{ row.name }}</span>
-                <span v-if="!row.available" class="na" :title="row.unavailable_reason || ''">{{ row.unavailable_reason ? '待核价' : '—' }}</span>
+                <span v-if="!row.available" class="na" :title="row.unavailable_reason || ''">{{ row.unavailable_reason ? '待补资料' : '—' }}</span>
                 <span v-else class="amt" :class="{ neg: row.value < 0 }">
                   {{ row.display === 'percent' ? percent(row.value) : money(row.value) }}
                 </span>

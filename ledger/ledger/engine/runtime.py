@@ -26,6 +26,7 @@ from ..model.schema import Metric, Model, ParseOptions, Template
 from ..money import decimal_amount, money_float
 from ..version import engine_version
 from . import calculate as calc
+from ..cost_evidence import GOODS_COST_CLOSE_THRESHOLD
 from .audit import AuditResult, audit
 from .project import Projection, claims, project, project_transactions
 from .derivative import Derivative, detect as detect_derivative
@@ -133,6 +134,7 @@ class Slice:
     link_reports: dict[str, LinkReport]
     classify_report: ClassifyReport
     pricing_gaps: pl.DataFrame = field(default_factory=pl.DataFrame)
+    cost_coverage: dict = field(default_factory=dict)
 
     @property
     def can_close(self) -> bool:
@@ -1094,25 +1096,9 @@ def _build_slice(
             completeness.reasons.pop("order_cost", None)
         if "order_cost" not in completeness.arrived:
             completeness.arrived.append("order_cost")
-    unavailable = {
-        m.id for m in model.metrics if m.source in completeness.missing
-    }
-    if not own_gaps.is_empty():
-        unavailable.update(own_gaps["metric_id"].unique().to_list())
-    # 没有合格订单时，零投影就是未入账，不能退回源金额把已拦下的补发成本算回来。
-    # 期间级指标也已生成显式投影，因此所有损益只使用实际入账事实。
-    totals = calc.totals_by_metric(scoped_spine, only_linked=False)
-    inapplicable = {m.id for m in model.metrics if m.for_platform(platform) is None}
-    nodes = calc.evaluate_statement(model, totals, unavailable, inapplicable)
-    if not own_gaps.is_empty():
-        for node in nodes.values():
-            if "order_cost" in node.missing_sources:
-                node.value = None
-                node.unavailable_reason = f"{own_gaps.height} 条商品成本待核价"
     own = classify_report.for_rows(_anchors_of(scoped))
-    # Legacy spreadsheet baselines intentionally keep their historical report semantics.
-    # The scoped denominator is required only when a multi-month live feed is present;
-    # changing old frozen audit text during this integration would be unrelated drift.
+    # Live feeds contain several months. Rebase coverage to this exact store/month
+    # before deciding whether the remaining uncovered rows block closing.
     live_feed = any(
         item.template is not None and item.template.id.startswith("order_console_")
         for item in ingestion.known
@@ -1121,6 +1107,23 @@ def _build_slice(
         _scoped_link_reports(model, scoped, own_spine, platform, link_reports)
         if live_feed else link_reports
     )
+    cost_coverage = _cost_coverage(model, scoped_reports)
+    pricing_blocks = not own_gaps.is_empty() and not cost_coverage["passed"]
+    unavailable = {
+        m.id for m in model.metrics if m.source in completeness.missing
+    }
+    if pricing_blocks:
+        unavailable.update(own_gaps["metric_id"].unique().to_list())
+    # 没有合格订单时，零投影就是未入账，不能退回源金额把已拦下的补发成本算回来。
+    # 期间级指标也已生成显式投影，因此所有损益只使用实际入账事实。
+    totals = calc.totals_by_metric(scoped_spine, only_linked=False)
+    inapplicable = {m.id for m in model.metrics if m.for_platform(platform) is None}
+    nodes = calc.evaluate_statement(model, totals, unavailable, inapplicable)
+    if pricing_blocks:
+        for node in nodes.values():
+            if "order_cost" in node.missing_sources:
+                node.value = None
+                node.unavailable_reason = "商品成本覆盖率未达到结账门槛"
     result = audit(model, scoped, scoped_reports, own, completeness, nodes)
     if ingestion.source_sync_pending:
         from .types import Finding
@@ -1144,9 +1147,15 @@ def _build_slice(
 
     if not own_gaps.is_empty():
         from .types import Finding
-        result.findings.append(Finding("historical_cost_evidence", "商品成本待核价", passed=False, blocking=True,
-            message=f"还有 {own_gaps.height} 条商品成本未核实，利润和提成暂不能确认。",
-            detail={"count": own_gaps.height, "items": own_gaps.head(5).to_dicts()}))
+        if cost_coverage["passed"]:
+            message = (f"商品成本覆盖率 {cost_coverage['coverage']:.1%}，结账门槛 "
+                       f"{cost_coverage['threshold']:.0%}，已达到；剩余 {own_gaps.height} 条未覆盖成本暂未计入。")
+        else:
+            message = (f"商品成本覆盖率 {cost_coverage['coverage']:.1%}，低于结账门槛 "
+                       f"{cost_coverage['threshold']:.0%}；还有 {cost_coverage['uncovered']:,} 笔订单未覆盖。")
+        result.findings.append(Finding("historical_cost_evidence", "未覆盖商品成本",
+            passed=cost_coverage["passed"], blocking=False, message=message,
+            detail={**cost_coverage, "count": own_gaps.height, "items": own_gaps.head(5).to_dicts()}))
     return_issues = (eval_errors or {}).get("cost_return", [])
     if return_issues and any(s.name == store and s.cost_return_posting == "transaction" for s in model.stores):
         from .types import Finding
@@ -1159,8 +1168,20 @@ def _build_slice(
         store=store, period=period, nodes=nodes, facts=scoped,
         completeness=completeness, audit=result,
         link_reports=scoped_reports, classify_report=own,
-        pricing_gaps=own_gaps,
+        pricing_gaps=own_gaps, cost_coverage=cost_coverage,
     )
+
+
+def _cost_coverage(model: Model, reports: dict[str, LinkReport]) -> dict:
+    check = next((c for c in model.checks if c.kind == "spine_coverage" and c.metric == "goods_cost"), None)
+    report = reports.get("goods_cost")
+    threshold = GOODS_COST_CLOSE_THRESHOLD
+    measurable = bool(check and report and report.spine_keys)
+    coverage = report.coverage if measurable else 0.0
+    expected = report.spine_keys if measurable else 0
+    covered = report.spine_keys_covered if measurable else 0
+    return {"coverage": coverage, "threshold": threshold, "passed": measurable and coverage >= threshold,
+            "covered": covered, "expected": expected, "uncovered": max(0, expected - covered)}
 
 
 def _scoped_link_reports(

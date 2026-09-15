@@ -129,10 +129,11 @@ class Commission:
 # --------------------------------------------------------------------------- #
 
 
-def compute(result: RunResult, model: Model, store: str, period: str) -> Commission:
+def compute(result: RunResult, model: Model, store: str, period: str,
+            *, allow_partial_pricing: bool = False) -> Commission:
     """算一个店期的提成。"""
     gaps = getattr(result, "pricing_gaps", pl.DataFrame())
-    if not gaps.is_empty() and not gaps.filter(
+    if not allow_partial_pricing and not gaps.is_empty() and not gaps.filter(
         pl.col("store").is_in(_store_labels(model, store))
         & pl.col("period").is_in([period, "(未知账期)"])
     ).is_empty():

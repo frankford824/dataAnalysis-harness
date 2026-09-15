@@ -16,6 +16,7 @@ import polars as pl
 
 from ..model.schema import Check, Model
 from ..money import decimal_amount, money_float, sum_amounts
+from ..cost_evidence import GOODS_COST_CLOSE_THRESHOLD
 from .calculate import NodeValue, _apply
 from .link import EXCLUDED_KEY
 from .types import ClassifyReport, Completeness, Finding, LinkReport
@@ -112,7 +113,8 @@ def _check_coverage(check, model, facts, links, classify, completeness, nodes, r
             check.id, check.name, passed=True, blocking=False,
             message=f"{check.name}：没有可比对的订单，跳过",
         )
-    threshold = check.threshold if check.threshold is not None else 0.95
+    threshold = (GOODS_COST_CLOSE_THRESHOLD if check.metric == "goods_cost"
+                 else check.threshold if check.threshold is not None else 0.95)
     passed = report.coverage >= threshold
     gap = report.spine_keys - report.spine_keys_covered
     # 分母被 expect 收窄时要说清算的是哪一批订单，不然「1,060 笔」对不上订单明细的行数。

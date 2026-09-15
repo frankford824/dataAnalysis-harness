@@ -243,7 +243,8 @@ class Recomputed:
     failure: dict[str, Any] | None = None
 
 
-def _commission(result: RunResult, model: Model, store: Store, period: str) -> dict[str, Any]:
+def _commission(result: RunResult, model: Model, store: Store, period: str,
+                *, allow_partial_pricing: bool = False) -> dict[str, Any]:
     """提成算完跟着损益一起进快照。
 
     为什么存快照而不是每次现算：现算要重新解析这家店全部文件，三十秒起步，
@@ -255,13 +256,14 @@ def _commission(result: RunResult, model: Model, store: Store, period: str) -> d
     是提成配置写错了，而不是让这家店连损益表都出不来。
     """
     pending = result.pricing_gaps
-    if not pending.is_empty():
+    if not allow_partial_pricing and not pending.is_empty():
         pending = pending.filter(pl.col("store").is_in([store.name, store.id, *store.aliases])
                                  & pl.col("period").is_in([period, "(未知账期)"]))
         if not pending.is_empty():
             return commission_engine.pending_pricing(pending.height)
     try:
-        return commission_dict(comm.compute(result, model, store.id, period))
+        return commission_dict(comm.compute(result, model, store.id, period,
+                                            allow_partial_pricing=allow_partial_pricing))
     except Exception as exc:  # noqa: BLE001 — 什么都不该让重算倒下
         return {
             "base_node": "", "base_name": "", "base_total": 0.0, "total": 0.0,
@@ -386,12 +388,26 @@ def _recompute_locked(
         report(f"存账期 · {where}", i, len(slices))
         payload = slice_dict(sl, store, model)
         payload["source_sync_pending"] = ing.source_sync_pending
-        allocation = commission_engine.calculate(result, model, store.id, sl.period, registry) if registry and sl.pricing_gaps.is_empty() else None
+        pricing_allowed = sl.pricing_gaps.is_empty() or bool(sl.cost_coverage.get("passed"))
+        partial_pricing = not sl.pricing_gaps.is_empty() and pricing_allowed
+        allocation = (commission_engine.calculate(result, model, store.id, sl.period, registry,
+                                                   allow_partial_pricing=partial_pricing)
+                      if registry and pricing_allowed else None)
         payload["commission"] = (commission_engine.pending_pricing(sl.pricing_gaps.height)
-                                 if not sl.pricing_gaps.is_empty()
-                                 else allocation[0] if allocation else _commission(result, model, store, sl.period))
+                                 if not pricing_allowed
+                                 else allocation[0] if allocation else _commission(
+                                     result, model, store, sl.period,
+                                     allow_partial_pricing=partial_pricing))
         if allocation:
             c = payload["commission"]
+            if partial_pricing:
+                c["pricing_pending_count"] = sl.pricing_gaps.height
+                c["pricing_threshold_met"] = True
+                c["cost_coverage"] = sl.cost_coverage
+                c["notes"].append(
+                    f"商品成本覆盖率{sl.cost_coverage['coverage']:.1%}，已达到"
+                    f"{sl.cost_coverage['threshold']:.0%}结账门槛；未覆盖成本暂未计入。"
+                )
             if ing.source_sync_pending:
                 c["amount_complete"] = False
                 c["notes"].append("订单来源仍在同步，当前提成仅为阶段试算")

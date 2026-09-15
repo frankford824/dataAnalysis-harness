@@ -4,7 +4,21 @@ import { NDrawer, NDrawerContent, NInput, NButton, NDataTable, NPagination, NAle
 import { api } from '../api'
 import { useLatest } from './ui/useLatest'
 
-const props = defineProps({ runId: { type: Number, required: true }, count: { type: Number, required: true }, storeId: String, period: String })
+const props = defineProps({ runId: { type: Number, required: true }, count: { type: Number, required: true }, coverage: { type: Object, default: () => ({}) }, storeId: String, period: String })
+const percentage = value => value == null ? '—' : `${(Number(value) * 100).toFixed(1)}%`
+const thresholdMet = computed(() => !!props.coverage?.passed)
+const coverageTitle = computed(() => props.coverage?.expected
+  ? `商品成本覆盖率 ${percentage(props.coverage.coverage)}，结账门槛 ${percentage(props.coverage.threshold)}`
+  : `${props.count} 条商品成本未覆盖`)
+const needed = computed(() => Math.max(0, Math.ceil((props.coverage?.expected || 0) * (props.coverage?.threshold || 0)) - (props.coverage?.covered || 0)))
+const reasonName = value => ({
+  '下单日历史成本待核实':'成本尚未确认',
+  '缺少已核实的下单日历史成本':'没有可用成本',
+  '原订单日期待核对':'缺少下单日期',
+  '取价日期与下单日不一致':'成本日期不一致',
+  '成本与订单金额差异较大，需核对':'成本金额异常',
+  '原订单商品信息待核对':'商品信息不一致',
+}[value] || value)
 const progress = ref(null), progressError = ref(''), progressRequest = useLatest()
 const calculatedAt = computed(() => progress.value?.calculated_at
   ? new Date(progress.value.calculated_at).toLocaleString('zh-CN', {timeZone: 'Asia/Shanghai', hour12: false}) : '')
@@ -29,7 +43,7 @@ const columns = [
   { title: '商品编码', key: 'sku', width: 210 },
   { title: '下单日期', key: 'order_date', width: 115 },
   { title: '数量', key: 'quantity', width: 80 },
-  { title: '待核对事项', key: 'reason', minWidth: 230 },
+  { title: '原因', key: 'reason', minWidth: 180, render: row => reasonName(row.reason) },
   { title: '聚水潭订单号', key: 'internal_order_id', width: 130 },
 ]
 const download = computed(() => `/api/runs/${props.runId}/pricing-gaps.csv?${new URLSearchParams({ q: search.value })}`)
@@ -52,24 +66,23 @@ watch(() => props.runId, () => { if(show.value)load(true) })
 </script>
 
 <template>
-  <div class="pricing-notice">
-    <div><strong>{{ count }} 条商品成本待核价</strong><p>还有商品成本未核实，相关利润和提成暂不能确认。</p>
+  <div class="pricing-notice" :class="{passed:thresholdMet}">
+    <div><strong>{{ coverageTitle }}</strong><p v-if="thresholdMet">已达到结账门槛。还有 {{ integer(count) }} 条未覆盖成本，本期暂不计入。</p><p v-else>尚未达到结账门槛，还差 {{ integer(needed) }} 笔订单覆盖。</p>
       <p v-if="progress" aria-live="polite">{{ progress.message }}</p>
       <p v-if="calculatedAt" class="pricing-help">最近核算（北京时间）：{{ calculatedAt }}。上方数量属于已保存的核算结果。</p>
       <p v-if="progress?.error" class="pricing-help">后台原因：{{ progress.error }}</p>
       <p v-if="progressError" role="status">{{ progressError }}</p>
     </div>
-    <n-button size="small" @click="show = true">查看待核价明细</n-button>
+    <n-button size="small" @click="show = true">查看未覆盖明细</n-button>
   </div>
   <n-drawer v-model:show="show" :width="920" style="max-width: 100vw">
-    <n-drawer-content title="待核价明细" closable>
-      <p class="pricing-help">请按下单日期核实清单中的价格。已有历史价格的记录随同步更新；缺少历史价格的记录需要另行核价，参考单价不直接计入成本。</p>
-      <div v-if="data.reason_counts?.length" class="pricing-summary" aria-label="待核价原因汇总">
-        <span v-for="item in data.reason_counts" :key="item.reason"><b>{{ integer(item.count) }}</b>{{ item.reason }}</span>
+    <n-drawer-content title="未覆盖成本明细" closable>
+      <p class="pricing-help">这些行暂未计入商品成本。资料补齐后会自动更新；当前覆盖率达到结账门槛时，不影响结账。</p>
+      <div v-if="data.reason_counts?.length" class="pricing-summary" aria-label="未覆盖原因汇总">
+        <span v-for="item in data.reason_counts" :key="item.reason"><b>{{ integer(item.count) }}</b>{{ reasonName(item.reason) }}</span>
       </div>
-      <p v-if="data.reference_count" class="pricing-help">其中 {{ integer(data.reference_count) }} 条带有参考单价；参考价只用于核对，未取得下单日历史证据前不会计入利润。</p>
       <form class="pricing-search" @submit.prevent="submit">
-        <n-input v-model:value="query" clearable placeholder="搜索订单号、商品编码" aria-label="搜索待核价明细" />
+        <n-input v-model:value="query" clearable placeholder="搜索订单号、商品编码" aria-label="搜索未覆盖成本明细" />
         <n-button attr-type="submit" :loading="busy">搜索</n-button>
         <a :href="download" download>导出明细</a>
       </form>
@@ -83,7 +96,7 @@ watch(() => props.runId, () => { if(show.value)load(true) })
           <p>下单日期 {{ row.order_date || '待核对' }}</p>
           <p>平台订单 {{ row.order_id || '待核对' }}</p>
           <p>聚水潭订单 {{ row.internal_order_id || '—' }}</p>
-          <p class="pricing-reason">{{ row.reason }}</p>
+          <p class="pricing-reason">{{ reasonName(row.reason) }}</p>
         </article>
       </div>
       <div class="pricing-pages"><span>共 {{ data.total }} 条</span><n-pagination v-model:page="page" :item-count="data.total" :page-size="50" :disabled="busy" simple /></div>
@@ -93,6 +106,7 @@ watch(() => props.runId, () => { if(show.value)load(true) })
 
 <style scoped>
 .pricing-notice { display: flex; align-items: center; gap: 16px; justify-content: space-between; padding: 16px; margin-bottom: 16px; background: #fff8e8; border: 1px solid #f0dcb0; border-radius: 8px; color: #715020; }
+.pricing-notice.passed { background:#edf8f2;border-color:#bee2ce;color:#17623f; }
 .pricing-notice p { margin: 4px 0 0; font-size: 13px; }
 .pricing-help { color: #657184; margin: 0 0 16px; }
 .pricing-search { display: flex; align-items: center; gap: 10px; margin-bottom: 16px; }

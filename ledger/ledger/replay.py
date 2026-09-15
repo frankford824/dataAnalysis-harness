@@ -196,7 +196,8 @@ def snapshot(model: Model, corpus: Path, store_ids: Iterable[str] | None = None)
         periods = {
             (sl.period or NO_PERIOD): _strip(
                 slice_dict(sl, store, model)
-                | {"commission": _commission(result, model, store.id, sl.period)}
+                | {"commission": _commission(result, model, store.id, sl.period,
+                                              allow_partial_pricing=bool(sl.cost_coverage.get("passed")))}
             )
             for sl in result.slices.values()
         }
@@ -205,7 +206,8 @@ def snapshot(model: Model, corpus: Path, store_ids: Iterable[str] | None = None)
     return dict(sorted(out.items()))
 
 
-def _commission(result: Any, model: Model, store_id: str, period: str) -> dict[str, Any]:
+def _commission(result: Any, model: Model, store_id: str, period: str,
+                *, allow_partial_pricing: bool = False) -> dict[str, Any]:
     """这个店期的提成，进基线一起比。
 
     提成本来不在 `slice_dict` 里——它算在 Slice 外面。于是回放门这道「改引擎不能
@@ -217,7 +219,8 @@ def _commission(result: Any, model: Model, store_id: str, period: str) -> dict[s
     一定会落在某个人的数上。
     """
     try:
-        c = commission.compute(result, model, store_id, period)
+        c = commission.compute(result, model, store_id, period,
+                               allow_partial_pricing=allow_partial_pricing)
     except commission.CommissionError as exc:
         return {"error": str(exc)}
     return {

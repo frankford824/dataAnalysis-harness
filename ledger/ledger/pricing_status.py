@@ -22,7 +22,7 @@ def status(ws, store_id, period, manager=None, activity=None):
         return {"run_id": saved["id"], "calculated_at": saved["at"], "state": "closed",
                 "message": "已结账，当前展示冻结结果；后续核价不会改写这份历史账。"}
     out = {"run_id": result["id"] if result else None, "calculated_at": result["at"] if result else None,
-           "state": "review", "message": "已完成最近一次核算。仍缺少的历史成本需继续核实。"}
+           "state": "review", "message": "已完成最近一次核算。未覆盖成本可在明细中查看。"}
     pending = None
     path = ws.root / "commission" / "registry.db"
     if path.exists():

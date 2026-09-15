@@ -55,6 +55,17 @@ def test_same_name_separate_identity_and_exact_cent_allocation(tmp_path):
     assert sum(p["amount"] for p in summary["people"]) == summary["total"]
 
 
+def test_commission_can_use_business_approved_partial_cost_coverage(tmp_path):
+    r,a,_=registry(tmp_path)
+    r.save_scheme('s1','p1',{'segments':[segment('2026-05-01',a)]},'tester','分点',publish=True)
+    result=_run([('a','p1','2026-05-02',100)])
+    result.pricing_gaps=pl.DataFrame({'store':['s1'],'period':['2026-05']})
+    with pytest.raises(ValueError,match='待核价'):
+        calculate(result,_model(),'s1','2026-05',r)
+    summary,_,_=calculate(result,_model(),'s1','2026-05',r,allow_partial_pricing=True)
+    assert summary['total']==5 and summary['amount_complete'] is True
+
+
 def test_history_draft_publish_and_optimistic_concurrency(tmp_path):
     r, a, b = registry(tmp_path)
     first = r.save_scheme("s1", "p1", {"segments": [segment("2026-05-01", a)]}, "tester", "初版", publish=True)

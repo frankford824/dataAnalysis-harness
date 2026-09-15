@@ -109,6 +109,7 @@ def slice_dict(sl: Slice, store: Store, model: Model) -> dict[str, Any]:
         "period": sl.period,
         "can_close": sl.can_close,
         "pricing_pending_count": sl.pricing_gaps.height,
+        "cost_coverage": sl.cost_coverage,
         "statement": _statement(sl, model),
         "findings": [
             {"id": f.check_id, "name": f.name, "passed": f.passed,

@@ -151,7 +151,22 @@ def test_configured_people_remain_visible_when_pricing_has_no_amount(tmp_path):
     store=report['stores'][0]
     assert store['configured_people']==1
     assert store['people']==0 and store['amount'] is None
-    assert '待核价' in store['status']
+    assert '成本覆盖不足' in store['status']
+
+
+def test_threshold_met_cost_gaps_keep_commission_amount_available(tmp_path):
+    ws,_,people,client=fixture(tmp_path)
+    rid=record(ws,people,'s1','2026-06',[12.34])
+    row=ws.conn.execute('SELECT result FROM run WHERE id=?',(rid,)).fetchone()
+    import json
+    payload=json.loads(row['result'])
+    payload['commission']['pricing_pending_count']=8
+    payload['commission']['pricing_threshold_met']=True
+    payload['commission']['amount_complete']=True
+    ws.conn.execute('UPDATE run SET result=? WHERE id=?',(json.dumps(payload),rid));ws.conn.commit()
+    report=client.post('/api/commission-v2/reports/query',json={'start':'2026-06','end':'2026-06','store_ids':['s1']}).json()
+    assert report['total']==12.34
+    assert '成本覆盖不足' not in report['stores'][0]['status']
 
 
 def test_employee_settlement_freezes_viewed_runs_and_reports_later_difference(tmp_path):

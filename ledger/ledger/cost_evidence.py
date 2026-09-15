@@ -1,5 +1,7 @@
 """Cost-source vocabulary shared by feed capture and accounting certification."""
 
+GOODS_COST_CLOSE_THRESHOLD = 0.95
+
 # These sources carry a concrete unit price and remain available for review.
 CAPTURED_COST_SOURCES = frozenset({
     "history", "component_history", "manual", "blue_flag",
