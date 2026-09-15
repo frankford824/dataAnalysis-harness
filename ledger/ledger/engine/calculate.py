@@ -68,7 +68,7 @@ class NodeValue:
 # --------------------------------------------------------------------------- #
 
 
-def historical_price_evidence(frame: pl.DataFrame):
+def historical_price_evidence(frame: pl.DataFrame, *, trusted_feed_history: bool = False):
     col=lambda name:pl.col(name) if name in frame.columns else pl.lit(None)
     keys=[pl.col(k).cast(pl.Utf8) for k in (LINK_KEY,'original_order_id','order_id') if k in frame.columns]
     key=pl.coalesce(keys) if keys else pl.lit(None,dtype=pl.Utf8)
@@ -81,7 +81,13 @@ def historical_price_evidence(frame: pl.DataFrame):
            &~col('pricing_suspect').cast(pl.Boolean).fill_null(False))
     if 'pricing_evidence' in frame.columns:
         evidence_day=col('pricing_evidence').cast(pl.Utf8).str.json_path_match('$.order_date')
-        known=known&(evidence_day==wanted.dt.strftime('%Y-%m-%d'))
+        dated=evidence_day==wanted.dt.strftime('%Y-%m-%d')
+        # The verified Order Console history row already certifies its price day
+        # in cost_as_of. Older history payloads used {} instead of repeating
+        # the same day in JSON; never extend that exception to register prices,
+        # uploaded costs, or an explicitly conflicting JSON order date.
+        history_day=(col('cost_source')=='history')&evidence_day.is_null()&pl.lit(trusted_feed_history)
+        known=known&(dated|history_day)
     return known.fill_null(False),wanted
 
 
@@ -252,7 +258,9 @@ def evaluate_metric(
         col = lambda name: pl.col(name) if name in frame.columns else pl.lit(None)
         key_columns = [pl.col(k).cast(pl.Utf8).replace("", None) for k in ("original_order_id", "order_id", LINK_KEY) if k in frame.columns]
         key = pl.coalesce(key_columns) if key_columns else pl.lit(None, dtype=pl.Utf8)
-        known,wanted = historical_price_evidence(frame)
+        known,wanted = historical_price_evidence(
+            frame, trusted_feed_history=template.id.startswith('order_console_')
+        )
         quoted = col("cost_as_of").cast(pl.Utf8).str.slice(0, 10).str.strptime(pl.Date, "%Y-%m-%d", strict=False)
         unit = col("unit_cost").cast(pl.Float64, strict=False)
         quantity = col("quantity").cast(pl.Float64, strict=False)

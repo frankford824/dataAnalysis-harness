@@ -1,8 +1,10 @@
 from datetime import datetime
 import json
+import polars as pl
 import pytest
 from conftest import MODELS
 from ledger.engine.runtime import Ingestion,run
+from ledger.engine.calculate import historical_price_evidence
 from ledger.view import slice_dict
 from ledger.model.loader import load_model
 from ledger.model.schema import Check,Model,Platform,Store,SourceContract,StatementNode
@@ -37,6 +39,38 @@ def test_original_platform_day_controls_cost_evidence(platform,source,day,eviden
     assert sl.nodes['profit'].value==(-10 if available else None)
     assert result.pricing_gaps.height==(0 if available else 1)
     if not available:assert result.pricing_gaps['order_date'].item()=='2026-06-05'
+
+
+@pytest.mark.parametrize('source,quoted,proof,available',[
+    ('history','2026-06-05','{}',True),
+    ('history','2026-07-02','{}',False),
+    ('history','2026-06-05',json.dumps({'order_date':'2026-07-02'}),False),
+    ('register','2026-06-05','{}',False),
+    ('register_first','2026-06-05','{}',False),
+])
+def test_verified_feed_history_day_does_not_need_duplicate_json_day(source,quoted,proof,available):
+    full=load_model(MODELS/'cn-ecommerce')
+    metric=full.metric('goods_cost').for_platform('taobao').model_copy(update={'by_platform':()})
+    model=Model(id='feed-history',name='feed-history',
+        platforms=(Platform(id='taobao',name='淘宝',cost_pricing='historical'),),
+        stores=(Store(id='s',name='shop',platform='taobao'),),
+        sources=(SourceContract(id='order_detail',name='订单',is_spine=True,owner_role='shop_owner',cadence='monthly'),
+                 SourceContract(id='order_cost',name='成本',owner_role='shop_owner',cadence='monthly')),
+        metrics=(metric,),statement=(StatementNode(id='profit',name='利润',formula={'op':'add','of':['goods_cost']}),))
+    order=dict(order_id='3306862164152025489',sub_order_id='CHILD',store_name='shop',
+               order_time=datetime(2026,6,5),order_type='销售订单')
+    cost={**order,'original_order_id':order['order_id'],'internal_order_id':'I','sku':'SKU',
+          'quantity':2.,'unit_cost':5.,'order_state':'Sent','cost_source':source,
+          'cost_status':'priced','cost_as_of':quoted,'pricing_evidence':proof}
+    cost_item=item('order_cost',[cost],cost)
+    result=run(Ingestion(model=model,items=[item('order_detail',[order],order),cost_item]),'taobao')
+    sl=result.slices[('shop','2026-06')]
+    assert sl.nodes['profit'].value==(-10 if available else None)
+    assert result.pricing_gaps.height==(0 if available else 1)
+    if available:
+        frame=cost_item.frame.with_columns(pl.lit(datetime(2026,6,5).date()).alias('__spine_order_date__'))
+        known,_=historical_price_evidence(frame, trusted_feed_history=False)
+        assert frame.select(known.alias('known'))['known'].item() is False
 
 
 def test_small_uncovered_cost_share_is_visible_without_blocking_profit_or_close():
