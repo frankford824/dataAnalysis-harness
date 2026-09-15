@@ -158,14 +158,15 @@ def build(workspace, registry, model, start, end, store_ids=None, person_ids=Non
                                                'amount':Decimal(0),'stores':set(),'periods':set(),'statuses':set()})
             total['amount']+=amount;total['stores'].add(sid);total['periods'].add(period);total['statuses'].add(status)
         scopes[(sid,period)]=scope
-        store_person_rows.append({'kind':'store','person':'店铺合计','person_id':None,
-                                  'employee_no':'','store_id':sid,'store':names[sid],
-                                  'period':period,'sales':sales,'gross':gross,
-                                  'labor_cost':money_float(labor_cut) if spread.total is not None else None,
-                                  'base':None,'base_name':'','amount':None,
-                                  'store_amount':money_float(scope['selected_amount']) if has_result else None,
-                                  'status':status,'finance_run':record['id']})
-        store_person_rows.extend(member_rows)
+        if not selected_people or member_rows:
+            store_person_rows.append({'kind':'store','person':'店铺合计','person_id':None,
+                                      'employee_no':'','store_id':sid,'store':names[sid],
+                                      'period':period,'sales':sales,'gross':gross,
+                                      'labor_cost':money_float(labor_cut) if spread.total is not None else None,
+                                      'base':None,'base_name':'','amount':None,
+                                      'store_amount':money_float(scope['selected_amount']) if has_result else None,
+                                      'status':status,'finance_run':record['id']})
+            store_person_rows.extend(member_rows)
     invalid=selected_people-set(roster)-set(available)
     if invalid:raise RegistryError('所选人员不存在，请重新选择')
     if selected_stores-set(names):raise RegistryError('所选店铺不存在，请重新选择')

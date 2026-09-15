@@ -470,9 +470,11 @@ def install(app, workspace, model, model_root: Path | None = None):
         if selection.view not in commission_reports.COLUMNS:
             raise RegistryError("请选择查看方式")
         rows = report['rows' if selection.view == 'breakdown' else selection.view]
+        visible_stores = (len({row['store_id'] for row in rows if row['kind'] == 'store'})
+                          if selection.view == 'store_people' else len(report['stores']))
         return {k:v for k,v in report.items() if k not in {'people','stores','rows','coverage'}} | {
             'items': rows[selection.offset:selection.offset+selection.limit], 'count': len(rows),
-            'people_count':len(report['people']), 'store_count':len(report['stores']),
+            'people_count':len(report['people']), 'store_count':visible_stores,
             'view':selection.view, 'offset':selection.offset,
             'run_scopes':[{'run_id':row['finance_run'],'store_id':row['store_id'],'period':row['period']} for row in report['coverage'] if row['finance_run'] is not None],
         }

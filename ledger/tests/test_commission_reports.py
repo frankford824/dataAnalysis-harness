@@ -228,6 +228,14 @@ def test_store_person_composition_shows_store_amounts_once_and_filters_people(tm
     }).json()['items']
     assert len(filtered) == 2 and filtered[0]['store_amount'] == 12.34
     assert filtered[0]['sales'] == 1000 and filtered[1]['amount'] == 12.34
+    record(ws, [people[1]], 's2', '2026-06', [3.21])
+    own_shops = client.post('/api/commission-v2/reports/query', json={
+        'start': '2026-06', 'end': '2026-06',
+        'person_ids': [people[0]['id']], 'view': 'store_people',
+    }).json()
+    assert own_shops['store_count'] == 1 and own_shops['count'] == 2
+    assert {row['store_id'] for row in own_shops['items']} == {'s1'}
+    assert own_shops['total'] == 12.34
     export = client.post('/api/commission-v2/export/reports/store_people', json={
         'start': '2026-06', 'end': '2026-06', 'store_ids': ['s1'], 'presentation': True,
     })
