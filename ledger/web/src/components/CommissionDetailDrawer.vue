@@ -9,7 +9,11 @@ const request=useLatest(),current=ref(null),data=ref(null),loading=ref(false),er
 let serial=0
 const money=value=>value==null?'—':Number(value).toLocaleString('zh-CN',{minimumFractionDigits:2,maximumFractionDigits:2})
 const mismatch=computed(()=>data.value && current.value?.expected!=null && data.value.total!==current.value.expected)
-const columns=computed(()=>[...(current.value?.kind==='stores'?[{title:'人员',key:'person',minWidth:120,mobileWidth:100}]:[]),{title:'店铺',key:'store',minWidth:190,mobileWidth:140},{title:'月份',key:'period',width:95,mobileWidth:80},{title:'提成金额',key:'amount',width:125,mobileWidth:110,align:'right',render:row=>h('span',{class:['table-money',row.amount<0?'negative':'']},money(row.amount))}])
+const columns=computed(()=>[...(current.value?.kind==='stores'?[{title:'人员',key:'person',minWidth:120,mobileWidth:100}]:[]),
+  {title:'店铺',key:'store',minWidth:190,mobileWidth:140},
+  {title:'月份',key:'period',width:95,mobileWidth:80},
+  ...(current.value?.kind==='store_people'?[{title:'本人参与基数',key:'base',width:125,mobileWidth:115,align:'right',render:row=>money(row.base)}]:[]),
+  {title:'提成金额',key:'amount',width:125,mobileWidth:110,align:'right',render:row=>h('span',{class:['table-money',row.amount<0?'negative':'']},money(row.amount))}])
 async function load(){
   if(!props.target)return
   const attempt=++serial;loading.value=true;error.value=''
