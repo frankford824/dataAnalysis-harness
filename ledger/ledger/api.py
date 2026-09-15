@@ -34,7 +34,7 @@ from fastapi.responses import HTMLResponse, PlainTextResponse
 from starlette.middleware.gzip import GZipMiddleware
 from pydantic import BaseModel, Field, ValidationError
 
-from . import assist, fees as fees_mod, gaps, index_client, manual_cost, nas_ingest, nas_status, onboard, order_feed, overhead, ownership, progress, service, view
+from . import assist, cost_lines, fees as fees_mod, gaps, index_client, manual_cost, nas_ingest, nas_status, onboard, order_feed, overhead, ownership, progress, service, view
 from . import search as search_mod
 from . import commission_api, commission_manager, storage_maintenance
 from .model import propose
@@ -920,7 +920,7 @@ def period_detail(
 def _build_period_detail(
     ws: Workspace, model: Model, store_id: str, period: str, st: PeriodState,
 ) -> dict:
-    return {
+    payload = {
         "state": st.state, "stale": st.stale, "at": st.at, "run_id": st.run_id,
         "by": st.by, "note": st.note, "engine": st.engine,
         "labor_cut": st.labor_cut,
@@ -929,6 +929,22 @@ def _build_period_detail(
         "gaps": gaps.gaps(st.result, model, _previous(store_id, period)),
         **_period_payload(st.result, model),
     }
+    if st.run_id and st.result.get('cost_review'):
+        review = dict(payload.get('cost_review') or {})
+        if ws.coverage_gaps_path(st.run_id).exists():
+            try:
+                lines = cost_lines.current(ws, st.run_id, store_id, period)
+                review.update(line_revision=lines['line_revision'],
+                              line_count=lines['reviewed_count'],
+                              line_total=lines['supplement_total'],
+                              coverage_lines=lines['total'],
+                              suggested_goods=money_float(decimal_amount(
+                                  (review.get('observed') or {}).get('goods') or 0)
+                                  + decimal_amount(lines['supplement_total'])))
+            except WorkspaceError as exc:
+                review['line_error'] = str(exc)
+        payload['cost_review'] = review
+    return payload
 
 
 def _period_payload(result: dict, model) -> dict:
@@ -1028,6 +1044,54 @@ class PeriodAction(BaseModel):
     costs: dict[str, Decimal] | None = None
     payouts: list[dict[str, Any]] = Field(default_factory=list, max_length=100)
     no_payout: bool = False
+    line_revision: int | None = Field(default=None, ge=0)
+
+
+class CostLineChange(BaseModel):
+    run_id: int
+    coverage_key: str = Field(min_length=1, max_length=200)
+    context_sha: str = Field(min_length=64, max_length=64)
+    amount: Decimal | None = None
+    reason: str = Field(min_length=1, max_length=500)
+    action: Literal['save','remove'] = 'save'
+    expected_line_revision: int = Field(default=0, ge=0)
+
+
+@app.get('/api/runs/{run_id}/coverage-gaps')
+def coverage_gaps(run_id: int, q: str = '', offset: int = 0, limit: int = 50) -> dict:
+    st = workspace().state_by_run(run_id)
+    if st is None:
+        raise HTTPException(404, '没有这次计算记录')
+    try:
+        return cost_lines.page(workspace(), run_id, st.store_id, st.period,
+                               q=q, offset=offset, limit=limit)
+    except WorkspaceError as exc:
+        raise HTTPException(409, str(exc)) from exc
+
+
+@app.get('/api/runs/{run_id}/coverage-gaps.csv')
+def coverage_gaps_csv(run_id: int) -> PlainTextResponse:
+    st = workspace().state_by_run(run_id)
+    if st is None:
+        raise HTTPException(404, '没有这次计算记录')
+    try:
+        body = cost_lines.export_csv(workspace(), run_id, st.store_id, st.period)
+    except WorkspaceError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    return PlainTextResponse('\ufeff'+body, media_type='text/csv; charset=utf-8',
+        headers={'Content-Disposition': f'attachment; filename="coverage-gaps-{run_id}.csv"'})
+
+
+@app.post('/api/stores/{store_id}/periods/{period}/cost-lines')
+def cost_line_save(store_id: str, period: str, change: CostLineChange) -> dict:
+    _store(_model(), store_id)
+    try:
+        return cost_lines.save(workspace(), store_id, period, change.run_id,
+                               coverage_key=change.coverage_key, context_sha=change.context_sha,
+                               amount=change.amount, reason=change.reason, action=change.action,
+                               expected_line_revision=change.expected_line_revision)
+    except WorkspaceError as exc:
+        raise HTTPException(409, str(exc)) from exc
 
 
 def _manual_source_run(ws: Workspace, model: Model, store_id: str,
@@ -1045,13 +1109,38 @@ def _manual_source_run(ws: Workspace, model: Model, store_id: str,
     return run
 
 
+def _line_snapshot(ws: Workspace, run_id: int, store_id: str, period: str,
+                   expected_revision: int | None) -> dict:
+    if ws.coverage_gaps_path(run_id).exists():
+        lines = cost_lines.current(ws, run_id, store_id, period)
+    else:
+        lines = {'line_revision': cost_lines.revision(ws, store_id, period),
+                 'reviewed_count': 0, 'supplement_total': 0.0, 'reviewed': [], 'total': 0}
+    if expected_revision not in (None, lines['line_revision']) or (
+        expected_revision is None and lines['reviewed_count']):
+        raise WorkspaceError('人工补录明细已有新修改，请刷新金额后再确认')
+    return lines
+
+
+def _costs_with_lines(costs: dict | None, lines: dict) -> dict:
+    result = dict(costs or {})
+    if 'goods' in result:
+        result['goods'] = Decimal(str(result['goods'])) + Decimal(str(lines['supplement_total']))
+    return result
+
+
 @app.post("/api/stores/{store_id}/periods/{period}/manual-cost-preview")
 def manual_cost_preview(store_id: str, period: str, action: PeriodAction) -> dict:
     model = _model()
     _store(model, store_id)
     try:
         run = _manual_source_run(workspace(), model, store_id, period, action.run_id)
-        return manual_cost.preview(model, json.loads(run["result"]), action.costs or {})
+        lines = _line_snapshot(workspace(), run['id'], store_id, period, action.line_revision)
+        trial = manual_cost.preview(model, json.loads(run["result"]),
+                                    _costs_with_lines(action.costs, lines))
+        return {**trial, 'line_revision': lines['line_revision'],
+                'line_count': lines['reviewed_count'],
+                'line_total': lines['supplement_total']}
     except WorkspaceError as exc:
         raise HTTPException(409, str(exc)) from exc
 
@@ -1068,10 +1157,17 @@ def close_period(store_id: str, period: str, action: PeriodAction) -> dict:
             manual_result = manual_decision = None
             if action.costs is not None:
                 run = _manual_source_run(ws, model, store_id, period, action.run_id)
+                lines = _line_snapshot(ws, run['id'], store_id, period, action.line_revision)
                 manual_result, manual_decision = manual_cost.certified(
-                    model, json.loads(run["result"]), run["id"], action.costs,
+                    model, json.loads(run["result"]), run["id"],
+                    _costs_with_lines(action.costs, lines),
                     action.payouts, action.no_payout, action.note,
                 )
+                manual_decision['base_costs'] = {key: str(value) for key, value in action.costs.items()}
+                manual_decision['line_revision'] = lines['line_revision']
+                manual_decision['line_reviews'] = lines['reviewed']
+                manual_result['manual_cost']['line_supplement'] = lines['supplement_total']
+                manual_result['manual_cost']['line_count'] = lines['reviewed_count']
             labor_cut = labor_api.share_at_close(ws, model, period, store_id)
             st = ws.close_period(
                 store_id,

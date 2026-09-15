@@ -142,6 +142,28 @@ create trigger if not exists manual_finance_no_delete before delete on manual_fi
   select raise(abort, 'immutable manual finance');
 end;
 
+-- 按子订单覆盖键补录总成本。每次修改追加新行，旧决定永不覆盖。
+create table if not exists cost_line_log (
+  id integer primary key autoincrement,
+  store_id text not null,
+  period text not null,
+  coverage_key text not null,
+  context_sha text not null,
+  source_run_id integer not null,
+  action text not null check(action in ('save','remove')),
+  amount text,
+  reason text not null,
+  at text not null,
+  by text not null
+);
+create index if not exists cost_line_store_key on cost_line_log(store_id,period,coverage_key,id);
+create trigger if not exists cost_line_no_update before update on cost_line_log begin
+  select raise(abort, 'immutable cost line');
+end;
+create trigger if not exists cost_line_no_delete before delete on cost_line_log begin
+  select raise(abort, 'immutable cost line');
+end;
+
 create table if not exists config_log (
   id integer primary key,
   at text not null,
@@ -190,6 +212,9 @@ create trigger if not exists bump_config_log_insert after insert on config_log b
   update workspace_meta set generation=generation+1 where id=1;
 end;
 create trigger if not exists bump_manual_finance_insert after insert on manual_finance begin
+  update workspace_meta set generation=generation+1 where id=1;
+end;
+create trigger if not exists bump_cost_line_insert after insert on cost_line_log begin
   update workspace_meta set generation=generation+1 where id=1;
 end;
 """
@@ -668,6 +693,9 @@ class Workspace:
     def pricing_gaps_path(self, run_id: int) -> Path:
         return self.facts_path(run_id).with_suffix(".pricing.parquet")
 
+    def coverage_gaps_path(self, run_id: int) -> Path:
+        return self.facts_path(run_id).with_suffix(".coverage.parquet")
+
     def latest_run(self, store_id: str, period: str) -> dict[str, Any] | None:
         row = self.conn.execute(
             "select * from run where store_id=? and period=? order by id desc limit 1",
@@ -805,6 +833,10 @@ class Workspace:
             why = run["evidence_error"] or "事实证据尚未完成留档"
             raise WorkspaceError(f"{period} 结不了账：{why}")
         result = json.loads(run["result"])
+        if manual_result is None and self.coverage_gaps_path(run["id"]).exists():
+            from .cost_lines import current
+            if current(self, run["id"], store_id, period)["reviewed_count"]:
+                raise WorkspaceError("本期有人工补录成本，请先预览并人工确认结账金额")
         if manual_result is not None:
             if expected_run_id is None or not note.strip() or manual_decision is None:
                 raise WorkspaceError("人工确认成本需要当前运行号、金额和原因")
@@ -859,6 +891,15 @@ class Workspace:
             except (InvalidOperation, ValueError) as exc:
                 raise WorkspaceError("兼职分摊金额无效，不能冻结结账") from exc
         with self.conn as conn:
+            if not conn.in_transaction:
+                conn.execute('BEGIN IMMEDIATE')
+            if manual_result is not None:
+                entered = conn.execute(
+                    'SELECT coalesce(max(id),0) FROM cost_line_log WHERE store_id=? AND period=?',
+                    (store_id, period),
+                ).fetchone()[0]
+                if entered != manual_decision.get('line_revision', 0):
+                    raise WorkspaceError("人工补录明细已有新修改，请刷新金额后再结账")
             current = conn.execute(
                 "select state from period where store_id=? and period=?",
                 (store_id, period),

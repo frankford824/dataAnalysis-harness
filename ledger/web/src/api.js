@@ -40,6 +40,11 @@ function query(params) {
 export const api = {
   pricingStatus: (id, period, init) => call(`/api/stores/${encodeURIComponent(id)}/pricing-status${query({period})}`, init),
   pricingGaps: (runId, params, options = {}) => call(`/api/runs/${runId}/pricing-gaps${query(params)}`, options),
+  coverageGaps: (runId, params, options = {}) => call(`/api/runs/${runId}/coverage-gaps${query(params)}`, options),
+  saveCostLine: (storeId, period, body) =>
+    call(`/api/stores/${encodeURIComponent(storeId)}/periods/${encodeURIComponent(period)}/cost-lines`, {
+      method:'POST', headers:{'content-type':'application/json'}, body:JSON.stringify(body),
+    }),
   navigation: () => call('/api/navigation'),
   bootstrap: () => call('/api/bootstrap'),
 
@@ -51,10 +56,10 @@ export const api = {
     call(`/api/stores/${encodeURIComponent(id)}/periods/${encodeURIComponent(period)}`, options),
   recompute: (id) =>
     call(`/api/stores/${encodeURIComponent(id)}/recompute`, { method: 'POST' }),
-  manualCostPreview: (id, period, runId, costs) =>
+  manualCostPreview: (id, period, runId, costs, lineRevision = 0) =>
     call(`/api/stores/${encodeURIComponent(id)}/periods/${encodeURIComponent(period)}/manual-cost-preview`, {
       method: 'POST', headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({run_id: runId, costs}),
+      body: JSON.stringify({run_id: runId, costs, line_revision: lineRevision}),
     }),
   close: (id, period, note = '', ignoredBlockers = [], runId = null, decision = null) =>
     call(`/api/stores/${encodeURIComponent(id)}/periods/${encodeURIComponent(period)}/close`, {

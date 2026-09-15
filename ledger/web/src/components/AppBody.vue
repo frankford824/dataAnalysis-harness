@@ -46,6 +46,12 @@ const readyCount = computed(
   () => (app.overview?.cells || []).filter((c) => c.can_close && c.state !== 'closed').length,
 )
 const workJobs = ref([])
+const progressMinimized = ref(true)
+const highestProgress = computed(() => Math.max(0,...workJobs.value.map(job => job.percent || 0)))
+function toggleProgress() {
+  progressMinimized.value = !progressMinimized.value
+  try { localStorage.setItem('ledger-progress-minimized',String(progressMinimized.value)) } catch {}
+}
 const completedJobs = new Map()
 let workTimer = null, workInFlight = false
 async function loadWorkJobs() {
@@ -120,6 +126,7 @@ watch(
 const explaining = ref(false)
 
 onMounted(() => {
+  try { progressMinimized.value = localStorage.getItem('ledger-progress-minimized') !== 'false' } catch {}
   window.addEventListener('ledger:page-load-error',pageFailed)
   app.loadNavigation().catch((e) => message.error(e.message, { duration: 6000 }))
   loadWorkJobs()
@@ -219,14 +226,14 @@ defineExpose({ take })
       </div>
     </div>
 
-    <section v-if="workJobs.length" class="work-jobs" :class="{withBusy: !!app.busy}" aria-label="后台核算进度" aria-live="polite">
-      <header><span class="work-jobs-mark"/>后台核算 <small>{{ workJobs.length }} 家店铺</small></header>
-      <article v-for="job in workJobs.slice(0, 3)" :key="job.store_id">
+    <section v-if="workJobs.length" class="work-jobs" :class="{withBusy: !!app.busy, isMinimized: progressMinimized}" aria-label="后台核算进度" aria-live="polite">
+      <header><span class="work-jobs-mark"/>后台核算 <small>{{ workJobs.length }} 家 · {{ highestProgress }}%</small><button class="work-jobs-toggle" type="button" :aria-label="progressMinimized ? '展开后台核算进度' : '收起后台核算进度'" @click="toggleProgress">{{ progressMinimized ? '展开' : '收起' }}</button></header>
+      <article v-for="job in progressMinimized ? [] : workJobs.slice(0, 3)" :key="job.store_id">
         <div class="work-jobs-row"><strong :title="job.store">{{ job.store }}</strong><b>{{ job.percent }}%</b></div>
         <div class="work-jobs-bar" role="progressbar" :aria-valuenow="job.percent" aria-valuemin="0" aria-valuemax="100" :aria-label="`${job.store}核算进度`"><span :style="{width: `${job.percent}%`}" /></div>
         <p>{{ job.state === 'queued' ? '等待核算资源' : job.state === 'done' ? '核算已完成' : `${job.phase} · 已运行 ${Math.round(job.seconds || 0)} 秒` }}</p>
       </article>
-      <footer v-if="workJobs.length > 3">另有 {{ workJobs.length - 3 }} 家店铺正在排队或核算</footer>
+      <footer v-if="!progressMinimized && workJobs.length > 3">另有 {{ workJobs.length - 3 }} 家店铺正在排队或核算</footer>
     </section>
 
     <UploadPanel v-if="explaining && app.ingestMode !== 'nas'" v-model:show="explaining" />

@@ -1069,6 +1069,11 @@
 .busy-progress span, .work-jobs-bar span { display: block; height: 100%; border-radius: inherit; background: linear-gradient(90deg, #4877ee, #78a5ff); transition: width 240ms ease; }
 .work-jobs { position: fixed; right: 24px; bottom: 24px; z-index: 3900; width: min(342px, calc(100vw - 32px)); max-height: min(65vh, 520px); overflow: auto; padding: 15px 17px; border: 1px solid #dce5f1; border-radius: 12px; background: rgba(255,255,255,.97); box-shadow: 0 12px 36px rgba(31,52,82,.16); color: #26364d; }
 .work-jobs.withBusy { bottom: 88px; }
+.work-jobs.isMinimized { left:13px; right:auto; width:158px; min-width:0; max-width:calc(100vw - 26px); padding:8px 9px; border-radius:999px; }
+.work-jobs.isMinimized header { margin:0; gap:4px; font-size:11px; white-space:nowrap; }
+.work-jobs.isMinimized header small { margin-left:0; font-size:10px; }
+.work-jobs-toggle { border:0; background:#edf3ff; color:#3765c7; border-radius:5px; padding:4px 7px; cursor:pointer; font:inherit; font-size:11px; }
+.work-jobs.isMinimized .work-jobs-toggle { background:transparent; padding:2px 0 2px 6px; }
 .work-jobs header { display: flex; align-items: center; gap: 8px; font-size: 13px; font-weight: 650; margin-bottom: 12px; }
 .work-jobs header small { margin-left: auto; color: #748298; font-size: 11px; font-weight: 400; }
 .work-jobs-mark { width: 7px; height: 7px; border-radius: 50%; background: #4783f4; box-shadow: 0 0 0 4px #eaf2ff; }
@@ -1090,6 +1095,7 @@
 .manual-payout-list { display: grid; gap: 8px; }
 .manual-payout-list label { display: grid; grid-template-columns: minmax(0,1fr) 145px; align-items: center; gap: 12px; padding: 8px 10px; border: 1px solid #e8edf4; border-radius: 7px; font-size: 12px; }
 .manual-blocker { padding: 6px 0; font-size: 12px; line-height: 1.5; }
+@media(max-width:900px){.work-jobs.isMinimized{left:auto;right:12px;bottom:12px}}
 @media(max-width:600px){.manual-cost-grid{grid-template-columns:1fr}.manual-payout-list label{grid-template-columns:1fr}.work-jobs{right:16px;bottom:16px}.work-jobs.withBusy{bottom:95px}}
 
 /* 等宽数字。表格里凡是钱、行号、单号都挂这个。 */

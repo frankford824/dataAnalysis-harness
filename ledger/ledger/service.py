@@ -490,6 +490,8 @@ def _recompute_locked(
             reusable = (sl.facts.is_empty() or verified(ws.facts_path(previous_id)))
             if not sl.pricing_gaps.is_empty():
                 reusable = reusable and verified(ws.pricing_gaps_path(previous_id))
+            if not getattr(sl, "coverage_gap_rows", pl.DataFrame()).is_empty():
+                reusable = reusable and verified(ws.coverage_gaps_path(previous_id))
             if allocation:
                 previous_calc=(previous_payload.get('commission') or {}).get('calculation_id')
                 with registry.connect() as conn:
@@ -556,12 +558,18 @@ def _keep_facts(ws: Workspace, run_id: int, sl: Slice) -> None:
     """把事实行落一份；失败会把本次快照降级为不可结账。"""
     path = ws.facts_path(run_id)
     pricing_path = ws.pricing_gaps_path(run_id)
+    coverage_path = ws.coverage_gaps_path(run_id)
     try:
         pending = getattr(sl, "pricing_gaps", pl.DataFrame())
         if not pending.is_empty():
             pending.write_parquet(pricing_path)
             from .storage_integrity import seal
             seal(pricing_path)
+        coverage = getattr(sl, "coverage_gap_rows", pl.DataFrame())
+        if not coverage.is_empty():
+            coverage.write_parquet(coverage_path)
+            from .storage_integrity import seal
+            seal(coverage_path)
         if sl.facts.is_empty():
             ws.mark_evidence(run_id, ready=True)
             return
@@ -583,6 +591,7 @@ def _keep_facts(ws: Workspace, run_id: int, sl: Slice) -> None:
     except Exception as exc:  # 磁盘满、权限之类必须显式拦住结账
         path.unlink(missing_ok=True)
         pricing_path.unlink(missing_ok=True)
+        coverage_path.unlink(missing_ok=True)
         ws.mark_evidence(run_id, ready=False, error=str(exc))
 
 

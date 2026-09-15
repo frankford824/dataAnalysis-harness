@@ -136,6 +136,7 @@ class Slice:
     pricing_gaps: pl.DataFrame = field(default_factory=pl.DataFrame)
     cost_coverage: dict = field(default_factory=dict)
     calculation_inputs: dict = field(default_factory=dict)
+    coverage_gap_rows: pl.DataFrame = field(default_factory=pl.DataFrame)
 
     @property
     def can_close(self) -> bool:
@@ -1173,12 +1174,65 @@ def _build_slice(
         completeness=completeness, audit=result,
         link_reports=scoped_reports, classify_report=own,
         pricing_gaps=own_gaps, cost_coverage=cost_coverage,
+        coverage_gap_rows=_goods_coverage_rows(model, own_spine, platform, scoped_reports),
         calculation_inputs={
             "metric_totals": totals,
             "unavailable_metrics": sorted(unavailable),
             "inapplicable_metrics": sorted(inapplicable),
         },
     )
+
+
+def _goods_coverage_rows(model: Model, spine_frame: pl.DataFrame, platform: str,
+                         reports: dict[str, LinkReport]) -> pl.DataFrame:
+    """List every expected order key without posted goods cost, including absent feed rows."""
+    empty = pl.DataFrame(schema={
+        "coverage_key": pl.Utf8, "context_sha": pl.Utf8, "order_id": pl.Utf8,
+        "sub_order_id": pl.Utf8, "product_ids": pl.Utf8, "order_date": pl.Utf8,
+        "quantities": pl.Utf8, "order_state": pl.Utf8,
+        "order_count": pl.Int64, "product_count": pl.Int64, "editable": pl.Boolean,
+    })
+    report = reports.get("goods_cost")
+    raw = next((metric for metric in model.metrics if metric.id == "goods_cost"), None)
+    metric = raw.for_platform(platform) if raw else None
+    if report is None or metric is None or metric.link is None or spine_frame.is_empty():
+        return empty
+    eligible = Spine(spine_frame).eligible(metric.link)
+    role = target_role(metric.link.to)
+    if not role or role not in eligible.frame.columns:
+        return empty
+    missing = eligible.keys_where(role, metric.expect) - report.covered_keys
+    if not missing:
+        return empty
+    rows = eligible.frame
+    if metric.expect and all(predicate.field in rows.columns for predicate in metric.expect):
+        rows = rows.filter(compile_where(metric.expect, rows))
+    rows = rows.with_columns(norm_expr(pl.col(role).cast(pl.Utf8)).alias("coverage_key"))
+    rows = rows.filter(pl.col("coverage_key").is_in(sorted(missing)))
+    fields = ("order_id", "sub_order_id", "product_id", "order_date",
+              "quantity", "order_state")
+    data = []
+    for key, group in rows.partition_by("coverage_key", as_dict=True, maintain_order=True).items():
+        key = key[0] if isinstance(key, tuple) else key
+        found = {field: sorted({str(value)[:10] if field == "order_date" else str(value)
+                                for value in group[field].drop_nulls().to_list()
+                                if str(value).strip()}) if field in group.columns else []
+                 for field in fields}
+        context = {"coverage_key": key, **found}
+        orders = found["order_id"]
+        data.append({
+            "coverage_key": key,
+            "context_sha": sha256(json.dumps(context, sort_keys=True, ensure_ascii=False).encode()).hexdigest(),
+            "order_id": orders[0] if len(orders) == 1 else "、".join(orders),
+            "sub_order_id": "、".join(found["sub_order_id"]),
+            "product_ids": "、".join(found["product_id"]),
+            "order_date": "、".join(found["order_date"]),
+            "quantities": "、".join(found["quantity"]),
+            "order_state": "、".join(found["order_state"]),
+            "order_count": len(orders), "product_count": len(found["product_id"]),
+            "editable": len(orders) == 1 and len(found["order_date"]) == 1,
+        })
+    return pl.DataFrame(data, schema=empty.schema).sort("coverage_key") if data else empty
 
 
 def _cost_coverage(model: Model, reports: dict[str, LinkReport]) -> dict:
