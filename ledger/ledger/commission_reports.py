@@ -56,16 +56,16 @@ def build(workspace, registry, model, start, end, store_ids=None, person_ids=Non
     roster={p['id']:p for p in registry.people()}
     configured=configured_people(registry,start,end)
     revenue_node=next((n.id for n in model.statement if n.headline=='revenue'),'')
-    period_states=[state for state in workspace.overview() if state.period in periods]
-    labor_spreads={}
-    for period in periods:
-        basis=[]
-        for state in period_states:
-            if state.period != period:continue
-            row=next((item for item in (state.result or {}).get('statement',[]) if item.get('id')==revenue_node),None)
-            value=row.get('value') if row and row.get('available',True) else None
-            basis.append((state.store_id,float(value or 0)))
-        labor_spreads[period]=overhead.allocate(period,model.overhead(period),basis)
+    basis_rows=workspace.conn.execute("""SELECT r.store_id,r.period,
+      CASE WHEN coalesce(json_extract(node.value,'$.available'),1)=1
+           THEN json_extract(node.value,'$.value') ELSE NULL END revenue
+      FROM period p JOIN run r ON r.id=CASE WHEN p.state='closed' AND p.run_id IS NOT NULL THEN p.run_id
+        ELSE (SELECT id FROM run latest WHERE latest.store_id=p.store_id AND latest.period=p.period ORDER BY id DESC LIMIT 1) END
+      LEFT JOIN json_each(r.result,'$.statement') node ON json_extract(node.value,'$.id')=?
+      WHERE r.period>=? AND r.period<=?""",(revenue_node,start,end)).fetchall()
+    labor_spreads={period:overhead.allocate(period,model.overhead(period),[
+        (row['store_id'],float(row['revenue'] or 0)) for row in basis_rows if row['period']==period
+    ]) for period in periods}
     frozen=frozen_shares(model_root) if model_root else {}
     where=['r.period>=?','r.period<=?']; args=[start,end]
     if selected_stores:
