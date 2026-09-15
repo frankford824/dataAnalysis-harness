@@ -153,6 +153,30 @@ def _root() -> Path:
     return Path(os.environ.get("LEDGER_ORDER_FEED_ROOT", r"D:\order\exchange\ledger-feed"))
 
 
+def quarantine_component_rows(costs: pl.DataFrame, invalid: list[tuple[str, str]]) -> pl.DataFrame:
+    """Keep malformed component evidence visible while excluding its cost from P&L."""
+    if not invalid:
+        return costs
+    if not {"pricing_suspect", "failure_reason", "internal_order_id", "internal_sub_order_id"} <= set(costs.columns):
+        raise OrderFeedError("套餐组件证据不一致，成本行缺少可单笔隔离的字段")
+    keys = sorted(set(invalid))
+    markers = pl.DataFrame({
+        "internal_order_id": [order for order, _ in keys],
+        "internal_sub_order_id": [item for _, item in keys],
+        "__invalid_components": [True] * len(keys),
+    })
+    return (costs.with_columns(
+        pl.col("internal_order_id", "internal_sub_order_id").cast(pl.Utf8),
+    ).join(markers, on=["internal_order_id", "internal_sub_order_id"], how="left")
+      .with_columns(
+          (pl.col("pricing_suspect").cast(pl.Boolean).fill_null(False)
+           | pl.col("__invalid_components").fill_null(False)).alias("pricing_suspect"),
+          pl.when(pl.col("__invalid_components").fill_null(False))
+          .then(pl.lit("invalid_original_components"))
+          .otherwise(pl.col("failure_reason")).alias("failure_reason"),
+      ).drop("__invalid_components"))
+
+
 class Client:
     def __init__(self, base_url: str | None = None, timeout: float | None = None):
         self.base_url = (base_url or os.environ.get(
@@ -836,10 +860,20 @@ class OrderFeed:
         with self._connect() as conn:
             source_stores = [str(row[0]) for row in conn.execute(
                 "SELECT order_store_id FROM feed_store WHERE ledger_store_id=? AND mapping_status='confirmed'", (store.id,))]
+        invalid_components: list[tuple[str, str]] = []
         try:
-            components = load_order_components(self.workspace_root, store.id, source_stores, feed_cost.frame)
+            components = load_order_components(
+                self.workspace_root, store.id, source_stores, feed_cost.frame,
+                invalid_out=invalid_components,
+            )
         except (ValueError,TypeError,KeyError) as exc:
             raise OrderFeedError(str(exc)) from exc
+        if invalid_components:
+            feed_cost.frame = quarantine_component_rows(feed_cost.frame, invalid_components)
+            feed_cost.notes.append(
+                f"订单台有 {len(set(invalid_components))} 条套餐组件与原商品行不一致，"
+                "相关成本暂不入账，其他订单继续核算。"
+            )
         self._align_after_sale_skus(ingestion, feed_cost.frame, components)
         from .engine.component_returns import normalize as normalize_component_returns
         normalize_component_returns(ingestion, feed_cost.frame, components)

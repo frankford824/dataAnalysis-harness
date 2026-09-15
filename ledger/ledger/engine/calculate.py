@@ -273,7 +273,9 @@ def evaluate_metric(
             col("internal_order_id").cast(pl.Utf8).alias("internal_order_id"),
             col("sku").cast(pl.Utf8).alias("sku"), pl.when(quantity.is_finite()).then(quantity).otherwise(None).alias("quantity"),
             pl.when(reference.is_finite()).then(reference).otherwise(None).alias("reference_unit_cost"),
-            pl.when(col('pricing_identity_changed').cast(pl.Boolean).fill_null(False)).then(pl.lit('订单商品与成本明细不一致，等待更新'))
+            pl.when(col("failure_reason") == "invalid_original_components")
+            .then(pl.lit("套餐组件与原订单商品不一致"))
+            .when(col('pricing_identity_changed').cast(pl.Boolean).fill_null(False)).then(pl.lit('订单商品与成本明细不一致，等待更新'))
             .when(col('pricing_source_suspect').cast(pl.Boolean).fill_null(False)).then(pl.lit('原订单商品信息待核对'))
             .when(col("pricing_suspect").cast(pl.Boolean).fill_null(False)).then(pl.lit("成本与订单金额差异较大，需核对"))
             .when(wanted.is_null()).then(pl.lit("原订单日期待核对"))

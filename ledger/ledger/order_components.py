@@ -27,7 +27,8 @@ def fingerprint(home: Path) -> str:
     return ":components:" + digest.hexdigest() if files else ""
 
 
-def load(home: Path, store_id: str, order_store_ids: list[str], costs: pl.DataFrame) -> pl.DataFrame | None:
+def load(home: Path, store_id: str, order_store_ids: list[str], costs: pl.DataFrame,
+         invalid_out: list[tuple[str, str]] | None = None) -> pl.DataFrame | None:
     required = {"internal_order_id", "internal_sub_order_id", "sub_order_id", "sku", "quantity"}
     if not required <= set(costs.columns):
         return None
@@ -56,13 +57,30 @@ def load(home: Path, store_id: str, order_store_ids: list[str], costs: pl.DataFr
         q=quantity(current['quantity']);parts=defaultdict(Decimal)
         if not q.is_finite() or q<=0:
             continue
+        invalid = False
         for part in components:
-            amount=quantity(part.get('qty'))
-            if (str(part.get('oi_id'))!=item_id or part.get('src_combine_sku_id')!=current['sku']
-                or quantity(part.get('src_combine_sku_qty'))!=q or not amount.is_finite() or amount<0
-                or not part.get('sku_id')):
-                raise ValueError(f'订单台原组件与商品行不匹配：{internal}/{item_id}')
+            mismatch = (str(part.get('oi_id'))!=item_id
+                        or part.get('src_combine_sku_id')!=current['sku']
+                        or not part.get('sku_id'))
+            if not mismatch:
+                try:
+                    amount=quantity(part.get('qty'))
+                    source_quantity=quantity(part.get('src_combine_sku_qty'))
+                except ValueError:
+                    if invalid_out is None:
+                        raise
+                    mismatch = True
+                if not mismatch:
+                    mismatch = (source_quantity!=q or not amount.is_finite() or amount<0)
+            if mismatch:
+                if invalid_out is None:
+                    raise ValueError(f'订单台原组件与商品行不匹配：{internal}/{item_id}')
+                invalid_out.append((internal, item_id))
+                invalid = True
+                break
             if amount:parts[part['sku_id']]+=amount
+        if invalid:
+            continue
         if parts:
             digest=hashlib.sha256(json.dumps(evidence,sort_keys=True,ensure_ascii=False,separators=(',',':')).encode()).hexdigest()
             resolved[internal,item_id]=(current,dict(parts),f'订单台原订单展开明细：{internal}/{item_id}；查询时间：{captured}；凭据：{digest}')

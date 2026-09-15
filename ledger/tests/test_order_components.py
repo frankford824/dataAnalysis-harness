@@ -58,3 +58,40 @@ def test_cost_feed_original_components_are_reused_without_double_counting_files(
     proof['original_components'][1]['qty']=7
     with pytest.raises(ValueError,match='证据不一致'):
         load(tmp_path,'shop',['10'],cost.with_columns(pl.lit(json.dumps(proof)).alias('pricing_evidence')))
+
+
+def test_bad_embedded_component_row_is_isolated_without_guessing_cost(tmp_path):
+    _,cost,_=data()
+    proof={'source_order_hash':'a'*64,'original_captured_at':'2026-09-12T12:00:13Z',
+           'original_components':[{'oi_id':'L','sku_id':'A','qty':1,
+                                   'src_combine_sku_id':None,'src_combine_sku_qty':None}]}
+    cost=cost.with_columns(pl.lit(json.dumps(proof)).alias('pricing_evidence'))
+    with pytest.raises(ValueError,match='原组件与商品行不匹配'):
+        load(tmp_path,'shop',['10'],cost)
+    invalid=[]
+    assert load(tmp_path,'shop',['10'],cost,invalid_out=invalid) is None
+    assert invalid==[('I','L')]
+    proof['original_components'][0]['src_combine_sku_id']='KIT'
+    invalid=[]
+    assert load(tmp_path,'shop',['10'],cost.with_columns(
+        pl.lit(json.dumps(proof)).alias('pricing_evidence')),invalid_out=invalid) is None
+    assert invalid==[('I','L')]
+
+    from datetime import date
+    from ledger.engine.calculate import historical_price_evidence
+    from ledger.order_feed import quarantine_component_rows
+    costs=pl.DataFrame({
+        'internal_order_id':['I','GOOD'],'internal_sub_order_id':['L','G'],
+        'pricing_suspect':[False,False],'failure_reason':[None,None],
+        'cost_source':['register','register'],'cost_status':['priced','priced'],
+        'cost_as_of':['2026-06-01','2026-06-01'],'unit_cost':[1.0,2.0],
+        'quantity':[1.0,1.0],
+        'pricing_evidence':[json.dumps({'order_date':'2026-06-01'})]*2,
+        '__spine_order_date__':[date(2026,6,1)]*2,
+    })
+    isolated=quarantine_component_rows(costs,invalid)
+    assert isolated['pricing_suspect'].to_list()==[True,False]
+    assert isolated['failure_reason'].to_list()==['invalid_original_components',None]
+    assert isolated['unit_cost'].to_list()==[1.0,2.0]
+    known,_=historical_price_evidence(isolated)
+    assert isolated.select(known.alias('known'))['known'].to_list()==[False,True]
