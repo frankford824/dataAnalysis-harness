@@ -137,7 +137,7 @@ const coverageColumns=[
           <strong>{{ row.order_id || '订单号未提供' }}</strong><span>{{ row.order_date || '日期未提供' }}</span>
           <p>子订单 {{ row.sub_order_id || '—' }} · 商品链接 {{ row.product_ids || '—' }} · 数量 {{ row.quantities || '未提供' }}</p>
           <p>人工总成本 {{ row.manual_amount == null ? '尚未补录' : `${Number(row.manual_amount).toFixed(2)} 元` }}</p>
-          <n-button v-if="row.editable" size="small" @click="editLine(row)">{{ row.manual_amount == null ? '添加金额' : '修改金额' }}</n-button><span v-else class="pricing-reason">此键对应多个订单或缺下单日，不能直接认定金额</span>
+          <n-button v-if="row.editable" size="small" @click="editLine(row)">{{ row.manual_amount == null ? '添加金额' : '修改金额' }}</n-button><span v-else class="pricing-reason">此键对应多个订单，需先确认归属</span>
         </article>
       </div>
       <div class="pricing-pages"><span>共 {{ coverageData.matching ?? coverageData.total ?? coverageRows }} 笔</span><n-pagination v-model:page="coveragePage" :item-count="coverageData.matching" :page-size="50" :disabled="coverageBusy" simple /></div>
@@ -162,7 +162,7 @@ const coverageColumns=[
     </n-drawer-content>
   </n-drawer>
   <n-modal :show="!!editor" preset="dialog" title="人工补录订单总成本" positive-text="保存金额" negative-text="取消" :positive-button-props="{disabled: !editorReason.trim() || (editorAction==='save' && !validCents(editorAmount))}" @update:show="!$event && (editor=null)" @positive-click="saveLine">
-    <p class="small muted">平台订单 {{ editor?.order_id }} · 子订单 {{ editor?.sub_order_id }} · {{ editor?.order_date }}。金额按本子订单所有商品合计填写。</p>
+    <p class="small muted">平台订单 {{ editor?.order_id }} · 子订单 {{ editor?.sub_order_id }} · {{ editor?.order_date || `本店${period}账期，原下单日未提供` }}。金额按本子订单所有商品合计填写；没有原下单日时请在依据中说明月份归属。</p>
     <n-input v-if="editorAction==='save'" v-model:value="editorAmount" inputmode="decimal" aria-label="人工总成本金额" placeholder="输入本子订单总成本" />
     <n-alert v-else type="warning" :bordered="false">将撤销此前的人工补录金额。旧记录仍保留。</n-alert>
     <n-input v-model:value="editorReason" type="textarea" :rows="3" maxlength="500" show-count placeholder="填写来源和确认依据" style="margin-top:12px" />

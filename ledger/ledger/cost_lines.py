@@ -56,12 +56,13 @@ def current(ws, run_id: int, store_id: str, period: str) -> dict:
     total = Decimal(0)
     reviewed = []
     for item in items:
+        item['editable'] = item['order_count'] == 1
         saved = latest.get(item['coverage_key'])
         item['line_revision'] = saved['id'] if saved else 0
         item['manual_amount'] = None
         item['manual_reason'] = ''
         item['stale_decision'] = bool(saved and saved['context_sha'] != item['context_sha'])
-        if (saved and not item['stale_decision'] and item['editable']
+        if (saved and not item['stale_decision'] and item['order_count'] == 1
                 and saved['action'] == 'save'):
             amount = _cents(saved['amount'])
             item['manual_amount'] = float(amount)
@@ -120,7 +121,7 @@ def save(ws, store_id: str, period: str, run_id: int, *, coverage_key: str,
         amount = None
     source = next((row for row in _source_rows(ws, run_id)
                    if row['coverage_key'] == coverage_key), None)
-    if source is None or not source['editable'] or source['context_sha'] != context_sha:
+    if source is None or source['order_count'] != 1 or source['context_sha'] != context_sha:
         raise WorkspaceError("订单对应关系已变化或存在歧义，请刷新明细后再修改")
     conn = ws.conn
     with conn:

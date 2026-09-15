@@ -32,19 +32,19 @@ def payload():
     }
 
 
-def archive(ws, run, keys=('S2','S3')):
+def archive(ws, run, keys=('S2','S3'), *, undated=False):
     frame = pl.DataFrame({
         'coverage_key':list(keys),
         'context_sha':[hashlib.sha256(key.encode()).hexdigest() for key in keys],
         'order_id':['O'+key[1:] for key in keys],
         'sub_order_id':list(keys),
         'product_ids':['P'+key[1:] for key in keys],
-        'order_date':['2026-06-02' for _ in keys],
+        'order_date':['' if undated and key=='S2' else '2026-06-02' for key in keys],
         'quantities':['1.0' for _ in keys],
         'order_state':['已发货' for _ in keys],
         'order_count':[1 for _ in keys],
         'product_count':[1 for _ in keys],
-        'editable':[True for _ in keys],
+        'editable':[not (undated and key=='S2') for key in keys],
     })
     path=ws.coverage_gaps_path(run);frame.write_parquet(path);seal(path)
     return frame
@@ -74,6 +74,21 @@ def test_edit_and_remove_append_history_and_respect_latest_order_context(tmp_pat
     archive(ws,newer,('S3',))  # Order S2 now has verified system cost.
     assert cost_lines.current(ws,newer,raw['store_id'],raw['period'])['supplement_total']==0
     assert cost_lines.current(ws,run,raw['store_id'],raw['period'])['supplement_total']==20
+    ws.close()
+
+
+def test_unique_undated_order_can_be_confirmed_without_fabricating_a_day(tmp_path):
+    ws=Workspace(tmp_path);raw=payload()
+    run=ws.record(raw['store_id'],raw['period'],raw,[])
+    first=archive(ws,run,undated=True).row(0,named=True)
+    assert not first['editable'] and first['order_date']==''  # An older archived gate.
+    page=cost_lines.page(ws,run,raw['store_id'],raw['period'])
+    assert page['items'][0]['editable'] and page['items'][0]['order_date']==''
+    cost_lines.save(ws,raw['store_id'],raw['period'],run,
+                    coverage_key='S2',context_sha=first['context_sha'],
+                    amount='12.00',reason='确认本店本月该唯一订单成本',
+                    expected_line_revision=0)
+    assert cost_lines.current(ws,run,raw['store_id'],raw['period'])['supplement_total']==12
     ws.close()
 
 

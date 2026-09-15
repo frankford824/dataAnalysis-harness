@@ -1230,7 +1230,10 @@ def _goods_coverage_rows(model: Model, spine_frame: pl.DataFrame, platform: str,
             "quantities": "、".join(found["quantity"]),
             "order_state": "、".join(found["order_state"]),
             "order_count": len(orders), "product_count": len(found["product_id"]),
-            "editable": len(orders) == 1 and len(found["order_date"]) == 1,
+            # Human confirms a store-period total, not a dated register quote.
+            # A missing original day remains visible and in the context hash;
+            # only a reused key across different orders makes this ambiguous.
+            "editable": len(orders) == 1,
         })
     return pl.DataFrame(data, schema=empty.schema).sort("coverage_key") if data else empty
 
