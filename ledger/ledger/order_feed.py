@@ -20,7 +20,7 @@ import urllib.parse
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterator
@@ -797,6 +797,75 @@ class OrderFeed:
         from .order_components import fingerprint
         return f"order-feed:{state.get('snapshot_id','')}:{int(state.get('consumed_seq') or 0)}" + fingerprint(self.workspace_root)
 
+    @staticmethod
+    def _jd_export_cost_for_absent_orders(
+        ingestion: Ingestion, store: Store, feed_order: pl.DataFrame,
+        feed_cost: pl.DataFrame,
+    ) -> list[Ingested]:
+        """Retain source-row JST costs only for JD masters absent from the feed.
+
+        The platform order export must independently name the same master. A
+        feed order with a missing or suspect price still owns its cost decision;
+        an uploaded price must never override that decision.
+        """
+        if store.platform != "jd" or "order_id" not in feed_order.columns:
+            return []
+        names = [store.name, *store.aliases]
+        masters: set[str] = set()
+        for item in ingestion.frames_of("order_detail"):
+            if item.frame is None or item.template is None or item.template.id.startswith("order_console_"):
+                continue
+            if "order_id" not in item.frame.columns:
+                continue
+            order = item.frame
+            if "store_name" in order.columns:
+                order = order.filter(pl.col("store_name").is_in(names))
+            masters.update(filter(None, (normalize_key(v) for v in order["order_id"])))
+        if not masters:
+            return []
+        owned = {normalize_key(v) for v in feed_order["order_id"] if normalize_key(v)}
+        if "original_order_id" in feed_cost.columns:
+            owned.update(normalize_key(v) for v in feed_cost["original_order_id"] if normalize_key(v))
+        candidates = sorted(masters - owned)
+        if not candidates:
+            return []
+        output: list[Ingested] = []
+        seen: dict[str, set[tuple[str, str | None]]] = {}
+        eligible: list[tuple[Ingested, pl.DataFrame]] = []
+        for item in ingestion.frames_of("order_cost"):
+            if item.frame is None or item.template is None or item.template.id != "jushuitan_cost_v1":
+                continue
+            required = {"original_order_id", "store_name", "quantity", "unit_cost", "sku"}
+            if not required <= set(item.frame.columns):
+                continue
+            frame = item.frame.with_columns(
+                norm_expr(pl.col("original_order_id").cast(pl.Utf8)).alias("__jd_master")
+            ).filter(
+                pl.col("store_name").is_in(names)
+                & pl.col("__jd_master").is_in(candidates)
+                & (pl.col("quantity").cast(pl.Float64, strict=False) > 0)
+                & pl.col("quantity").cast(pl.Float64, strict=False).is_finite()
+                & (pl.col("unit_cost").cast(pl.Float64, strict=False) > 0)
+                & pl.col("unit_cost").cast(pl.Float64, strict=False).is_finite()
+                & (pl.col("sku").cast(pl.Utf8).str.strip_chars().fill_null("") != "")
+            ).drop("__jd_master")
+            if frame.is_empty():
+                continue
+            eligible.append((item, frame))
+            for master in frame["original_order_id"].to_list():
+                seen.setdefault(normalize_key(master), set()).add((item.ref.sha256, item.ref.sheet))
+        ambiguous = {master for master, sources in seen.items() if len(sources) > 1}
+        for item, frame in eligible:
+            if ambiguous:
+                frame = frame.filter(~norm_expr(pl.col("original_order_id").cast(pl.Utf8)).is_in(ambiguous))
+            if frame.is_empty():
+                continue
+            output.append(replace(
+                item, frame=frame, rows=frame.height,
+                notes=[*item.notes, f"订单台没有收录的京东原单，按平台订单明细与本表原始线上订单号精确对上 {frame.height:,} 行；原文件和行号保留"],
+            ))
+        return output
+
     def append_to(self, ingestion: Ingestion, store: Store) -> None:
         """Overlay live facts while preserving human-certified platform identities.
 
@@ -842,6 +911,9 @@ class OrderFeed:
         feed_order = next(item for item in frames if item.recognition.source_id == "order_detail")
         feed_after = next(item for item in frames if item.recognition.source_id == "after_sales")
         feed_cost = next(item for item in frames if item.recognition.source_id == "order_cost")
+        jd_source_cost = self._jd_export_cost_for_absent_orders(
+            ingestion, store, feed_order.frame, feed_cost.frame,
+        ) if feed_order.frame is not None and feed_cost.frame is not None else []
         from .order_flags import apply as apply_order_flags
         apply_order_flags(ingestion, store, feed_cost, feed_order)
         # 订单台售后和上传的聚水潭售后单并用，不替换。订单台一张售后只挂一个商品，
@@ -902,6 +974,7 @@ class OrderFeed:
             if item.recognition.source_id not in replaced
         ]
         ingestion.items.extend(frames)
+        ingestion.items.extend(jd_source_cost)
         for item in ingestion.known:
             assert item.frame is not None
             item.frame = item.frame.with_columns(pl.lit(True).alias("__live_period_scope__"))

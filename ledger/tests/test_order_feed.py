@@ -308,6 +308,64 @@ def test_snapshot_and_delta_become_normalized_engine_sources(tmp_path):
     assert after.row(0, named=True)["sku"] == cost.row(0, named=True)["sku"] == "SKU1"
 
 
+def test_jd_uploaded_cost_only_fills_platform_masters_absent_from_feed():
+    model = ModelRepository(
+        Path(__file__).resolve().parents[2] / "models" / "cn-ecommerce"
+    ).get().model
+    store = model.store("jd_huanglishi")
+    order_ref = FileRef("order-file", "京东原始订单明细.xlsx", "Sheet1")
+    cost_ref = FileRef("cost-file", "聚水潭订单成本.xlsx", "Sheet1")
+    def item(ref, template_id, frame):
+        template = model.template(template_id)
+        return Ingested(ref, Recognition(ref, "sheet", 10, template_id, template.source),
+                        frame.height, frame, template)
+    orders = item(order_ref, "jd_order_detail_v1", pl.DataFrame({
+        "order_id": ["ON1", "ON2", "ON3"], "store_name": [store.name] * 3,
+    }))
+    costs = item(cost_ref, "jushuitan_cost_v1", pl.DataFrame({
+        "original_order_id": ["ON1", "ON2", "ON2", "ON3", "ON4"],
+        "store_name": [store.name, store.name, store.name, store.name, "另一家店"],
+        "unit_cost": [8.0, 16.0, 0.0, 9.0, 10.0],
+        "quantity": [1, 2, 1, 0, 1],
+        "sku": ["A", "B", "C", "D", "E"],
+        "__anchor_row__": [2, 3, 4, 5, 6],
+    }))
+    ingestion = Ingestion(model, [orders, costs])
+    original = costs.frame.clone()
+    fallback = OrderFeed._jd_export_cost_for_absent_orders(
+        ingestion, store,
+        pl.DataFrame({"order_id": ["ON1"]}),
+        pl.DataFrame({"original_order_id": ["ON1"]}),
+    )
+    assert len(fallback) == 1
+    assert fallback[0].frame["original_order_id"].to_list() == ["ON2"]
+    assert fallback[0].frame["__anchor_row__"].to_list() == [3]
+    assert fallback[0].ref is cost_ref and fallback[0].frame["unit_cost"].item() == 16.0
+    assert costs.frame.equals(original)
+    competing_ref = FileRef("other-cost-file", "第二份聚水潭表.xlsx", "Sheet1")
+    competing = item(competing_ref, "jushuitan_cost_v1", pl.DataFrame({
+        "original_order_id": ["ON2"], "store_name": [store.name],
+        "unit_cost": [16.0], "quantity": [2], "sku": ["B"],
+    }))
+    ingestion.items.append(competing)
+    assert OrderFeed._jd_export_cost_for_absent_orders(
+        ingestion, store,
+        pl.DataFrame({"order_id": ["ON1"]}),
+        pl.DataFrame({"original_order_id": ["ON1"]}),
+    ) == []
+    ingestion.items.pop()
+    assert OrderFeed._jd_export_cost_for_absent_orders(
+        ingestion, store,
+        pl.DataFrame({"order_id": ["ON1", "ON2"]}),
+        pl.DataFrame({"original_order_id": ["ON1", "ON2"]}),
+    ) == []
+    assert OrderFeed._jd_export_cost_for_absent_orders(
+        ingestion, Store(id="another", name=store.name, platform="taobao"),
+        pl.DataFrame({"order_id": ["ON1"]}),
+        pl.DataFrame({"original_order_id": ["ON1"]}),
+    ) == []
+
+
 AFTER_SALES_HEADER = [
     "售后单号", "内部订单号", "店铺名称", "线上订单号", "状态", "线上状态",
     "货物状态", "商品编码", "线上子订单编号", "申请数量",
