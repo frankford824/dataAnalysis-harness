@@ -205,7 +205,6 @@ def _participation_facts(result, model, store_id: str, period: str) -> tuple[pl.
     facts = facts.filter(
         pl.col("store").is_in(_store_labels(model, store_id))
         & (pl.col("period") == period)
-        & pl.col("spine_row").is_not_null()
     )
     if facts.is_empty():
         return pl.DataFrame(schema=schema), bool(sales_metrics), bool(gross_metrics), bool(profit_metrics)
@@ -220,8 +219,8 @@ def _participation_facts(result, model, store_id: str, period: str) -> tuple[pl.
     sales = metric_rows(sales_metrics, "participation_sales")
     gross = metric_rows(gross_metrics, "participation_gross")
     profit = metric_rows(profit_metrics, "participation_profit")
-    combined = sales.join(gross, on="spine_row", how="full", coalesce=True)
-    combined = combined.join(profit, on="spine_row", how="full", coalesce=True)
+    combined = sales.join(gross, on="spine_row", how="full", coalesce=True, nulls_equal=True)
+    combined = combined.join(profit, on="spine_row", how="full", coalesce=True, nulls_equal=True)
     return combined, bool(sales_metrics), bool(gross_metrics), bool(profit_metrics)
 
 
@@ -286,7 +285,7 @@ def participation_only(result, model, store_id: str, period: str, registry: Regi
     if assigned.is_empty():
         return []
     facts, has_sales, has_gross, has_profit = _participation_facts(result, model, store_id, period)
-    assigned = assigned.join(facts, on="spine_row", how="left").with_columns(
+    assigned = assigned.join(facts, on="spine_row", how="left", nulls_equal=True).with_columns(
         pl.col("participation_sales").fill_null(0.0),
         pl.col("participation_gross").fill_null(0.0),
         pl.col("participation_profit").fill_null(0.0),
@@ -350,7 +349,7 @@ def calculate(result, model, store_id: str, period: str, registry: Registry,
     paid = paid.with_columns(pl.col("share").cast(pl.Decimal(16, 8)))
     paid = paid.with_columns((pl.col("base") * pl.col("share")).round(2, mode="half_away_from_zero").alias("amount"))
     output_facts, has_sales, has_gross, has_profit = _participation_facts(result, model, store_id, period)
-    paid = paid.join(output_facts, on="spine_row", how="left").with_columns(
+    paid = paid.join(output_facts, on="spine_row", how="left", nulls_equal=True).with_columns(
         pl.col("participation_sales").fill_null(0.0),
         pl.col("participation_gross").fill_null(0.0),
         pl.col("participation_profit").fill_null(0.0),

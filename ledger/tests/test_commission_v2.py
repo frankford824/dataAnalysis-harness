@@ -167,6 +167,28 @@ def test_uniform_fallback_survives_explicit_wage_preview(tmp_path):
     assert details.filter(pl.col('fallback_reason')=='store_uniform_distribution').height==2
 
 
+def test_uniform_fallback_allocates_orderless_store_output_too(tmp_path):
+    r,a,b=registry(tmp_path)
+    body={'segments':[{'valid_from':'2026-05-01','total_rate':'.05','allocations':[
+        {'person_id':a,'role':'运营','rate':'.03'},
+        {'person_id':b,'role':'运营','rate':'.02'}]}]}
+    r.save_scheme('s1','p1',body,'tester','整店统一分点',publish=True)
+    run=_run([('known','p1','2026-05-02',100)])
+    orderless=run.spine_facts.head(1).with_columns(
+        pl.lit(None,dtype=pl.UInt32).alias('spine_row'),
+        pl.lit('outside-order-spine').alias('link_key'),
+        pl.lit(50.).alias('amount'))
+    run.spine_facts=pl.concat([run.spine_facts,orderless],how='vertical_relaxed')
+    summary,details,_=calculate(run,_model(),'s1','2026-05',r)
+    assert summary['base_total']==150 and summary['unassigned_orders']==0
+    values={person['person_id']:person for person in summary['people']}
+    assert [values[pid]['allocated_sales'] for pid in (a,b)]==[90,60]
+    assert [values[pid]['allocated_gross'] for pid in (a,b)]==[90,60]
+    orderless_rows=details.filter(pl.col('spine_row').is_null())
+    assert orderless_rows.height==2
+    assert orderless_rows['fallback_reason'].unique().to_list()==['store_uniform_distribution']
+
+
 def test_june_store_default_covers_unassigned_links_preserving_existing_products(tmp_path):
     r, owner, _ = registry(tmp_path)
     r.save_scheme('s1', 'p1', {'segments':[segment('2026-06-01',owner,rate='.05')]},
