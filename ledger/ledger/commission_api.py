@@ -531,6 +531,19 @@ def install(app, workspace, model, model_root: Path | None = None):
             'people_count':len(report['people']), 'store_count':visible_stores,
             'view':selection.view, 'offset':selection.offset,
             'run_scopes':[{'run_id':row['finance_run'],'store_id':row['store_id'],'period':row['period']} for row in report['coverage'] if row['finance_run'] is not None],
+            'confirmation_scopes':[{
+                'run_id':row['finance_run'],'store_id':row['store_id'],
+                'store':row['store'],'period':row['period'],'status':row['status'],
+                'has_result':row['has_result'],'amount':money_float(row['selected_amount'])
+                if row['selected_amount'] is not None else None,
+                'unassigned_orders':row.get('unassigned_orders') or 0,
+            } for row in report['coverage'] if row['finance_run'] is not None],
+            'person_confirmation_scopes':[{
+                'person_id':row['person_id'],'person':row['person'],
+                'run_id':row['finance_run'],'store_id':row['store_id'],
+                'store':row['store'],'period':row['period'],'status':row['status'],
+                'amount':row['amount'],
+            } for row in report['rows'] if row.get('finance_run') is not None],
             'assignment_gaps':[{'store_id':row['store_id'],'store':row['store'],'period':row['period'],
                                 'orders':row['unassigned_orders'],'base':row.get('unassigned_base')}
                                for row in report['coverage'] if row.get('unassigned_orders')

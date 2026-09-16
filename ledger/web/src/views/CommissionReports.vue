@@ -16,6 +16,7 @@ const payoutOpen = ref(false), payoutLoading = ref(false), payoutSaving = ref(fa
 const payoutError = ref(''), payoutContext = ref(null), payoutPeople = ref([])
 const payoutReason = ref(''), payoutNoPeople = ref(false)
 const payoutNotice = ref('')
+const payoutTargetsOpen = ref(false), payoutTargets = ref([]), payoutTargetTitle = ref('')
 let payoutRequest = 0
 const kinds = [{key:'store_people',label:'店铺与分配人'},{key:'people',label:'按人员'},{key:'stores',label:'按店铺'},{key:'breakdown',label:'按月明细'},{key:'coverage',label:'月份进度'}]
 const scope = computed(() => ({start:state.start,end:state.end,...state.scope}))
@@ -105,6 +106,32 @@ async function openPayout(row) {
   } catch(e) { if(ticket===payoutRequest)payoutError.value=e.message }
   finally { if(ticket===payoutRequest)payoutLoading.value=false }
 }
+function targetsFor(row) {
+  if(!report.value)return []
+  let targets=[]
+  if(['store_people','breakdown','coverage'].includes(state.reportView) && row.finance_run){
+    targets=[{store_id:row.store_id,store:row.store,period:row.period,
+      run_id:row.finance_run,status:row.status,
+      amount:row.amount ?? row.selected_amount ?? row.store_amount}]
+  }else if(state.reportView==='stores'){
+    targets=(report.value.confirmation_scopes||[]).filter(item=>item.store_id===row.store_id)
+  }else if(state.reportView==='people'){
+    targets=(report.value.person_confirmation_scopes||[]).filter(item=>item.person_id===row.person_id)
+  }
+  const unique=new Map()
+  for(const target of targets)if(target.run_id)unique.set(`${target.store_id}:${target.period}:${target.run_id}`,target)
+  return [...unique.values()].sort((a,b)=>b.period.localeCompare(a.period)||a.store.localeCompare(b.store))
+}
+function choosePayout(row) {
+  if(locked.value)return
+  const targets=targetsFor(row)
+  if(!targets.length){payoutError.value='当前行没有可确认的店铺月份核算记录';return}
+  if(targets.length===1){openPayout(targets[0]);return}
+  payoutTargets.value=targets
+  payoutTargetTitle.value=row.person||row.store||'提成'
+  payoutTargetsOpen.value=true
+}
+function pickPayout(target){payoutTargetsOpen.value=false;openPayout(target)}
 async function savePayout() {
   if(!payoutReady.value)return
   payoutSaving.value=true;payoutError.value=''
@@ -200,10 +227,10 @@ const tableColumns=computed(()=>{
           key==='person'&&row.kind==='store'?h('strong','店铺合计'):
           key==='amount'&&row.kind==='store'?h('strong',money(row.store_amount)):cell(row,key))
   }))
-  if(['people','stores','store_people'].includes(state.reportView))list.push({title:'操作',key:'action',width:composition?168:96,mobileWidth:composition?155:78,fixed:'right',render:row=>h('div',{class:'report-row-actions'},[
-    ...(composition && row.finance_run && /试算|成本待人工确认|已人工确认/.test(row.status||'')
+  if(['people','stores','store_people','breakdown','coverage'].includes(state.reportView))list.push({title:'操作',key:'action',width:168,mobileWidth:155,fixed:'right',render:row=>h('div',{class:'report-row-actions'},[
+    ...(targetsFor(row).length
       ? [h(NButton,{text:true,type:'primary',size:'small',disabled:locked.value,
-          onClick:()=>openPayout(row)},()=>row.status?.includes('已人工确认')?'修改确认':'确认提成')]:[]),
+          onClick:()=>choosePayout(row)},()=>row.status?.includes('已人工确认')?'修改确认':'确认提成')]:[]),
     h(NButton,{text:true,type:'primary',size:'small',disabled:locked.value||row.amount==null,
       onClick:()=>drill(row)},()=> '明细'),
   ])})
@@ -232,7 +259,7 @@ const tableColumns=computed(()=>{
     </n-alert>
     <p v-if="state.reportView==='stores'" style="color:#64748b;margin:0 0 12px">提成设置人数按所选月份的有效设置统计；已出金额人数只统计已有结算金额的人员。</p>
     <div class="report-tabs-row"><LedgerTabs v-model="state.reportView" :options="kinds" label="汇总方式" @update:model-value="detail=null" /><div class="report-actions"><n-button :disabled="!canSettle" @click="openSettlement">确认员工结算</n-button><n-button type="primary" :disabled="!report || locked" :loading="downloading" @click="download">导出表格</n-button></div></div>
-    <p v-if="state.reportView==='store_people'" class="report-grain-note"><template v-if="state.personIds.length">当前仅显示所选人员；请清空人员筛选后再核对店铺合计。 </template>店铺销售额和毛利额是真实总额；个人销售额、毛利额仍各记参与链接的完整产出，不能相加。利润额＝经营账利润－兼职费用：共享订单利润按提成点数占比分拆，兼职与未归属净亏损按成员参与销售额分摊；未归属净利润留在店铺。人员利润额可相加，合计不高于店铺行。兼职额仍只在店铺行显示；个人提成基数可点“查看明细”。</p>
+    <p v-if="state.reportView==='store_people'" class="report-grain-note"><template v-if="state.personIds.length">当前仅显示所选人员；请清空人员筛选后再核对店铺合计。 </template>店铺销售额和毛利额是真实总额；个人销售额、毛利额仍各记参与链接的完整产出，不能相加。利润额＝经营账利润－兼职费用：共享订单利润按提成点数占比分拆，兼职与未归属净亏损按成员参与销售额分摊；未归属净利润留在店铺。已确认由一人负责整店的，店铺利润全部归本人。人员利润额可相加，合计不高于店铺行。兼职额仍只在店铺行显示；个人提成基数可点“查看明细”。</p>
 
     <div v-if="loading" class="commission-loading-line"/>
     <LedgerTable :rows="rows" :columns="tableColumns" :row-key="rowKey" :loading="loading" :max-height="440" empty="没有找到提成记录，可调整店铺、人员或月份" />
@@ -242,6 +269,16 @@ const tableColumns=computed(()=>{
       <n-spin :show="settlementLoading"><n-table v-if="matchingSettlements.length" size="small" :bordered="false"><thead><tr><th>确认时间</th><th>说明</th><th class="right">结算金额</th><th>操作</th></tr></thead><tbody><tr v-for="item in matchingSettlements" :key="item.id"><td>{{displayTime(item.at)}}</td><td>{{item.note}}</td><td class="right num">¥{{money(item.total)}}</td><td><n-button text type="primary" @click="viewSettlement(item)">查看当时明细</n-button></td></tr></tbody></n-table></n-spin>
     </section>
     <CommissionDetailDrawer :target="detail" @close="detail=null" />
+    <n-modal v-model:show="payoutTargetsOpen" preset="card" :title="`${payoutTargetTitle}：选择要确认的店铺月份`" style="width:min(620px,calc(100vw - 32px))">
+      <p class="settlement-help">汇总行可能包含多个店铺月份。人工确认按店铺月份保存，请选择一项。</p>
+      <div class="payout-targets">
+        <button v-for="target in payoutTargets" :key="`${target.store_id}:${target.period}:${target.run_id}`" type="button" @click="pickPayout(target)">
+          <span><strong>{{ target.store }}</strong><small>{{ target.period }} · {{ status(target.status) }}</small></span>
+          <span class="num">¥{{ money(target.amount) }}</span>
+        </button>
+      </div>
+      <template #footer><div class="settlement-footer"><n-button @click="payoutTargetsOpen=false">取消</n-button></div></template>
+    </n-modal>
     <n-modal v-model:show="payoutOpen" preset="card" title="人工确认提成" style="width:min(520px,calc(100vw - 32px))">
       <n-spin :show="payoutLoading">
         <template v-if="payoutContext">
@@ -285,6 +322,7 @@ const tableColumns=computed(()=>{
 .report-actions{display:flex;gap:10px}.settlement-history{border-top:1px solid #e9edf2;margin-top:22px;padding-top:22px}.settlement-history h3{font-size:15px;margin:0}.settlement-history p,.settlement-help{font-size:12px;color:#718097;margin:5px 0 14px}.settlement-footer{display:flex;justify-content:flex-end;gap:10px}
 .report-row-actions{display:flex;align-items:center;gap:10px;white-space:nowrap}.payout-people{display:grid;gap:12px;margin-top:14px}.payout-people label{display:grid;grid-template-columns:minmax(0,1fr) 145px;align-items:center;gap:10px;font-size:13px}.payout-people small{display:block;color:#8490a0;font-size:11px;margin-top:3px}.payout-sum{display:flex;justify-content:space-between;margin:2px 0 0;border-top:1px solid #e9edf2;padding-top:12px;font-size:13px}.payout-sum strong{font-size:17px;font-variant-numeric:tabular-nums}
 .payout-history{margin-top:14px;border-top:1px solid #e9edf2;padding-top:10px;font-size:12px;color:#536176}.payout-history summary{cursor:pointer;color:#3468f0}.payout-history>div{margin-top:10px;display:grid;gap:3px}.payout-history small{color:#8490a0;font-size:11px;margin-left:4px}
+.payout-targets{display:grid;gap:8px}.payout-targets button{border:1px solid #e3e8f0;background:#fff;border-radius:7px;padding:11px 13px;display:flex;justify-content:space-between;align-items:center;text-align:left;cursor:pointer;color:#334155}.payout-targets button:hover{border-color:#91adf8;background:#f7f9ff}.payout-targets strong{display:block;font-size:13px}.payout-targets small{display:block;color:#7b8798;font-size:11px;margin-top:4px}.payout-targets .num{font-weight:600;font-size:14px}
 @media(max-width:1180px){.report-total{min-width:200px;padding-right:24px}.report-count{padding:8px 20px}.report-overview{flex-wrap:wrap;row-gap:18px}.report-attention{margin-left:0;flex-basis:100%}.report-tabs{gap:22px}}
 @media(max-width:600px){.report-months{gap:8px}.report-months input{width:calc((100% - 63px)/2);min-width:0;padding:0 5px}.month-shortcuts{margin-left:40px;margin-top:6px}.report-overview{padding:22px 0;gap:18px}.report-total{flex-basis:100%;padding:0}.report-total strong{font-size:31px}.report-count{padding:0 20px 0 0;border:0}.report-count strong{font-size:21px}.report-tabs-row{flex-wrap:wrap;padding:12px 0 16px;gap:12px}.report-tabs{gap:22px;width:100%;min-height:42px}.report-tabs button{padding:10px 0}.report-attention{font-size:12px}}
 @media(max-width:600px){.report-months{display:grid;grid-template-columns:28px minmax(0,1fr) 12px minmax(0,1fr);gap:6px}.report-months input{width:100%;min-width:0;font-size:12px}.month-shortcuts{grid-column:2/-1;margin:8px 0 0;gap:20px}.report-table{min-width:0}.report-table th:first-child{width:auto}.report-table td,.report-table th{padding:12px 9px;font-size:12px}.report-table .amount{width:96px;font-size:14px}.report-table .sticky-action{width:70px}.report-table [data-field=employee_no],.report-table [data-field=stores],.report-table [data-field=people],.report-table [data-field=periods],.report-table [data-field=missing],.report-table [data-field=status],.report-table [data-field=explanation]{display:none}.report-table [data-field=store]:not(:first-child){display:none}.mobile-context{display:block;margin-top:5px;font-size:10px;color:#8a94a3;font-weight:400}.report-table [data-field=period]{width:66px;font-size:11px}.report-table .text-button{font-size:11px}}

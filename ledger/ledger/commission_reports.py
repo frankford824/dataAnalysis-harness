@@ -53,6 +53,9 @@ _profit_lock = threading.RLock()
 _profit_cache: OrderedDict[tuple, dict[str, float] | None] = OrderedDict()
 _PROFIT_CACHE_LIMIT = 128
 _CAIGUO_PERSON_ID = 'legacy:5811db93188b314a53ce01f5'
+_CAIGUO_SOLO_STORES = frozenset({
+    'douyin_mszr2dhn', 'douyin_mt9sbkne', 'douyin_qianhuajian',
+})
 
 
 def _archived_allocated_profit(registry, commission):
@@ -109,7 +112,7 @@ def _split_cents(total, weights):
     return {pid: Decimal(cents) / 100 for pid, cents in whole.items()}
 
 
-def attributed_profit(commission, operating, labor, registry, *, manual_cost=False):
+def attributed_profit(commission, operating, labor, registry, *, store_id='', manual_cost=False):
     """Additive person profit; keep full sales and gross output separate."""
     people = commission.get('people') or []
     if operating is None or manual_cost or not people:
@@ -117,6 +120,9 @@ def attributed_profit(commission, operating, labor, registry, *, manual_cost=Fal
     ids = [p.get('person_id') for p in people]
     if any(not pid for pid in ids) or len(ids) != len(set(ids)):
         return {}
+    if (store_id in _CAIGUO_SOLO_STORES and len(people) == 1
+            and ids[0] == _CAIGUO_PERSON_ID):
+        return {ids[0]: profit_after_labor(operating, labor)}
     split = {p['person_id']: p.get('allocated_profit') for p in people
              if p.get('person_id') and p.get('allocated_profit') is not None}
     if len(split) != len(people):
@@ -137,11 +143,11 @@ def attributed_profit(commission, operating, labor, registry, *, manual_cost=Fal
             for pid in weights}
 
 
-def confirmed_profit_rate(commission, person_id):
-    """Cai Guo's approved profit-based 5% payout, only where loss is deducted."""
+def confirmed_profit_rate(commission, person_id, store_id=''):
+    """Cai Guo's approved solo-store profit-based 5% payout."""
     if (person_id != _CAIGUO_PERSON_ID or
+            store_id not in _CAIGUO_SOLO_STORES or
             commission.get('base_node') != 'net_profit' or
-            commission.get('on_loss') != 'deduct' or
             len(commission.get('people') or []) != 1):
         return None
     rates = {decimal(product.get('total_rate') or 0)
@@ -294,14 +300,14 @@ def build(workspace, registry, model, start, end, store_ids=None, person_ids=Non
         gross=statement_amount(statement,gross_node) if gross_node else None
         operating=statement_amount(statement,profit_node) if profit_node else None
         visible_labor=labor_cut if spread.total is not None else Decimal(0)
-        person_profit=attributed_profit(source_c,operating,visible_labor,registry,
+        person_profit=attributed_profit(source_c,operating,visible_labor,registry,store_id=sid,
                                         manual_cost=bool(record['manual_cost_json']))
         source_pid=(source_c.get('people') or [{}])[0].get('person_id')
-        profit_rate=(confirmed_profit_rate(source_c,source_pid)
+        profit_rate=(confirmed_profit_rate(source_c,source_pid,sid)
                      if not decision and not c.get('manual_confirmed')
                      and source_c.get('people') else None)
         if profit_rate is not None and person_profit.get(source_pid) is not None:
-            notes.append('蔡果提成按已分摊兼职后的人员利润额乘已核实的5%点数计算')
+            notes.append('蔡果一人负责本店：店铺利润全部归本人，提成按利润额乘已核实的5%点数计算')
             scope['notes']='；'.join(notes)
         member_rows=[]
         for person in c.get('people',[]):

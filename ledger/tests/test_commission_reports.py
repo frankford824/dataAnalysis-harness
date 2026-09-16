@@ -383,8 +383,8 @@ def test_store_person_profit_after_labor_keeps_full_participation_and_export(tmp
 
 
 @pytest.mark.parametrize('store_id,store_profit,labor,assigned_profit,sales,trial,expected', [
-    ('douyin_mszr2dhn', 46686.67, 5477.63, 46108.09, 123571.79, 2302.64, 2031.52),
-    ('douyin_mt9sbkne', 3460.11, 647.24, 2608.20, 10804.25, 130.50, 98.05),
+    ('douyin_mszr2dhn', 46686.67, 5477.63, 46108.09, 123571.79, 2302.64, 2060.45),
+    ('douyin_mt9sbkne', 3460.11, 647.24, 2608.20, 10804.25, 130.50, 140.64),
 ])
 def test_caiguo_single_rate_payout_uses_person_profit_after_labor(
         tmp_path, store_id, store_profit, labor, assigned_profit, sales, trial, expected):
@@ -419,7 +419,7 @@ def test_caiguo_single_rate_payout_uses_person_profit_after_labor(
         'start':'2026-06','end':'2026-06','store_ids':[store_id],
         'view':'store_people'}).json()
     assert report['trial_periods']==1
-    assert report['items'][1]['profit_after_labor']==round(assigned_profit-labor,2)
+    assert report['items'][1]['profit_after_labor']==round(store_profit-labor,2)
     assert report['items'][1]['amount']==expected
     assert report['total']==expected
     context=client.get('/api/commission-v2/payout-confirmations/context',params={
@@ -437,7 +437,7 @@ def test_caiguo_single_rate_payout_uses_person_profit_after_labor(
     assert confirmed['trial_periods']==0
 
 
-def test_caiguo_store_with_skip_loss_keeps_its_existing_loss_policy(tmp_path):
+def test_caiguo_solo_store_attributes_full_profit_even_with_legacy_skip_loss(tmp_path):
     ws=Workspace(tmp_path);registry=Registry(tmp_path)
     store_id='douyin_qianhuajian';pid='legacy:5811db93188b314a53ce01f5'
     registry.person_save({'id':pid,'name':'蔡果'},'test','登记')
@@ -466,8 +466,8 @@ def test_caiguo_store_with_skip_loss_keeps_its_existing_loss_policy(tmp_path):
     report=TestClient(app).post('/api/commission-v2/reports/query',json={
         'start':'2026-06','end':'2026-06','store_ids':[store_id],
         'view':'store_people'}).json()
-    assert report['items'][1]['profit_after_labor']==1951.76
-    assert report['items'][1]['amount']==138.06
+    assert report['items'][1]['profit_after_labor']==1981.68
+    assert report['items'][1]['amount']==99.08
 
 
 def test_unattributed_store_loss_is_shared_without_assigning_unknown_orders(tmp_path):
@@ -752,6 +752,28 @@ def test_report_confirms_person_payout_without_closing_store_and_freezes_settlem
         'run_id': ws.latest_run('s1', '2026-06')['id']}).json()
     assert refreshed['latest'] is None
     assert refreshed['history'][0]['confirmed_total'] == '25.00'
+
+
+def test_every_report_tab_receives_confirmation_scope_relationships(tmp_path):
+    ws, _, people, client = fixture(tmp_path)
+    run1=record(ws,people,'s1','2026-06',[10,20],complete=False)
+    run2=record(ws,people,'s1','2026-07',[30,40],complete=False)
+    record(ws,people,'s2','2026-06',[3],complete=False)
+    base={'start':'2026-06','end':'2026-07'}
+    for view in ('store_people','people','stores','breakdown','coverage'):
+        reply=client.post('/api/commission-v2/reports/query',json={
+            **base,'view':view,'limit':200})
+        assert reply.status_code==200,reply.text
+        data=reply.json()
+        assert data['view']==view
+        scopes=data['confirmation_scopes']
+        assert {(row['store_id'],row['period'],row['run_id']) for row in scopes} >= {
+            ('s1','2026-06',run1),('s1','2026-07',run2)}
+        person_scopes=data['person_confirmation_scopes']
+        assert {(row['person_id'],row['store_id'],row['period'])
+                for row in person_scopes} >= {
+            (people[0]['id'],'s1','2026-06'),
+            (people[0]['id'],'s1','2026-07')}
 
 
 def test_incomplete_store_close_stays_pending_until_person_payout_is_confirmed(tmp_path):
