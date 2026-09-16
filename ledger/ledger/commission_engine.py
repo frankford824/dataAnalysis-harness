@@ -152,6 +152,34 @@ def _participation_facts(result, model, store_id: str, period: str) -> tuple[pl.
     return combined, bool(sales_metrics), bool(gross_metrics), bool(profit_metrics)
 
 
+def allocated_profit(details: pl.DataFrame, *, net_profit_basis: bool = False) -> dict[str, float] | None:
+    """Split assigned order profit by each participant's share of that link's rate."""
+    if 'participation_profit' in details.columns:
+        profit = pl.col('participation_profit')
+    elif net_profit_basis and 'original_base' in details.columns:
+        profit = pl.col('original_base')
+    else:
+        return None
+    required = {'status', 'person_id', 'share', 'total_rate'}
+    if not required <= set(details.columns):
+        return None
+    assigned = details.filter(pl.col('status') == 'distribute')
+    if assigned.is_empty():
+        return {}
+    assigned = assigned.with_columns(
+        pl.col('share').cast(pl.Decimal(16, 8)).alias('__share'),
+        pl.col('total_rate').cast(pl.Decimal(16, 8), strict=False).alias('__rate'),
+        profit.cast(pl.Decimal(28, 10), strict=False).alias('__profit'),
+    )
+    if assigned.filter(pl.col('__rate').is_null() | (pl.col('__rate') <= 0)
+                       | pl.col('__profit').is_null()).height:
+        return None
+    totals = (assigned.with_columns(
+        (pl.col('__profit') * pl.col('__share') / pl.col('__rate')).alias('__part')
+    ).group_by('person_id').agg(pl.col('__part').sum()).iter_rows(named=True))
+    return {row['person_id']: money_float(row['__part']) for row in totals}
+
+
 def participation_only(result, model, store_id: str, period: str, registry: Registry) -> list[dict]:
     """Show linked sales output even when goods cost prevents a payout."""
     _, versions, people, policy = registry.active(store_id, period)
@@ -259,11 +287,13 @@ def calculate(result, model, store_id: str, period: str, registry: Registry,
         pl.col("participation_profit").sum(),
         pl.col("product_id").n_unique().alias("products"),
     ).sort("amount", descending=True)
+    split_profit = allocated_profit(paid) if has_profit else None
     person_rows = [
         {**r, "amount": money_float(r["amount"]), "base": money_float(r["base"]),
          "sales": money_float(r["participation_sales"]) if has_sales else None,
          "gross": money_float(r["participation_gross"]) if has_gross else None,
-         "profit": money_float(r["participation_profit"]) if has_profit else None}
+         "profit": money_float(r["participation_profit"]) if has_profit else None,
+         "allocated_profit": split_profit.get(r['person_id']) if split_profit is not None else None}
         for r in people_lines.iter_rows(named=True)
     ]
     for row in person_rows:

@@ -1,8 +1,11 @@
 """Stored payout reporting must not change money or substitute closed snapshots."""
 import csv
 import io
+import json
+from uuid import uuid4
 
 import pytest
+import polars as pl
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
@@ -313,8 +316,9 @@ def test_store_person_profit_after_labor_keeps_full_participation_and_export(tmp
         'commission': {'engine': 'commission-v2', 'base_total': 100, 'total': 15,
                        'amount_complete': True, 'people': [
                            {'person_id': p['id'], 'person': p['name'], 'amount': amount,
-                            'sales': 1000, 'gross': 400, 'profit': 200}
-                           for p, amount in zip(people, (10, 5))]},
+                            'sales': 1000, 'gross': 400, 'profit': 200,
+                            'allocated_profit': allocated}
+                           for p, amount, allocated in zip(people, (10, 5), (120, 80))]},
     }, [])
     app = FastAPI(); install(app, lambda: ws, lambda: model)
     client = TestClient(app)
@@ -324,23 +328,111 @@ def test_store_person_profit_after_labor_keeps_full_participation_and_export(tmp
     assert store['gross'] == 400 and store['labor_cost'] == 50
     assert store['profit_after_labor'] == 150
     assert [(p['gross'], p['profit_after_labor'], p['labor_cost']) for p in (first, second)] == [
-        (400, 150, None), (400, 150, None)]
+        (400, 95, None), (400, 55, None)]
     assert report['total'] == 7.5  # existing payout calculation remains unchanged
     filtered = client.post('/api/commission-v2/reports/query', json={
         **scope, 'person_ids': [people[0]['id']],
     }).json()['items']
-    assert len(filtered) == 2 and filtered[0]['profit_after_labor'] == 150
+    assert len(filtered) == 2 and filtered[1]['profit_after_labor'] == 95
     export = client.post('/api/commission-v2/export/reports/store_people', json={
         **scope, 'presentation': True,
     })
     assert export.status_code == 200, export.text
     exported = list(csv.DictReader(io.StringIO(export.text.lstrip('\ufeff'))))
-    assert [r['利润额'] for r in exported] == ['150.0', '150.0', '150.0']
+    assert [r['利润额'] for r in exported] == ['150.0', '95.0', '55.0']
     assert [r['兼职额'] for r in exported] == ['50.0', '', '']
     raw_export = client.post('/api/commission-v2/export/reports/store_people', json=scope)
     assert raw_export.status_code == 200
     raw_rows = list(csv.DictReader(io.StringIO(raw_export.text.lstrip('\ufeff'))))
-    assert [r['利润额'] for r in raw_rows] == ['150.0', '150.0', '150.0']
+    assert [r['利润额'] for r in raw_rows] == ['150.0', '95.0', '55.0']
+
+
+def test_unattributed_store_loss_is_shared_without_assigning_unknown_orders(tmp_path):
+    ws = Workspace(tmp_path); registry = Registry(tmp_path)
+    model = _model(stores=(Store(id='s1', name='1688南京朗歆', platform='taobao'),))
+    model = model.model_copy(update={
+        'overheads':(Overhead(period='2026-06',amount=3511.01,name='兼职人工费用'),),
+        'statement':(model.statement[0].model_copy(update={'headline':'revenue'}),
+                     *model.statement[1:],
+                     StatementNode(id='net_profit',name='利润',level=1,is_total=True,
+                                   headline='profit',formula={'op':'add','of':['gross']})),
+    })
+    members=[registry.person_save({'name':n},'test','登记') for n in ('姜慧卉','邱倩倩')]
+    ws.record('s1','2026-06',{
+        'statement':[{'id':model.statement[0].id,'value':79620.89,'available':True},
+                     {'id':'gross','value':50834.99,'available':True},
+                     {'id':'net_profit','value':44367.84,'available':True}],
+        'commission':{'engine':'commission-v2','base_node':'net_profit',
+                      'base_total':44367.84,'amount_complete':False,
+                      'unassigned_orders':4,'unassigned_base':-72.76,
+                      'total':2046.04,'people':[
+                          {'person_id':p['id'],'person':p['name'],'amount':amount,
+                           'base':basis,'allocated_profit':basis,
+                           'sales':sales,'gross':gross,'profit':basis}
+                          for p,amount,basis,sales,gross in zip(
+                              members,(1483.68,562.36),(32228.45,12212.14),
+                              (58636.06,20932.91),(37015.81,13860.2))]},
+    },[])
+    app=FastAPI(); install(app,lambda:ws,lambda:model)
+    rows=TestClient(app).post('/api/commission-v2/reports/query',json={
+        'start':'2026-06','end':'2026-06','store_ids':['s1'],
+        'view':'store_people'}).json()['items']
+    store,*people=rows
+    assert store['profit_after_labor']==40856.83
+    assert [p['profit_after_labor'] for p in people]==[29587.50,11269.33]
+    assert sum(p['profit_after_labor'] for p in people)==store['profit_after_labor']
+    assert [p['sales'] for p in people]==[58636.06,20932.91]
+    assert [p['gross'] for p in people]==[37015.81,13860.2]
+
+
+def test_archived_order_details_supply_additive_profit_without_mutating_run(tmp_path, monkeypatch):
+    from ledger.commission_engine import persist
+    ws=Workspace(tmp_path); registry=Registry(tmp_path)
+    model=_model(stores=(Store(id='s1',name='共享链接店',platform='taobao'),))
+    model=model.model_copy(update={
+        'overheads':(Overhead(period='2026-06',amount=20,name='兼职人工费用'),),
+        'statement':(model.statement[0].model_copy(update={'headline':'revenue'}),
+                     *model.statement[1:],
+                     StatementNode(id='net_profit',name='利润',level=1,is_total=True,
+                                   headline='profit',formula={'op':'add','of':['gross']})),
+    })
+    crew=[registry.person_save({'name':name},'test','登记') for name in ('甲','乙')]
+    calc=str(uuid4())
+    archived={'statement':[{'id':model.statement[0].id,'value':100,'available':True},
+                           {'id':'gross','value':80,'available':True},
+                           {'id':'net_profit','value':60,'available':True}],
+              'commission':{'engine':'commission-v2','base_node':'net_profit',
+                            'calculation_id':calc,
+                            'base_total':60,'total':5,'amount_complete':True,
+                            'people':[{'person_id':p['id'],'person':p['name'],
+                                       'amount':amount,'sales':100,'gross':80,
+                                       'profit':60,'base':60}
+                                      for p,amount in zip(crew,(3,2))]}}
+    run=ws.record('s1','2026-06',archived,[])
+    # Save a separate immutable calculation archive, as the production v2
+    # engine does; the old finance snapshot contains no allocated-profit field.
+    details=pl.DataFrame({'status':['distribute','distribute'],
+                          'person_id':[p['id'] for p in crew],
+                          'share':['0.03','0.02'],'total_rate':['0.05','0.05'],
+                          'participation_profit':[60.,60.],
+                          'original_base':[60.,60.]})
+    persist(registry,run,details,{'id':calc,'store_id':'s1','period':'2026-06',
+        'registry_revision':registry.revision(),'model_json':model.model_dump_json(),
+        'rules_json':'{}','summary_json':'{}'})
+    app=FastAPI();install(app,lambda:ws,lambda:model)
+    client=TestClient(app)
+    reads=[]; original_read=pl.read_parquet
+    def counted_read(*args,**kwargs):
+        reads.append(True)
+        return original_read(*args,**kwargs)
+    monkeypatch.setattr(pl,'read_parquet',counted_read)
+    values=[client.post('/api/commission-v2/reports/query',json={
+        'start':'2026-06','end':'2026-06','store_ids':['s1'],
+        'view':'store_people'}).json()['items'] for _ in range(2)]
+    assert all([row['profit_after_labor'] for row in visible]==[40,26,14]
+               for visible in values)
+    assert len(reads)==1  # Immutable detail archive is reused across refreshed reads.
+    assert json.loads(ws.conn.execute('SELECT result FROM run WHERE id=?',(run,)).fetchone()[0])==archived
 
 
 

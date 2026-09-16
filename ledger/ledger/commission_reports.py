@@ -7,10 +7,13 @@ import re
 import threading
 from collections import OrderedDict
 from datetime import date
-from decimal import Decimal
+from decimal import Decimal, ROUND_FLOOR
 from pathlib import Path
 
+import polars as pl
+
 from . import overhead
+from .commission_engine import allocated_profit
 from .commission_registry import RegistryError
 from .labor_api import frozen_shares
 from .money import money_float
@@ -39,29 +42,98 @@ def statement_amount(statement, node_id):
     return row.get('value') if row and row.get('available', True) else None
 
 
-def profit_after_labor(profit, labor, *, personal=False, person_sales=None, store_sales=None):
+def profit_after_labor(profit, labor):
     """Display operating profit less the store labor cut."""
     if profit is None:
         return None
-    cut = decimal(labor or 0)
-    if personal:
-        if cut == 0:
-            return money_float(decimal(profit))
-        if person_sales is None or store_sales is None or decimal(store_sales) <= 0:
+    return money_float(decimal(profit) - decimal(labor or 0))
+
+
+_profit_lock = threading.RLock()
+_profit_cache: OrderedDict[tuple, dict[str, float] | None] = OrderedDict()
+_PROFIT_CACHE_LIMIT = 128
+
+
+def _archived_allocated_profit(registry, commission):
+    calculation = commission.get('calculation_id')
+    if not calculation:
+        return None
+    with registry.connect() as conn:
+        row = conn.execute('SELECT path,sha FROM calculation WHERE id=?',
+                           (calculation,)).fetchone()
+    if not row:
+        return None
+    key = (str(registry.root.resolve()), calculation, row['sha'])
+    with _profit_lock:
+        if key in _profit_cache:
+            _profit_cache.move_to_end(key)
+            return _profit_cache[key]
+    path = registry.root / 'calculations' / Path(row['path']).name
+    try:
+        payload = path.read_bytes()
+        if hashlib.sha256(payload).hexdigest() != row['sha']:
             return None
-        cut *= max(decimal(person_sales), Decimal(0)) / decimal(store_sales)
-    return money_float(decimal(profit) - cut)
+        from io import BytesIO
+        schema = pl.read_parquet_schema(BytesIO(payload))
+        cols = [name for name in ('status', 'person_id', 'share', 'total_rate',
+                                  'participation_profit', 'original_base')
+                if name in schema]
+        details = pl.read_parquet(BytesIO(payload), columns=cols)
+        result = allocated_profit(details, net_profit_basis=(
+            commission.get('base_node') == 'net_profit'
+            and commission.get('on_loss') == 'deduct'))
+    except (OSError, ValueError, pl.exceptions.PolarsError):
+        result = None
+    with _profit_lock:
+        _profit_cache[key] = result
+        if len(_profit_cache) > _PROFIT_CACHE_LIMIT:
+            _profit_cache.popitem(last=False)
+    return result
 
 
-def personal_profit(person, commission, *, manual_cost=False):
-    if person.get('profit') is not None and not manual_cost:
-        return person['profit']
-    # Older net-profit calculations already retained the complete assigned
-    # order basis. Do not use a skipped-loss or manually adjusted basis here.
-    if (not manual_cost and commission.get('base_node') == 'net_profit'
-            and commission.get('on_loss') == 'deduct'):
-        return person.get('base')
-    return None
+def _split_cents(total, weights):
+    """Allocate a nonnegative store amount by member sales, preserving cents."""
+    total = decimal(total).quantize(Decimal('.01'))
+    if total == 0:
+        return {pid: Decimal(0) for pid in weights}
+    basis = sum(weights.values(), Decimal(0))
+    if basis <= 0:
+        return None
+    exact = {pid: total * 100 * weight / basis for pid, weight in weights.items()}
+    whole = {pid: int(value.to_integral_value(rounding=ROUND_FLOOR))
+             for pid, value in exact.items()}
+    remainder = int(total * 100) - sum(whole.values())
+    for pid in sorted(exact, key=lambda p: (-(exact[p] - whole[p]), p))[:remainder]:
+        whole[pid] += 1
+    return {pid: Decimal(cents) / 100 for pid, cents in whole.items()}
+
+
+def attributed_profit(commission, operating, labor, registry, *, manual_cost=False):
+    """Additive person profit; keep full sales and gross output separate."""
+    people = commission.get('people') or []
+    if operating is None or manual_cost or not people:
+        return {}
+    ids = [p.get('person_id') for p in people]
+    if any(not pid for pid in ids) or len(ids) != len(set(ids)):
+        return {}
+    split = {p['person_id']: p.get('allocated_profit') for p in people
+             if p.get('person_id') and p.get('allocated_profit') is not None}
+    if len(split) != len(people):
+        split = _archived_allocated_profit(registry, commission)
+    if split is None or any(p.get('person_id') not in split for p in people):
+        return {}
+    values = {p['person_id']: decimal(split[p['person_id']]) for p in people}
+    weights = {p['person_id']: max(decimal(p.get('sales') or 0), Decimal(0))
+               for p in people}
+    # A negative store residual is shared as operating loss. Positive
+    # unattributed profit remains at the store until its owner is known.
+    residual = max(sum(values.values(), Decimal(0)) - decimal(operating), Decimal(0))
+    cost = _split_cents(labor or 0, weights)
+    loss = _split_cents(residual, weights)
+    if cost is None or loss is None:
+        return {}
+    return {pid: money_float(values[pid] - cost[pid] - loss[pid])
+            for pid in weights}
 
 
 _configured_lock = threading.RLock()
@@ -180,6 +252,8 @@ def build(workspace, registry, model, start, end, store_ids=None, person_ids=Non
         gross=statement_amount(statement,gross_node) if gross_node else None
         operating=statement_amount(statement,profit_node) if profit_node else None
         visible_labor=labor_cut if spread.total is not None else Decimal(0)
+        person_profit=attributed_profit(c,operating,visible_labor,registry,
+                                        manual_cost=bool(record['manual_cost_json']))
         member_rows=[]
         for person in c.get('people',[]):
             name=person.get('person') or '未命名人员'
@@ -198,9 +272,7 @@ def build(workspace, registry, model, start, end, store_ids=None, person_ids=Non
                                         'employee_no':roster.get(pid,{}).get('employee_no',''),
                                         'store_id':sid,'store':names[sid],'period':period,
                                         'sales':person.get('sales'),'gross':person.get('gross'),
-                                        'profit_after_labor':profit_after_labor(
-                                            personal_profit(person,c,manual_cost=bool(record['manual_cost_json'])), visible_labor,
-                                            personal=True, person_sales=person.get('sales'), store_sales=sales),
+                                        'profit_after_labor':person_profit.get(person.get('person_id')),
                                         'labor_cost':None,'base':None,'base_name':'',
                                         'amount':None,'store_amount':None,
                                         'status':status,'finance_run':record['id']})
@@ -216,9 +288,7 @@ def build(workspace, registry, model, start, end, store_ids=None, person_ids=Non
                                 'employee_no':roster.get(pid,{}).get('employee_no',''),
                                 'store_id':sid,'store':names[sid],'period':period,
                                 'sales':person.get('sales'),'gross':person.get('gross'),
-                                'profit_after_labor':profit_after_labor(
-                                    personal_profit(person,c,manual_cost=bool(record['manual_cost_json'])), visible_labor,
-                                    personal=True, person_sales=person.get('sales'), store_sales=sales),
+                                'profit_after_labor':person_profit.get(person.get('person_id')),
                                 'labor_cost':None,
                                 'base':person.get('base'),'base_name':scope['base_name'],
                                 'amount':money_float(amount),'store_amount':None,

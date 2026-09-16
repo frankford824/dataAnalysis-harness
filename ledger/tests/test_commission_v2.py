@@ -79,6 +79,34 @@ def test_shared_link_credits_complete_posted_output_to_each_person(tmp_path):
     assert details.filter(pl.col("status") == "distribute")["participation_sales"].to_list() == [100, 100]
 
 
+def test_shared_link_splits_person_profit_by_points_while_sales_and_gross_repeat(tmp_path):
+    r,a,b=registry(tmp_path)
+    r.save_scheme('s1','p1',{'segments':[{'valid_from':'2026-05-01',
+        'total_rate':'.05','allocations':[
+            {'person_id':a,'role':'运营','rate':'.03'},
+            {'person_id':b,'role':'运营','rate':'.02'}]}]},
+        'tester','两人各看完整销售和毛利，利润按点数拆分',publish=True)
+    model=_model()
+    model=model.model_copy(update={
+        'metrics':(*model.metrics,Metric(id='fee',name='平台费用',source='cost',
+                                         value=ValueExpr(op='sum',of=['amount']))),
+        'statement':(*model.statement,StatementNode(id='net_profit',name='利润',
+            level=1,is_total=True,headline='profit',commission_base=True,
+            formula={'op':'add','of':['gross','fee']}))})
+    run=_run([('same-link','p1','2026-05-02',100)])
+    cost=run.spine_facts.with_columns(pl.lit('goods').alias('metric_id'),
+                                      pl.lit(-20.).alias('amount'))
+    fee=run.spine_facts.with_columns(pl.lit('fee').alias('metric_id'),
+                                     pl.lit(-20.).alias('amount'))
+    run.spine_facts=pl.concat([run.spine_facts,cost,fee],how='vertical_relaxed')
+    summary,_,_=calculate(run,model,'s1','2026-05',r)
+    values={p['person_id']:p for p in summary['people']}
+    assert [values[p]['sales'] for p in (a,b)]==[100,100]
+    assert [values[p]['gross'] for p in (a,b)]==[80,80]
+    assert [values[p]['profit'] for p in (a,b)]==[60,60]
+    assert [values[p]['allocated_profit'] for p in (a,b)]==[36,24]
+
+
 def test_june_store_default_covers_unassigned_links_preserving_existing_products(tmp_path):
     r, owner, _ = registry(tmp_path)
     r.save_scheme('s1', 'p1', {'segments':[segment('2026-06-01',owner,rate='.05')]},
