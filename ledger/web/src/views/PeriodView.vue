@@ -160,7 +160,8 @@ function openManualClose() {
     [key, amounts[key] == null ? '' : Number(amounts[key]).toFixed(2)]))
   manualPayouts.value = (snap.value?.commission?.people || []).map(person => ({
     person_id: person.person_id, person: person.person,
-    sales: person.sales, gross: person.gross, amount: '',
+    sales: person.sales, gross: person.gross, suggested: person.amount,
+    amount: person.amount == null ? '' : Number(person.amount).toFixed(2),
   }))
   manualNoPayout.value = false
   manualRunId.value = snap.value?.run_id || null
@@ -274,6 +275,22 @@ const manualCloseReady = computed(() =>
           : manualNoPayout.value)
         : manualBlockers.value.length > 0)),
 )
+const manualCloseNeeds = computed(() => {
+  const needs = []
+  if (manualRunId.value !== snap.value?.run_id) needs.push('刷新到最新核算结果')
+  if (manualLineRevision.value !== (snap.value?.cost_review?.line_revision ?? 0)) needs.push('重新预览最新人工成本')
+  if (manualCostEnabled.value && (manualPreview.value?.profit == null || manualPreview.value.inputKey !== manualPreviewKey.value)) {
+    needs.push('预览确认后的成本与利润')
+  }
+  if ((manualCostEnabled.value || manualPayoutEnabled.value) && manualPayouts.value.length &&
+      !manualPayouts.value.every(person => person.person_id && centsInput(person.amount))) {
+    needs.push('补齐每人的最终提成额')
+  }
+  const unchecked = manualCloseBlockers.value.filter(f => !ignoredBlockers.value.includes(f.id)).length
+  if (unchecked) needs.push(`勾选接受 ${unchecked} 项待确认事项`)
+  if (!manualCloseNote.value.trim()) needs.push('填写人工确认依据')
+  return needs
+})
 const fixing = ref(false)
 const missingSources = computed(() =>
   (snap.value?.sources || []).filter((s) => s.arrived === false && s.status !== 'not_applicable').length,
@@ -818,10 +835,10 @@ watch(
           <n-alert v-if="manualPreviewError" type="warning" :bordered="false">{{ manualPreviewError }}</n-alert>
         </template>
         <template v-if="manualCostEnabled || manualPayoutEnabled">
-          <div class="manual-payout-head"><b>逐人确认提成</b><small>这里填已含兼职分摊的确认金额；原订单试算保留，不会自动分配未关联的订单。</small></div>
+          <div class="manual-payout-head"><b>逐人确认提成</b><small>系统按现有资料试算的金额已自动带入，可直接接受或修改；保存后成为本期最终确认金额。</small></div>
           <div v-if="manualPayouts.length" class="manual-payout-list">
             <label v-for="person in manualPayouts" :key="person.person_id">
-              <span>{{ person.person }}<small>参与销售 {{ money(person.sales) }} · 参与毛利 {{ money(person.gross) }}</small></span>
+              <span>{{ person.person }}<small>参与销售 {{ money(person.sales) }} · 参与毛利 {{ money(person.gross) }}<template v-if="person.suggested != null"> · 系统试算 {{ money(person.suggested) }}</template></small></span>
               <n-input v-model:value="person.amount" inputmode="decimal" :aria-label="`${person.person}确认提成额`" placeholder="确认提成额" />
             </label>
           </div>
@@ -834,6 +851,7 @@ watch(
           </div>
         </n-checkbox-group>
         <n-input v-model:value="manualCloseNote" type="textarea" :rows="3" maxlength="500" show-count placeholder="填写人工确认依据与处理原因" />
+        <n-alert v-if="manualCloseNeeds.length" type="info" :bordered="false">还需完成：{{ manualCloseNeeds.join('；') }}</n-alert>
       </div>
     </n-modal>
 

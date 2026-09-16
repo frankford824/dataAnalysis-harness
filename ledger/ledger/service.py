@@ -431,16 +431,16 @@ def _recompute_locked(
         pricing_allowed = bool(sl.cost_coverage.get("passed")) or (
             not sl.cost_coverage.get("expected") and sl.pricing_gaps.is_empty()
         )
-        partial_pricing = not sl.pricing_gaps.is_empty() and pricing_allowed
+        partial_pricing = not sl.pricing_gaps.is_empty()
         allocation = (commission_engine.calculate(result, model, store.id, sl.period, registry,
                                                    allow_partial_pricing=partial_pricing)
-                      if registry and pricing_allowed else None)
-        payload["commission"] = (commission_engine.pending_pricing(sl.pricing_gaps.height, sl.cost_coverage)
-                                 if not pricing_allowed
-                                 else allocation[0] if allocation else _commission(
+                      if registry else None)
+        payload["commission"] = (allocation[0] if allocation else
+                                 commission_engine.pending_pricing(sl.pricing_gaps.height, sl.cost_coverage)
+                                 if not pricing_allowed else _commission(
                                      result, model, store, sl.period,
                                      allow_partial_pricing=partial_pricing))
-        if not pricing_allowed and registry:
+        if not pricing_allowed and registry and not allocation:
             c = payload["commission"]
             c["people"] = commission_engine.participation_only(result, model, store.id, sl.period, registry)
             c["participation_basis"] = "complete_link_output_per_assigned_person"
@@ -463,12 +463,20 @@ def _recompute_locked(
                     person["gross"] = None
             if partial_pricing:
                 c["pricing_pending_count"] = sl.pricing_gaps.height
-                c["pricing_threshold_met"] = True
+                c["pricing_threshold_met"] = pricing_allowed
                 c["cost_coverage"] = sl.cost_coverage
-                c["notes"].append(
-                    f"商品成本覆盖率{sl.cost_coverage['coverage']:.1%}，已达到"
-                    f"{sl.cost_coverage['threshold']:.0%}结账门槛；未覆盖成本暂未计入。"
-                )
+                if pricing_allowed:
+                    c["notes"].append(
+                        f"商品成本覆盖率{sl.cost_coverage['coverage']:.1%}，已达到"
+                        f"{sl.cost_coverage['threshold']:.0%}结账门槛；未覆盖成本暂未计入。"
+                    )
+                else:
+                    c["amount_complete"] = False
+                    c["notes"].append(
+                        f"商品成本覆盖率{sl.cost_coverage['coverage']:.1%}，未达到"
+                        f"{sl.cost_coverage['threshold']:.0%}自动放行参考；逐人提成已按现有资料试算，"
+                        "人工结账时可直接接受或修改。"
+                    )
             if ing.source_sync_pending:
                 c["amount_complete"] = False
                 c["notes"].append("订单来源仍在同步，当前提成仅为阶段试算")
