@@ -49,6 +49,17 @@ def profit_after_labor(profit, labor):
     return money_float(decimal(profit) - decimal(labor or 0))
 
 
+def _output_residual(total, values, field):
+    """Return the visible store amount not represented by named people."""
+    if total is None:
+        return None
+    represented = sum(
+        (decimal(value[field]) for value in values.values()
+         if value.get(field) is not None), Decimal(0)
+    )
+    return money_float(decimal(total) - represented)
+
+
 _profit_lock = threading.RLock()
 _profit_cache: OrderedDict[tuple, dict[str, dict[str, float]] | None] = OrderedDict()
 _PROFIT_CACHE_LIMIT = 128
@@ -396,6 +407,33 @@ def build(workspace, registry, model, start, end, store_ids=None, person_ids=Non
             total=people_totals.setdefault(pid,{'person_id':pid,'person':label,'employee_no':roster.get(pid,{}).get('employee_no',''),
                                                'amount':Decimal(0),'stores':set(),'periods':set(),'statuses':set()})
             total['amount']+=amount;total['stores'].add(sid);total['periods'].add(period);total['statuses'].add(status)
+        if not selected_people and source_c.get('people'):
+            store_profit = profit_after_labor(operating, visible_labor)
+            residual_sales = _output_residual(sales, person_output, 'sales')
+            residual_gross = _output_residual(gross, person_output, 'gross')
+            residual_profit = _output_residual(
+                store_profit,
+                {pid: {'profit': value} for pid, value in person_profit.items()},
+                'profit',
+            )
+            residuals = (residual_sales, residual_gross, residual_profit)
+            if any(value is not None and abs(value) > .01 for value in residuals):
+                missing_count = int(source_c.get('unassigned_orders') or 0)
+                label = (f'未分配（{missing_count}笔订单信息不完整）'
+                         if missing_count else '未分配（缺少人员归属证据）')
+                member_rows.append({
+                    'kind':'unassigned','person_id':None,'person':label,'employee_no':'',
+                    'store_id':sid,'store':names[sid],'period':period,
+                    'sales':residual_sales,'gross':residual_gross,
+                    'profit_after_labor':residual_profit,'labor_cost':None,
+                    'base':source_c.get('unassigned_base'),'base_name':scope['base_name'],
+                    'amount':None,'store_amount':None,'status':'待核对',
+                    'finance_run':record['id'],
+                })
+                profit_label = ('待核对' if residual_profit is None
+                                else f'{residual_profit:,.2f} 元')
+                notes.append(f'{label}：利润额 {profit_label}；人员行与店铺合计的差额已显式列出')
+                scope['notes']='；'.join(notes)
         scopes[(sid,period)]=scope
         if not selected_people or member_rows:
             store_person_rows.append({'kind':'store','person':'店铺合计','person_id':None,

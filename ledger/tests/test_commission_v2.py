@@ -111,6 +111,43 @@ def test_shared_link_splits_all_person_outputs_by_points(tmp_path):
     assert [values[p]['allocated_profit'] for p in (a,b)]==[36,24]
 
 
+def test_uniform_store_distribution_covers_missing_product_and_time(tmp_path):
+    r,a,b=registry(tmp_path)
+    body={'segments':[{'valid_from':'2026-05-01','total_rate':'.05','allocations':[
+        {'person_id':a,'role':'运营','rate':'.03'},
+        {'person_id':b,'role':'运营','rate':'.02'}]}]}
+    for product in ('p1','p2'):
+        r.save_scheme('s1',product,body,'tester','整店两人统一分点',publish=True)
+    run=_run([('known','p1','2026-05-02',50),
+              ('missing-product','','2026-05-03',100),
+              ('missing-time','p1',None,50)])
+    summary,details,_=calculate(run,_model(),'s1','2026-05',r)
+    assert summary['unassigned_orders']==0 and summary['unassigned_base']==0
+    assert summary['uniform_fallback_orders']==2 and summary['fallback_base']==150
+    assert summary['amount_complete'] is True and summary['total']==10
+    values={person['person_id']:person for person in summary['people']}
+    assert [values[pid]['amount'] for pid in (a,b)]==[6,4]
+    assert [values[pid]['allocated_gross'] for pid in (a,b)]==[120,80]
+    fallback=details.filter(pl.col('fallback_reason')=='store_uniform_distribution')
+    assert fallback.height==4 and fallback['status'].unique().to_list()==['distribute']
+
+
+def test_mixed_store_distributions_do_not_guess_missing_identity(tmp_path):
+    r,a,b=registry(tmp_path)
+    r.save_scheme('s1','p1',{'segments':[segment('2026-05-01',a)]},
+                  'tester','甲负责',publish=True)
+    r.save_scheme('s1','p2',{'segments':[segment('2026-05-01',b)]},
+                  'tester','乙负责',publish=True)
+    run=_run([('known','p1','2026-05-02',50),
+              ('missing-product','','2026-05-03',100),
+              ('missing-time','p1',None,50)])
+    summary,details,_=calculate(run,_model(),'s1','2026-05',r)
+    assert summary['unassigned_orders']==2 and summary['unassigned_base']==150
+    assert summary['uniform_fallback_orders']==0 and summary['amount_complete'] is False
+    assert set(details.filter(pl.col('status')!='distribute')['status'].to_list())=={
+        'missing_product_id','missing_order_time'}
+
+
 def test_june_store_default_covers_unassigned_links_preserving_existing_products(tmp_path):
     r, owner, _ = registry(tmp_path)
     r.save_scheme('s1', 'p1', {'segments':[segment('2026-06-01',owner,rate='.05')]},

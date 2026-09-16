@@ -5,6 +5,7 @@ import hashlib
 import json
 import warnings
 from collections import defaultdict
+from datetime import datetime
 from decimal import Decimal
 from pathlib import Path
 from uuid import uuid4
@@ -95,6 +96,79 @@ def _match(orders, rules):
         .when((pl.col("mode") == "distribute") & (pl.col("amount_hold") != "")).then(pl.col("amount_hold"))
         .otherwise(pl.col("mode")).alias("status")
     )
+
+
+def _uniform_distribution_rule(rules, allocations, period):
+    """Return one safe store-wide rule when every rule in the month has one signature.
+
+    Missing product IDs and missing source timestamps cannot select a product/time
+    rule.  They may still be attributed when every possible rule for this store
+    month names the same people at the same rates.  A mixed owner, rate, exclusion,
+    expiry, or amount hold remains unassigned instead of being guessed.
+    """
+    try:
+        start = datetime.fromisoformat(period + "-01T00:00:00")
+        year, month = map(int, period.split("-"))
+        end = datetime(year + (month == 12), month % 12 + 1, 1)
+    except (TypeError, ValueError):
+        return None
+    candidates = rules.filter(
+        (pl.col("from_at") < end)
+        & (pl.col("to_at").is_null() | (pl.col("to_at") > start))
+    )
+    if candidates.is_empty() or candidates.filter(
+        (pl.col("mode") != "distribute")
+        | (pl.col("amount_hold") != "")
+        | pl.col("wage_preview")
+    ).height:
+        return None
+    signatures = {}
+    for rule in candidates.iter_rows(named=True):
+        lines = allocations.filter(pl.col("rule_key") == rule["rule_key"])
+        if lines.is_empty():
+            return None
+        shares = tuple(sorted(
+            (str(person), Decimal(str(share)))
+            for person, share in lines.select("person_id", "share").iter_rows()
+        ))
+        total = Decimal(str(rule["total_rate"]))
+        if total <= 0 or any(share <= 0 for _, share in shares) or sum(
+            (share for _, share in shares), Decimal(0)
+        ) != total:
+            return None
+        signatures.setdefault((total, shares), rule)
+        if len(signatures) > 1:
+            return None
+    return next(iter(signatures.values()))
+
+
+def _attribute_uniform_unknowns(matched, rules, allocations, period):
+    """Apply an unambiguous store-month distribution to rows lacking match inputs."""
+    matched = matched.with_columns(
+        pl.when(pl.col("fallback")).then(pl.lit("store_default"))
+        .otherwise(pl.lit("")).alias("fallback_reason")
+    )
+    rule = _uniform_distribution_rule(rules, allocations, period)
+    if rule is None:
+        return matched, 0
+    unknown = pl.col("status").is_in(["missing_order_time", "missing_product_id"])
+    count = int(matched.select(unknown.sum()).item() or 0)
+    if not count:
+        return matched, 0
+    columns = [
+        "rule_key", "valid_from", "valid_to", "mode", "total_rate",
+        "rule_version", "rule_name", "amount_hold", "priority", "wage_preview",
+        "from_at", "to_at",
+    ]
+    matched = matched.with_columns(*[
+        pl.when(unknown).then(pl.lit(rule[name], dtype=matched.schema[name]))
+        .otherwise(pl.col(name)).alias(name)
+        for name in columns
+    ], pl.when(unknown).then(pl.lit(True)).otherwise(pl.col("fallback")).alias("fallback"),
+        pl.when(unknown).then(pl.lit("store_uniform_distribution"))
+        .otherwise(pl.col("fallback_reason")).alias("fallback_reason"),
+        pl.when(unknown).then(pl.lit("distribute")).otherwise(pl.col("status")).alias("status"))
+    return matched, count
 
 
 def pending_pricing(count: int, coverage: dict | None = None) -> dict:
@@ -270,6 +344,9 @@ def calculate(result, model, store_id: str, period: str, registry: Registry,
     orders = orders.with_columns(pl.col("base").cast(pl.Decimal(28, 10)))
     rf, af = _frames(versions, people, policy_body.get("wages", "pending"))
     matched = _match(orders, rf)
+    matched, uniform_fallback_orders = _attribute_uniform_unknowns(
+        matched, rf, af, period,
+    )
     paid = matched.filter(pl.col("status") == "distribute").join(af, on="rule_key", how="inner")
     paid = paid.with_columns(pl.col("share").cast(pl.Decimal(16, 8)))
     paid = paid.with_columns((pl.col("base") * pl.col("share")).round(2, mode="half_away_from_zero").alias("amount"))
@@ -340,6 +417,11 @@ def calculate(result, model, store_id: str, period: str, registry: Registry,
         notes.append(f"{other_missing}笔订单的提成关系待确认或缺少有效身份/时间")
     if wage_preview:
         notes.append(f"按指定口径先不扣工资，{wage_preview}笔相关订单仅作试算")
+    if uniform_fallback_orders:
+        notes.append(
+            f"{uniform_fallback_orders}笔订单缺少商品链接或原始下单时间；"
+            "本店本月所有有效配置的人员和点数完全一致，已按该唯一配置分配"
+        )
     calc_id = str(uuid4())
     payload = {
         "store": store_id, "period": period, "base_node": node.id, "base_name": node.name,
@@ -348,6 +430,7 @@ def calculate(result, model, store_id: str, period: str, registry: Registry,
         "products": sorted(products, key=lambda r: -r["base"]), "configured": bool(person_rows),
         "unassigned_base": money_float(missing["base"].sum()),
         "fallback_base": money_float(matched.filter(pl.col("fallback"))["base"].sum()),
+        "uniform_fallback_orders": uniform_fallback_orders,
         "negative_orders": negative.height, "negative_base": money_float(negative["original_base"].sum()),
         "on_loss": on_loss,
         "skipped_loss_base": money_float(negative["original_base"].sum()) if on_loss == "skip" else 0.0,

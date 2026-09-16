@@ -393,6 +393,41 @@ def test_store_person_profit_after_labor_keeps_full_participation_and_export(tmp
     assert [r['利润额'] for r in raw_rows] == ['150.0', '90.0', '60.0']
 
 
+def test_store_person_report_exposes_unattributed_output_instead_of_hiding_gap(tmp_path):
+    ws=Workspace(tmp_path);registry=Registry(tmp_path)
+    model=_model(stores=(Store(id='s1',name='店铺1',platform='taobao'),))
+    model=model.model_copy(update={
+        'statement':(model.statement[0].model_copy(update={'headline':'revenue'}),
+                     *model.statement[1:],
+                     StatementNode(id='net_profit',name='利润',level=1,is_total=True,
+                                   headline='profit',formula={'op':'add','of':['gross']})),
+    })
+    people=[registry.person_save({'name':name},'test','登记') for name in ('甲','乙')]
+    ws.record('s1','2026-06',{
+        'statement':[{'id':model.statement[0].id,'value':100,'available':True},
+                     {'id':'gross','value':80,'available':True},
+                     {'id':'net_profit','value':60,'available':True}],
+        'commission':{'engine':'commission-v2','base_node':'net_profit',
+                      'base_total':60,'total':4,'amount_complete':False,
+                      'unassigned_orders':2,'unassigned_base':12,
+                      'people':[
+                          {'person_id':people[0]['id'],'person':'甲','amount':3,
+                           'allocated_sales':60,'allocated_gross':48,'allocated_profit':36},
+                          {'person_id':people[1]['id'],'person':'乙','amount':1,
+                           'allocated_sales':20,'allocated_gross':16,'allocated_profit':12},
+                      ]},
+    },[])
+    app=FastAPI();install(app,lambda:ws,lambda:model)
+    rows=TestClient(app).post('/api/commission-v2/reports/query',json={
+        'start':'2026-06','end':'2026-06','store_ids':['s1'],
+        'view':'store_people'}).json()['items']
+    store,*members=rows
+    assert [row['kind'] for row in members]==['person','person','unassigned']
+    assert members[-1]['person']=='未分配（2笔订单信息不完整）'
+    assert (members[-1]['sales'],members[-1]['gross'],members[-1]['profit_after_labor'])==(20,16,12)
+    assert sum(row['profit_after_labor'] for row in members)==store['profit_after_labor']==60
+
+
 @pytest.mark.parametrize('store_id,store_profit,labor,assigned_profit,sales,trial,rate,expected', [
     ('douyin_mszr2dhn', 46686.67, 5477.63, 46108.09, 123571.79, 2302.64, .05, 2060.45),
     ('douyin_mt9sbkne', 3460.11, 647.24, 2608.20, 10804.25, 130.50, .05, 140.64),
@@ -524,11 +559,13 @@ def test_unattributed_store_loss_is_shared_without_assigning_unknown_orders(tmp_
         'view':'store_people'}).json()['items']
     store,*people=rows
     assert store['profit_after_labor']==40856.83
-    assert [p['profit_after_labor'] for p in people]==[29587.50,11269.33]
+    assert [p['profit_after_labor'] for p in people]==[29587.50,11269.33,0]
     assert sum(p['profit_after_labor'] for p in people)==store['profit_after_labor']
-    assert [p['sales'] for p in people]==[58636.06,20932.91]
+    assert [p['sales'] for p in people]==[58636.06,20932.91,51.92]
+    assert people[-1]['kind']=='unassigned'
+    assert people[-1]['person']=='未分配（4笔订单信息不完整）'
     assert round(sum(p['gross'] for p in people),2)==store['gross']
-    assert [p['gross'] for p in people]==[36985.58,13849.41]
+    assert [p['gross'] for p in people]==[36985.58,13849.41,0]
 
 
 def test_archived_order_details_supply_additive_profit_without_mutating_run(tmp_path, monkeypatch):
