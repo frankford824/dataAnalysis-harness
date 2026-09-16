@@ -99,6 +99,21 @@ CREATE TRIGGER IF NOT EXISTS settlement_no_update BEFORE UPDATE ON settlement
  BEGIN SELECT RAISE(ABORT,'commission settlement history is immutable'); END;
 CREATE TRIGGER IF NOT EXISTS settlement_no_delete BEFORE DELETE ON settlement
  BEGIN SELECT RAISE(ABORT,'commission settlement history is immutable'); END;
+CREATE TABLE IF NOT EXISTS payout_confirmation (
+ id TEXT PRIMARY KEY, store_id TEXT NOT NULL, period TEXT NOT NULL,
+ finance_run INTEGER NOT NULL, at TEXT NOT NULL, actor TEXT NOT NULL,
+ reason TEXT NOT NULL, source_sha TEXT NOT NULL,
+ payouts_json TEXT NOT NULL, trial_json TEXT NOT NULL,
+ confirmed_total TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS payout_confirmation_scope
+ ON payout_confirmation(store_id,period,finance_run,at DESC);
+CREATE INDEX IF NOT EXISTS payout_confirmation_run
+ ON payout_confirmation(finance_run,at DESC);
+CREATE TRIGGER IF NOT EXISTS payout_confirmation_no_update BEFORE UPDATE ON payout_confirmation
+ BEGIN SELECT RAISE(ABORT,'confirmed payout history is immutable'); END;
+CREATE TRIGGER IF NOT EXISTS payout_confirmation_no_delete BEFORE DELETE ON payout_confirmation
+ BEGIN SELECT RAISE(ABORT,'confirmed payout history is immutable'); END;
 CREATE TABLE IF NOT EXISTS operator (
  id TEXT PRIMARY KEY, name TEXT NOT NULL, salt TEXT NOT NULL, password_hash TEXT NOT NULL,
  admin INTEGER NOT NULL DEFAULT 0, disabled INTEGER NOT NULL DEFAULT 0

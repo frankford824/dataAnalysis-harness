@@ -572,3 +572,138 @@ def test_employee_settlement_rejects_incomplete_amounts(tmp_path):
     })
     assert response.status_code == 400
     assert '待核对' in response.json()['detail'] or '未完成' in response.json()['detail']
+
+
+def test_report_confirms_person_payout_without_closing_store_and_freezes_settlement(tmp_path):
+    ws, registry, people, client = fixture(tmp_path)
+    original_run = record(ws, people, 's1', '2026-06', [10, 20], complete=False)
+    selection = {'start': '2026-06', 'end': '2026-06',
+                 'store_ids': ['s1'], 'view': 'store_people'}
+    before = client.post('/api/commission-v2/reports/query', json=selection).json()
+    assert before['trial_periods'] == 1
+    context = client.get('/api/commission-v2/payout-confirmations/context',
+                         params={'store_id': 's1', 'period': '2026-06',
+                                 'run_id': original_run}).json()
+    assert [row['suggested'] for row in context['people']] == [10, 20]
+    decision = {'store_id': 's1', 'period': '2026-06', 'run_id': original_run,
+                'source_sha': context['source_sha'], 'reason': '已与两位运营核对提成',
+                'payouts': [{'person_id': row['person_id'], 'amount': value}
+                            for row, value in zip(context['people'], ('12.00', '13.00'))]}
+    assert client.post('/api/commission-v2/payout-confirmations',
+                       json={**decision, 'run_id': original_run + 1}).status_code == 409
+    assert client.post('/api/commission-v2/payout-confirmations',
+                       json={**decision, 'payouts': [{'person_id': 'unknown',
+                                                     'amount': '12.00'}]}).status_code == 400
+    assert client.post('/api/commission-v2/payout-confirmations',
+                       json={**decision, 'payouts': [decision['payouts'][0],
+                                                     {**decision['payouts'][1],
+                                                      'amount': '13.001'}]}).status_code == 400
+    saved = client.post('/api/commission-v2/payout-confirmations', json=decision)
+    assert saved.status_code == 200, saved.text
+    assert ws.state('s1', '2026-06').closed is False
+    assert ws.latest_run('s1', '2026-06')['id'] == original_run
+    assert json.loads(ws.conn.execute('SELECT result FROM run WHERE id=?',
+                                      (original_run,)).fetchone()[0])['commission']['total'] == 30
+    revised = client.post('/api/commission-v2/reports/query', json=selection).json()
+    assert revised['trial_periods'] == 0 and revised['total'] == 25
+    assert [row['amount'] for row in revised['items'][1:]] == [12, 13]
+    assert all(row['status'] == '已人工确认' for row in revised['items'])
+    assert client.post('/api/commission-v2/payout-confirmations', json=decision).status_code == 409
+    with registry.connect() as conn:
+        row = conn.execute('SELECT count(*) FROM payout_confirmation').fetchone()[0]
+        assert row == 1
+        with pytest.raises(Exception):
+            conn.execute('UPDATE payout_confirmation SET confirmed_total=0')
+    settlement = client.post('/api/commission-v2/settlements', json={
+        'start': '2026-06', 'end': '2026-06', 'store_ids': ['s1'],
+        'run_ids': revised['run_ids'], 'fingerprint': revised['fingerprint'],
+        'note': '本店人员确认金额已结算'})
+    assert settlement.status_code == 200, settlement.text
+    settled_id = settlement.json()['id']
+    record(ws, people, 's1', '2026-06', [40, 50], complete=False)
+    live = client.post('/api/commission-v2/reports/query', json=selection).json()
+    assert live['trial_periods'] == 1 and live['total'] == 90
+    assert client.get('/api/commission-v2/settlements/' + settled_id).json()['total'] == 25
+    refreshed = client.get('/api/commission-v2/payout-confirmations/context', params={
+        'store_id': 's1', 'period': '2026-06',
+        'run_id': ws.latest_run('s1', '2026-06')['id']}).json()
+    assert refreshed['latest'] is None
+    assert refreshed['history'][0]['confirmed_total'] == '25.00'
+
+
+def test_incomplete_store_close_stays_pending_until_person_payout_is_confirmed(tmp_path):
+    ws, _, people, client = fixture(tmp_path)
+    run = record(ws, people, 's1', '2026-06', [10], complete=False)
+    ws.close_period('s1', '2026-06', by='test', note='店铺经营账已人工确认')
+    scope = {'start': '2026-06', 'end': '2026-06',
+             'store_ids': ['s1'], 'view': 'store_people'}
+    report = client.post('/api/commission-v2/reports/query', json=scope).json()
+    assert report['trial_periods'] == 1
+    context = client.get('/api/commission-v2/payout-confirmations/context',
+                         params={'store_id': 's1', 'period': '2026-06',
+                                 'run_id': run}).json()
+    assert context['store_closed'] is True
+    response = client.post('/api/commission-v2/payout-confirmations', json={
+        'store_id': 's1', 'period': '2026-06', 'run_id': run,
+        'source_sha': context['source_sha'], 'reason': '员工提成另行核对',
+        'payouts': [{'person_id': context['people'][0]['person_id'],
+                     'amount': '11.00'}]})
+    assert response.status_code == 200, response.text
+    confirmed = client.post('/api/commission-v2/reports/query', json=scope).json()
+    assert confirmed['trial_periods'] == 0 and confirmed['total'] == 11
+    assert ws.state('s1', '2026-06').closed is True
+
+
+def test_registered_person_can_confirm_payout_with_goods_cost_still_missing(tmp_path):
+    from test_commission_v2 import segment
+    ws, registry, people, client = fixture(tmp_path)
+    registry.save_scheme('s1', 'p1', {
+        'segments': [segment('2026-06-01', people[0]['id'])]},
+        'test', '登记运营', publish=True)
+    run = ws.record('s1', '2026-06', {'commission': {
+        'engine': 'commission-v2', 'total': None, 'people': [],
+        'pricing_threshold_met': False, 'pricing_pending_count': 3,
+        'amount_complete': False}, 'statement': []}, [])
+    context = client.get('/api/commission-v2/payout-confirmations/context', params={
+        'store_id': 's1', 'period': '2026-06', 'run_id': run}).json()
+    assert len(context['people']) == 1 and context['people'][0]['suggested'] is None
+    confirmed = client.post('/api/commission-v2/payout-confirmations', json={
+        'store_id': 's1', 'period': '2026-06', 'run_id': run,
+        'source_sha': context['source_sha'], 'reason': '成本仍待补，员工提成已人工核对',
+        'payouts': [{'person_id': people[0]['id'], 'amount': '17.00'}]})
+    assert confirmed.status_code == 200, confirmed.text
+    report = client.post('/api/commission-v2/reports/query', json={
+        'start': '2026-06', 'end': '2026-06', 'store_ids': ['s1'],
+        'view': 'store_people'}).json()
+    assert report['total'] == 17 and report['trial_periods'] == 0
+    assert report['missing_periods'] == 0
+    assert report['items'][0]['status'] == '已人工确认'
+    assert ws.state('s1', '2026-06').closed is False
+    assert json.loads(ws.latest_run('s1', '2026-06')['result'])['commission']['total'] is None
+
+
+def test_corrected_human_payout_keeps_the_previous_decision(tmp_path):
+    ws, registry, people, client = fixture(tmp_path)
+    run = record(ws, people, 's1', '2026-06', [10], complete=False)
+    params = {'store_id': 's1', 'period': '2026-06', 'run_id': run}
+    first_context = client.get('/api/commission-v2/payout-confirmations/context',
+                               params=params).json()
+    body = {**params, 'source_sha': first_context['source_sha'],
+            'reason': '人工核对',
+            'payouts': [{'person_id': people[0]['id'], 'amount': '11.00'}]}
+    first = client.post('/api/commission-v2/payout-confirmations', json=body).json()
+    second_context = client.get('/api/commission-v2/payout-confirmations/context',
+                                params=params).json()
+    assert second_context['latest']['id'] == first['id']
+    correction = client.post('/api/commission-v2/payout-confirmations', json={
+        **body, 'expected_confirmation_id': first['id'],
+        'payouts': [{'person_id': people[0]['id'], 'amount': '12.00'}],
+        'reason': '运营复核后更正金额'})
+    assert correction.status_code == 200, correction.text
+    with registry.connect() as conn:
+        decisions = conn.execute('SELECT id,confirmed_total FROM payout_confirmation '
+                                 'ORDER BY at,id').fetchall()
+        assert [row['confirmed_total'] for row in decisions] == ['11.00', '12.00']
+    live = client.post('/api/commission-v2/reports/query', json={
+        'start': '2026-06', 'end': '2026-06', 'store_ids': ['s1']}).json()
+    assert live['total'] == 12 and live['trial_periods'] == 0

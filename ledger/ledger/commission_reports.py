@@ -14,7 +14,7 @@ import polars as pl
 
 from . import overhead
 from .commission_engine import allocated_profit
-from .commission_registry import RegistryError
+from .commission_registry import RegistryError, json_text
 from .labor_api import frozen_shares
 from .money import money_float
 
@@ -214,18 +214,45 @@ def build(workspace, registry, model, start, end, store_ids=None, person_ids=Non
     if run_ids is not None and len(records)!=len(run_ids):raise RegistryError('部分计算记录已不存在或不在所选范围，请重新查询')
     keys=[(r['store_id'],r['period']) for r in records]
     if len(keys)!=len(set(keys)):raise RegistryError('同店同账期只能选择一份计算结果')
+    from .commission_confirm import active_for_runs
+    confirmed = active_for_runs(registry, records)
     scopes={}; lines=[]; store_person_rows=[]; available={}; people_totals={}; store_totals={}; store_people={}
     for record in records:
         c=json.loads(record['commission_json'] or '{}');sid=record['store_id'];period=record['period']
+        source_c=c
+        decision=confirmed.get((sid,period,record['id']))
+        if decision and hashlib.sha256(json_text(c).encode()).hexdigest() == decision['source_sha']:
+            c={**c,'people':[dict(person) for person in c.get('people') or []]}
+            by_id={str(person.get('person_id')):person for person in c['people']}
+            for selected in json.loads(decision['payouts_json']):
+                pid=selected['person_id']
+                person=by_id.get(pid)
+                if person is None:
+                    person={'person_id':pid,'person':selected['person'],
+                            'base':None,'sales':None,'gross':None}
+                    c['people'].append(person)
+                    by_id[pid]=person
+                person['amount']=selected['amount']
+            c.update(total=money_float(decimal(decision['confirmed_total'])),
+                     manual_amounts_after_labor=True,manual_confirmed=True,
+                     amount_complete=True)
+            c.setdefault('notes',[]).append('本期提成已由人工逐人确认，原试算和未分配订单保留')
+        else:
+            decision=None
         names.setdefault(sid,record['store_name'] or sid)
         closed=record['state']=='closed' and record['frozen_id']==record['id']
         legacy=c.get('engine')!='commission-v2'
-        status='已结账' if closed else ('历史口径' if legacy else ('已计算' if c.get('amount_complete') else '试算'))
+        status=('已人工确认' if decision else
+                '试算（店铺已结账）' if closed and c.get('amount_complete') is False else
+                '已结账' if closed else
+                '历史口径' if legacy else
+                '已计算' if c.get('amount_complete') else '试算')
         notes=list(c.get('notes') or [])
         if closed and c.get('amount_complete') is False:notes.append('原结账结果保留了试算标记')
         has_result=c.get('total') is not None or any(p.get('amount') is not None for p in c.get('people',[]))
         if not has_result:status='未计算提成'
-        if c.get('pricing_threshold_met') is False or (c.get('pricing_pending_count') and not c.get('pricing_threshold_met')):
+        if not decision and (c.get('pricing_threshold_met') is False or
+                             (c.get('pricing_pending_count') and not c.get('pricing_threshold_met'))):
             status='成本待人工确认'
         all_total=sum((decimal(p['amount']) for p in c.get('people',[]) if p.get('amount') is not None),Decimal(0))
         if c.get('total') is not None and abs(all_total-decimal(c['total']))>Decimal('.01'):
@@ -252,7 +279,7 @@ def build(workspace, registry, model, start, end, store_ids=None, person_ids=Non
         gross=statement_amount(statement,gross_node) if gross_node else None
         operating=statement_amount(statement,profit_node) if profit_node else None
         visible_labor=labor_cut if spread.total is not None else Decimal(0)
-        person_profit=attributed_profit(c,operating,visible_labor,registry,
+        person_profit=attributed_profit(source_c,operating,visible_labor,registry,
                                         manual_cost=bool(record['manual_cost_json']))
         member_rows=[]
         for person in c.get('people',[]):

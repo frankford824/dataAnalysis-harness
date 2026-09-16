@@ -21,7 +21,7 @@ from fastapi.responses import StreamingResponse
 from starlette.concurrency import run_in_threadpool
 from pydantic import BaseModel, Field
 
-from . import commission_catalog, commission_batch, commission_reports
+from . import commission_catalog, commission_batch, commission_confirm, commission_reports
 from .commission_registry import Registry, RegistryError, RevisionConflict, json_text, local_time, now
 from .money import money_float
 
@@ -36,6 +36,17 @@ class SchemeChange(Change):
     product_id: str
     body: dict
     publish: bool = False
+
+
+class PayoutConfirmationChange(BaseModel):
+    store_id: str
+    period: str
+    run_id: int = Field(gt=0)
+    source_sha: str = Field(min_length=64, max_length=64)
+    expected_confirmation_id: str = ""
+    payouts: list[dict] = Field(default_factory=list, max_length=100)
+    no_payout: bool = False
+    reason: str = Field(min_length=1, max_length=500)
 
 
 class SettingChange(BaseModel):
@@ -482,6 +493,21 @@ def install(app, workspace, model, model_root: Path | None = None):
                                for row in report['coverage'] if row.get('unassigned_orders')
                                and '试算' in row['status']],
         }
+
+    @router.get('/payout-confirmations/context')
+    def payout_confirmation_context(store_id: str, period: str, run_id: int):
+        return commission_confirm.context(workspace(), reg(), model(),
+                                          store_id, period, expected_run=run_id)
+
+    @router.post('/payout-confirmations')
+    def payout_confirmation_save(change: PayoutConfirmationChange, request: Request):
+        return commission_confirm.confirm(
+            workspace(), reg(), model(), store_id=change.store_id,
+            period=change.period, run_id=change.run_id,
+            source_sha=change.source_sha,
+            expected_confirmation_id=change.expected_confirmation_id,
+            payouts=change.payouts, no_payout=change.no_payout,
+            reason=change.reason, actor=actor(request)['id'])
 
     @router.post("/export/reports/{kind}")
     def report_export(kind: str, selection: ReportSelection):
