@@ -23,7 +23,7 @@ async function call(path, options={}) {
 function open(options={}) {
   selection.value=options;kind.value=options.kind||'selected';shops.value=options.store_id?[options.store_id]:[]
   text.value='';plan.value=null;errors.value=[];failure.value='';page.value=0;operation.value=kind.value==='selected'?'merge':'replace'
-  form.value={mode:'distribute',valid_from:stamp(),valid_to:'',allocations:[{person:null,percent:null}]};shown.value=true
+  form.value={mode:'distribute',valid_from:options.valid_from||stamp(),valid_to:'',allocations:[{person:null,percent:null}]};shown.value=true
 }
 function prepared() {
   if(form.value.mode!=='distribute')return []

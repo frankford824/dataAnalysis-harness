@@ -30,6 +30,28 @@ const allScope = ref(null)
 const batchDialog = ref(null)
 const peopleDialog = ref(null)
 const fileInput = ref(null)
+const issue = ref(null), issueShow = ref(false), issueError = ref('')
+let issueTicket = 0
+const issueKey = computed(() => shared.storeIds.length === 1 && shared.start === shared.end
+  ? `${shared.storeIds[0]}:${shared.start}:${shared.refreshTick}` : '')
+watch(issueKey, async key => {
+  const ticket = ++issueTicket
+  issue.value = null; issueError.value = ''
+  if (!key) return
+  try {
+    const params = new URLSearchParams({store_id:shared.storeIds[0],period:shared.start})
+    const result = await commissionRequest(`/unassigned?${params}`)
+    if (ticket === issueTicket) issue.value = result
+  } catch (error) { if (ticket === issueTicket) issueError.value = error.message }
+}, {immediate:true})
+function bulkIssue(){
+  if(!issue.value?.links?.length)return
+  issueShow.value=false
+  batchDialog.value.open({targets:issue.value.links.map(link=>({
+    store_id:link.store_id,product_id:link.product_id,
+    product_name:link.product_name,revision:link.revision,
+  })),valid_from:`${issue.value.period}-01T00:00:00`})
+}
 const keyOf = row => row.store_id + ':' + row.product_id
 const chosen = computed(() => Object.values(checked.value))
 function rowSelected(row){return allScope.value?!((allScope.value.excluded||[]).includes(keyOf(row))):!!checked.value[keyOf(row)]}
@@ -101,7 +123,7 @@ async function edit(row = {}) {
     for(const p of current.allocations||[])grouped.set(p.person_id,(grouped.get(p.person_id)||0)+Number(p.rate))
     const allocations=selected.value?[...grouped].map(([person,rate])=>({person,percent:Number((rate*100).toFixed(8))})):(row.people||[]).map(p=>({person:p.person_id,percent:Number((Number(p.rate)*100).toFixed(8))}))
     form.value={store_id:row.store_id||(shared.storeIds.length===1?shared.storeIds[0]:''),product_id:row.product_id||'',product_name:selected.value?.product_name||row.product_name||'',
-      mode:current.mode||'distribute',valid_from:current.valid_from>stamp?current.valid_from:stamp,valid_to:current.valid_to>stamp?current.valid_to:'',allocations}
+      mode:current.mode||'distribute',valid_from:row.issue_valid_from||(current.valid_from>stamp?current.valid_from:stamp),valid_to:current.valid_to>stamp?current.valid_to:'',allocations}
     if(!form.value.allocations.length)form.value.allocations.push({person:null,percent:null})
     editorOriginal.value=JSON.stringify(form.value)
   }catch(e){if(ticket===editorSerial&&e.name!=='AbortError')editorError.value=e.message}
@@ -167,11 +189,28 @@ defineExpose({edit,menu,busy})
       <button class="text-button" @click="clearSelection">取消选择</button>
     </div>
     <div v-if="error" class="commission-error" role="alert">{{ error }}<button class="text-button" @click="load">重试</button></div>
+    <n-alert v-if="issue?.orders" type="warning" :bordered="false" class="commission-unassigned">
+      {{ issue.store }} {{ issue.period }}：{{ issue.orders }} 笔提成订单未归属（利润基数 ¥{{ Number(issue.base).toLocaleString('zh-CN',{minimumFractionDigits:2}) }}）；{{ issue.link_count }} 个有商品链接可设置，{{ issue.without_product }} 笔缺商品号需人工确认。设置保存后会自动重算，本数量取自最近一次核算。
+      <n-button v-if="issue.link_count" size="small" text type="primary" @click="issueShow=true">查看这些链接</n-button>
+    </n-alert>
+    <n-alert v-else-if="issueError" type="info" :bordered="false" class="commission-unassigned">暂时无法读取本月未归属订单：{{ issueError }}</n-alert>
     <div v-if="loading" class="commission-loading-line" />
     <LedgerTable :rows="rows" :columns="tableColumns" :row-key="keyOf" :loading="loading" :checked-keys="visibleChecked" :max-height="520" empty="没有找到商品，可调整筛选条件" @update:checked-keys="checkTableRows" />
     <div class="commission-paging"><span class="row-count">共 {{ data?.total ?? "—" }} 件商品 · 本页 {{ rows.length }} 件</span><n-button size="small" :disabled="!pages.length || locked" @click="previousPage">上一页</n-button><span>第 {{ data?.total_pages ? pages.length+1 : 0 }} / {{ data?.total_pages ?? "—" }} 页</span><n-button size="small" :disabled="!next || locked" @click="nextPage">下一页</n-button></div>
 
     <CommissionBatchDialog ref="batchDialog" :stores="app.stores" :people="people" @saved="saved" />
+    <n-drawer v-model:show="issueShow" :width="'min(620px,100vw)'">
+      <n-drawer-content :title="`${issue?.period||''} 未归属商品链接`" closable>
+        <p class="issue-help">{{ issue?.link_count || 0 }} 个链接可直接设置提成人员和点数；{{ issue?.without_product || 0 }} 笔没有商品号，只能由人工确认提成金额。生效日期已预填本月月初，请核对后再保存。</p>
+        <n-button v-if="issue?.links?.length" type="primary" size="small" @click="bulkIssue">批量设置这些链接</n-button>
+        <div class="issue-links">
+          <div v-for="link in issue?.links||[]" :key="link.product_id">
+            <strong>{{ link.product_name || link.product_id }}</strong><small>{{ link.product_id }} · {{ link.sub_orders }} 笔 · 利润基数 ¥{{ Number(link.base).toFixed(2) }}</small>
+            <n-button size="small" text type="primary" @click="issueShow=false;edit({...link,issue_valid_from:`${issue.period}-01T00:00:00`})">设置</n-button>
+          </div>
+        </div>
+      </n-drawer-content>
+    </n-drawer>
     <CommissionPeople ref="peopleDialog" @changed="shared.changed();load()" @assignments="showAssignments" />
     <n-drawer :show="showEditor" :width="'min(540px,100vw)'" :mask-closable="!busy || editorLoading" :close-on-esc="!busy || editorLoading" @update:show="closeEditor"><n-drawer-content :title="editorRow?.scheme_id?'修改提成':'新增设置'" closable class="commission-editor">
       <div v-if="editorRow?.scheme_id" class="commission-edit-context"><strong>{{form.product_name || '未填写商品名称'}}</strong><p>{{storeName(form.store_id)}} · {{form.product_id}}</p></div>
@@ -206,5 +245,6 @@ defineExpose({edit,menu,busy})
 
 .setting-person{display:flex;justify-content:space-between;gap:16px;line-height:1.85}.setting-person strong{font-weight:500;font-variant-numeric:tabular-nums}.empty-reset{display:block;margin:8px auto 0}.file-input{display:none}
 .commission-editor input,.commission-editor select{border:1px solid #dce2eb;border-radius:6px;padding:8px 10px;background:white;font-size:14px;color:#263244;box-sizing:border-box;min-width:0}.commission-editor label{display:block;margin:12px 0 6px;font-size:13px;color:#536071}.commission-editor label>input,.commission-editor label>select{display:block;width:100%;margin-top:6px}.commission-editor small{display:block;font-size:12px;color:#8a919d;margin-top:4px}.fields{display:grid;grid-template-columns:1fr 1fr;gap:14px}.allocation-head{display:grid;grid-template-columns:1fr 125px 42px;gap:12px;margin-top:24px;color:#6b7280;font-size:13px}.allocation-row{display:grid;grid-template-columns:1fr 125px 42px;gap:12px;align-items:center;margin:10px 0}.allocation-row .percentage{display:flex;align-items:center;gap:6px;margin:0}.percentage input{width:98px!important;margin:0!important}.allocation-footer{display:flex;justify-content:space-between;align-items:center;font-size:13px;color:#6b7280}.dates,.history{border-top:1px solid #eef0f3;padding-top:16px;margin-top:20px;font-size:13px}.dates summary,.history summary{cursor:pointer;color:#677183}.dates summary span{font-size:12px;margin-left:8px;color:#8a919d}.history-item{border-bottom:1px solid #eef0f3;padding:8px 0}.history-item p{margin:5px 0;line-height:1.6}.history-item .current-version{color:#16734b}.history-item .old-version{color:#7b8490;font-weight:500}.history{max-height:260px;overflow:auto}.footer{display:flex;justify-content:flex-end;gap:10px;margin-top:25px}
+.commission-unassigned{margin:10px 0 14px}.commission-unassigned .n-button{margin-left:8px}.issue-help{font-size:12px;color:#62728b;line-height:1.7}.issue-links{margin-top:14px;display:grid;gap:8px}.issue-links>div{border-bottom:1px solid #e9edf2;padding:9px 0;display:grid;grid-template-columns:minmax(0,1fr) auto;gap:3px 10px}.issue-links strong{font-size:13px;font-weight:550}.issue-links small{grid-column:1;color:#8791a0;font-size:11px}.issue-links .n-button{grid-column:2;grid-row:1/3;align-self:center}
 @media(max-width:640px){.fields{grid-template-columns:1fr;gap:0}.allocation-head,.allocation-row{grid-template-columns:1fr 96px 32px;gap:7px}.percentage input{width:70px!important}.dates summary span{display:block;margin:6px 0}}
 </style>

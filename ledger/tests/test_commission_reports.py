@@ -152,6 +152,29 @@ def test_report_names_unassigned_profit_behind_partial_negative_payout(tmp_path)
     assert report['total'] == -140.95  # Audit preserves the partial trial amount.
 
 
+def test_configuration_shows_unassigned_links_from_selected_order_month(tmp_path):
+    from test_commission_v2 import segment
+    ws, registry, people, client = fixture(tmp_path)
+    scheme = registry.save_scheme('s1', '123456789001', {
+        'segments': [segment('2026-09-01', people[0]['id'])]},
+        'test', '后来才设置提成', publish=True)
+    ws.record('s1', '2026-06', {'commission': {
+        'engine': 'commission-v2', 'unassigned_orders': 4,
+        'unassigned_base': 851.91, 'products': [
+            {'product_id': '123456789001', 'product_name': '商品A',
+             'unassigned': True, 'sub_orders': 3, 'base': 629.73},
+            {'product_id': '', 'product_name': '',
+             'unassigned': True, 'sub_orders': 1, 'base': 222.18}] }}, [])
+    result = client.get('/api/commission-v2/unassigned', params={
+        'store_id': 's1', 'period': '2026-06'})
+    assert result.status_code == 200, result.text
+    body = result.json()
+    assert body['orders'] == 4 and body['base'] == 851.91
+    assert body['link_count'] == 1 and body['without_product'] == 1
+    assert body['links'][0]['scheme_id'] == scheme['id']
+    assert body['links'][0]['product_id'] == '123456789001'
+
+
 def test_v2_legacy_name_ids_do_not_merge_across_stores(tmp_path):
     ws, _, _, c = fixture(tmp_path)
     historical = [{'id': 'legacy:same-name-hash', 'name': '同名人员'}]
@@ -345,6 +368,94 @@ def test_store_person_profit_after_labor_keeps_full_participation_and_export(tmp
     assert raw_export.status_code == 200
     raw_rows = list(csv.DictReader(io.StringIO(raw_export.text.lstrip('\ufeff'))))
     assert [r['利润额'] for r in raw_rows] == ['150.0', '95.0', '55.0']
+
+
+@pytest.mark.parametrize('store_id,store_profit,labor,assigned_profit,sales,trial,expected', [
+    ('douyin_mszr2dhn', 46686.67, 5477.63, 46108.09, 123571.79, 2302.64, 2031.52),
+    ('douyin_mt9sbkne', 3460.11, 647.24, 2608.20, 10804.25, 130.50, 98.05),
+])
+def test_caiguo_single_rate_payout_uses_person_profit_after_labor(
+        tmp_path, store_id, store_profit, labor, assigned_profit, sales, trial, expected):
+    ws=Workspace(tmp_path);registry=Registry(tmp_path)
+    model=_model(stores=(Store(id=store_id,name='蔡果店',platform='taobao'),))
+    model=model.model_copy(update={
+        'overheads':(Overhead(period='2026-06',amount=labor,name='兼职人工费用'),),
+        'statement':(model.statement[0].model_copy(update={'headline':'revenue'}),
+                     *model.statement[1:],
+                     StatementNode(id='net_profit',name='利润',level=1,is_total=True,
+                                   headline='profit',formula={'op':'add','of':['gross']})),
+    })
+    pid='legacy:5811db93188b314a53ce01f5'
+    registry.person_save({'id':pid,'name':'蔡果'},'test','登记')
+    run=ws.record(store_id,'2026-06',{
+        'statement':[{'id':model.statement[0].id,'value':sales+500,'available':True},
+                     {'id':'gross','value':assigned_profit+400,'available':True},
+                     {'id':'net_profit','value':store_profit,'available':True}],
+        'commission':{'engine':'commission-v2','base_node':'net_profit',
+                      'base_total':store_profit,'on_loss':'deduct',
+                      'amount_complete':False,'unassigned_orders':1,
+                      'total':trial,'people':[{'person_id':pid,'person':'蔡果',
+                          'amount':trial,'base':assigned_profit,
+                          'allocated_profit':assigned_profit,'profit':assigned_profit,
+                          'sales':sales,'gross':assigned_profit+100}],
+                      'products':[{'product_id':'12345678901','total_rate':0.05,
+                          'people':[{'person_id':pid,'person':'蔡果','amount':trial}]}]},
+    },[])
+    app=FastAPI();install(app,lambda:ws,lambda:model)
+    client=TestClient(app)
+    report=client.post('/api/commission-v2/reports/query',json={
+        'start':'2026-06','end':'2026-06','store_ids':[store_id],
+        'view':'store_people'}).json()
+    assert report['trial_periods']==1
+    assert report['items'][1]['profit_after_labor']==round(assigned_profit-labor,2)
+    assert report['items'][1]['amount']==expected
+    assert report['total']==expected
+    context=client.get('/api/commission-v2/payout-confirmations/context',params={
+        'store_id':store_id,'period':'2026-06','run_id':run}).json()
+    assert context['people'][0]['suggested']==expected
+    human=client.post('/api/commission-v2/payout-confirmations',json={
+        'store_id':store_id,'period':'2026-06','run_id':run,
+        'source_sha':context['source_sha'],'reason':'运营另行确认本期提成',
+        'payouts':[{'person_id':pid,'amount':'99.00'}]})
+    assert human.status_code==200,human.text
+    confirmed=client.post('/api/commission-v2/reports/query',json={
+        'start':'2026-06','end':'2026-06','store_ids':[store_id],
+        'view':'store_people'}).json()
+    assert confirmed['items'][1]['amount']==99
+    assert confirmed['trial_periods']==0
+
+
+def test_caiguo_store_with_skip_loss_keeps_its_existing_loss_policy(tmp_path):
+    ws=Workspace(tmp_path);registry=Registry(tmp_path)
+    store_id='douyin_qianhuajian';pid='legacy:5811db93188b314a53ce01f5'
+    registry.person_save({'id':pid,'name':'蔡果'},'test','登记')
+    model=_model(stores=(Store(id=store_id,name='抖音浅花涧',platform='taobao'),))
+    model=model.model_copy(update={
+        'overheads':(Overhead(period='2026-06',amount=393.18,name='兼职人工费用'),),
+        'statement':(model.statement[0].model_copy(update={'headline':'revenue'}),
+                     *model.statement[1:],
+                     StatementNode(id='net_profit',name='利润',level=1,is_total=True,
+                                   headline='profit',formula={'op':'add','of':['gross']})),
+    })
+    ws.record(store_id,'2026-06',{
+        'statement':[{'id':model.statement[0].id,'value':9000,'available':True},
+                     {'id':'gross','value':6000,'available':True},
+                     {'id':'net_profit','value':2374.86,'available':True}],
+        'commission':{'engine':'commission-v2','base_node':'net_profit',
+            'base_total':2374.86,'on_loss':'skip','total':165.45,
+            'amount_complete':False,'unassigned_orders':1,
+            'people':[{'person_id':pid,'person':'蔡果','amount':165.45,
+                       'base':3309.78,'allocated_profit':2344.94,
+                       'sales':8900,'gross':5900,'profit':2344.94}],
+            'products':[{'product_id':'12345678901','total_rate':0.05,
+                         'people':[{'person_id':pid,'amount':165.45}]}]},
+    },[])
+    app=FastAPI();install(app,lambda:ws,lambda:model)
+    report=TestClient(app).post('/api/commission-v2/reports/query',json={
+        'start':'2026-06','end':'2026-06','store_ids':[store_id],
+        'view':'store_people'}).json()
+    assert report['items'][1]['profit_after_labor']==1951.76
+    assert report['items'][1]['amount']==138.06
 
 
 def test_unattributed_store_loss_is_shared_without_assigning_unknown_orders(tmp_path):

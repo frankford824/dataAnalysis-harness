@@ -45,6 +45,18 @@ export const api = {
     call(`/api/stores/${encodeURIComponent(storeId)}/periods/${encodeURIComponent(period)}/cost-lines`, {
       method:'POST', headers:{'content-type':'application/json'}, body:JSON.stringify(body),
     }),
+  previewCostBatch: (storeId, period, runId, file, reason) => {
+    const form = new FormData(); form.append('file', file)
+    return call(`/api/stores/${encodeURIComponent(storeId)}/periods/${encodeURIComponent(period)}/cost-lines/batch-preview${query({run_id:runId,default_reason:reason})}`, {
+      method:'POST',body:form,
+    })
+  },
+  applyCostBatch: (storeId, period, runId, file, reason, preview) => {
+    const form = new FormData(); form.append('file', file)
+    return call(`/api/stores/${encodeURIComponent(storeId)}/periods/${encodeURIComponent(period)}/cost-lines/batch-apply${query({run_id:runId,default_reason:reason,expected_file_sha:preview.file_sha,expected_line_revision:preview.line_revision})}`, {
+      method:'POST',body:form,
+    })
+  },
   navigation: () => call('/api/navigation'),
   bootstrap: () => call('/api/bootstrap'),
 

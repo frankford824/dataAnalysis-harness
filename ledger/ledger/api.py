@@ -1095,6 +1095,53 @@ def cost_line_save(store_id: str, period: str, change: CostLineChange) -> dict:
         raise HTTPException(409, str(exc)) from exc
 
 
+def _cost_batch_scope(store_id: str, period: str, run_id: int) -> None:
+    _store(_model(), store_id)
+    ws = workspace()
+    state = ws.state_by_run(run_id)
+    if not state or state.store_id != store_id or state.period != period:
+        raise HTTPException(409, '本店核算记录已更新，请刷新后重新导出成本表')
+    current = ws.state(store_id, period)
+    latest = ws.latest_run(store_id, period)
+    if not current or current.closed or not latest or latest['id'] != run_id:
+        raise HTTPException(409, '本店账期已结或核算已更新，请刷新后重新导出成本表')
+
+
+@app.post('/api/stores/{store_id}/periods/{period}/cost-lines/batch-preview')
+async def cost_line_batch_preview(store_id: str, period: str,
+                                  file: Annotated[UploadFile, File()],
+                                  run_id: int, default_reason: str = '') -> dict:
+    _cost_batch_scope(store_id, period, run_id)
+    if not file.filename or not file.filename.lower().endswith('.csv'):
+        raise HTTPException(422, '请上传本页导出并编辑的CSV成本表')
+    content = await file.read(20_000_001)
+    try:
+        return cost_lines.batch_preview(workspace(), store_id, period, run_id,
+                                        content, default_reason)
+    except WorkspaceError as exc:
+        raise HTTPException(409, str(exc)) from exc
+
+
+@app.post('/api/stores/{store_id}/periods/{period}/cost-lines/batch-apply')
+async def cost_line_batch_apply(store_id: str, period: str,
+                                file: Annotated[UploadFile, File()],
+                                run_id: int, expected_file_sha: str,
+                                expected_line_revision: int,
+                                default_reason: str = '') -> dict:
+    _cost_batch_scope(store_id, period, run_id)
+    if not file.filename or not file.filename.lower().endswith('.csv'):
+        raise HTTPException(422, '请上传本页导出并编辑的CSV成本表')
+    content = await file.read(20_000_001)
+    try:
+        return cost_lines.batch_apply(
+            workspace(), store_id, period, run_id, content,
+            expected_file_sha=expected_file_sha,
+            expected_line_revision=expected_line_revision,
+            default_reason=default_reason)
+    except WorkspaceError as exc:
+        raise HTTPException(409, str(exc)) from exc
+
+
 def _manual_source_run(ws: Workspace, model: Model, store_id: str,
                        period: str, run_id: int | None) -> dict:
     run = ws.latest_run(store_id, period)

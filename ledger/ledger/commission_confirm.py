@@ -79,20 +79,26 @@ def context(ws, registry, model, store_id, period, *, expected_run=None):
     keep = (Decimal(1) if commission.get('manual_amounts_after_labor')
             else (Decimal(str(base)) - Decimal(str(labor or 0))) / Decimal(str(base))
             if base else Decimal(1))
-    people = [{'person_id': pid,
-               'person': row.get('person') or known.get(pid, {}).get('name') or pid,
-               'suggested': money_float(Decimal(str(row['amount'])) * keep)
-               if row.get('amount') is not None else None}
-              for pid, row in identities.items()]
-    original_order = {row['person_id']: index for index, row in enumerate(original)}
-    people.sort(key=lambda row: (original_order.get(row['person_id'], len(original)),
-                                 row['person'], row['person_id']))
     with registry.connect() as conn:
         latest = _last(conn, store_id, period, run_id)
         history = [dict(row) for row in conn.execute('''SELECT id,finance_run,at,actor,
           reason,confirmed_total,payouts_json FROM payout_confirmation
           WHERE store_id=? AND period=? ORDER BY at DESC,id DESC LIMIT 10''',
           (store_id, period))]
+    suggestions = {row['person_id']: row['amount'] for row in report['rows']
+                   if row['store_id'] == store_id and row['period'] == period}
+    if latest:
+        suggestions = {row['person_id']: row['suggested']
+                       for row in latest['trial'].get('people') or []}
+    people = [{'person_id': pid,
+               'person': row.get('person') or known.get(pid, {}).get('name') or pid,
+               'suggested': suggestions.get(pid) if pid in suggestions else
+               money_float(Decimal(str(row['amount'])) * keep)
+               if row.get('amount') is not None else None}
+              for pid, row in identities.items()]
+    original_order = {row['person_id']: index for index, row in enumerate(original)}
+    people.sort(key=lambda row: (original_order.get(row['person_id'], len(original)),
+                                 row['person'], row['person_id']))
     for item in history:
         item['payouts'] = json.loads(item.pop('payouts_json'))
     return {'store_id': store_id, 'store': model.store(store_id).name,

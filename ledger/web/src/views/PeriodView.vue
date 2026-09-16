@@ -479,7 +479,7 @@ watch(
                 @click.stop
               >导出订单费项</a>
             </header>
-            <PricingPending v-if="snap.run_id && (snap.pricing_pending_count || (snap.cost_coverage?.expected && !snap.cost_coverage?.passed))" ref="pricingPanel" :key="`${props.id}:${period}`" :run-id="snap.run_id" :count="snap.pricing_pending_count || 0" :coverage-rows="snap.cost_review?.coverage_lines || 0" :coverage="snap.cost_coverage" :observed="snap.cost_review?.observed" :line-summary="snap.cost_review" :manual-decision="snap.manual_cost" :store-id="props.id" :period="period" @show-quality="rail = 'quality'" @request-manual="openManualClose" @line-saved="load(true,true);app.invalidate([props.id])" @request-recompute="refreshManualBasis" />
+            <PricingPending v-if="snap.run_id && (snap.pricing_pending_count || snap.cost_review?.coverage_lines || (snap.cost_coverage?.expected && !snap.cost_coverage?.passed))" ref="pricingPanel" :key="`${props.id}:${period}`" :run-id="snap.run_id" :count="snap.pricing_pending_count || 0" :coverage-rows="snap.cost_review?.coverage_lines || 0" :coverage="snap.cost_coverage" :observed="snap.cost_review?.observed" :line-summary="snap.cost_review" :manual-decision="snap.manual_cost" :store-id="props.id" :period="period" @show-quality="rail = 'quality'" @request-manual="openManualClose" @line-saved="load(true,true);app.invalidate([props.id])" @request-recompute="refreshManualBasis" />
             <div class="statement">
               <div
                 v-for="row in snap.statement || []"

@@ -77,9 +77,33 @@ async function loadCoverage() {
   finally{coverageBusy.value=false}
 }
 watch(coveragePage,loadCoverage)
-watch(()=>props.runId,()=>{editor.value=null;if(show.value){coveragePage.value=1;loadCoverage()}})
+watch(()=>props.runId,()=>{editor.value=null;batchFile.value=null;batchPreview.value=null;batchError.value='';if(show.value){coveragePage.value=1;loadCoverage()}})
 const editor=ref(null), editorAmount=ref(''), editorReason=ref(''), editorAction=ref('save')
 const savingLine=ref(false), saveError=ref('')
+const batchFile=ref(null), batchReason=ref(''), batchPreview=ref(null)
+const batchBusy=ref(false), batchError=ref(''), batchResult=ref('')
+const batchInput=ref(null)
+watch(batchReason,()=>{batchPreview.value=null})
+function chooseBatch(event){batchFile.value=event.target.files?.[0]||null;batchPreview.value=null;batchError.value='';batchResult.value=''}
+async function previewBatch(){
+  if(!batchFile.value||!props.storeId||!props.period)return
+  batchBusy.value=true;batchError.value='';batchResult.value=''
+  try{batchPreview.value=await api.previewCostBatch(props.storeId,props.period,props.runId,batchFile.value,batchReason.value)}
+  catch(error){batchPreview.value=null;batchError.value=error.message}
+  finally{batchBusy.value=false}
+}
+async function applyBatch(){
+  if(!batchFile.value||!batchPreview.value?.valid||batchPreview.value?.issue_count||batchBusy.value)return
+  batchBusy.value=true;batchError.value=''
+  try{
+    const saved=await api.applyCostBatch(props.storeId,props.period,props.runId,batchFile.value,batchReason.value,batchPreview.value)
+    batchResult.value=`已批量保存 ${saved.saved} 笔、${Number(saved.amount_total).toFixed(2)} 元`
+    batchPreview.value=null;batchFile.value=null
+    if(batchInput.value)batchInput.value.value=''
+    await loadCoverage();emit('line-saved')
+  }catch(error){batchError.value=error.message}
+  finally{batchBusy.value=false}
+}
 const validCents=value=>/^-?\d+(?:\.\d{1,2})?$/.test(String(value||'').trim())
 function editLine(row){
   if(!row.editable)return
@@ -129,6 +153,21 @@ const coverageColumns=[
         <a v-if="count" :href="download" download>导出来源异常行</a>
         <a :href="`/api/runs/${runId}/coverage-gaps.csv`" download>导出全部订单缺口</a>
       </form>
+      <div class="pricing-batch">
+        <strong>批量补录成本</strong>
+        <p>导出全部订单缺口，在 Excel/WPS 的“人工补录总成本”列填金额，保存为 CSV 后上传；保留原表头和末尾核对列。可在这里填写一条统一依据，逐行依据优先。</p>
+        <div class="pricing-batch-actions">
+          <input ref="batchInput" type="file" accept=".csv" aria-label="上传批量成本CSV" @change="chooseBatch" />
+          <n-input v-model:value="batchReason" aria-label="批量成本统一依据" placeholder="统一确认依据（可选）" style="max-width:260px" />
+          <n-button size="small" :loading="batchBusy" :disabled="!batchFile || batchBusy" @click="previewBatch">预览批量金额</n-button>
+        </div>
+        <p v-if="batchPreview" class="pricing-help">可保存 {{ integer(batchPreview.valid) }} 笔、{{ Number(batchPreview.amount_total).toFixed(2) }} 元；{{ integer(batchPreview.skipped) }} 行未填写或未变化。<template v-if="batchPreview.issue_count">还有 {{ integer(batchPreview.issue_count) }} 行需修改。</template></p>
+        <n-alert v-if="batchPreview?.issue_count" type="warning" :bordered="false"><p v-for="issue in batchPreview.issues" :key="issue">{{ issue }}</p></n-alert>
+        <n-alert v-if="batchError" type="error" :bordered="false">{{ batchError }}</n-alert>
+        <n-alert v-if="batchResult" type="success" :bordered="false">{{ batchResult }}</n-alert>
+        <n-button v-if="batchResult" size="small" text type="primary" @click="emit('request-manual')">确认本月成本与提成并结账 →</n-button>
+        <n-button v-if="batchPreview?.valid" size="small" type="primary" :loading="batchBusy" :disabled="batchBusy || !!batchPreview.issue_count" @click="applyBatch">确认批量补录</n-button>
+      </div>
       <n-alert v-if="coverageError" type="warning" style="margin-bottom:12px">{{ coverageError }} <n-button size="small" @click="emit('request-recompute')">重算后显示全部缺口</n-button></n-alert>
       <n-data-table class="pricing-desktop" :columns="coverageColumns" :data="coverageData.items" :loading="coverageBusy" :scroll-x="870" :max-height="480" size="small" />
       <div class="pricing-mobile" :aria-busy="coverageBusy">
@@ -172,6 +211,7 @@ const coverageColumns=[
 </template>
 
 <style scoped>
+.pricing-batch{border:1px solid #dce6f2;background:#f8fbff;border-radius:8px;padding:14px;margin:12px 0 16px}.pricing-batch>strong{font-size:14px}.pricing-batch>p{font-size:12px;color:#62728b;margin:8px 0}.pricing-batch-actions{display:flex;align-items:center;gap:10px;flex-wrap:wrap}.pricing-batch-actions input[type=file]{max-width:280px;font-size:12px}.pricing-batch .n-alert{margin:10px 0}.pricing-batch .n-alert p{margin:3px 0}
 .pricing-notice { display: flex; align-items: center; gap: 16px; justify-content: space-between; padding: 16px; margin-bottom: 16px; background: #fff8e8; border: 1px solid #f0dcb0; border-radius: 8px; color: #715020; }
 .pricing-notice.passed { background:#edf8f2;border-color:#bee2ce;color:#17623f; }
 .pricing-actions { display:flex;flex-wrap:wrap;gap:8px;justify-content:flex-end; }

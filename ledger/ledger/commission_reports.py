@@ -52,6 +52,7 @@ def profit_after_labor(profit, labor):
 _profit_lock = threading.RLock()
 _profit_cache: OrderedDict[tuple, dict[str, float] | None] = OrderedDict()
 _PROFIT_CACHE_LIMIT = 128
+_CAIGUO_PERSON_ID = 'legacy:5811db93188b314a53ce01f5'
 
 
 def _archived_allocated_profit(registry, commission):
@@ -134,6 +135,20 @@ def attributed_profit(commission, operating, labor, registry, *, manual_cost=Fal
         return {}
     return {pid: money_float(values[pid] - cost[pid] - loss[pid])
             for pid in weights}
+
+
+def confirmed_profit_rate(commission, person_id):
+    """Cai Guo's approved profit-based 5% payout, only where loss is deducted."""
+    if (person_id != _CAIGUO_PERSON_ID or
+            commission.get('base_node') != 'net_profit' or
+            commission.get('on_loss') != 'deduct' or
+            len(commission.get('people') or []) != 1):
+        return None
+    rates = {decimal(product.get('total_rate') or 0)
+             for product in commission.get('products') or []
+             if any(crew.get('person_id') == person_id
+                    for crew in product.get('people') or [])}
+    return Decimal('.05') if rates == {Decimal('.05')} else None
 
 
 _configured_lock = threading.RLock()
@@ -281,6 +296,13 @@ def build(workspace, registry, model, start, end, store_ids=None, person_ids=Non
         visible_labor=labor_cut if spread.total is not None else Decimal(0)
         person_profit=attributed_profit(source_c,operating,visible_labor,registry,
                                         manual_cost=bool(record['manual_cost_json']))
+        source_pid=(source_c.get('people') or [{}])[0].get('person_id')
+        profit_rate=(confirmed_profit_rate(source_c,source_pid)
+                     if not decision and not c.get('manual_confirmed')
+                     and source_c.get('people') else None)
+        if profit_rate is not None and person_profit.get(source_pid) is not None:
+            notes.append('蔡果提成按已分摊兼职后的人员利润额乘已核实的5%点数计算')
+            scope['notes']='；'.join(notes)
         member_rows=[]
         for person in c.get('people',[]):
             name=person.get('person') or '未命名人员'
@@ -304,7 +326,12 @@ def build(workspace, registry, model, start, end, store_ids=None, person_ids=Non
                                         'amount':None,'store_amount':None,
                                         'status':status,'finance_run':record['id']})
                 continue
-            amount=decimal(money_float(decimal(person['amount'])*keep));scope['selected_amount']+=amount
+            if (profit_rate is not None and person.get('person_id') in person_profit
+                    and person.get('amount') is not None):
+                amount=decimal(money_float(decimal(person_profit[person['person_id']])*profit_rate))
+            else:
+                amount=decimal(money_float(decimal(person['amount'])*keep))
+            scope['selected_amount']+=amount
             store_people.setdefault(sid,set()).add(pid)
             lines.append({'person_id':pid,'person':name,'employee_no':roster.get(pid,{}).get('employee_no',''),
                           'store_id':sid,'store':names[sid],'period':period,'amount':money_float(amount),

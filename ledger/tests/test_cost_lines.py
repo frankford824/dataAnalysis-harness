@@ -1,6 +1,8 @@
 """Per-order human amounts remain auditable across recomputes and freezes."""
 import hashlib
 import json
+import csv
+import io
 from pathlib import Path
 
 import polars as pl
@@ -48,6 +50,64 @@ def archive(ws, run, keys=('S2','S3'), *, undated=False):
     })
     path=ws.coverage_gaps_path(run);frame.write_parquet(path);seal(path)
     return frame
+
+
+def edited_cost_export(ws, run, amounts):
+    text = cost_lines.export_csv(ws, run, 'taobao_mt9sjmls', '2026-06')
+    rows = list(csv.DictReader(io.StringIO(text)))
+    for row in rows:
+        row['人工补录总成本'] = amounts.get(row['清单键'], '')
+    output = io.StringIO()
+    writer = csv.DictWriter(output, fieldnames=rows[0].keys())
+    writer.writeheader(); writer.writerows(rows)
+    return output.getvalue().encode('utf-8-sig')
+
+
+def test_batch_cost_round_trip_is_atomic_and_preserves_source_run(tmp_path):
+    ws = Workspace(tmp_path); raw = payload()
+    run = ws.record(raw['store_id'], raw['period'], raw, [])
+    archive(ws, run)
+    content = edited_cost_export(ws, run, {'S2': '12.50', 'S3': '20.00'})
+    preview = cost_lines.batch_preview(ws, raw['store_id'], raw['period'],
+                                       run, content, '财务从原成本单批量核对')
+    assert preview['valid'] == 2 and preview['amount_total'] == 32.5
+    assert preview['issue_count'] == 0
+    saved = cost_lines.batch_apply(ws, raw['store_id'], raw['period'], run,
+        content, expected_file_sha=preview['file_sha'],
+        expected_line_revision=preview['line_revision'],
+        default_reason='财务从原成本单批量核对')
+    assert saved['saved'] == 2 and saved['amount_total'] == 32.5
+    assert cost_lines.current(ws, run, raw['store_id'], raw['period'])['supplement_total'] == 32.5
+    assert ws.conn.execute('SELECT count(*) FROM cost_line_log').fetchone()[0] == 2
+    assert json.loads(ws.conn.execute('SELECT result FROM run WHERE id=?', (run,)).fetchone()[0]) == raw
+    with pytest.raises(WorkspaceError, match='发生变化|不能提交'):
+        cost_lines.batch_apply(ws, raw['store_id'], raw['period'], run,
+            content, expected_file_sha=preview['file_sha'],
+            expected_line_revision=preview['line_revision'],
+            default_reason='财务从原成本单批量核对')
+    ws.close()
+
+
+def test_batch_cost_rejects_stale_row_without_partial_write(tmp_path):
+    ws = Workspace(tmp_path); raw = payload()
+    run = ws.record(raw['store_id'], raw['period'], raw, [])
+    archive(ws, run)
+    content = edited_cost_export(ws, run, {'S2': '12.50', 'S3': '20.00'})
+    rows = list(csv.DictReader(io.StringIO(content.decode('utf-8-sig'))))
+    rows[1]['核对版本'] = '0' * 64
+    output = io.StringIO(); writer = csv.DictWriter(output, fieldnames=rows[0].keys())
+    writer.writeheader(); writer.writerows(rows)
+    stale = output.getvalue().encode('utf-8-sig')
+    preview = cost_lines.batch_preview(ws, raw['store_id'], raw['period'],
+                                       run, stale, '统一核对')
+    assert preview['valid'] == 1 and preview['issue_count'] == 1
+    with pytest.raises(WorkspaceError, match='不能提交'):
+        cost_lines.batch_apply(ws, raw['store_id'], raw['period'], run,
+            stale, expected_file_sha=preview['file_sha'],
+            expected_line_revision=preview['line_revision'],
+            default_reason='统一核对')
+    assert ws.conn.execute('SELECT count(*) FROM cost_line_log').fetchone()[0] == 0
+    ws.close()
 
 
 def test_edit_and_remove_append_history_and_respect_latest_order_context(tmp_path):
@@ -164,4 +224,33 @@ def test_http_edit_is_visible_in_all_missing_orders_and_store_preview(tmp_path,m
         'run_id':run,'coverage_key':'S2','context_sha':first['context_sha'],
         'amount':'20.00','reason':'结账后试图修改','expected_line_revision':1,
     }).status_code==409
+    ws.close()
+
+
+def test_http_batch_preview_then_apply_preserves_audited_cost_rows(tmp_path, monkeypatch):
+    from fastapi.testclient import TestClient
+    from ledger import api
+    m = model(); ws = Workspace(tmp_path); raw = payload()
+    run = ws.record(raw['store_id'], raw['period'], raw, [],
+                    model_revision=hashlib.sha256(m.model_dump_json().encode()).hexdigest())
+    archive(ws, run)
+    monkeypatch.setattr(api, 'WORKSPACE_ROOT', tmp_path)
+    monkeypatch.setattr(api, '_ws', ws)
+    monkeypatch.setattr(api, '_model', lambda: m)
+    client = TestClient(api.app)
+    content = edited_cost_export(ws, run, {'S2': '12.50', 'S3': '20.00'})
+    base = f"/api/stores/{raw['store_id']}/periods/{raw['period']}/cost-lines"
+    uploaded = {'file': ('missing-cost.csv', content, 'text/csv')}
+    preview = client.post(base + '/batch-preview',
+        params={'run_id': run, 'default_reason': '财务批量核对成本'}, files=uploaded)
+    assert preview.status_code == 200, preview.text
+    assert preview.json()['valid'] == 2 and preview.json()['issue_count'] == 0
+    saved = client.post(base + '/batch-apply', params={
+        'run_id': run, 'default_reason': '财务批量核对成本',
+        'expected_file_sha': preview.json()['file_sha'],
+        'expected_line_revision': preview.json()['line_revision']}, files=uploaded)
+    assert saved.status_code == 200, saved.text
+    assert saved.json()['saved'] == 2
+    assert client.get(f'/api/runs/{run}/coverage-gaps').json()['reviewed_count'] == 2
+    assert ws.conn.execute('SELECT count(*) FROM cost_line_log').fetchone()[0] == 2
     ws.close()

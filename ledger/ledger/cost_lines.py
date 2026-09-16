@@ -6,6 +6,7 @@ from decimal import Decimal
 import json
 import csv
 import io
+import hashlib
 
 import polars as pl
 
@@ -99,7 +100,9 @@ def export_csv(ws, run_id: int, store_id: str, period: str) -> str:
     fields = [('order_id','平台订单号'),('sub_order_id','子订单号'),
               ('product_ids','商品链接'),('quantities','数量'),('order_date','下单日期'),
               ('manual_amount','人工补录总成本'),('manual_reason','确认依据'),
-              ('editable','可直接补录')]
+              ('editable','可直接补录'),
+              ('coverage_key','清单键'),('context_sha','核对版本'),
+              ('line_revision','修改版本')]
     output = io.StringIO()
     writer = csv.writer(output)
     writer.writerow([label for _, label in fields])
@@ -108,6 +111,130 @@ def export_csv(ws, run_id: int, store_id: str, period: str) -> str:
                          else row.get(key) if row.get(key) is not None else ''
                          for key, _ in fields])
     return output.getvalue()
+
+
+def _batch_rows(ws, store_id: str, period: str, run_id: int,
+                content: bytes, default_reason: str = '') -> dict:
+    """Match edited export rows to the sealed current order gap list."""
+    if len(content) > 20_000_000:
+        raise WorkspaceError('批量成本表过大，请按店铺月份拆分后导入')
+    for encoding in ('utf-8-sig', 'gb18030'):
+        try:
+            body = content.decode(encoding)
+            break
+        except UnicodeDecodeError:
+            continue
+    else:
+        raise WorkspaceError('成本表编码无法读取，请从系统导出CSV后编辑')
+    reader = csv.DictReader(io.StringIO(body))
+    required = {'平台订单号','子订单号','人工补录总成本','确认依据',
+                '清单键','核对版本','修改版本'}
+    if not reader.fieldnames or not required <= set(reader.fieldnames):
+        raise WorkspaceError('请使用本页导出的完整订单缺口CSV，保留原表头和核对列')
+    current_rows = current(ws, run_id, store_id, period)
+    by_key = {row['coverage_key']: row for row in current_rows['items']}
+    chosen = []
+    used = set()
+    issues = []
+    skipped = 0
+    for line, edited in enumerate(reader, start=2):
+        if line > 200_002:
+            raise WorkspaceError('一次最多导入20万笔，请按店铺月份拆分')
+        raw_amount = (edited.get('人工补录总成本') or '').strip()
+        if not raw_amount:
+            skipped += 1
+            continue
+        key = (edited.get('清单键') or '').strip().lstrip("'")
+        source = by_key.get(key)
+        if not source or key in used:
+            issues.append(f'第{line}行订单键不存在或重复')
+            continue
+        used.add(key)
+        order = (edited.get('平台订单号') or '').strip().lstrip("'")
+        sub = (edited.get('子订单号') or '').strip().lstrip("'")
+        if (source['order_count'] != 1 or source['context_sha'] !=
+                (edited.get('核对版本') or '').strip() or
+                order != (source.get('order_id') or '') or
+                sub != (source.get('sub_order_id') or '')):
+            issues.append(f'第{line}行订单归属或清单版本已变化，请重新导出')
+            continue
+        try:
+            expected = int((edited.get('修改版本') or '0').strip())
+        except ValueError:
+            issues.append(f'第{line}行修改版本无效')
+            continue
+        if expected != source['line_revision']:
+            issues.append(f'第{line}行金额已有新修改，请刷新清单')
+            continue
+        reason = (edited.get('确认依据') or '').strip() or default_reason.strip()
+        if not reason or len(reason) > 500:
+            issues.append(f'第{line}行请填写不超过500字的确认依据')
+            continue
+        try:
+            amount = _cents(raw_amount)
+        except WorkspaceError:
+            issues.append(f'第{line}行成本金额须为两位小数')
+            continue
+        old = source.get('manual_amount')
+        if old is not None and _cents(old) == amount and source.get('manual_reason') == reason:
+            skipped += 1
+            continue
+        chosen.append({'coverage_key': key, 'context_sha': source['context_sha'],
+                       'order_id': source['order_id'], 'amount': amount,
+                       'reason': reason, 'expected_line_revision': expected})
+    if not chosen and not issues:
+        issues.append('没有填写新的人工成本金额')
+    return {'run_id': run_id, 'file_sha': hashlib.sha256(content).hexdigest(),
+            'line_revision': current_rows['line_revision'],
+            'changes': chosen, 'skipped': skipped, 'issues': issues,
+            'total': len(current_rows['items'])}
+
+
+def batch_preview(ws, store_id: str, period: str, run_id: int,
+                  content: bytes, default_reason: str = '') -> dict:
+    result = _batch_rows(ws, store_id, period, run_id, content, default_reason)
+    return {key: value for key, value in result.items() if key != 'changes'} | {
+        'valid': len(result['changes']),
+        'amount_total': float(sum((row['amount'] for row in result['changes']), Decimal(0))),
+        'issues': result['issues'][:20], 'issue_count': len(result['issues']),
+    }
+
+
+def batch_apply(ws, store_id: str, period: str, run_id: int, content: bytes,
+                *, expected_file_sha: str, expected_line_revision: int,
+                default_reason: str = '', by: str = '人工批量补录') -> dict:
+    if hashlib.sha256(content).hexdigest() != expected_file_sha:
+        raise WorkspaceError('批量成本文件已变化，请重新预览')
+    result = _batch_rows(ws, store_id, period, run_id, content, default_reason)
+    if result['issues']:
+        raise WorkspaceError('批量成本表不能提交：' + result['issues'][0])
+    if result['line_revision'] != expected_line_revision:
+        raise WorkspaceError('已有人工成本发生变化，请重新预览')
+    with ws.conn as conn:
+        conn.execute('BEGIN IMMEDIATE')
+        active = conn.execute('SELECT id FROM run WHERE store_id=? AND period=? '
+                              'ORDER BY id DESC LIMIT 1', (store_id, period)).fetchone()
+        state = conn.execute('SELECT state FROM period WHERE store_id=? AND period=?',
+                             (store_id, period)).fetchone()
+        if not active or active['id'] != run_id or not state or state['state'] != 'open':
+            raise WorkspaceError('核算结果或账期状态已更新，请重新导出成本表')
+        if revision(ws, store_id, period) != expected_line_revision:
+            raise WorkspaceError('已有人工成本发生变化，请重新预览')
+        for item in result['changes']:
+            previous = conn.execute('SELECT coalesce(max(id),0) FROM cost_line_log '
+                                    'WHERE store_id=? AND period=? AND coverage_key=?',
+                                    (store_id, period, item['coverage_key'])).fetchone()[0]
+            if previous != item['expected_line_revision']:
+                raise WorkspaceError('订单金额已被修改，请重新预览')
+            conn.execute('''INSERT INTO cost_line_log(
+              store_id,period,coverage_key,context_sha,source_run_id,action,
+              amount,reason,at,by) VALUES(?,?,?,?,?,?,?,?,?,?)''',
+              (store_id, period, item['coverage_key'], item['context_sha'], run_id,
+               'save', str(item['amount']), item['reason'],
+               datetime.now(timezone.utc).astimezone().isoformat(timespec='seconds'), by))
+    return {'saved': len(result['changes']), 'amount_total': float(sum(
+        (row['amount'] for row in result['changes']), Decimal(0))),
+        'line_revision': revision(ws, store_id, period), 'run_id': run_id}
 
 
 def save(ws, store_id: str, period: str, run_id: int, *, coverage_key: str,

@@ -330,6 +330,49 @@ def install(app, workspace, model, model_root: Path | None = None):
                  limit: int = Query(100, ge=1, le=500)):
         return commission_catalog.products(reg(), store_id=store_id, search=search, missing=missing, after=after, limit=limit)
 
+    @router.get('/unassigned')
+    def unassigned(store_id: str, period: str):
+        m = model()
+        if store_id not in {store.id for store in m.stores}:
+            raise RegistryError('请选择已登记店铺')
+        commission_reports.months(period, period)
+        state = workspace().state(store_id, period)
+        if not state or not state.result:
+            raise RegistryError('本店本月尚无核算记录')
+        c = state.result.get('commission') or {}
+        links = [product for product in c.get('products') or []
+                 if product.get('unassigned') and
+                 re.fullmatch(r'\d{9,20}', str(product.get('product_id') or ''))]
+        ids = [product['product_id'] for product in links]
+        schemes = {}
+        if ids:
+            with reg().connect() as conn:
+                for offset in range(0, len(ids), 500):
+                    chunk = ids[offset:offset + 500]
+                    for row in conn.execute('SELECT id,product_id,revision FROM scheme '
+                                            'WHERE store_id=? AND product_id IN ('
+                                            + ','.join('?' for _ in chunk) + ')',
+                                            (store_id, *chunk)):
+                        schemes[row['product_id']] = dict(row)
+        ranked = sorted(links, key=lambda product: -float(product.get('base') or 0))
+        without_id = sum(int(product.get('sub_orders') or 0)
+                         for product in c.get('products') or []
+                         if product.get('unassigned') and not
+                         re.fullmatch(r'\d{9,20}', str(product.get('product_id') or '')))
+        return {'store_id': store_id, 'store': m.store(store_id).name,
+                'period': period, 'run_id': state.run_id,
+                'orders': c.get('unassigned_orders') or 0,
+                'base': c.get('unassigned_base') or 0,
+                'link_count': len(links), 'without_product': without_id,
+                'links': [{'store_id': store_id,
+                           'product_id': product['product_id'],
+                           'product_name': product.get('product_name') or '',
+                           'base': product.get('base') or 0,
+                           'sub_orders': product.get('sub_orders') or 0,
+                           'scheme_id': schemes.get(product['product_id'], {}).get('id'),
+                           'revision': schemes.get(product['product_id'], {}).get('revision', 0)}
+                          for product in ranked[:200]]}
+
     @router.get("/schemes")
     def schemes(store_id: str = "", search: str = "", after: str = "", limit: int = Query(100, ge=1, le=500)):
         with reg().connect() as conn:
