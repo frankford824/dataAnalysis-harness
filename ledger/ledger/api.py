@@ -944,7 +944,39 @@ def _build_period_detail(
             except WorkspaceError as exc:
                 review['line_error'] = str(exc)
         payload['cost_review'] = review
+    _annotate_commission_after_labor(payload, ws, model, store_id, period, st)
     return payload
+
+
+def _annotate_commission_after_labor(
+    payload: dict, ws: Workspace, model: Model, store_id: str, period: str, st: PeriodState,
+) -> None:
+    """Expose after-labor trial payouts so the close dialog cannot accept the raw trial."""
+    from . import commission_reports
+    commission = payload.get('commission')
+    people = commission.get('people') if isinstance(commission, dict) else None
+    if not people:
+        return
+    labor = st.labor_cut if st.state == 'closed' and st.labor_cut is not None else None
+    if labor is None:
+        try:
+            labor = labor_api.share_at_close(ws, model, period, store_id)
+        except WorkspaceError:
+            return
+        payload['pending_labor_cut'] = money_float(labor)
+    profit_node = next((node.id for node in model.statement
+                        if node.headline == 'profit' and node.is_total), '')
+    operating = (commission_reports.statement_amount(payload.get('statement') or [], profit_node)
+                 if profit_node else None)
+    suggested = commission_reports.suggested_payouts(commission, labor, operating=operating)
+    payload['commission'] = {
+        **commission,
+        'people': [
+            ({**person, 'amount_after_labor': suggested[person['person_id']]}
+             if person.get('person_id') in suggested else person)
+            for person in people
+        ],
+    }
 
 
 def _period_payload(result: dict, model) -> dict:
@@ -1217,6 +1249,7 @@ def close_period(store_id: str, period: str, action: PeriodAction) -> dict:
             _store(model, store_id)
             ws = workspace()
             manual_result = manual_decision = None
+            labor_cut = labor_api.share_at_close(ws, model, period, store_id)
             if action.payout_only and action.costs is not None:
                 raise WorkspaceError("只确认提成时不能同时修改成本")
             if action.costs is not None:
@@ -1226,6 +1259,7 @@ def close_period(store_id: str, period: str, action: PeriodAction) -> dict:
                     model, json.loads(run["result"]), run["id"],
                     _costs_with_lines(action.costs, lines),
                     action.payouts, action.no_payout, action.note,
+                    labor_cut=labor_cut,
                 )
                 manual_decision['base_costs'] = {key: str(value) for key, value in action.costs.items()}
                 manual_decision['line_revision'] = lines['line_revision']
@@ -1239,9 +1273,8 @@ def close_period(store_id: str, period: str, action: PeriodAction) -> dict:
                     raise WorkspaceError("已有人工补录成本，请同时预览并确认成本与提成")
                 manual_result, manual_decision = manual_cost.payout_only(
                     json.loads(run['result']), run['id'], action.payouts,
-                    action.no_payout, action.note)
+                    action.no_payout, action.note, labor_cut=labor_cut)
                 manual_decision['line_revision'] = lines['line_revision']
-            labor_cut = labor_api.share_at_close(ws, model, period, store_id)
             st = ws.close_period(
                 store_id,
                 period,

@@ -66,8 +66,34 @@ def preview(model, result: dict, confirmed: dict) -> dict:
     }
 
 
+def _operating(result: dict):
+    row = next((item for item in result.get("statement") or []
+                if item.get("id") == "net_profit"), None)
+    return row.get("value") if row and row.get("available", True) else None
+
+
+def _deduct_labor_if_trial_accepted(amounts: dict[str, Decimal], commission: dict,
+                                    labor_cut, operating=None) -> tuple[dict[str, Decimal], bool]:
+    """Do not persist the raw order-level trial as an after-labor confirmation."""
+    if labor_cut is None or not amounts:
+        return amounts, False
+    trial = {str(person["person_id"]): _cents(person["amount"])
+             for person in commission.get("people") or []
+             if person.get("person_id") and person.get("amount") is not None}
+    if not trial or amounts != trial:
+        return amounts, False
+    from . import commission_reports
+    suggested = commission_reports.suggested_payouts(
+        commission, labor_cut, operating=operating)
+    if not suggested or any(pid not in suggested for pid in amounts):
+        return amounts, False
+    corrected = {pid: _cents(suggested[pid]) for pid in amounts}
+    return corrected, corrected != amounts
+
+
 def certified(model, result: dict, source_run_id: int, confirmed: dict,
-              payouts: list[dict], no_payout: bool, reason: str) -> tuple[dict, dict]:
+              payouts: list[dict], no_payout: bool, reason: str,
+              labor_cut=None) -> tuple[dict, dict]:
     """Prepare a separate immutable human result for the close transaction."""
     if not reason.strip():
         raise WorkspaceError("人工确认成本和提成必须填写原因")
@@ -86,6 +112,8 @@ def certified(model, result: dict, source_run_id: int, confirmed: dict,
     if not no_payout and (len(entered) != len(set(entered)) or set(entered) != set(identities)):
         raise WorkspaceError("请分别填写全部提成人员的确认金额")
     amounts = {str(item["person_id"]): _cents(item.get("amount")) for item in payouts}
+    amounts, labor_adjusted = _deduct_labor_if_trial_accepted(
+        amounts, result.get("commission") or {}, labor_cut, trial.get("profit"))
     decided = deepcopy(result)
     decided["statement"] = trial["statement"]
     decided["manual_cost"] = {
@@ -122,6 +150,9 @@ def certified(model, result: dict, source_run_id: int, confirmed: dict,
         pricing_threshold_met=True,
     )
     commission.setdefault("notes", []).append("提成金额由人工逐人确认，已含兼职分摊；源订单提成试算未替代人工确认")
+    if labor_adjusted:
+        commission["notes"].append(
+            f"提交金额等于扣兼职前试算，已按兼职分摊 {money_float(labor_cut):,.2f} 元折算")
     decided["commission"] = commission
     decision = {"source_run_id": source_run_id, "observed": trial["observed"],
                 "confirmed": trial["confirmed"], "payouts": [
@@ -134,7 +165,7 @@ def certified(model, result: dict, source_run_id: int, confirmed: dict,
 
 
 def payout_only(result: dict, source_run_id: int, payouts: list[dict],
-                no_payout: bool, reason: str) -> tuple[dict, dict]:
+                no_payout: bool, reason: str, labor_cut=None) -> tuple[dict, dict]:
     """Confirm payouts while keeping the computed store statement unchanged."""
     if not reason.strip():
         raise WorkspaceError("人工确认提成必须填写原因")
@@ -152,6 +183,8 @@ def payout_only(result: dict, source_run_id: int, payouts: list[dict],
     if not no_payout and (len(entered) != len(set(entered)) or set(entered) != set(identities)):
         raise WorkspaceError("请分别填写全部提成人员的确认金额")
     amounts = {str(item["person_id"]): _cents(item.get("amount")) for item in payouts}
+    amounts, labor_adjusted = _deduct_labor_if_trial_accepted(
+        amounts, result.get("commission") or {}, labor_cut, _operating(result))
     decided = deepcopy(result)
     for person in decided["commission"].get("people") or []:
         person["amount"] = money_float(amounts[person["person_id"]])
@@ -160,6 +193,9 @@ def payout_only(result: dict, source_run_id: int, payouts: list[dict],
                                    manual_amounts_after_labor=True)
     decided["commission"].setdefault("notes", []).append(
         "提成由人工逐人确认，已含兼职分摊；原订单试算与未分配订单保留")
+    if labor_adjusted:
+        decided["commission"]["notes"].append(
+            f"提交金额等于扣兼职前试算，已按兼职分摊 {money_float(labor_cut):,.2f} 元折算")
     decided["manual_payout"] = {"source_run_id": source_run_id, "reason": reason.strip(),
                                  "method": "人工确认提成，不调整成本或经营利润"}
     decision = {"source_run_id": source_run_id, "reason": reason.strip(),

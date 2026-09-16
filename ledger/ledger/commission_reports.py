@@ -49,6 +49,38 @@ def profit_after_labor(profit, labor):
     return money_float(decimal(profit) - decimal(labor or 0))
 
 
+def labor_keep(base_total, labor_cut):
+    """Scale trial payouts so the store labor cut is taken out of the pool."""
+    base = decimal(base_total or 0)
+    if not base:
+        return Decimal(1)
+    return (base - decimal(labor_cut or 0)) / base
+
+
+def suggested_payouts(commission, labor_cut, *, operating=None):
+    """Human-facing trial payouts after the store labor cut.
+
+    A later manual confirmation stores those amounts as already after labor.
+    Prefilling the raw order-level trial here would pay the labor cut twice or
+    not at all, depending on that flag.
+    """
+    people = commission.get('people') or []
+    if commission.get('manual_amounts_after_labor'):
+        return {person['person_id']: money_float(person['amount'])
+                for person in people
+                if person.get('person_id') and person.get('amount') is not None}
+    if (len(people) == 1 and operating is not None
+            and people[0].get('person_id') and people[0].get('amount') is not None):
+        rate = confirmed_profit_rate(commission, people[0]['person_id'])
+        if rate is not None:
+            return {people[0]['person_id']: money_float(
+                decimal(profit_after_labor(operating, labor_cut)) * rate)}
+    keep = labor_keep(commission.get('base_total'), labor_cut)
+    return {person['person_id']: money_float(decimal(person['amount']) * keep)
+            for person in people
+            if person.get('person_id') and person.get('amount') is not None}
+
+
 def _output_residual(total, values, field):
     """Return the visible store amount not represented by named people."""
     if total is None:
@@ -329,7 +361,7 @@ def build(workspace, registry, model, start, end, store_ids=None, person_ids=Non
                    else decimal(spread.of(sid)))
         base_total=decimal(c.get('base_total') or 0)
         keep=(Decimal(1) if c.get('manual_amounts_after_labor')
-              else (base_total-labor_cut)/base_total if base_total else Decimal(1))
+              else labor_keep(base_total, labor_cut))
         if spread.total is not None:
             notes.append(f"{next((x.name for x in model.overheads if x.period==period),'兼职人工费用')}已分摊 {money_float(labor_cut):,.2f} 元")
         scope={'store_id':sid,'store':names[sid],'period':period,'finance_run':record['id'],'calculated_at':record['at'],

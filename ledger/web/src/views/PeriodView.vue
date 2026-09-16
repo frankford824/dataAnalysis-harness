@@ -21,6 +21,7 @@ import GapList from '../components/GapList.vue'
 import PageHead from '../components/PageHead.vue'
 import PeriodStrip from '../components/PeriodStrip.vue'
 import PricingPending from '../components/PricingPending.vue'
+import { suggestedManualPayout } from '../commissionPayout'
 import { count, money, percent, stamp } from '../format'
 import { useApp } from '../store'
 
@@ -160,8 +161,7 @@ function openManualClose() {
     [key, amounts[key] == null ? '' : Number(amounts[key]).toFixed(2)]))
   manualPayouts.value = (snap.value?.commission?.people || []).map(person => ({
     person_id: person.person_id, person: person.person,
-    sales: person.sales, gross: person.gross, suggested: person.amount,
-    amount: person.amount == null ? '' : Number(person.amount).toFixed(2),
+    sales: person.sales, gross: person.gross, ...suggestedManualPayout(person),
   }))
   manualNoPayout.value = false
   manualRunId.value = snap.value?.run_id || null
@@ -835,10 +835,10 @@ watch(
           <n-alert v-if="manualPreviewError" type="warning" :bordered="false">{{ manualPreviewError }}</n-alert>
         </template>
         <template v-if="manualCostEnabled || manualPayoutEnabled">
-          <div class="manual-payout-head"><b>逐人确认提成</b><small>系统按现有资料试算的金额已自动带入，可直接接受或修改；保存后成为本期最终确认金额。</small></div>
+          <div class="manual-payout-head"><b>逐人确认提成</b><small>系统已按本期兼职分摊折算建议金额，直接接受即为扣兼职后的确认额；也可改成最终发放数。</small></div>
           <div v-if="manualPayouts.length" class="manual-payout-list">
             <label v-for="person in manualPayouts" :key="person.person_id">
-              <span>{{ person.person }}<small>参与销售 {{ money(person.sales) }} · 参与毛利 {{ money(person.gross) }}<template v-if="person.suggested != null"> · 系统试算 {{ money(person.suggested) }}</template></small></span>
+              <span>{{ person.person }}<small>参与销售 {{ money(person.sales) }} · 参与毛利 {{ money(person.gross) }}<template v-if="person.trial != null && person.suggested != null && person.trial !== person.suggested"> · 扣兼职前 {{ money(person.trial) }}</template><template v-if="person.suggested != null"> · 已扣兼职 {{ money(person.suggested) }}</template></small></span>
               <n-input v-model:value="person.amount" inputmode="decimal" :aria-label="`${person.person}确认提成额`" placeholder="确认提成额" />
             </label>
           </div>

@@ -77,8 +77,7 @@ def context(ws, registry, model, store_id, period, *, expected_run=None):
                   if row['store_id'] == store_id), 0)
     base = commission.get('base_total')
     keep = (Decimal(1) if commission.get('manual_amounts_after_labor')
-            else (Decimal(str(base)) - Decimal(str(labor or 0))) / Decimal(str(base))
-            if base else Decimal(1))
+            else commission_reports.labor_keep(base, labor))
     with registry.connect() as conn:
         latest = _last(conn, store_id, period, run_id)
         history = [dict(row) for row in conn.execute('''SELECT id,finance_run,at,actor,
