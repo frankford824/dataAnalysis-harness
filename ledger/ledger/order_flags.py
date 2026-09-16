@@ -8,8 +8,6 @@ from .model.schema import ColumnBinding
 
 
 def collect(ingestion, store):
-    if store.platform != "pdd":
-        return {}, 0
     choices = defaultdict(set)
     for item in ingestion.frames_of("order_cost"):
         frame = item.frame
@@ -27,19 +25,14 @@ def collect(ingestion, store):
 
 
 def apply(ingestion, store, cost, orders):
-    if store.platform != "pdd":
-        return
     flags, conflicts = collect(ingestion, store)
     if conflicts:
         cost.notes.append(f"有 {conflicts} 张内部订单的旗帜记录不一致，未据此排除成本")
     if "order_flag" not in cost.frame.columns:
         cost.frame = cost.frame.with_columns(pl.col("internal_order_id").cast(pl.Utf8).replace_strict(
             flags, default=None, return_dtype=pl.Utf8).alias("order_flag"))
-    blue = cost.frame.filter(pl.col("order_flag") == "蓝色旗帜")
-    if blue.height:
-        cost.notes.append(f"蓝旗订单商品成本不计，共 {blue.height} 条商品记录；原数量和单价保留")
-    # A merged group can contain genuine items alongside blue-flag items.
-    # Only a wholly excluded group is exempt from the cost coverage check.
+    # A merged group can contain items with different flags.  Only propagate a
+    # flag when every line agrees; the cost rule combines it with seller remarks.
     if "order_flag" not in orders.frame.columns:
         coverage = cost.frame.group_by("order_id").agg(
             (pl.col("order_flag") == "蓝色旗帜").fill_null(False).all().alias("__all_blue"))

@@ -4,6 +4,32 @@ from functools import lru_cache
 import polars as pl
 
 
+BRUSHING_REMARK_PATTERN = r"(?i)(^|[^a-z])by([^a-z]|$)"
+
+
+def is_brushing(frame):
+    """A brushing order needs both the blue flag and an explicit ``by`` marker.
+
+    The amount after ``by`` and phrases such as ``发空包`` are operational notes,
+    not classification requirements.  Requiring them would turn ordinary omission
+    or spelling variation into a real goods cost.
+    """
+    if not {"order_flag", "order_remark"} <= set(frame.columns):
+        return pl.lit(False)
+    blue = (
+        pl.col("order_flag").cast(pl.Utf8).str.strip_chars() == "蓝色旗帜"
+    ).fill_null(False)
+    marked = (
+        pl.col("order_remark").cast(pl.Utf8).str.contains(BRUSHING_REMARK_PATTERN)
+    ).fill_null(False)
+    buyer_show = (
+        pl.col("order_remark").cast(pl.Utf8).str.contains("买家秀", literal=True)
+    ).fill_null(False)
+    # ``买家秀`` is an explicit cost-bearing instruction.  Give it precedence
+    # if a future malformed remark happens to contain both markers.
+    return blue & marked & ~buyer_show
+
+
 @lru_cache(maxsize=32768)
 def remark_dropship(sku, remark):
     sku = str(sku or '').strip()
@@ -26,7 +52,7 @@ def prepare_dropship(frame):
     if not {'sku', 'order_remark'} <= set(frame.columns):
         return frame
     pairs = frame.select('sku', 'order_remark').filter(
-        pl.col('order_remark').str.contains('代发', literal=True).fill_null(False)).unique()
+        pl.col('order_remark').cast(pl.Utf8).str.contains('代发', literal=True).fill_null(False)).unique()
     if pairs.is_empty():
         return frame
     pairs = pairs.with_columns(pl.struct('sku', 'order_remark').map_elements(
@@ -36,7 +62,7 @@ def prepare_dropship(frame):
     if order_key:
         scope = (["store_name"] if "store_name" in frame.columns else []) + [order_key]
         recognized = is_dropship(frame).any().over(scope)
-        frame = frame.with_columns((pl.col('order_remark').str.replace_all(r'(不|取消|无需|非).{0,3}代发','').str.contains('代发',literal=True).fill_null(False)
+        frame = frame.with_columns((pl.col('order_remark').cast(pl.Utf8).str.replace_all(r'(不|取消|无需|非).{0,3}代发','').str.contains('代发',literal=True).fill_null(False)
             & ~recognized).alias('__dropship_ambiguous'))
     return frame
 

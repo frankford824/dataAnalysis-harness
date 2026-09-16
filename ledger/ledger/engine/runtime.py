@@ -857,6 +857,17 @@ def _exclude_linked(
     zero_costs = []
     if metric.id in {"goods_cost", "reshipment_cost"}:
         frame = frame.with_columns(pl.lit(None, dtype=pl.Utf8).alias("__cost_exempt_reason"))
+        from .cost_policy import is_brushing
+        brushing = is_brushing(frame)
+        brushing_rows = int(frame.select(brushing.sum()).item() or 0)
+        if brushing_rows:
+            frame = frame.with_columns(
+                pl.when(brushing)
+                .then(pl.lit("蓝色旗帜且卖家备注含 by，按刷单规则不计商品成本"))
+                .otherwise(pl.col("__cost_exempt_reason"))
+                .alias("__cost_exempt_reason")
+            )
+            notes.append(f"{label} · {metric.name}：刷单规则明确计 0，共 {brushing_rows:,} 行")
     from .cost_returns import policy_mask
     deferred = frame.filter(policy_mask(frame, ingestion.model)) if metric.id == "goods_cost" else frame.clear()
     out = frame.filter(~policy_mask(frame, ingestion.model)) if metric.id == "goods_cost" else frame

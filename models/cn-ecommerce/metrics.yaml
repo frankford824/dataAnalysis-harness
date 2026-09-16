@@ -245,11 +245,9 @@
       where:
         - {field: order_type, op: not_in, value: [补发订单]}
         - {field: order_state, op: not_in, value: [已取消, 取消, Cancelled], include_null: true}
-        - {field: order_flag, op: not_in, value: [蓝色旗帜], include_null: true, allow_missing: true}
       expect:
         - {field: tracking_no, op: notnull}
-        - {field: order_flag, op: not_in, value: [蓝色旗帜], include_null: true, allow_missing: true}
-      expect_label: 已发货且非蓝旗订单
+      expect_label: 已发货订单
 
 - id: dropship_cost
   name: 代发成本
@@ -317,7 +315,6 @@
       where:
         - {field: order_type, op: in, value: [补发订单]}
         - {field: order_state, op: not_in, value: [已取消, 取消, Cancelled], include_null: true}
-        - {field: order_flag, op: not_in, value: [蓝色旗帜], include_null: true, allow_missing: true}
 
 - id: freight_cost
   name: 发货运费

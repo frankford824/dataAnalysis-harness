@@ -1572,7 +1572,15 @@ class OrderFeed:
                 else pl.lit(False).alias(name)
                 for name in ("is_gift", "is_suspect")
             ),
-        ).unique(subset=["order_id", "sub_order_id"], keep="first")
+        ).unique(subset=["order_id", "sub_order_id"], keep="first").join(
+            orders.select(
+                pl.col("order_id").cast(pl.Utf8),
+                pl.col("order_remark").cast(pl.Utf8)
+                if "order_remark" in orders.columns
+                else pl.lit(None, dtype=pl.Utf8).alias("order_remark"),
+            ).unique(subset=["order_id"], keep="first"),
+            on="order_id", how="left",
+        )
         certified = certified.with_columns(pl.col("order_id", "sub_order_id").cast(pl.Utf8)).join(
             flags, on=["order_id", "sub_order_id"], how="left",
         ).with_columns(pl.col("is_gift", "is_suspect").fill_null(False))
@@ -1585,8 +1593,9 @@ class OrderFeed:
             certified=certified.with_columns(suspect.alias('__source_pricing_suspect'))
         else:
             certified = certified.filter(~suspect)
-        blue = (pl.col("order_flag") == "蓝色旗帜").fill_null(False) if store.platform == "pdd" else pl.lit(False)
-        unpriced = ((unit <= 0) | unit.is_null()) & ~((unit == 0) & (pl.col("is_gift") | blue))
+        from .engine.cost_policy import is_brushing
+        brushing = is_brushing(certified)
+        unpriced = ((unit <= 0) | unit.is_null()) & ~((unit == 0) & (pl.col("is_gift") | brushing))
         self._unpriced_cost_rows = int(certified.select(unpriced.sum()).item() or 0)
         if not review_pricing:
             certified = certified.filter(~unpriced)
@@ -1753,7 +1762,7 @@ class OrderFeed:
             ("sub_order_id", "text"), ("sku", "text"), ("quantity", "number"),
             ("unit_cost", "number"), ("total_cost", "number"), ("tracking_no", "text"),
             ("order_state", "text"), ("order_time", "time"), ("order_type", "text"),
-            ("store_name", "text"),
+            ("order_flag", "text"), ("order_remark", "text"), ("store_name", "text"),
         ])
 
     @classmethod

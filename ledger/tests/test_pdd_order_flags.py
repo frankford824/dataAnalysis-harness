@@ -3,34 +3,65 @@ from types import SimpleNamespace
 import polars as pl
 import pytest
 
+from conftest import MODELS
 from ledger.engine.runtime import Ingestion, run
+from ledger.model.loader import load_model
 from ledger.order_feed import OrderFeed
 from ledger.order_flags import apply
 from test_after_sale_identity import original_cost
 from test_order_feed import _fixture, _model_and_store, _write, FakeClient
 
 
-@pytest.mark.parametrize('platform,flag,expected',[('pdd','蓝色旗帜',0),('pdd','红色旗帜',-9),('pdd',None,-9),('taobao','蓝色旗帜',-9)])
-def test_blue_cost_exclusion_survives_feed_without_changing_other_flags(tmp_path,platform,flag,expected):
+def test_uploaded_cost_template_keeps_seller_remark_for_brushing_rule():
+    template=load_model(MODELS/'cn-ecommerce').template('jushuitan_cost_v1')
+    remark=next(binding for binding in template.bindings if binding.role=='order_remark')
+    assert remark.columns==('卖家备注',) and not remark.required
+
+
+@pytest.mark.parametrize('platform,flag,remark,expected',[
+    ('pdd','蓝色旗帜','by1 蔡果',0),
+    ('taobao','蓝色旗帜','BY 蔡果 发空包',0),
+    ('douyin','蓝色旗帜','by蔡果',0),
+    ('pdd','蓝色旗帜','买家秀 蔡果',-9),
+    ('pdd','蓝色旗帜','by1 蔡果 买家秀',-9),
+    ('pdd','蓝色旗帜','普通订单',-9),
+    ('pdd','蓝色旗帜','bypass 蔡果',-9),
+    ('pdd','红色旗帜','by1 蔡果',-9),
+    ('pdd',None,'by1 蔡果',-9),
+])
+def test_brushing_cost_rule_uses_blue_flag_and_by_remark(tmp_path,platform,flag,remark,expected):
     root=tmp_path/'feed';manifest=_fixture(root,after_sku=None,second_unnamed=True)
-    if platform == 'pdd':
-        for name in ('orders.parquet', 'order_items.parquet', 'order_costs.parquet'):
-            if name not in manifest['objects']:
-                continue
-            frame = pl.read_parquet(root / manifest['objects'][name]['path'])
-            if 'online_order_no' in frame.columns:
-                frame = frame.with_columns(pl.lit('260601-163771850381198').alias('online_order_no'))
-            if name == 'order_costs.parquet':
-                frame = frame.with_columns(pl.lit('2026-06-01').alias('cost_as_of'), pl.lit('history').alias('cost_source'),
-                                           pl.lit('{"order_date":"2026-06-01"}').alias('pricing_evidence'))
-            manifest['objects'][name] = _write(root, name, frame)
-    feed=OrderFeed(tmp_path/'ws',client=FakeClient(manifest),feed_root=root);feed.sync()
+    for name in ('orders.parquet', 'order_items.parquet', 'order_costs.parquet'):
+        if name not in manifest['objects']:
+            continue
+        frame = pl.read_parquet(root / manifest['objects'][name]['path'])
+        if 'online_order_no' in frame.columns and platform == 'pdd':
+            frame = frame.with_columns(pl.lit('260601-163771850381198').alias('online_order_no'))
+        if name == 'orders.parquet':
+            frame = frame.with_columns(pl.lit(remark).alias('order_remark'))
+        if name == 'order_items.parquet':
+            frame = frame.with_columns(pl.lit(flag,dtype=pl.Utf8).alias('order_flag'))
+        if name == 'order_costs.parquet':
+            frame = frame.with_columns(pl.lit('2026-06-01').alias('cost_as_of'), pl.lit('history').alias('cost_source'),
+                                       pl.lit('{"order_date":"2026-06-01"}').alias('pricing_evidence'))
+        manifest['objects'][name] = _write(root, name, frame)
+    client=FakeClient(manifest); original_get=client.get
+    def get(path, params=None):
+        response=original_get(path, params)
+        if path in {'entities/order/1','orders/1'}:
+            response['order']['order_remark']=remark
+        return response
+    client.get=get
+    feed=OrderFeed(tmp_path/'ws',client=client,feed_root=root);feed.sync()
     model,store=_model_and_store(feed,pricing='required')
     store=store.model_copy(update={'platform':platform})
     model=model.model_copy(update={'stores':tuple(store if s.id==store.id else s for s in model.stores)})
     ing=Ingestion(model=model,items=[])
     old=original_cost(ing,[('1','11','S1','SKU1'),('1','12','S2','SKU2')])
-    old.frame=old.frame.with_columns(pl.lit(flag,dtype=pl.Utf8).alias('order_flag'))
+    old.frame=old.frame.with_columns(
+        pl.lit(flag,dtype=pl.Utf8).alias('order_flag'),
+        pl.lit(remark,dtype=pl.Utf8).alias('order_remark'),
+    )
     feed.append_to(ing,store)
     if platform == 'pdd':
         orders = ing.frames_of('order_detail')[0].frame
@@ -43,9 +74,43 @@ def test_blue_cost_exclusion_survives_feed_without_changing_other_flags(tmp_path
     assert result.facts.filter(pl.col('metric_id')=='goods_cost')['contribution'].sum()==expected
     if platform=='pdd' and flag=='蓝色旗帜':
         assert result.spine['order_flag'].unique().to_list()==['蓝色旗帜']
+    if expected == 0:
+        brush = result.facts.filter(
+            (pl.col('metric_id')=='goods_cost')
+            & pl.col('source_note').str.contains('按刷单规则不计商品成本',literal=True).fill_null(False)
+        )
+        assert brush.height == 2
         for sl in result.slices.values():
             report=sl.link_reports.get('goods_cost')
-            if report:assert report.spine_keys==0
+            if report:assert report.coverage == 1
+
+
+@pytest.mark.parametrize('remark,pending',[('by 蔡果',False),('买家秀 蔡果',True)])
+def test_zero_price_blue_order_is_valid_only_for_brushing(tmp_path,remark,pending):
+    root=tmp_path/'feed';manifest=_fixture(root,after_sku=None,second_unnamed=True)
+    orders=pl.read_parquet(root/manifest['objects']['orders.parquet']['path']).with_columns(
+        pl.lit(remark).alias('order_remark'))
+    items=pl.read_parquet(root/manifest['objects']['order_items.parquet']['path']).with_columns(
+        pl.lit('蓝色旗帜').alias('order_flag'))
+    costs=pl.read_parquet(root/manifest['objects']['order_costs.parquet']['path']).with_columns(
+        pl.lit('0').alias('unit_cost'),pl.lit('0').alias('cost_amount'))
+    manifest['objects']['orders.parquet']=_write(root,'orders.parquet',orders)
+    manifest['objects']['order_items.parquet']=_write(root,'order_items.parquet',items)
+    manifest['objects']['order_costs.parquet']=_write(root,'order_costs.parquet',costs)
+    client=FakeClient(manifest);original_get=client.get
+    def get(path,params=None):
+        response=original_get(path,params)
+        if path in {'entities/order/1','orders/1'}:response['order']['order_remark']=remark
+        return response
+    client.get=get
+    feed=OrderFeed(tmp_path/'ws',client=client,feed_root=root);feed.sync()
+    model,store=_model_and_store(feed,pricing='required')
+    ing=Ingestion(model=model,items=[]);feed.append_to(ing,store)
+    result=run(ing,store.platform)
+    assert (result.pricing_gaps.height == 2) is pending
+    if not pending:
+        facts=result.facts.filter(pl.col('metric_id')=='goods_cost')
+        assert facts.height==2 and facts['contribution'].sum()==0
 
 
 def test_mixed_flags_do_not_exempt_the_entire_merged_order():

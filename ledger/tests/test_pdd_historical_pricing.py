@@ -26,7 +26,7 @@ def scenario(**overrides):
         base_order_id='260524-163771850381198', internal_order_id='123', sub_order_id='CHILD',
         sku='SKU', order_type='补发订单', order_state='Sent', store_name='shop',
         order_time=datetime(2026, 6, 10), quantity=2., unit_cost=5., cost_source='history',
-        cost_status='priced', cost_as_of='2026-05-24', order_flag=None)
+        cost_status='priced', cost_as_of='2026-05-24', order_flag=None, order_remark=None)
     row.update(overrides)
     orders = [{k: row[k] for k in ('order_id', 'sub_order_id', 'order_type', 'store_name', 'order_time')}]
     result = run(Ingestion(model=model, items=[item('order_detail', orders, orders[0]), item('order_cost', [row], row)]), 'pdd')
@@ -65,10 +65,15 @@ def test_verified_history_is_booked_in_original_month():
     assert result.slices[('shop', '2026-05')].nodes['profit'].value == -10
 
 
-def test_blue_flag_needs_no_price_and_no_pending_review():
-    _, result = scenario(order_flag='蓝色旗帜', unit_cost=None, cost_status='missing_price')
+def test_brushing_order_needs_no_price_and_no_pending_review():
+    _, result = scenario(order_flag='蓝色旗帜', order_remark='by 蔡果', unit_cost=None, cost_status='missing_price')
     assert result.pricing_gaps.is_empty()
-    assert result.facts.is_empty()
+    assert result.facts['contribution'].sum() == 0
+
+
+def test_blue_flag_without_by_still_requires_price():
+    _, result = scenario(order_flag='蓝色旗帜', unit_cost=None, cost_status='missing_price')
+    assert result.pricing_gaps.height == 1
 
 
 def test_pending_rows_are_saved_even_without_monetary_facts(tmp_path):
