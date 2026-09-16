@@ -9,6 +9,7 @@ import { useCommission } from '../commissionStore'
 import { useCommissionQuery } from '../components/useCommissionQuery'
 import { commissionRequest } from '../components/commissionRequest'
 import { sameSettlementScope, settlementDifference as compareSettlement } from '../components/commissionSettlement'
+import { reportRowActions } from '../commissionRowActions'
 const state = useCommission()
 const page = ref(1), downloading = ref(false), downloadError = ref(''), detail = ref(null)
 const settlements = ref([]), settlementLoading = ref(false), settlementOpen = ref(false)
@@ -264,18 +265,35 @@ const tableColumns=computed(()=>{
           key==='person'&&row.kind==='store'?h('strong','店铺合计'):
           key==='amount'&&row.kind==='store'?h('strong',money(row.store_amount)):cell(row,key))
   }))
-  if(['people','stores','store_people','breakdown','coverage'].includes(state.reportView))list.push({title:'操作',key:'action',width:['store_people','breakdown'].includes(state.reportView)?228:168,mobileWidth:155,fixed:'right',render:row=>h('div',{class:'report-row-actions'},[
-    ...(canOpenProfit(row)
-      ? [h(NButton,{text:true,type:'primary',size:'small',disabled:locked.value,
-          onClick:()=>openProfit(row)},()=>'利润构成')]:[]),
-    ...(targetsFor(row).length
-      ? [h(NButton,{text:true,type:'primary',size:'small',disabled:locked.value,
-          onClick:()=>choosePayout(row)},()=>row.status?.includes('已人工确认')?'修改确认':'确认提成')]:[]),
-    h(NButton,{text:true,type:'primary',size:'small',disabled:locked.value||row.amount==null,
-      onClick:()=>drill(row)},()=> '明细'),
-  ])})
+  if(['people','stores','store_people','breakdown','coverage'].includes(state.reportView))list.push({
+    title:'操作',key:'action',width:292,minWidth:220,mobileWidth:176,mobile:true,fixed:'right',
+    render:row=>renderRowActions(row),
+  })
   return list
 })
+function renderRowActions(row) {
+  const actions = reportRowActions(row, {
+    profit: canOpenProfit(row),
+    payout: targetsFor(row).length > 0,
+    detail: row.amount != null,
+  })
+  if (!actions.length) return h('span', {class:'report-row-actions-empty'}, '—')
+  const clicks = {
+    profit: () => openProfit(row),
+    payout: () => choosePayout(row),
+    detail: () => drill(row),
+  }
+  return h('div', {class:'report-row-actions', role:'group', 'aria-label':'行操作'},
+    actions.flatMap((action, index) => [
+      ...(index ? [h('span', {class:'report-row-action-split', 'aria-hidden':'true'})] : []),
+      h('button', {
+        type:'button',
+        class:['report-row-action', `is-${action.kind}`],
+        disabled: locked.value,
+        onClick: clicks[action.key],
+      }, action.label),
+    ]))
+}
 </script>
 <template>
   <div class="commission-content report-content">
@@ -329,7 +347,7 @@ const tableColumns=computed(()=>{
             <label v-for="person in payoutPeople" :key="person.person_id">
               <span>{{ person.person }}<small>系统试算 {{ money(person.suggested) }}</small>
                 <small v-if="person.included_profit!=null">计入阶梯 ¥{{ money(person.included_profit) }}<template v-if="person.excluded_count"> · 已剔除 {{ person.excluded_count }} 个商品</template></small>
-                <button type="button" class="text-button" @click="openProfitFromPayout(person)">利润构成</button>
+                <button type="button" class="report-inline-action" @click="openProfitFromPayout(person)">查看利润构成</button>
               </span>
               <n-input v-model:value="person.amount" inputmode="decimal" :aria-label="`${person.person}确认提成`" placeholder="确认金额" />
             </label>
@@ -364,7 +382,7 @@ const tableColumns=computed(()=>{
 
 .report-content{padding-top:0}.report-months{display:flex;align-items:center;gap:12px;min-height:76px;border-bottom:1px solid #e9edf2;flex-wrap:wrap;padding:14px 0}.month-label{font-size:13px;margin-right:4px;color:#566176}.report-months input{height:35px;width:145px;max-width:100%;border:1px solid #dce2eb;border-radius:5px;padding:0 10px;background:#fff;font-size:13px;color:#30415c}.date-separator{font-size:13px;color:#8a94a3}.month-shortcuts{display:flex;gap:18px;margin-left:12px}.report-overview{display:flex;align-items:center;gap:0;padding:26px 0 27px;min-height:129px;border-bottom:1px solid #e9edf2}.report-total{padding-right:42px;min-width:240px}.report-total>span{font-size:13px;color:#67748a}.report-total strong{display:block;margin-top:7px;font-size:33px;line-height:1.3;font-weight:650;letter-spacing:-.7px;font-variant-numeric:tabular-nums}.report-total small{font-size:25px;margin-right:3px}.report-count{border-left:1px solid #e9edf2;padding:8px 32px;display:flex;align-items:baseline;gap:9px;white-space:nowrap}.report-count strong{font-size:28px;font-weight:600}.report-count span{color:#6e7b90;font-size:13px}.report-attention{display:flex;gap:8px;align-items:center;margin-left:auto;background:transparent;border:0;padding:0;color:#b88734;font-size:12px;cursor:pointer;text-align:left}.report-attention>span:last-child{color:#3468f0;margin-left:3px}.attention-dot{width:6px;height:6px;background:#d9a13d;border-radius:50%;flex:none}.report-tabs-row{display:flex;align-items:center;justify-content:space-between;gap:16px;min-height:76px}.report-tabs{display:flex;gap:28px;align-self:stretch;min-width:0;overflow:auto}.report-tabs button{border:0;border-bottom:2px solid transparent;background:transparent;color:#768397;font-size:13px;white-space:nowrap;padding:17px 0 13px;cursor:pointer}.report-tabs button.active{color:#3468f0;border-color:#3468f0;font-weight:550}.report-table th:first-child{width:22%}.report-table td:first-child{color:#30415b;font-weight:500}.report-state{font-size:12px;color:#8490a0}.report-state.review{color:#b18741}.report-empty-action{display:block;margin:9px auto 0}.report-back{padding:0 0 13px}.report-table{min-width:780px}
 .report-actions{display:flex;gap:10px}.settlement-history{border-top:1px solid #e9edf2;margin-top:22px;padding-top:22px}.settlement-history h3{font-size:15px;margin:0}.settlement-history p,.settlement-help{font-size:12px;color:#718097;margin:5px 0 14px}.settlement-footer{display:flex;justify-content:flex-end;gap:10px}
-.report-grain-note{font-size:12px;color:#718097;line-height:1.7;margin:0 0 14px}.report-row-actions{display:flex;align-items:center;gap:10px;white-space:nowrap}.payout-people{display:grid;gap:12px;margin-top:14px}.payout-people label{display:grid;grid-template-columns:minmax(0,1fr) 145px;align-items:center;gap:10px;font-size:13px}.payout-people small{display:block;color:#8490a0;font-size:11px;margin-top:3px}.payout-people .text-button{display:block;margin-top:4px;font-size:12px}.payout-sum{display:flex;justify-content:space-between;margin:2px 0 0;border-top:1px solid #e9edf2;padding-top:12px;font-size:13px}.payout-sum strong{font-size:17px;font-variant-numeric:tabular-nums}
+.report-grain-note{font-size:12px;color:#718097;line-height:1.7;margin:0 0 14px}.report-row-actions{display:inline-flex;align-items:center;gap:0;max-width:100%;padding:3px;background:#f4f6f9;border:1px solid #e3e8f0;border-radius:9px;white-space:nowrap}.report-row-action{appearance:none;border:0;background:transparent;height:26px;padding:0 10px;border-radius:6px;font:inherit;font-size:12px;line-height:26px;color:#5a6578;cursor:pointer}.report-row-action:hover:not(:disabled){background:#fff;color:#1f5eff}.report-row-action.is-main{background:#fff;color:#1f5eff;font-weight:600;box-shadow:0 0 0 1px #d7e2ff}.report-row-action.is-main:hover:not(:disabled){background:#f4f7ff}.report-row-action:disabled{opacity:.4;cursor:default}.report-row-action-split{width:1px;height:14px;background:#d9dee8;flex:none}.report-row-actions-empty{color:#9aa3b2}.payout-people{display:grid;gap:12px;margin-top:14px}.payout-people label{display:grid;grid-template-columns:minmax(0,1fr) 145px;align-items:center;gap:10px;font-size:13px}.payout-people small{display:block;color:#8490a0;font-size:11px;margin-top:3px}.report-inline-action{display:inline-flex;margin-top:6px;border:0;background:#eef2f7;color:#3d4a5c;border-radius:999px;padding:2px 9px;font:inherit;font-size:11px;cursor:pointer}.report-inline-action:hover{background:#e4ebff;color:#1f5eff}.payout-sum{display:flex;justify-content:space-between;margin:2px 0 0;border-top:1px solid #e9edf2;padding-top:12px;font-size:13px}.payout-sum strong{font-size:17px;font-variant-numeric:tabular-nums}
 .payout-history{margin-top:14px;border-top:1px solid #e9edf2;padding-top:10px;font-size:12px;color:#536176}.payout-history summary{cursor:pointer;color:#3468f0}.payout-history>div{margin-top:10px;display:grid;gap:3px}.payout-history small{color:#8490a0;font-size:11px;margin-left:4px}
 .payout-targets{display:grid;gap:8px}.payout-targets button{border:1px solid #e3e8f0;background:#fff;border-radius:7px;padding:11px 13px;display:flex;justify-content:space-between;align-items:center;text-align:left;cursor:pointer;color:#334155}.payout-targets button:hover{border-color:#91adf8;background:#f7f9ff}.payout-targets strong{display:block;font-size:13px}.payout-targets small{display:block;color:#7b8798;font-size:11px;margin-top:4px}.payout-targets .num{font-weight:600;font-size:14px}
 @media(max-width:1180px){.report-total{min-width:200px;padding-right:24px}.report-count{padding:8px 20px}.report-overview{flex-wrap:wrap;row-gap:18px}.report-attention{margin-left:0;flex-basis:100%}.report-tabs{gap:22px}}

@@ -581,6 +581,50 @@ def test_manual_cost_unique_rate_uses_store_profit_after_labor(tmp_path):
     assert abs(sum(suggested.values())-2039)<=0.01
 
 
+def test_unique_rate_still_caps_when_allocated_profit_is_missing(tmp_path):
+    ws=Workspace(tmp_path);registry=Registry(tmp_path)
+    model=_model(stores=(Store(id='s1',name='拾梦小屋',platform='taobao'),))
+    model=model.model_copy(update={
+        'overheads':(Overhead(period='2026-06',amount=6090.41,name='兼职人工费用'),),
+        'statement':(model.statement[0].model_copy(update={'headline':'revenue'}),
+                     *model.statement[1:],
+                     StatementNode(id='net_profit',name='利润',level=1,is_total=True,
+                                   headline='profit',formula={'op':'add','of':['gross']})),
+    })
+    members=[registry.person_save({'name':name},'test','登记')
+             for name in ('陈慨','石紫莹','黄颖','杨舒')]
+    people=[{'person_id':p['id'],'person':p['name'],'amount':after,
+             'allocated_sales':sales,'allocated_gross':gross,
+             'sales':sales,'gross':gross}
+            for p,after,sales,gross in zip(
+                members,(2044.95,25.51,11.83,1.03),
+                (132634.54,2759.80,1407.28,54.06),
+                (85990.03,1532.69,1184.18,42.35))]
+    ws.record('s1','2026-06',{
+        'statement':[{'id':model.statement[0].id,'value':138115.17,'available':True},
+                     {'id':'gross','value':88058.51,'available':True},
+                     {'id':'net_profit','value':46870.46,'available':True}],
+        'manual_cost':{'profit':46870.46},
+        'commission':{'engine':'commission-v2','base_node':'net_profit',
+                      'base_total':46870.46,'on_loss':'deduct','total':2083.32,
+                      'amount_complete':True,'manual_confirmed':True,
+                      'manual_amounts_after_labor':True,'people':people,
+                      'products':[{'product_id':'1','total_rate':0.05,'people':[
+                          {'person_id':p['id']} for p in members]}]},
+    },[])
+    app=FastAPI();install(app,lambda:ws,lambda:model)
+    report=TestClient(app).post('/api/commission-v2/reports/query',json={
+        'start':'2026-06','end':'2026-06','store_ids':['s1'],
+        'view':'store_people'}).json()
+    store,*rows=report['items']
+    people_rows=[row for row in rows if row['kind']=='person']
+    assert store['profit_after_labor']==40780.05
+    assert abs(report['total']-2039)<=0.01
+    assert abs(sum(row['amount'] for row in people_rows)-2039)<=0.01
+    assert abs(sum(row['profit_after_labor'] for row in people_rows)-40780.05)<=0.01
+    assert report['total']<=40780.05*0.05+0.01
+
+
 def test_unattributed_store_loss_is_shared_without_assigning_unknown_orders(tmp_path):
     ws = Workspace(tmp_path); registry = Registry(tmp_path)
     model = _model(stores=(Store(id='s1', name='1688南京朗歆', platform='taobao'),))

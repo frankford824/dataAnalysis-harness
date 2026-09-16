@@ -72,15 +72,28 @@ def _operating(result: dict):
     return row.get("value") if row and row.get("available", True) else None
 
 
+def _keep_scaled_trial(trial: dict[str, Decimal], commission: dict, labor_cut):
+    """Reproduce the page prefill used when store profit is not yet confirmed."""
+    from . import commission_reports
+    if commission.get("manual_amounts_after_labor"):
+        return dict(trial)
+    keep = commission_reports.labor_keep(commission.get("base_total"), labor_cut)
+    return {pid: _cents(commission_reports.money_float(amount * keep))
+            for pid, amount in trial.items()}
+
+
 def _deduct_labor_if_trial_accepted(amounts: dict[str, Decimal], commission: dict,
                                     labor_cut, operating=None) -> tuple[dict[str, Decimal], bool]:
-    """Do not persist the raw order-level trial as an after-labor confirmation."""
+    """Replace auto trial/keep prefills with profit × unique rate once operating is known."""
     if labor_cut is None or not amounts:
         return amounts, False
     trial = {str(person["person_id"]): _cents(person["amount"])
              for person in commission.get("people") or []
              if person.get("person_id") and person.get("amount") is not None}
-    if not trial or amounts != trial:
+    if not trial:
+        return amounts, False
+    keep_scaled = _keep_scaled_trial(trial, commission, labor_cut)
+    if amounts != trial and amounts != keep_scaled:
         return amounts, False
     from . import commission_reports
     suggested = commission_reports.suggested_payouts(

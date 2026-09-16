@@ -156,6 +156,30 @@ def _split_cents(total, weights):
     return {pid: Decimal(cents) / 100 for pid, cents in whole.items()}
 
 
+def _profit_from_sales(people, operating, labor):
+    """When allocated profit is missing, split store profit after labor by sales."""
+    weights = {}
+    for person in people:
+        pid = person.get('person_id')
+        sales = person.get('allocated_sales')
+        if sales is None:
+            sales = person.get('sales')
+        if not pid or sales is None:
+            return {}
+        weights[pid] = max(decimal(sales), Decimal(0))
+    after = profit_after_labor(operating, labor)
+    if after is None:
+        return {}
+    amount = decimal(after)
+    if amount == 0:
+        return {pid: 0.0 for pid in weights}
+    parts = _split_cents(abs(amount), weights)
+    if parts is None:
+        return {}
+    sign = Decimal(1) if amount > 0 else Decimal(-1)
+    return {pid: money_float(sign * parts[pid]) for pid in parts}
+
+
 def attributed_profit(commission, operating, labor, registry, *, store_id='', manual_cost=False):
     """Additive person profit; keep full sales and gross output separate.
 
@@ -179,7 +203,7 @@ def attributed_profit(commission, operating, labor, registry, *, store_id='', ma
     if len(split) != len(people):
         split = _archived_allocated_outputs(registry, commission)
     if split is None or any(p.get('person_id') not in split for p in people):
-        return {}
+        return _profit_from_sales(people, operating, labor)
     values = {p['person_id']: decimal(split[p['person_id']]['profit']) for p in people}
     weights = {p['person_id']: max(decimal(split[p['person_id']].get('sales') or 0), Decimal(0))
                for p in people}

@@ -290,3 +290,49 @@ def test_period_snapshot_exposes_after_labor_trial_for_manual_close(tmp_path, mo
     assert report.status_code == 200, report.text
     assert report.json()['total'] == 20
     ws.close()
+
+
+def test_accepting_keep_scaled_payouts_uses_unique_rate_after_cost_confirm(tmp_path):
+    from decimal import Decimal
+    from ledger.commission_reports import labor_keep, money_float
+
+    m = model(); ws = Workspace(tmp_path); registry = Registry(tmp_path)
+    members = [registry.person_save({'name': name}, 'test', '登记')
+               for name in ('陈慨', '石紫莹')]
+    raw = result(m, members[0])
+    raw['commission']['people'] = [
+        {'person_id': members[0]['id'], 'person': '陈慨', 'amount': 2347.44,
+         'allocated_sales': 132634.54, 'allocated_gross': 85990.03,
+         'allocated_profit': 46947.61},
+        {'person_id': members[1]['id'], 'person': '石紫莹', 'amount': 29.28,
+         'allocated_sales': 2759.80, 'allocated_gross': 1532.69,
+         'allocated_profit': 586.77},
+    ]
+    raw['commission'].update(
+        engine='commission-v2', base_node='net_profit', base_total=47861.18,
+        total=2376.72, amount_complete=False,
+        products=[{'product_id': '1', 'total_rate': 0.05, 'people': [
+            {'person_id': person['id']} for person in members]}],
+    )
+    raw['calculation_inputs']['metric_totals'].update({
+        'goods_cost': -40000.0, 'goods_return_cost': 0.0,
+        'dropship_cost': 0.0, 'reshipment_cost': 0.0,
+    })
+    keep = labor_keep(47861.18, 6090.41)
+    keep_payouts = [
+        {'person_id': person['person_id'],
+         'amount': f"{money_float(Decimal(str(person['amount'])) * keep):.2f}"}
+        for person in raw['commission']['people']
+    ]
+    keep_total = sum(Decimal(item['amount']) for item in keep_payouts)
+    decided, _ = manual_cost.certified(
+        m, raw, 1,
+        {'goods': '49670.17', 'dropship': '164.60', 'reshipment': '221.89'},
+        keep_payouts, False, '页面预填的扣兼职后试算', labor_cut='6090.41')
+    total = decided['commission']['total']
+    profit = decided['manual_cost']['profit']
+    assert profit is not None
+    after = round(profit - 6090.41, 2)
+    assert total <= after * 0.05 + 0.01
+    assert Decimal(str(total)) != keep_total
+    ws.close()
