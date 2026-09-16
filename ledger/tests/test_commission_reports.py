@@ -382,12 +382,13 @@ def test_store_person_profit_after_labor_keeps_full_participation_and_export(tmp
     assert [r['利润额'] for r in raw_rows] == ['150.0', '95.0', '55.0']
 
 
-@pytest.mark.parametrize('store_id,store_profit,labor,assigned_profit,sales,trial,expected', [
-    ('douyin_mszr2dhn', 46686.67, 5477.63, 46108.09, 123571.79, 2302.64, 2060.45),
-    ('douyin_mt9sbkne', 3460.11, 647.24, 2608.20, 10804.25, 130.50, 140.64),
+@pytest.mark.parametrize('store_id,store_profit,labor,assigned_profit,sales,trial,rate,expected', [
+    ('douyin_mszr2dhn', 46686.67, 5477.63, 46108.09, 123571.79, 2302.64, .05, 2060.45),
+    ('douyin_mt9sbkne', 3460.11, 647.24, 2608.20, 10804.25, 130.50, .05, 140.64),
+    ('pdd_yidali', 45000, 500, 44322.17, 12000, 1326.95, .03, 1335.00),
 ])
-def test_caiguo_single_rate_payout_uses_person_profit_after_labor(
-        tmp_path, store_id, store_profit, labor, assigned_profit, sales, trial, expected):
+def test_single_owner_uniform_rate_uses_full_store_profit_after_labor(
+        tmp_path, store_id, store_profit, labor, assigned_profit, sales, trial, rate, expected):
     ws=Workspace(tmp_path);registry=Registry(tmp_path)
     model=_model(stores=(Store(id=store_id,name='蔡果店',platform='taobao'),))
     model=model.model_copy(update={
@@ -410,7 +411,7 @@ def test_caiguo_single_rate_payout_uses_person_profit_after_labor(
                           'amount':trial,'base':assigned_profit,
                           'allocated_profit':assigned_profit,'profit':assigned_profit,
                           'sales':sales,'gross':assigned_profit+100}],
-                      'products':[{'product_id':'12345678901','total_rate':0.05,
+                      'products':[{'product_id':'12345678901','total_rate':rate,
                           'people':[{'person_id':pid,'person':'蔡果','amount':trial}]}]},
     },[])
     app=FastAPI();install(app,lambda:ws,lambda:model)
@@ -437,7 +438,7 @@ def test_caiguo_single_rate_payout_uses_person_profit_after_labor(
     assert confirmed['trial_periods']==0
 
 
-def test_caiguo_solo_store_attributes_full_profit_even_with_legacy_skip_loss(tmp_path):
+def test_single_owner_attributes_full_profit_even_with_legacy_skip_loss(tmp_path):
     ws=Workspace(tmp_path);registry=Registry(tmp_path)
     store_id='douyin_qianhuajian';pid='legacy:5811db93188b314a53ce01f5'
     registry.person_save({'id':pid,'name':'蔡果'},'test','登记')
@@ -468,6 +469,15 @@ def test_caiguo_solo_store_attributes_full_profit_even_with_legacy_skip_loss(tmp
         'view':'store_people'}).json()
     assert report['items'][1]['profit_after_labor']==1981.68
     assert report['items'][1]['amount']==99.08
+
+
+def test_single_owner_with_multiple_effective_rates_keeps_order_payout(tmp_path):
+    from ledger.commission_reports import confirmed_profit_rate
+    person_id='person:one'
+    commission={'base_node':'net_profit','people':[{'person_id':person_id}],
+        'products':[{'total_rate':.03,'people':[{'person_id':person_id}]},
+                    {'total_rate':.05,'people':[{'person_id':person_id}]}]}
+    assert confirmed_profit_rate(commission,person_id,'any_store') is None
 
 
 def test_unattributed_store_loss_is_shared_without_assigning_unknown_orders(tmp_path):

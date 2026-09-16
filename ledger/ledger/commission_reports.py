@@ -52,10 +52,6 @@ def profit_after_labor(profit, labor):
 _profit_lock = threading.RLock()
 _profit_cache: OrderedDict[tuple, dict[str, float] | None] = OrderedDict()
 _PROFIT_CACHE_LIMIT = 128
-_CAIGUO_PERSON_ID = 'legacy:5811db93188b314a53ce01f5'
-_CAIGUO_SOLO_STORES = frozenset({
-    'douyin_mszr2dhn', 'douyin_mt9sbkne', 'douyin_qianhuajian',
-})
 
 
 def _archived_allocated_profit(registry, commission):
@@ -115,14 +111,15 @@ def _split_cents(total, weights):
 def attributed_profit(commission, operating, labor, registry, *, store_id='', manual_cost=False):
     """Additive person profit; keep full sales and gross output separate."""
     people = commission.get('people') or []
-    if operating is None or manual_cost or not people:
+    if operating is None or not people:
         return {}
     ids = [p.get('person_id') for p in people]
     if any(not pid for pid in ids) or len(ids) != len(set(ids)):
         return {}
-    if (store_id in _CAIGUO_SOLO_STORES and len(people) == 1
-            and ids[0] == _CAIGUO_PERSON_ID):
+    if len(people) == 1:
         return {ids[0]: profit_after_labor(operating, labor)}
+    if manual_cost:
+        return {}
     split = {p['person_id']: p.get('allocated_profit') for p in people
              if p.get('person_id') and p.get('allocated_profit') is not None}
     if len(split) != len(people):
@@ -144,17 +141,15 @@ def attributed_profit(commission, operating, labor, registry, *, store_id='', ma
 
 
 def confirmed_profit_rate(commission, person_id, store_id=''):
-    """Cai Guo's approved solo-store profit-based 5% payout."""
-    if (person_id != _CAIGUO_PERSON_ID or
-            store_id not in _CAIGUO_SOLO_STORES or
-            commission.get('base_node') != 'net_profit' or
+    """One-owner stores use full store profit at their sole effective rate."""
+    if (not person_id or commission.get('base_node') != 'net_profit' or
             len(commission.get('people') or []) != 1):
         return None
     rates = {decimal(product.get('total_rate') or 0)
              for product in commission.get('products') or []
              if any(crew.get('person_id') == person_id
                     for crew in product.get('people') or [])}
-    return Decimal('.05') if rates == {Decimal('.05')} else None
+    return next(iter(rates)) if len(rates) == 1 else None
 
 
 _configured_lock = threading.RLock()
@@ -307,7 +302,7 @@ def build(workspace, registry, model, start, end, store_ids=None, person_ids=Non
                      if not decision and not c.get('manual_confirmed')
                      and source_c.get('people') else None)
         if profit_rate is not None and person_profit.get(source_pid) is not None:
-            notes.append('蔡果一人负责本店：店铺利润全部归本人，提成按利润额乘已核实的5%点数计算')
+            notes.append(f'本店仅一位分配人：店铺利润全部归本人，提成按利润额乘唯一有效点数{money_float(profit_rate*100):g}%计算')
             scope['notes']='；'.join(notes)
         member_rows=[]
         for person in c.get('people',[]):
