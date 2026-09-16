@@ -78,7 +78,8 @@ def historical_price_evidence(frame: pl.DataFrame, *, trusted_feed_history: bool
     unit=col('unit_cost').cast(pl.Float64,strict=False);qty=col('quantity').cast(pl.Float64,strict=False)
     known=(col('cost_source').cast(pl.Utf8).is_in(ORDER_DAY_COST_SOURCES)
            &(col('cost_status')=='priced')&(quoted==wanted)&unit.is_finite()&(unit>=0)&qty.is_finite()&(qty>=0)
-           &~col('pricing_suspect').cast(pl.Boolean).fill_null(False))
+           &~col('pricing_suspect').cast(pl.Boolean).fill_null(False)
+           &~col('pricing_missing').cast(pl.Boolean).fill_null(False))
     if 'pricing_evidence' in frame.columns:
         evidence_day=col('pricing_evidence').cast(pl.Utf8).str.json_path_match('$.order_date')
         dated=evidence_day==wanted.dt.strftime('%Y-%m-%d')

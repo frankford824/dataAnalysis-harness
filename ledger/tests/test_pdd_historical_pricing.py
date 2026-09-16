@@ -76,6 +76,12 @@ def test_blue_flag_without_by_still_requires_price():
     assert result.pricing_gaps.height == 1
 
 
+def test_blue_buyer_show_zero_feed_price_still_requires_price():
+    _, result = scenario(order_flag='蓝色旗帜', order_remark='买家秀 蔡果', unit_cost=0,
+                         pricing_missing=True)
+    assert result.pricing_gaps.height == 1
+
+
 def test_pending_rows_are_saved_even_without_monetary_facts(tmp_path):
     model, result = scenario(unit_cost=None, cost_status='missing_price', reference_unit_cost=float('nan'))
     sl = result.slices[('shop', '2026-05')]
