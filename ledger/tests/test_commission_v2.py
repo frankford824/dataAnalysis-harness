@@ -148,6 +148,25 @@ def test_mixed_store_distributions_do_not_guess_missing_identity(tmp_path):
         'missing_product_id','missing_order_time'}
 
 
+def test_uniform_fallback_survives_explicit_wage_preview(tmp_path):
+    r,a,b=registry(tmp_path)
+    body={'segments':[{'valid_from':'2026-05-01','total_rate':'.05',
+        'amount_hold':'wage_pending','allocations':[
+            {'person_id':a,'role':'运营','rate':'.03'},
+            {'person_id':b,'role':'运营','rate':'.02'}]}]}
+    r.save_scheme('s1','p1',body,'tester','统一分点待工资确认',publish=True)
+    r.save_policy({'base_node':'gross','wages':'skip_preview'},'2026-05-01',
+                  'tester','工资先不扣，仅试算')
+    summary,details,_=calculate(
+        _run([('known','p1','2026-05-02',50),
+              ('missing-product','','2026-05-03',100)]),
+        _model(),'s1','2026-05',r)
+    assert summary['uniform_fallback_orders']==1 and summary['unassigned_orders']==0
+    assert summary['wage_preview_orders']==2 and summary['amount_complete'] is False
+    assert summary['total']==7.5
+    assert details.filter(pl.col('fallback_reason')=='store_uniform_distribution').height==2
+
+
 def test_june_store_default_covers_unassigned_links_preserving_existing_products(tmp_path):
     r, owner, _ = registry(tmp_path)
     r.save_scheme('s1', 'p1', {'segments':[segment('2026-06-01',owner,rate='.05')]},

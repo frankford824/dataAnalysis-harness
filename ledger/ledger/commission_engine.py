@@ -119,7 +119,6 @@ def _uniform_distribution_rule(rules, allocations, period):
     if candidates.is_empty() or candidates.filter(
         (pl.col("mode") != "distribute")
         | (pl.col("amount_hold") != "")
-        | pl.col("wage_preview")
     ).height:
         return None
     signatures = {}
