@@ -124,6 +124,30 @@ def test_batch_cost_round_trip_preserves_long_excel_order_ids(tmp_path):
     ws.close()
 
 
+def test_batch_cost_uses_stable_hidden_identity_when_excel_rounds_visible_ids(tmp_path):
+    ws=Workspace(tmp_path);raw=payload();run=ws.record(raw['store_id'],raw['period'],raw,[])
+    frame=archive(ws,run,('S2',)).with_columns(
+        pl.lit('6926959428278976406').alias('order_id'),
+        pl.lit('6926959428278976419').alias('sub_order_id'))
+    path=ws.coverage_gaps_path(run);frame.write_parquet(path);seal(path)
+    content=edited_cost_export(ws,run,{'S2':'12.50'})
+    rows=list(csv.DictReader(io.StringIO(content.decode('utf-8-sig'))))
+    rows[0]['平台订单号']='6.92695942827898E+18'
+    rows[0]['子订单号']='6926959428278970000'
+    output=io.StringIO();writer=csv.DictWriter(output,fieldnames=rows[0].keys())
+    writer.writeheader();writer.writerows(rows)
+    rounded=output.getvalue().encode('utf-8-sig')
+    preview=cost_lines.batch_preview(ws,raw['store_id'],raw['period'],run,
+                                     rounded,'Excel批量核对')
+    assert preview['valid']==1 and preview['issue_count']==0
+    saved=cost_lines.batch_apply(ws,raw['store_id'],raw['period'],run,rounded,
+        expected_file_sha=preview['file_sha'],expected_line_revision=preview['line_revision'],
+        default_reason='Excel批量核对')
+    assert saved['saved']==1 and saved['amount_total']==12.5
+    assert cost_lines.current(ws,run,raw['store_id'],raw['period'])['supplement_total']==12.5
+    ws.close()
+
+
 def test_edit_and_remove_append_history_and_respect_latest_order_context(tmp_path):
     ws=Workspace(tmp_path);raw=payload()
     run=ws.record(raw['store_id'],raw['period'],raw,[])

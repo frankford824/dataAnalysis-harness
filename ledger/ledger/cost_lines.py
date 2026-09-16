@@ -157,13 +157,14 @@ def _batch_rows(ws, store_id: str, period: str, run_id: int,
             issues.append(f'第{line}行订单键不存在或重复')
             continue
         used.add(key)
-        order = identifier(edited.get('平台订单号'))
-        sub = identifier(edited.get('子订单号'))
+        # Excel/WPS can rewrite 18+ digit order numbers even when the export uses
+        # formula text.  Those columns are for people to read, not row identity.
+        # The opaque key plus the hash of its exact order context are the stable,
+        # tamper-evident authority; checking the rendered IDs again only creates
+        # false stale-file errors after an ordinary CSV save.
         if (source['order_count'] != 1 or source['context_sha'] !=
-                (edited.get('核对版本') or '').strip() or
-                order != (source.get('order_id') or '') or
-                sub != (source.get('sub_order_id') or '')):
-            issues.append(f'第{line}行订单归属或清单版本已变化，请重新导出')
+                (edited.get('核对版本') or '').strip()):
+            issues.append(f'第{line}行清单键或核对版本已变化，请重新导出')
             continue
         try:
             expected = int((edited.get('修改版本') or '0').strip())
