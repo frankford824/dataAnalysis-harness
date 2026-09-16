@@ -57,28 +57,32 @@ def labor_keep(base_total, labor_cut):
     return (base - decimal(labor_cut or 0)) / base
 
 
-def suggested_payouts(commission, labor_cut, *, operating=None):
+def suggested_payouts(commission, labor_cut, *, operating=None, registry=None):
     """Human-facing trial payouts after the store labor cut.
 
-    A later manual confirmation stores those amounts as already after labor.
-    Prefilling the raw order-level trial here would pay the labor cut twice or
-    not at all, depending on that flag.
+    A unique link rate uses attributed profit after labor. Scaling the raw
+    order trial by the labor keep would ignore cost supplements and unassigned
+    losses that already reduced the store profit the page shows.
     """
     people = commission.get('people') or []
-    if commission.get('manual_amounts_after_labor'):
-        return {person['person_id']: money_float(person['amount'])
-                for person in people
-                if person.get('person_id') and person.get('amount') is not None}
-    if (len(people) == 1 and operating is not None
-            and people[0].get('person_id') and people[0].get('amount') is not None):
-        rate = confirmed_profit_rate(commission, people[0]['person_id'])
-        if rate is not None:
-            return {people[0]['person_id']: money_float(
-                decimal(profit_after_labor(operating, labor_cut)) * rate)}
-    keep = labor_keep(commission.get('base_total'), labor_cut)
-    return {person['person_id']: money_float(decimal(person['amount']) * keep)
-            for person in people
-            if person.get('person_id') and person.get('amount') is not None}
+    profits = (attributed_profit(commission, operating, labor_cut, registry)
+               if operating is not None else {})
+    keep = (Decimal(1) if commission.get('manual_amounts_after_labor')
+            else labor_keep(commission.get('base_total'), labor_cut))
+    suggested = {}
+    for person in people:
+        pid = person.get('person_id')
+        if not pid:
+            continue
+        rate = confirmed_profit_rate(commission, pid)
+        if rate is not None and pid in profits:
+            suggested[pid] = money_float(decimal(profits[pid]) * rate)
+            continue
+        if person.get('amount') is None:
+            continue
+        suggested[pid] = money_float(person['amount'] if commission.get('manual_amounts_after_labor')
+                                     else decimal(person['amount']) * keep)
+    return suggested
 
 
 def _output_residual(total, values, field):
@@ -153,7 +157,11 @@ def _split_cents(total, weights):
 
 
 def attributed_profit(commission, operating, labor, registry, *, store_id='', manual_cost=False):
-    """Additive person profit; keep full sales and gross output separate."""
+    """Additive person profit; keep full sales and gross output separate.
+
+    Manual cost changes the store profit, not the ownership split. The
+    allocated-to-operating residual already absorbs that gap.
+    """
     people = commission.get('people') or []
     if operating is None or not people:
         return {}
@@ -162,8 +170,6 @@ def attributed_profit(commission, operating, labor, registry, *, store_id='', ma
         return {}
     if len(people) == 1:
         return {ids[0]: profit_after_labor(operating, labor)}
-    if manual_cost:
-        return {}
     split = {p['person_id']: {'sales':p.get('allocated_sales'),
                               'gross':p.get('allocated_gross'),
                               'profit':p.get('allocated_profit')}
@@ -226,8 +232,9 @@ def confirmed_profit_rate(commission, person_id, store_id=''):
         return None
     rates = {decimal(product.get('total_rate') or 0)
              for product in commission.get('products') or []
-             if any(crew.get('person_id') == person_id
-                    for crew in product.get('people') or [])}
+             if decimal(product.get('total_rate') or 0) > 0
+             and any(crew.get('person_id') == person_id
+                     for crew in product.get('people') or [])}
     rate = next(iter(rates)) if len(rates) == 1 else None
     return rate if rate is not None and rate > 0 else None
 
@@ -376,11 +383,10 @@ def build(workspace, registry, model, start, end, store_ids=None, person_ids=Non
         operating=statement_amount(statement,profit_node) if profit_node else None
         visible_labor=labor_cut if spread.total is not None else Decimal(0)
         person_output=attributed_outputs(source_c,sales,gross,registry)
-        person_profit=attributed_profit(source_c,operating,visible_labor,registry,store_id=sid,
-                                        manual_cost=bool(record['manual_cost_json']))
+        person_profit=attributed_profit(source_c,operating,visible_labor,registry,store_id=sid)
         profit_rates={person.get('person_id'):confirmed_profit_rate(
             source_c,person.get('person_id'),sid) for person in source_c.get('people') or []}
-        if not decision and not c.get('manual_confirmed') and any(
+        if not decision and any(
                 rate is not None and person_profit.get(pid) is not None
                 for pid,rate in profit_rates.items()):
             if len(source_c.get('people') or [])==1:
@@ -413,7 +419,7 @@ def build(workspace, registry, model, start, end, store_ids=None, person_ids=Non
                                         'status':status,'finance_run':record['id']})
                 continue
             profit_rate=(profit_rates.get(person.get('person_id'))
-                         if not decision and not c.get('manual_confirmed') else None)
+                         if not decision else None)
             if (profit_rate is not None and person.get('person_id') in person_profit
                     and person.get('amount') is not None):
                 amount=decimal(money_float(decimal(person_profit[person['person_id']])*profit_rate))

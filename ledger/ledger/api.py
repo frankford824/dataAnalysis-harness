@@ -968,7 +968,9 @@ def _annotate_commission_after_labor(
                         if node.headline == 'profit' and node.is_total), '')
     operating = (commission_reports.statement_amount(payload.get('statement') or [], profit_node)
                  if profit_node else None)
-    suggested = commission_reports.suggested_payouts(commission, labor, operating=operating)
+    from .commission_registry import Registry
+    suggested = commission_reports.suggested_payouts(
+        commission, labor, operating=operating, registry=Registry(ws.root))
     payload['commission'] = {
         **commission,
         'people': [
