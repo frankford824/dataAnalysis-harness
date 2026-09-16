@@ -114,6 +114,18 @@ CREATE TRIGGER IF NOT EXISTS payout_confirmation_no_update BEFORE UPDATE ON payo
  BEGIN SELECT RAISE(ABORT,'confirmed payout history is immutable'); END;
 CREATE TRIGGER IF NOT EXISTS payout_confirmation_no_delete BEFORE DELETE ON payout_confirmation
  BEGIN SELECT RAISE(ABORT,'confirmed payout history is immutable'); END;
+CREATE TABLE IF NOT EXISTS profit_exclusion (
+ id TEXT PRIMARY KEY, store_id TEXT NOT NULL, period TEXT NOT NULL,
+ person_id TEXT NOT NULL, finance_run INTEGER NOT NULL, at TEXT NOT NULL,
+ actor TEXT NOT NULL, note TEXT NOT NULL, source_sha TEXT NOT NULL,
+ excluded_json TEXT NOT NULL, included_profit TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS profit_exclusion_scope
+ ON profit_exclusion(store_id,period,person_id,finance_run,at DESC);
+CREATE TRIGGER IF NOT EXISTS profit_exclusion_no_update BEFORE UPDATE ON profit_exclusion
+ BEGIN SELECT RAISE(ABORT,'profit exclusion history is immutable'); END;
+CREATE TRIGGER IF NOT EXISTS profit_exclusion_no_delete BEFORE DELETE ON profit_exclusion
+ BEGIN SELECT RAISE(ABORT,'profit exclusion history is immutable'); END;
 CREATE TABLE IF NOT EXISTS operator (
  id TEXT PRIMARY KEY, name TEXT NOT NULL, salt TEXT NOT NULL, password_hash TEXT NOT NULL,
  admin INTEGER NOT NULL DEFAULT 0, disabled INTEGER NOT NULL DEFAULT 0

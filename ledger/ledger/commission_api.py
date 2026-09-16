@@ -21,7 +21,7 @@ from fastapi.responses import StreamingResponse
 from starlette.concurrency import run_in_threadpool
 from pydantic import BaseModel, Field
 
-from . import commission_catalog, commission_batch, commission_confirm, commission_reports
+from . import commission_catalog, commission_batch, commission_confirm, commission_profit, commission_reports
 from .commission_registry import Registry, RegistryError, RevisionConflict, json_text, local_time, now
 from .money import money_float
 
@@ -96,6 +96,16 @@ class ReportSelection(BaseModel):
     offset: int = Field(default=0, ge=0)
     limit: int = Field(default=50, ge=1, le=200)
     presentation: bool = False
+
+
+class ProfitExclusionChange(BaseModel):
+    store_id: str
+    period: str
+    person_id: str
+    run_id: int = Field(gt=0)
+    source_sha: str = Field(min_length=64, max_length=64)
+    excluded_product_ids: list[str] = Field(default_factory=list, max_length=5000)
+    note: str = Field(min_length=1, max_length=500)
 
 
 class SettlementCreate(BaseModel):
@@ -549,6 +559,32 @@ def install(app, workspace, model, model_root: Path | None = None):
                                for row in report['coverage'] if row.get('unassigned_orders')
                                and '试算' in row['status']],
         }
+
+    def profit_scope(store_id, period, person_id, run_id):
+        if store_id not in {store.id for store in model().stores}:
+            raise RegistryError('请选择已登记店铺')
+        commission_reports.months(period, period)
+        if not person_id:
+            raise RegistryError('请选择人员')
+        if run_id < 1:
+            raise RegistryError('请选择本次核算')
+        return model().store(store_id).name
+
+    @router.get('/profit-composition')
+    def profit_composition(store_id: str, period: str, person_id: str, run_id: int):
+        store_name = profit_scope(store_id, period, person_id, run_id)
+        return commission_profit.compose(reg(), store_id, period, person_id, run_id,
+                                         store_name=store_name)
+
+    @router.post('/profit-exclusions')
+    def profit_exclusion_save(change: ProfitExclusionChange, request: Request):
+        store_name = profit_scope(change.store_id, change.period, change.person_id, change.run_id)
+        return commission_profit.save(
+            reg(), store_id=change.store_id, period=change.period,
+            person_id=change.person_id, run_id=change.run_id,
+            source_sha=change.source_sha,
+            excluded_product_ids=change.excluded_product_ids,
+            note=change.note, actor=actor(request)['id'], store_name=store_name)
 
     @router.get('/payout-confirmations/context')
     def payout_confirmation_context(store_id: str, period: str, run_id: int):

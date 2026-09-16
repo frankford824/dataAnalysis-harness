@@ -4,6 +4,7 @@ import { NButton, NTag } from 'naive-ui'
 import LedgerTabs from '../components/ui/LedgerTabs.vue'
 import LedgerTable from '../components/ui/LedgerTable.vue'
 import CommissionDetailDrawer from '../components/CommissionDetailDrawer.vue'
+import ProfitCompositionDrawer from '../components/ProfitCompositionDrawer.vue'
 import { useCommission } from '../commissionStore'
 import { useCommissionQuery } from '../components/useCommissionQuery'
 import { commissionRequest } from '../components/commissionRequest'
@@ -17,6 +18,7 @@ const payoutError = ref(''), payoutContext = ref(null), payoutPeople = ref([])
 const payoutReason = ref(''), payoutNoPeople = ref(false)
 const payoutNotice = ref('')
 const payoutTargetsOpen = ref(false), payoutTargets = ref([]), payoutTargetTitle = ref('')
+const profit = ref(null)
 let payoutRequest = 0
 const kinds = [{key:'store_people',label:'店铺与分配人'},{key:'people',label:'按人员'},{key:'stores',label:'按店铺'},{key:'breakdown',label:'按月明细'},{key:'coverage',label:'月份进度'}]
 const scope = computed(() => ({start:state.start,end:state.end,...state.scope}))
@@ -132,6 +134,41 @@ function choosePayout(row) {
   payoutTargetsOpen.value=true
 }
 function pickPayout(target){payoutTargetsOpen.value=false;openPayout(target)}
+function laborFor(row) {
+  return rows.value.find(item => item.kind==='store' && item.store_id===row.store_id && item.period===row.period)?.labor_cost
+    ?? row.labor_cost
+}
+function canOpenProfit(row) {
+  return !!(row.person_id && row.finance_run && row.store_id && row.period && row.kind!=='store')
+}
+function openProfit(row) {
+  if (locked.value || !canOpenProfit(row)) return
+  profit.value = {
+    store_id: row.store_id, store: row.store, period: row.period,
+    person_id: row.person_id, person: row.person, run_id: row.finance_run,
+    labor_cost: laborFor(row),
+  }
+}
+function onProfitSaved(saved) {
+  load()
+  if (!payoutContext.value || payoutContext.value.run_id !== saved.run_id
+      || payoutContext.value.store_id !== saved.store_id
+      || payoutContext.value.period !== saved.period) return
+  payoutPeople.value = payoutPeople.value.map(person =>
+    person.person_id === saved.person_id || person.person === saved.person
+      ? {...person, included_profit: saved.included_profit,
+         excluded_count: (saved.excluded_product_ids || []).length}
+      : person)
+}
+function openProfitFromPayout(person) {
+  const context = payoutContext.value
+  if (!context) return
+  profit.value = {
+    store_id: context.store_id, store: context.store, period: context.period,
+    person_id: person.person_id, person: person.person, run_id: context.run_id,
+    labor_cost: laborFor({store_id: context.store_id, period: context.period}),
+  }
+}
 async function savePayout() {
   if(!payoutReady.value)return
   payoutSaving.value=true;payoutError.value=''
@@ -149,9 +186,9 @@ async function savePayout() {
   } catch(e) { payoutError.value=e.message }
   finally { payoutSaving.value=false }
 }
-watch(() => JSON.stringify(scope.value), () => {page.value=1;downloadError.value='';detail.value=null;payoutNotice.value=''})
-watch(() => state.reportView, () => {page.value=1;downloadError.value='';detail.value=null})
-onDeactivated(()=>{detail.value=null})
+watch(() => JSON.stringify(scope.value), () => {page.value=1;downloadError.value='';detail.value=null;profit.value=null;payoutNotice.value=''})
+watch(() => state.reportView, () => {page.value=1;downloadError.value='';detail.value=null;profit.value=null})
+onDeactivated(()=>{detail.value=null;profit.value=null})
 watch(report, value => { if(value)state.reportPeople=value.available_people || [] })
 async function download() {
   if(!report.value || locked.value || downloading.value)return
@@ -227,7 +264,10 @@ const tableColumns=computed(()=>{
           key==='person'&&row.kind==='store'?h('strong','店铺合计'):
           key==='amount'&&row.kind==='store'?h('strong',money(row.store_amount)):cell(row,key))
   }))
-  if(['people','stores','store_people','breakdown','coverage'].includes(state.reportView))list.push({title:'操作',key:'action',width:168,mobileWidth:155,fixed:'right',render:row=>h('div',{class:'report-row-actions'},[
+  if(['people','stores','store_people','breakdown','coverage'].includes(state.reportView))list.push({title:'操作',key:'action',width:['store_people','breakdown'].includes(state.reportView)?228:168,mobileWidth:155,fixed:'right',render:row=>h('div',{class:'report-row-actions'},[
+    ...(canOpenProfit(row)
+      ? [h(NButton,{text:true,type:'primary',size:'small',disabled:locked.value,
+          onClick:()=>openProfit(row)},()=>'利润构成')]:[]),
     ...(targetsFor(row).length
       ? [h(NButton,{text:true,type:'primary',size:'small',disabled:locked.value,
           onClick:()=>choosePayout(row)},()=>row.status?.includes('已人工确认')?'修改确认':'确认提成')]:[]),
@@ -259,7 +299,7 @@ const tableColumns=computed(()=>{
     </n-alert>
     <p v-if="state.reportView==='stores'" style="color:#64748b;margin:0 0 12px">提成设置人数按所选月份的有效设置统计；已出金额人数只统计已有结算金额的人员。</p>
     <div class="report-tabs-row"><LedgerTabs v-model="state.reportView" :options="kinds" label="汇总方式" @update:model-value="detail=null" /><div class="report-actions"><n-button :disabled="!canSettle" @click="openSettlement">确认员工结算</n-button><n-button type="primary" :disabled="!report || locked" :loading="downloading" @click="download">导出表格</n-button></div></div>
-    <p v-if="state.reportView==='store_people'" class="report-grain-note"><template v-if="state.personIds.length">当前仅显示所选人员；请清空人员筛选后再核对店铺合计。 </template>店铺销售额、毛利额和利润额是真实总额；个人三项金额均按有效提成点数拆分，可相加核对。兼职与未归属净亏损按成员销售额分摊，未归属净利润留在店铺；仅一位分配人时整店金额归本人。人员涉及的链接总点数唯一时，提成＝人员利润额×该点数；点数不一致时保留订单明细计算。兼职额仍只在店铺行显示。</p>
+    <p v-if="state.reportView==='store_people'" class="report-grain-note"><template v-if="state.personIds.length">当前仅显示所选人员；请清空人员筛选后再核对店铺合计。 </template>店铺销售额、毛利额和利润额是真实总额；个人三项金额均按有效提成点数拆分，可相加核对。兼职与未归属净亏损按成员销售额分摊，未归属净利润留在店铺；仅一位分配人时整店金额归本人。人员涉及的链接总点数唯一时，提成＝人员利润额×该点数；点数不一致时保留订单明细计算。兼职额仍只在店铺行显示。人员行可打开利润构成，勾掉不进阶梯的商品。</p>
 
     <div v-if="loading" class="commission-loading-line"/>
     <LedgerTable :rows="rows" :columns="tableColumns" :row-key="rowKey" :loading="loading" :max-height="440" empty="没有找到提成记录，可调整店铺、人员或月份" />
@@ -269,6 +309,7 @@ const tableColumns=computed(()=>{
       <n-spin :show="settlementLoading"><n-table v-if="matchingSettlements.length" size="small" :bordered="false"><thead><tr><th>确认时间</th><th>说明</th><th class="right">结算金额</th><th>操作</th></tr></thead><tbody><tr v-for="item in matchingSettlements" :key="item.id"><td>{{displayTime(item.at)}}</td><td>{{item.note}}</td><td class="right num">¥{{money(item.total)}}</td><td><n-button text type="primary" @click="viewSettlement(item)">查看当时明细</n-button></td></tr></tbody></n-table></n-spin>
     </section>
     <CommissionDetailDrawer :target="detail" @close="detail=null" />
+    <ProfitCompositionDrawer :target="profit" @close="profit=null" @saved="onProfitSaved" />
     <n-modal v-model:show="payoutTargetsOpen" preset="card" :title="`${payoutTargetTitle}：选择要确认的店铺月份`" style="width:min(620px,calc(100vw - 32px))">
       <p class="settlement-help">汇总行可能包含多个店铺月份。人工确认按店铺月份保存，请选择一项。</p>
       <div class="payout-targets">
@@ -286,7 +327,10 @@ const tableColumns=computed(()=>{
           <n-alert v-if="payoutContext.unassigned_orders" type="info" :bordered="false" style="margin-bottom:12px">还有 {{ payoutContext.unassigned_orders }} 笔订单没有提成归属，可由人工直接确认最终金额。</n-alert>
           <div v-if="payoutPeople.length" class="payout-people">
             <label v-for="person in payoutPeople" :key="person.person_id">
-              <span>{{ person.person }}<small>系统试算 {{ money(person.suggested) }}</small></span>
+              <span>{{ person.person }}<small>系统试算 {{ money(person.suggested) }}</small>
+                <small v-if="person.included_profit!=null">计入阶梯 ¥{{ money(person.included_profit) }}<template v-if="person.excluded_count"> · 已剔除 {{ person.excluded_count }} 个商品</template></small>
+                <button type="button" class="text-button" @click="openProfitFromPayout(person)">利润构成</button>
+              </span>
               <n-input v-model:value="person.amount" inputmode="decimal" :aria-label="`${person.person}确认提成`" placeholder="确认金额" />
             </label>
             <p class="payout-sum">确认合计 <strong>¥{{ payoutTotal }}</strong></p>
@@ -320,7 +364,7 @@ const tableColumns=computed(()=>{
 
 .report-content{padding-top:0}.report-months{display:flex;align-items:center;gap:12px;min-height:76px;border-bottom:1px solid #e9edf2;flex-wrap:wrap;padding:14px 0}.month-label{font-size:13px;margin-right:4px;color:#566176}.report-months input{height:35px;width:145px;max-width:100%;border:1px solid #dce2eb;border-radius:5px;padding:0 10px;background:#fff;font-size:13px;color:#30415c}.date-separator{font-size:13px;color:#8a94a3}.month-shortcuts{display:flex;gap:18px;margin-left:12px}.report-overview{display:flex;align-items:center;gap:0;padding:26px 0 27px;min-height:129px;border-bottom:1px solid #e9edf2}.report-total{padding-right:42px;min-width:240px}.report-total>span{font-size:13px;color:#67748a}.report-total strong{display:block;margin-top:7px;font-size:33px;line-height:1.3;font-weight:650;letter-spacing:-.7px;font-variant-numeric:tabular-nums}.report-total small{font-size:25px;margin-right:3px}.report-count{border-left:1px solid #e9edf2;padding:8px 32px;display:flex;align-items:baseline;gap:9px;white-space:nowrap}.report-count strong{font-size:28px;font-weight:600}.report-count span{color:#6e7b90;font-size:13px}.report-attention{display:flex;gap:8px;align-items:center;margin-left:auto;background:transparent;border:0;padding:0;color:#b88734;font-size:12px;cursor:pointer;text-align:left}.report-attention>span:last-child{color:#3468f0;margin-left:3px}.attention-dot{width:6px;height:6px;background:#d9a13d;border-radius:50%;flex:none}.report-tabs-row{display:flex;align-items:center;justify-content:space-between;gap:16px;min-height:76px}.report-tabs{display:flex;gap:28px;align-self:stretch;min-width:0;overflow:auto}.report-tabs button{border:0;border-bottom:2px solid transparent;background:transparent;color:#768397;font-size:13px;white-space:nowrap;padding:17px 0 13px;cursor:pointer}.report-tabs button.active{color:#3468f0;border-color:#3468f0;font-weight:550}.report-table th:first-child{width:22%}.report-table td:first-child{color:#30415b;font-weight:500}.report-state{font-size:12px;color:#8490a0}.report-state.review{color:#b18741}.report-empty-action{display:block;margin:9px auto 0}.report-back{padding:0 0 13px}.report-table{min-width:780px}
 .report-actions{display:flex;gap:10px}.settlement-history{border-top:1px solid #e9edf2;margin-top:22px;padding-top:22px}.settlement-history h3{font-size:15px;margin:0}.settlement-history p,.settlement-help{font-size:12px;color:#718097;margin:5px 0 14px}.settlement-footer{display:flex;justify-content:flex-end;gap:10px}
-.report-row-actions{display:flex;align-items:center;gap:10px;white-space:nowrap}.payout-people{display:grid;gap:12px;margin-top:14px}.payout-people label{display:grid;grid-template-columns:minmax(0,1fr) 145px;align-items:center;gap:10px;font-size:13px}.payout-people small{display:block;color:#8490a0;font-size:11px;margin-top:3px}.payout-sum{display:flex;justify-content:space-between;margin:2px 0 0;border-top:1px solid #e9edf2;padding-top:12px;font-size:13px}.payout-sum strong{font-size:17px;font-variant-numeric:tabular-nums}
+.report-grain-note{font-size:12px;color:#718097;line-height:1.7;margin:0 0 14px}.report-row-actions{display:flex;align-items:center;gap:10px;white-space:nowrap}.payout-people{display:grid;gap:12px;margin-top:14px}.payout-people label{display:grid;grid-template-columns:minmax(0,1fr) 145px;align-items:center;gap:10px;font-size:13px}.payout-people small{display:block;color:#8490a0;font-size:11px;margin-top:3px}.payout-people .text-button{display:block;margin-top:4px;font-size:12px}.payout-sum{display:flex;justify-content:space-between;margin:2px 0 0;border-top:1px solid #e9edf2;padding-top:12px;font-size:13px}.payout-sum strong{font-size:17px;font-variant-numeric:tabular-nums}
 .payout-history{margin-top:14px;border-top:1px solid #e9edf2;padding-top:10px;font-size:12px;color:#536176}.payout-history summary{cursor:pointer;color:#3468f0}.payout-history>div{margin-top:10px;display:grid;gap:3px}.payout-history small{color:#8490a0;font-size:11px;margin-left:4px}
 .payout-targets{display:grid;gap:8px}.payout-targets button{border:1px solid #e3e8f0;background:#fff;border-radius:7px;padding:11px 13px;display:flex;justify-content:space-between;align-items:center;text-align:left;cursor:pointer;color:#334155}.payout-targets button:hover{border-color:#91adf8;background:#f7f9ff}.payout-targets strong{display:block;font-size:13px}.payout-targets small{display:block;color:#7b8798;font-size:11px;margin-top:4px}.payout-targets .num{font-weight:600;font-size:14px}
 @media(max-width:1180px){.report-total{min-width:200px;padding-right:24px}.report-count{padding:8px 20px}.report-overview{flex-wrap:wrap;row-gap:18px}.report-attention{margin-left:0;flex-basis:100%}.report-tabs{gap:22px}}

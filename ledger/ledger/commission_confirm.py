@@ -10,7 +10,7 @@ import json
 import uuid
 from decimal import Decimal, InvalidOperation
 
-from . import commission_reports
+from . import commission_profit, commission_reports
 from .commission_registry import Registry, RegistryError, RevisionConflict, json_text, now
 from .money import money_float
 
@@ -98,6 +98,15 @@ def context(ws, registry, model, store_id, period, *, expected_run=None):
     original_order = {row['person_id']: index for index, row in enumerate(original)}
     people.sort(key=lambda row: (original_order.get(row['person_id'], len(original)),
                                  row['person'], row['person_id']))
+    roster_ids = set(known)
+    exclusions = commission_profit.latest_for_run(registry, store_id, period, run_id)
+    for person in people:
+        display = commission_profit.display_person_id(
+            store_id, person['person_id'], person['person'], roster_ids)
+        extra = exclusions.get(display) or exclusions.get(person['person_id'])
+        if extra:
+            person['included_profit'] = extra['included_profit']
+            person['excluded_count'] = extra['excluded_count']
     for item in history:
         item['payouts'] = json.loads(item.pop('payouts_json'))
     return {'store_id': store_id, 'store': model.store(store_id).name,
