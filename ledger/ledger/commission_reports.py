@@ -13,7 +13,7 @@ from pathlib import Path
 import polars as pl
 
 from . import overhead
-from .commission_engine import allocated_profit
+from .commission_engine import allocated_outputs
 from .commission_registry import RegistryError, json_text
 from .labor_api import frozen_shares
 from .money import money_float
@@ -50,11 +50,11 @@ def profit_after_labor(profit, labor):
 
 
 _profit_lock = threading.RLock()
-_profit_cache: OrderedDict[tuple, dict[str, float] | None] = OrderedDict()
+_profit_cache: OrderedDict[tuple, dict[str, dict[str, float]] | None] = OrderedDict()
 _PROFIT_CACHE_LIMIT = 128
 
 
-def _archived_allocated_profit(registry, commission):
+def _archived_allocated_outputs(registry, commission):
     calculation = commission.get('calculation_id')
     if not calculation:
         return None
@@ -76,10 +76,11 @@ def _archived_allocated_profit(registry, commission):
         from io import BytesIO
         schema = pl.read_parquet_schema(BytesIO(payload))
         cols = [name for name in ('status', 'person_id', 'share', 'total_rate',
+                                  'participation_sales','participation_gross',
                                   'participation_profit', 'original_base')
                 if name in schema]
         details = pl.read_parquet(BytesIO(payload), columns=cols)
-        result = allocated_profit(details, net_profit_basis=(
+        result = allocated_outputs(details, net_profit_basis=(
             commission.get('base_node') == 'net_profit'
             and commission.get('on_loss') == 'deduct'))
     except (OSError, ValueError, pl.exceptions.PolarsError):
@@ -120,14 +121,18 @@ def attributed_profit(commission, operating, labor, registry, *, store_id='', ma
         return {ids[0]: profit_after_labor(operating, labor)}
     if manual_cost:
         return {}
-    split = {p['person_id']: p.get('allocated_profit') for p in people
-             if p.get('person_id') and p.get('allocated_profit') is not None}
+    split = {p['person_id']: {'sales':p.get('allocated_sales'),
+                              'gross':p.get('allocated_gross'),
+                              'profit':p.get('allocated_profit')}
+             for p in people if p.get('person_id') and
+             all(p.get(key) is not None for key in
+                 ('allocated_sales','allocated_gross','allocated_profit'))}
     if len(split) != len(people):
-        split = _archived_allocated_profit(registry, commission)
+        split = _archived_allocated_outputs(registry, commission)
     if split is None or any(p.get('person_id') not in split for p in people):
         return {}
-    values = {p['person_id']: decimal(split[p['person_id']]) for p in people}
-    weights = {p['person_id']: max(decimal(p.get('sales') or 0), Decimal(0))
+    values = {p['person_id']: decimal(split[p['person_id']]['profit']) for p in people}
+    weights = {p['person_id']: max(decimal(split[p['person_id']].get('sales') or 0), Decimal(0))
                for p in people}
     # A negative store residual is shared as operating loss. Positive
     # unattributed profit remains at the store until its owner is known.
@@ -140,16 +145,48 @@ def attributed_profit(commission, operating, labor, registry, *, store_id='', ma
             for pid in weights}
 
 
+def attributed_outputs(commission, store_sales, store_gross, registry):
+    people=commission.get('people') or []
+    ids=[p.get('person_id') for p in people]
+    if not people or any(not pid for pid in ids) or len(ids)!=len(set(ids)):
+        return {}
+    if len(people)==1:
+        return {ids[0]:{'sales':store_sales,'gross':store_gross}}
+    split={p['person_id']:{'sales':p.get('allocated_sales'),'gross':p.get('allocated_gross')}
+           for p in people if p.get('person_id') and
+           p.get('allocated_sales') is not None and p.get('allocated_gross') is not None}
+    if len(split)!=len(people):
+        archived=_archived_allocated_outputs(registry,commission)
+        if archived is None:return {}
+        split={pid:{'sales':value.get('sales'),'gross':value.get('gross')}
+               for pid,value in archived.items()}
+    if any(pid not in split or split[pid].get('sales') is None or
+           split[pid].get('gross') is None for pid in ids):
+        return {}
+    values={pid:{'sales':decimal(split[pid]['sales']),
+                 'gross':decimal(split[pid]['gross'])} for pid in ids}
+    weights={pid:max(values[pid]['sales'],Decimal(0)) for pid in ids}
+    for name,store_value in (('sales',store_sales),('gross',store_gross)):
+        if store_value is None:continue
+        excess=max(sum((value[name] for value in values.values()),Decimal(0))
+                   -decimal(store_value),Decimal(0))
+        cuts=_split_cents(excess,weights)
+        if cuts is None:return {}
+        for pid in ids:values[pid][name]-=cuts[pid]
+    return {pid:{name:money_float(amount) for name,amount in value.items()}
+            for pid,value in values.items()}
+
+
 def confirmed_profit_rate(commission, person_id, store_id=''):
-    """One-owner stores use full store profit at their sole effective rate."""
-    if (not person_id or commission.get('base_node') != 'net_profit' or
-            len(commission.get('people') or []) != 1):
+    """Use the person's allocated profit only when its link total rate is unique."""
+    if not person_id or commission.get('base_node') != 'net_profit':
         return None
     rates = {decimal(product.get('total_rate') or 0)
              for product in commission.get('products') or []
              if any(crew.get('person_id') == person_id
                     for crew in product.get('people') or [])}
-    return next(iter(rates)) if len(rates) == 1 else None
+    rate = next(iter(rates)) if len(rates) == 1 else None
+    return rate if rate is not None and rate > 0 else None
 
 
 _configured_lock = threading.RLock()
@@ -295,14 +332,18 @@ def build(workspace, registry, model, start, end, store_ids=None, person_ids=Non
         gross=statement_amount(statement,gross_node) if gross_node else None
         operating=statement_amount(statement,profit_node) if profit_node else None
         visible_labor=labor_cut if spread.total is not None else Decimal(0)
+        person_output=attributed_outputs(source_c,sales,gross,registry)
         person_profit=attributed_profit(source_c,operating,visible_labor,registry,store_id=sid,
                                         manual_cost=bool(record['manual_cost_json']))
-        source_pid=(source_c.get('people') or [{}])[0].get('person_id')
-        profit_rate=(confirmed_profit_rate(source_c,source_pid,sid)
-                     if not decision and not c.get('manual_confirmed')
-                     and source_c.get('people') else None)
-        if profit_rate is not None and person_profit.get(source_pid) is not None:
-            notes.append(f'本店仅一位分配人：店铺利润全部归本人，提成按利润额乘唯一有效点数{money_float(profit_rate*100):g}%计算')
+        profit_rates={person.get('person_id'):confirmed_profit_rate(
+            source_c,person.get('person_id'),sid) for person in source_c.get('people') or []}
+        if not decision and not c.get('manual_confirmed') and any(
+                rate is not None and person_profit.get(pid) is not None
+                for pid,rate in profit_rates.items()):
+            if len(source_c.get('people') or [])==1:
+                notes.append(f'本店仅一位分配人：店铺利润全部归本人，提成按利润额乘唯一有效点数{money_float(next(iter(profit_rates.values()))*100):g}%计算')
+            else:
+                notes.append('人员销售、毛利、利润按提成点数拆分；总点数唯一时，提成按人员利润额乘该点数计算')
             scope['notes']='；'.join(notes)
         member_rows=[]
         for person in c.get('people',[]):
@@ -321,12 +362,15 @@ def build(workspace, registry, model, start, end, store_ids=None, person_ids=Non
                     member_rows.append({'kind':'person','person_id':pid,'person':name,
                                         'employee_no':roster.get(pid,{}).get('employee_no',''),
                                         'store_id':sid,'store':names[sid],'period':period,
-                                        'sales':person.get('sales'),'gross':person.get('gross'),
+                                        'sales':person_output.get(person.get('person_id'),{}).get('sales'),
+                                        'gross':person_output.get(person.get('person_id'),{}).get('gross'),
                                         'profit_after_labor':person_profit.get(person.get('person_id')),
                                         'labor_cost':None,'base':None,'base_name':'',
                                         'amount':None,'store_amount':None,
                                         'status':status,'finance_run':record['id']})
                 continue
+            profit_rate=(profit_rates.get(person.get('person_id'))
+                         if not decision and not c.get('manual_confirmed') else None)
             if (profit_rate is not None and person.get('person_id') in person_profit
                     and person.get('amount') is not None):
                 amount=decimal(money_float(decimal(person_profit[person['person_id']])*profit_rate))
@@ -342,7 +386,8 @@ def build(workspace, registry, model, start, end, store_ids=None, person_ids=Non
             member_rows.append({'kind':'person','person_id':pid,'person':name,
                                 'employee_no':roster.get(pid,{}).get('employee_no',''),
                                 'store_id':sid,'store':names[sid],'period':period,
-                                'sales':person.get('sales'),'gross':person.get('gross'),
+                                'sales':person_output.get(person.get('person_id'),{}).get('sales'),
+                                'gross':person_output.get(person.get('person_id'),{}).get('gross'),
                                 'profit_after_labor':person_profit.get(person.get('person_id')),
                                 'labor_cost':None,
                                 'base':person.get('base'),'base_name':scope['base_name'],

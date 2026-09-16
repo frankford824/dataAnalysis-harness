@@ -74,12 +74,14 @@ def test_shared_link_credits_complete_posted_output_to_each_person(tmp_path):
     assigned = {p["person_id"]: p for p in summary["people"]}
     assert assigned[a]["sales"] == assigned[b]["sales"] == 100
     assert assigned[a]["gross"] == assigned[b]["gross"] == 80
+    assert assigned[a]['allocated_sales']==60 and assigned[b]['allocated_sales']==40
+    assert assigned[a]['allocated_gross']==48 and assigned[b]['allocated_gross']==32
     assert assigned[a]["amount"] == 2.4 and assigned[b]["amount"] == 1.6
-    assert summary["participation_basis"] == "complete_link_output_per_assigned_person"
+    assert summary["participation_basis"] == "complete_link_output_with_rate_allocated_report"
     assert details.filter(pl.col("status") == "distribute")["participation_sales"].to_list() == [100, 100]
 
 
-def test_shared_link_splits_person_profit_by_points_while_sales_and_gross_repeat(tmp_path):
+def test_shared_link_splits_all_person_outputs_by_points(tmp_path):
     r,a,b=registry(tmp_path)
     r.save_scheme('s1','p1',{'segments':[{'valid_from':'2026-05-01',
         'total_rate':'.05','allocations':[
@@ -104,6 +106,8 @@ def test_shared_link_splits_person_profit_by_points_while_sales_and_gross_repeat
     assert [values[p]['sales'] for p in (a,b)]==[100,100]
     assert [values[p]['gross'] for p in (a,b)]==[80,80]
     assert [values[p]['profit'] for p in (a,b)]==[60,60]
+    assert [values[p]['allocated_sales'] for p in (a,b)]==[60,40]
+    assert [values[p]['allocated_gross'] for p in (a,b)]==[48,32]
     assert [values[p]['allocated_profit'] for p in (a,b)]==[36,24]
 
 

@@ -152,32 +152,44 @@ def _participation_facts(result, model, store_id: str, period: str) -> tuple[pl.
     return combined, bool(sales_metrics), bool(gross_metrics), bool(profit_metrics)
 
 
-def allocated_profit(details: pl.DataFrame, *, net_profit_basis: bool = False) -> dict[str, float] | None:
-    """Split assigned order profit by each participant's share of that link's rate."""
-    if 'participation_profit' in details.columns:
-        profit = pl.col('participation_profit')
-    elif net_profit_basis and 'original_base' in details.columns:
-        profit = pl.col('original_base')
-    else:
-        return None
+def allocated_outputs(details: pl.DataFrame, *, net_profit_basis: bool = False) -> dict[str, dict[str, float]] | None:
+    """Split order output by each participant's share of the link's total rate."""
     required = {'status', 'person_id', 'share', 'total_rate'}
     if not required <= set(details.columns):
         return None
     assigned = details.filter(pl.col('status') == 'distribute')
     if assigned.is_empty():
         return {}
+    fields = {name: name for name in ('participation_sales','participation_gross',
+                                      'participation_profit') if name in assigned.columns}
+    if 'participation_profit' not in fields and net_profit_basis and 'original_base' in assigned.columns:
+        fields['participation_profit'] = 'original_base'
+    if not fields:
+        return None
     assigned = assigned.with_columns(
         pl.col('share').cast(pl.Decimal(16, 8)).alias('__share'),
         pl.col('total_rate').cast(pl.Decimal(16, 8), strict=False).alias('__rate'),
-        profit.cast(pl.Decimal(28, 10), strict=False).alias('__profit'),
+        *[pl.col(source).cast(pl.Decimal(28, 10), strict=False).alias('__'+name)
+          for name, source in fields.items()],
     )
     if assigned.filter(pl.col('__rate').is_null() | (pl.col('__rate') <= 0)
-                       | pl.col('__profit').is_null()).height:
+                       | pl.any_horizontal(*[pl.col('__'+name).is_null() for name in fields])).height:
         return None
-    totals = (assigned.with_columns(
-        (pl.col('__profit') * pl.col('__share') / pl.col('__rate')).alias('__part')
-    ).group_by('person_id').agg(pl.col('__part').sum()).iter_rows(named=True))
-    return {row['person_id']: money_float(row['__part']) for row in totals}
+    totals = (assigned.with_columns(*[
+        (pl.col('__'+name) * pl.col('__share') / pl.col('__rate')).alias('__part_'+name)
+        for name in fields
+    ]).group_by('person_id').agg(*[
+        pl.col('__part_'+name).sum() for name in fields
+    ]).iter_rows(named=True))
+    return {row['person_id']:{name.replace('participation_',''):money_float(row['__part_'+name])
+                              for name in fields} for row in totals}
+
+
+def allocated_profit(details: pl.DataFrame, *, net_profit_basis: bool = False) -> dict[str, float] | None:
+    outputs = allocated_outputs(details, net_profit_basis=net_profit_basis)
+    if outputs is None or any('profit' not in value for value in outputs.values()):
+        return None
+    return {pid:value['profit'] for pid,value in outputs.items()}
 
 
 def participation_only(result, model, store_id: str, period: str, registry: Registry) -> list[dict]:
@@ -287,13 +299,15 @@ def calculate(result, model, store_id: str, period: str, registry: Registry,
         pl.col("participation_profit").sum(),
         pl.col("product_id").n_unique().alias("products"),
     ).sort("amount", descending=True)
-    split_profit = allocated_profit(paid) if has_profit else None
+    split_output = allocated_outputs(paid) if (has_sales or has_gross or has_profit) else None
     person_rows = [
         {**r, "amount": money_float(r["amount"]), "base": money_float(r["base"]),
          "sales": money_float(r["participation_sales"]) if has_sales else None,
          "gross": money_float(r["participation_gross"]) if has_gross else None,
          "profit": money_float(r["participation_profit"]) if has_profit else None,
-         "allocated_profit": split_profit.get(r['person_id']) if split_profit is not None else None}
+         "allocated_sales": split_output.get(r['person_id'],{}).get('sales') if split_output is not None else None,
+         "allocated_gross": split_output.get(r['person_id'],{}).get('gross') if split_output is not None else None,
+         "allocated_profit": split_output.get(r['person_id'],{}).get('profit') if split_output is not None else None}
         for r in people_lines.iter_rows(named=True)
     ]
     for row in person_rows:
@@ -345,7 +359,7 @@ def calculate(result, model, store_id: str, period: str, registry: Registry,
         "wage_preview_orders": wage_preview,
         "policy_version": policy["id"] if policy else None,
         "rounding": "per_order_person_cent_half_up",
-        "participation_basis": "complete_link_output_per_assigned_person",
+        "participation_basis": "complete_link_output_with_rate_allocated_report",
     }
     metadata = {"id": calc_id, "store_id": store_id, "period": period, "registry_revision": revision,
                 "model_json": model.model_dump_json(), "rules_json": json_text({"relationships": versions, "policy": policy}),

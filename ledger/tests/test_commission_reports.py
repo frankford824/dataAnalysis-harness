@@ -291,9 +291,11 @@ def test_store_person_composition_shows_store_amounts_once_and_filters_people(tm
         ],
         'commission': {'engine': 'commission-v2', 'people': [
             {'person_id': people[0]['id'], 'person': '甲', 'amount': 12.34, 'base': 250,
-             'sales': 1000, 'gross': 400},
+             'sales': 1000, 'gross': 400, 'allocated_sales':700, 'allocated_gross':280,
+             'allocated_profit':250},
             {'person_id': people[1]['id'], 'person': '乙', 'amount': 3.21, 'base': 100,
-             'sales': 1000, 'gross': 400},
+             'sales': 1000, 'gross': 400, 'allocated_sales':300, 'allocated_gross':120,
+             'allocated_profit':100},
         ], 'total': 15.55, 'amount_complete': True, 'base_name': '利润'},
     }, [])
     scope = {'start': '2026-06', 'end': '2026-06', 'store_ids': ['s1'], 'view': 'store_people'}
@@ -304,13 +306,14 @@ def test_store_person_composition_shows_store_amounts_once_and_filters_people(tm
     assert rows[0]['kind'] == 'store' and rows[0]['sales'] == 1000 and rows[0]['gross'] == 400
     assert rows[0]['amount'] is None and rows[0]['store_amount'] == 15.55
     assert [r['amount'] for r in rows[1:]] == [12.34, 3.21]
-    assert all(r['sales'] == 1000 and r['gross'] == 400 and r['labor_cost'] is None for r in rows[1:])
+    assert [(r['sales'],r['gross'],r['labor_cost']) for r in rows[1:]]==[
+        (700,280,None),(300,120,None)]
     assert all(r['finance_run'] == rid for r in rows)
     filtered = client.post('/api/commission-v2/reports/query', json={
         **scope, 'person_ids': [people[0]['id']],
     }).json()['items']
     assert len(filtered) == 2 and filtered[0]['store_amount'] == 12.34
-    assert filtered[0]['sales'] == 1000 and filtered[1]['amount'] == 12.34
+    assert filtered[0]['sales'] == 1000 and filtered[1]['sales']==700 and filtered[1]['amount'] == 12.34
     record(ws, [people[1]], 's2', '2026-06', [3.21])
     own_shops = client.post('/api/commission-v2/reports/query', json={
         'start': '2026-06', 'end': '2026-06',
@@ -324,7 +327,7 @@ def test_store_person_composition_shows_store_amounts_once_and_filters_people(tm
     })
     assert export.status_code == 200, export.text
     export_rows = list(csv.DictReader(io.StringIO(export.text.lstrip('\ufeff'))))
-    assert [r['销售额/参与销售额'] for r in export_rows] == ['1000', '1000', '1000']
+    assert [r['销售额/参与销售额'] for r in export_rows] == ['1000', '700.0', '300.0']
     assert [r['提成额'] for r in export_rows] == ['', '12.34', '3.21']
 
 
@@ -348,12 +351,19 @@ def test_store_person_profit_after_labor_keeps_full_participation_and_export(tmp
         'statement': [{'id': model.statement[0].id, 'value': 1000, 'available': True},
                       {'id': 'gross', 'value': 400, 'available': True},
                       {'id': 'net_profit', 'value': 200, 'available': True}],
-        'commission': {'engine': 'commission-v2', 'base_total': 100, 'total': 15,
+        'commission': {'engine': 'commission-v2', 'base_node':'net_profit',
+                       'base_total': 100, 'total': 15,
                        'amount_complete': True, 'people': [
                            {'person_id': p['id'], 'person': p['name'], 'amount': amount,
                             'sales': 1000, 'gross': 400, 'profit': 200,
+                            'allocated_sales': allocated_sales,
+                            'allocated_gross': allocated_gross,
                             'allocated_profit': allocated}
-                           for p, amount, allocated in zip(people, (10, 5), (120, 80))]},
+                           for p, amount, allocated_sales,allocated_gross,allocated in zip(
+                               people,(10,5),(600,400),(240,160),(120,80))],
+                       'products':[{'product_id':'p1','total_rate':.05,'people':[
+                           {'person_id':p['id'],'amount':amount}
+                           for p,amount in zip(people,(10,5))]}]},
     }, [])
     app = FastAPI(); install(app, lambda: ws, lambda: model)
     client = TestClient(app)
@@ -362,24 +372,25 @@ def test_store_person_profit_after_labor_keeps_full_participation_and_export(tmp
     store, first, second = report['items']
     assert store['gross'] == 400 and store['labor_cost'] == 50
     assert store['profit_after_labor'] == 150
-    assert [(p['gross'], p['profit_after_labor'], p['labor_cost']) for p in (first, second)] == [
-        (400, 95, None), (400, 55, None)]
+    assert [(p['sales'],p['gross'], p['profit_after_labor'], p['labor_cost']) for p in (first, second)] == [
+        (600,240, 90, None), (400,160, 60, None)]
+    assert [first['amount'],second['amount']]==[4.5,3.0]
     assert report['total'] == 7.5  # existing payout calculation remains unchanged
     filtered = client.post('/api/commission-v2/reports/query', json={
         **scope, 'person_ids': [people[0]['id']],
     }).json()['items']
-    assert len(filtered) == 2 and filtered[1]['profit_after_labor'] == 95
+    assert len(filtered) == 2 and filtered[1]['profit_after_labor'] == 90
     export = client.post('/api/commission-v2/export/reports/store_people', json={
         **scope, 'presentation': True,
     })
     assert export.status_code == 200, export.text
     exported = list(csv.DictReader(io.StringIO(export.text.lstrip('\ufeff'))))
-    assert [r['利润额'] for r in exported] == ['150.0', '95.0', '55.0']
+    assert [r['利润额'] for r in exported] == ['150.0', '90.0', '60.0']
     assert [r['兼职额'] for r in exported] == ['50.0', '', '']
     raw_export = client.post('/api/commission-v2/export/reports/store_people', json=scope)
     assert raw_export.status_code == 200
     raw_rows = list(csv.DictReader(io.StringIO(raw_export.text.lstrip('\ufeff'))))
-    assert [r['利润额'] for r in raw_rows] == ['150.0', '95.0', '55.0']
+    assert [r['利润额'] for r in raw_rows] == ['150.0', '90.0', '60.0']
 
 
 @pytest.mark.parametrize('store_id,store_profit,labor,assigned_profit,sales,trial,rate,expected', [
@@ -499,9 +510,10 @@ def test_unattributed_store_loss_is_shared_without_assigning_unknown_orders(tmp_
                       'base_total':44367.84,'amount_complete':False,
                       'unassigned_orders':4,'unassigned_base':-72.76,
                       'total':2046.04,'people':[
-                          {'person_id':p['id'],'person':p['name'],'amount':amount,
-                           'base':basis,'allocated_profit':basis,
-                           'sales':sales,'gross':gross,'profit':basis}
+                              {'person_id':p['id'],'person':p['name'],'amount':amount,
+                               'base':basis,'allocated_sales':sales,
+                               'allocated_gross':gross,'allocated_profit':basis,
+                               'sales':sales,'gross':gross,'profit':basis}
                           for p,amount,basis,sales,gross in zip(
                               members,(1483.68,562.36),(32228.45,12212.14),
                               (58636.06,20932.91),(37015.81,13860.2))]},
@@ -515,7 +527,8 @@ def test_unattributed_store_loss_is_shared_without_assigning_unknown_orders(tmp_
     assert [p['profit_after_labor'] for p in people]==[29587.50,11269.33]
     assert sum(p['profit_after_labor'] for p in people)==store['profit_after_labor']
     assert [p['sales'] for p in people]==[58636.06,20932.91]
-    assert [p['gross'] for p in people]==[37015.81,13860.2]
+    assert round(sum(p['gross'] for p in people),2)==store['gross']
+    assert [p['gross'] for p in people]==[36985.58,13849.41]
 
 
 def test_archived_order_details_supply_additive_profit_without_mutating_run(tmp_path, monkeypatch):
@@ -547,6 +560,8 @@ def test_archived_order_details_supply_additive_profit_without_mutating_run(tmp_
     details=pl.DataFrame({'status':['distribute','distribute'],
                           'person_id':[p['id'] for p in crew],
                           'share':['0.03','0.02'],'total_rate':['0.05','0.05'],
+                          'participation_sales':[100.,100.],
+                          'participation_gross':[80.,80.],
                           'participation_profit':[60.,60.],
                           'original_base':[60.,60.]})
     persist(registry,run,details,{'id':calc,'store_id':'s1','period':'2026-06',
@@ -562,7 +577,7 @@ def test_archived_order_details_supply_additive_profit_without_mutating_run(tmp_
     values=[client.post('/api/commission-v2/reports/query',json={
         'start':'2026-06','end':'2026-06','store_ids':['s1'],
         'view':'store_people'}).json()['items'] for _ in range(2)]
-    assert all([row['profit_after_labor'] for row in visible]==[40,26,14]
+    assert all([row['profit_after_labor'] for row in visible]==[40,24,16]
                for visible in values)
     assert len(reads)==1  # Immutable detail archive is reused across refreshed reads.
     assert json.loads(ws.conn.execute('SELECT result FROM run WHERE id=?',(run,)).fetchone()[0])==archived
