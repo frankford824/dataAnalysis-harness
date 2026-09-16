@@ -151,13 +151,13 @@ const coverageColumns=[
         <n-input v-model:value="query" clearable placeholder="搜索订单号、子订单号或商品链接" aria-label="搜索未覆盖成本明细" />
         <n-button attr-type="submit" :loading="busy">搜索</n-button>
         <a v-if="count" :href="download" download>导出来源异常行</a>
-        <a :href="`/api/runs/${runId}/coverage-gaps.csv`" download>导出全部订单缺口</a>
+        <a :href="`/api/runs/${runId}/coverage-gaps.xlsx`" download>导出全部订单缺口（Excel）</a>
       </form>
       <div class="pricing-batch">
         <strong>批量补录成本</strong>
-        <p>导出全部订单缺口，在 Excel/WPS 的“人工补录总成本”列填金额，保存为 CSV 后上传；保留原表头和末尾核对列。可在这里填写一条统一依据，逐行依据优先。</p>
+        <p>下载 Excel 模板，只在“人工补录总成本”列填金额后直接保存并上传；订单号和核对列已固定为文本，不会变成科学计数法。旧 CSV 仍可上传。可在这里填写一条统一依据，逐行依据优先。</p>
         <div class="pricing-batch-actions">
-          <input ref="batchInput" type="file" accept=".csv" aria-label="上传批量成本CSV" @change="chooseBatch" />
+          <input ref="batchInput" type="file" accept=".xlsx,.csv" aria-label="上传批量成本Excel或CSV" @change="chooseBatch" />
           <n-input v-model:value="batchReason" aria-label="批量成本统一依据" placeholder="统一确认依据（可选）" style="max-width:260px" />
           <n-button size="small" :loading="batchBusy" :disabled="!batchFile || batchBusy" @click="previewBatch">预览批量金额</n-button>
         </div>

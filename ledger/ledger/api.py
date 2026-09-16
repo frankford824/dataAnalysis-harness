@@ -1083,6 +1083,20 @@ def coverage_gaps_csv(run_id: int) -> PlainTextResponse:
         headers={'Content-Disposition': f'attachment; filename="coverage-gaps-{run_id}.csv"'})
 
 
+@app.get('/api/runs/{run_id}/coverage-gaps.xlsx')
+def coverage_gaps_xlsx(run_id: int) -> Response:
+    st = workspace().state_by_run(run_id)
+    if st is None:
+        raise HTTPException(404, '没有这次计算记录')
+    try:
+        body = cost_lines.export_xlsx(workspace(), run_id, st.store_id, st.period)
+    except WorkspaceError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    return Response(body, media_type=(
+        'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'),
+        headers={'Content-Disposition': f'attachment; filename="coverage-gaps-{run_id}.xlsx"'})
+
+
 @app.post('/api/stores/{store_id}/periods/{period}/cost-lines')
 def cost_line_save(store_id: str, period: str, change: CostLineChange) -> dict:
     _store(_model(), store_id)
@@ -1112,8 +1126,8 @@ async def cost_line_batch_preview(store_id: str, period: str,
                                   file: Annotated[UploadFile, File()],
                                   run_id: int, default_reason: str = '') -> dict:
     _cost_batch_scope(store_id, period, run_id)
-    if not file.filename or not file.filename.lower().endswith('.csv'):
-        raise HTTPException(422, '请上传本页导出并编辑的CSV成本表')
+    if not file.filename or not file.filename.lower().endswith(('.xlsx','.csv')):
+        raise HTTPException(422, '请上传本页导出并编辑的Excel或CSV成本表')
     content = await file.read(20_000_001)
     try:
         return cost_lines.batch_preview(workspace(), store_id, period, run_id,
@@ -1129,8 +1143,8 @@ async def cost_line_batch_apply(store_id: str, period: str,
                                 expected_line_revision: int,
                                 default_reason: str = '') -> dict:
     _cost_batch_scope(store_id, period, run_id)
-    if not file.filename or not file.filename.lower().endswith('.csv'):
-        raise HTTPException(422, '请上传本页导出并编辑的CSV成本表')
+    if not file.filename or not file.filename.lower().endswith(('.xlsx','.csv')):
+        raise HTTPException(422, '请上传本页导出并编辑的Excel或CSV成本表')
     content = await file.read(20_000_001)
     try:
         return cost_lines.batch_apply(

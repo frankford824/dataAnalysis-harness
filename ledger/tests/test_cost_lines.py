@@ -134,6 +134,7 @@ def test_batch_cost_uses_stable_hidden_identity_when_excel_rounds_visible_ids(tm
     rows=list(csv.DictReader(io.StringIO(content.decode('utf-8-sig'))))
     rows[0]['平台订单号']='6.92695942827898E+18'
     rows[0]['子订单号']='6926959428278970000'
+    rows[0]['清单键']='6.92695942827898E+18'
     output=io.StringIO();writer=csv.DictWriter(output,fieldnames=rows[0].keys())
     writer.writeheader();writer.writerows(rows)
     rounded=output.getvalue().encode('utf-8-sig')
@@ -145,6 +146,30 @@ def test_batch_cost_uses_stable_hidden_identity_when_excel_rounds_visible_ids(tm
         default_reason='Excel批量核对')
     assert saved['saved']==1 and saved['amount_total']==12.5
     assert cost_lines.current(ws,run,raw['store_id'],raw['period'])['supplement_total']==12.5
+    ws.close()
+
+
+def test_excel_cost_template_keeps_every_identifier_as_text_and_round_trips(tmp_path):
+    import openpyxl
+    ws=Workspace(tmp_path);raw=payload();run=ws.record(raw['store_id'],raw['period'],raw,[])
+    key='6926959428278976406'
+    frame=archive(ws,run,(key,)).with_columns(
+        pl.lit(key).alias('order_id'),pl.lit('6926959428278976419').alias('sub_order_id'),
+        pl.lit('991290072690').alias('product_ids'))
+    path=ws.coverage_gaps_path(run);frame.write_parquet(path);seal(path)
+    exported=cost_lines.export_xlsx(ws,run,raw['store_id'],raw['period'])
+    workbook=openpyxl.load_workbook(io.BytesIO(exported))
+    sheet=workbook.active
+    assert [sheet.cell(2,index).data_type for index in (1,2,3,9,10)]==['s']*5
+    assert sheet['A2'].value==key and sheet['I2'].value==key
+    assert all(sheet.column_dimensions[column].hidden for column in ('I','J','K'))
+    sheet['F2']=12.5;sheet['G2']='Excel原表核对'
+    output=io.BytesIO();workbook.save(output);content=output.getvalue()
+    preview=cost_lines.batch_preview(ws,raw['store_id'],raw['period'],run,content)
+    assert preview['valid']==1 and preview['issue_count']==0 and preview['amount_total']==12.5
+    saved=cost_lines.batch_apply(ws,raw['store_id'],raw['period'],run,content,
+        expected_file_sha=preview['file_sha'],expected_line_revision=preview['line_revision'])
+    assert saved['saved']==1 and saved['amount_total']==12.5
     ws.close()
 
 
@@ -276,6 +301,21 @@ def test_http_batch_preview_then_apply_preserves_audited_cost_rows(tmp_path, mon
     monkeypatch.setattr(api, '_ws', ws)
     monkeypatch.setattr(api, '_model', lambda: m)
     client = TestClient(api.app)
+    xlsx = client.get(f'/api/runs/{run}/coverage-gaps.xlsx')
+    assert xlsx.status_code == 200
+    assert xlsx.headers['content-type'].startswith(
+        'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+    import openpyxl
+    workbook=openpyxl.load_workbook(io.BytesIO(xlsx.content));sheet=workbook.active
+    for row,amount in ((2,12.5),(3,20)):
+        sheet.cell(row,6).value=amount;sheet.cell(row,7).value='财务批量核对成本'
+    xlsx_content=io.BytesIO();workbook.save(xlsx_content)
+    xlsx_preview=client.post(
+        f"/api/stores/{raw['store_id']}/periods/{raw['period']}/cost-lines/batch-preview",
+        params={'run_id':run},files={'file':('missing-cost.xlsx',xlsx_content.getvalue(),
+            'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')})
+    assert xlsx_preview.status_code==200,xlsx_preview.text
+    assert xlsx_preview.json()['valid']==2 and xlsx_preview.json()['issue_count']==0
     content = edited_cost_export(ws, run, {'S2': '12.50', 'S3': '20.00'})
     base = f"/api/stores/{raw['store_id']}/periods/{raw['period']}/cost-lines"
     uploaded = {'file': ('missing-cost.csv', content, 'text/csv')}

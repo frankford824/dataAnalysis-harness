@@ -7,6 +7,7 @@ import json
 import csv
 import io
 import hashlib
+import zipfile
 
 import polars as pl
 
@@ -109,17 +110,72 @@ def export_csv(ws, run_id: int, store_id: str, period: str) -> str:
     writer = csv.writer(output)
     writer.writerow([label for _, label in fields])
     for row in current(ws, run_id, store_id, period)['items']:
-        writer.writerow([identifier(row.get(key)) if key.endswith('order_id')
+        writer.writerow([identifier(row.get(key)) if key in {
+                            'order_id','sub_order_id','coverage_key','context_sha'}
                          else row.get(key) if row.get(key) is not None else ''
                          for key, _ in fields])
     return output.getvalue()
 
 
-def _batch_rows(ws, store_id: str, period: str, run_id: int,
-                content: bytes, default_reason: str = '') -> dict:
-    """Match edited export rows to the sealed current order gap list."""
-    if len(content) > 20_000_000:
-        raise WorkspaceError('批量成本表过大，请按店铺月份拆分后导入')
+def export_xlsx(ws, run_id: int, store_id: str, period: str) -> bytes:
+    """Excel-native batch template; every identifier is a real text cell."""
+    import openpyxl
+    from openpyxl.styles import Font, PatternFill
+    fields = [('order_id','平台订单号'),('sub_order_id','子订单号'),
+              ('product_ids','商品链接'),('quantities','数量'),('order_date','下单日期'),
+              ('manual_amount','人工补录总成本'),('manual_reason','确认依据'),
+              ('editable','可直接补录'),('coverage_key','清单键'),
+              ('context_sha','核对版本'),('line_revision','修改版本')]
+    workbook = openpyxl.Workbook()
+    sheet = workbook.active
+    sheet.title = '未覆盖订单成本'
+    sheet.append([label for _, label in fields])
+    header_fill = PatternFill('solid', fgColor='DCE6F2')
+    input_fill = PatternFill('solid', fgColor='FFF2CC')
+    for cell in sheet[1]:
+        cell.font = Font(bold=True)
+        cell.fill = header_fill
+    text_fields = {'order_id','sub_order_id','product_ids','coverage_key','context_sha'}
+    for source in current(ws, run_id, store_id, period)['items']:
+        values = []
+        for key, _ in fields:
+            value = source.get(key)
+            values.append(str(value) if key in text_fields and value is not None else value)
+        sheet.append(values)
+        row = sheet.max_row
+        for index, (key, _) in enumerate(fields, 1):
+            cell = sheet.cell(row, index)
+            if key in text_fields:
+                cell.number_format = '@'
+            elif key == 'manual_amount':
+                cell.number_format = '0.00'
+                cell.fill = input_fill
+    sheet.freeze_panes = 'A2'
+    sheet.auto_filter.ref = sheet.dimensions
+    widths = [24,24,20,12,13,16,28,12,24,68,12]
+    for index, width in enumerate(widths, 1):
+        sheet.column_dimensions[openpyxl.utils.get_column_letter(index)].width = width
+    for column in ('I','J','K'):
+        sheet.column_dimensions[column].hidden = True
+    output = io.BytesIO()
+    workbook.save(output)
+    return output.getvalue()
+
+
+def _batch_table(content: bytes):
+    """Read the native Excel template and retain CSV compatibility."""
+    if content.startswith(b'PK'):
+        import openpyxl
+        try:
+            with zipfile.ZipFile(io.BytesIO(content)) as archive:
+                if sum(item.file_size for item in archive.infolist()) > 100_000_000:
+                    raise WorkspaceError('批量成本表解压后过大，请按店铺月份拆分')
+            workbook = openpyxl.load_workbook(io.BytesIO(content), read_only=True, data_only=True)
+            rows = workbook.active.iter_rows(values_only=True)
+            fieldnames = [str(value or '').strip() for value in next(rows)]
+            return fieldnames, [dict(zip(fieldnames, row)) for row in rows]
+        except (StopIteration, OSError, ValueError, zipfile.BadZipFile) as exc:
+            raise WorkspaceError('Excel成本表无法读取，请重新下载模板') from exc
     for encoding in ('utf-8-sig', 'gb18030'):
         try:
             body = content.decode(encoding)
@@ -127,54 +183,75 @@ def _batch_rows(ws, store_id: str, period: str, run_id: int,
         except UnicodeDecodeError:
             continue
     else:
-        raise WorkspaceError('成本表编码无法读取，请从系统导出CSV后编辑')
+        raise WorkspaceError('成本表编码无法读取，请上传系统导出的Excel模板或CSV')
     reader = csv.DictReader(io.StringIO(body))
+    return reader.fieldnames, list(reader)
+
+
+def _batch_rows(ws, store_id: str, period: str, run_id: int,
+                content: bytes, default_reason: str = '') -> dict:
+    """Match edited export rows to the sealed current order gap list."""
+    if len(content) > 20_000_000:
+        raise WorkspaceError('批量成本表过大，请按店铺月份拆分后导入')
+    fieldnames, rows = _batch_table(content)
     required = {'平台订单号','子订单号','人工补录总成本','确认依据',
                 '清单键','核对版本','修改版本'}
-    if not reader.fieldnames or not required <= set(reader.fieldnames):
-        raise WorkspaceError('请使用本页导出的完整订单缺口CSV，保留原表头和核对列')
+    if not fieldnames or not required <= set(fieldnames):
+        raise WorkspaceError('请使用本页导出的完整订单缺口Excel或CSV，保留原表头和核对列')
     current_rows = current(ws, run_id, store_id, period)
     by_key = {row['coverage_key']: row for row in current_rows['items']}
+    by_context = {}
+    duplicate_contexts = set()
+    for row in current_rows['items']:
+        context = str(row['context_sha'])
+        if context in by_context:
+            duplicate_contexts.add(context)
+        else:
+            by_context[context] = row
+    for context in duplicate_contexts:
+        by_context.pop(context, None)
     chosen = []
     used = set()
     issues = []
     skipped = 0
-    for line, edited in enumerate(reader, start=2):
+    for line, edited in enumerate(rows, start=2):
         if line > 200_002:
             raise WorkspaceError('一次最多导入20万笔，请按店铺月份拆分')
-        raw_amount = (edited.get('人工补录总成本') or '').strip()
+        raw_amount = str(edited.get('人工补录总成本') or '').strip()
         if not raw_amount:
             skipped += 1
             continue
         def identifier(value):
-            text = (value or '').strip().lstrip("'")
+            text = str(value or '').strip().lstrip("'")
             if len(text) >= 2 and text[0] == text[-1] == '"':
                 text = text[1:-1].replace('""', '"')
             return text[2:-1] if text.startswith('="') and text.endswith('"') else text
         key = identifier(edited.get('清单键'))
-        source = by_key.get(key)
-        if not source or key in used:
+        context = identifier(edited.get('核对版本'))
+        source = by_context.get(context) or by_key.get(key)
+        canonical = source['coverage_key'] if source else key
+        if not source or canonical in used:
             issues.append(f'第{line}行订单键不存在或重复')
             continue
-        used.add(key)
+        used.add(canonical)
         # Excel/WPS can rewrite 18+ digit order numbers even when the export uses
         # formula text.  Those columns are for people to read, not row identity.
         # The opaque key plus the hash of its exact order context are the stable,
         # tamper-evident authority; checking the rendered IDs again only creates
         # false stale-file errors after an ordinary CSV save.
         if (source['order_count'] != 1 or source['context_sha'] !=
-                (edited.get('核对版本') or '').strip()):
+                context):
             issues.append(f'第{line}行清单键或核对版本已变化，请重新导出')
             continue
         try:
-            expected = int((edited.get('修改版本') or '0').strip())
+            expected = int(str(edited.get('修改版本') or '0').strip())
         except ValueError:
             issues.append(f'第{line}行修改版本无效')
             continue
         if expected != source['line_revision']:
             issues.append(f'第{line}行金额已有新修改，请刷新清单')
             continue
-        reason = (edited.get('确认依据') or '').strip() or default_reason.strip()
+        reason = str(edited.get('确认依据') or '').strip() or default_reason.strip()
         if not reason or len(reason) > 500:
             issues.append(f'第{line}行请填写不超过500字的确认依据')
             continue
@@ -187,7 +264,7 @@ def _batch_rows(ws, store_id: str, period: str, run_id: int,
         if old is not None and _cents(old) == amount and source.get('manual_reason') == reason:
             skipped += 1
             continue
-        chosen.append({'coverage_key': key, 'context_sha': source['context_sha'],
+        chosen.append({'coverage_key': canonical, 'context_sha': source['context_sha'],
                        'order_id': source['order_id'], 'amount': amount,
                        'reason': reason, 'expected_line_revision': expected})
     if not chosen and not issues:
