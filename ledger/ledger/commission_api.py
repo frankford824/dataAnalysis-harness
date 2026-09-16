@@ -371,7 +371,7 @@ def install(app, workspace, model, model_root: Path | None = None):
                            'sub_orders': product.get('sub_orders') or 0,
                            'scheme_id': schemes.get(product['product_id'], {}).get('id'),
                            'revision': schemes.get(product['product_id'], {}).get('revision', 0)}
-                          for product in ranked[:200]]}
+                          for product in ranked]}
 
     @router.get("/schemes")
     def schemes(store_id: str = "", search: str = "", after: str = "", limit: int = Query(100, ge=1, le=500)):

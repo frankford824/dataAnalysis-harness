@@ -110,6 +110,20 @@ def test_batch_cost_rejects_stale_row_without_partial_write(tmp_path):
     ws.close()
 
 
+def test_batch_cost_round_trip_preserves_long_excel_order_ids(tmp_path):
+    ws=Workspace(tmp_path);raw=payload();run=ws.record(raw['store_id'],raw['period'],raw,[])
+    frame=archive(ws,run,('S2',)).with_columns(
+        pl.lit('6926959428278976406').alias('order_id'))
+    path=ws.coverage_gaps_path(run);frame.write_parquet(path);seal(path)
+    content=edited_cost_export(ws,run,{'S2':'12.50'})
+    exported=next(csv.DictReader(io.StringIO(content.decode('utf-8-sig'))))
+    assert exported['平台订单号']=='="6926959428278976406"'
+    preview=cost_lines.batch_preview(ws,raw['store_id'],raw['period'],run,
+                                     content,'核对长订单号成本')
+    assert preview['valid']==1 and preview['issue_count']==0
+    ws.close()
+
+
 def test_edit_and_remove_append_history_and_respect_latest_order_context(tmp_path):
     ws=Workspace(tmp_path);raw=payload()
     run=ws.record(raw['store_id'],raw['period'],raw,[])

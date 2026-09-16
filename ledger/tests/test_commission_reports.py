@@ -175,6 +175,18 @@ def test_configuration_shows_unassigned_links_from_selected_order_month(tmp_path
     assert body['links'][0]['product_id'] == '123456789001'
 
 
+def test_all_unassigned_product_links_are_returned_for_bulk_assignment(tmp_path):
+    ws, _, _, client = fixture(tmp_path)
+    products=[{'product_id':str(100000000000+i),'product_name':f'商品{i}',
+               'unassigned':True,'sub_orders':1,'base':1}
+              for i in range(205)]
+    ws.record('s1','2026-06',{'commission':{'engine':'commission-v2',
+        'unassigned_orders':205,'unassigned_base':205,'products':products}},[])
+    body=client.get('/api/commission-v2/unassigned',params={
+        'store_id':'s1','period':'2026-06'}).json()
+    assert body['link_count']==205 and len(body['links'])==205
+
+
 def test_v2_legacy_name_ids_do_not_merge_across_stores(tmp_path):
     ws, _, _, c = fixture(tmp_path)
     historical = [{'id': 'legacy:same-name-hash', 'name': '同名人员'}]

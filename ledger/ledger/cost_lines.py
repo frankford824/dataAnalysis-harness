@@ -96,7 +96,9 @@ def page(ws, run_id: int, store_id: str, period: str, *, q: str = '',
 
 
 def export_csv(ws, run_id: int, store_id: str, period: str) -> str:
-    from .view import _excel_identifier_cell
+    def identifier(value):
+        text = '' if value is None else str(value).strip()
+        return f'="{text}"' if text.isdigit() and len(text) > 15 else text
     fields = [('order_id','平台订单号'),('sub_order_id','子订单号'),
               ('product_ids','商品链接'),('quantities','数量'),('order_date','下单日期'),
               ('manual_amount','人工补录总成本'),('manual_reason','确认依据'),
@@ -107,7 +109,7 @@ def export_csv(ws, run_id: int, store_id: str, period: str) -> str:
     writer = csv.writer(output)
     writer.writerow([label for _, label in fields])
     for row in current(ws, run_id, store_id, period)['items']:
-        writer.writerow([_excel_identifier_cell(row.get(key)) if key.endswith('order_id')
+        writer.writerow([identifier(row.get(key)) if key.endswith('order_id')
                          else row.get(key) if row.get(key) is not None else ''
                          for key, _ in fields])
     return output.getvalue()
@@ -144,14 +146,19 @@ def _batch_rows(ws, store_id: str, period: str, run_id: int,
         if not raw_amount:
             skipped += 1
             continue
-        key = (edited.get('清单键') or '').strip().lstrip("'")
+        def identifier(value):
+            text = (value or '').strip().lstrip("'")
+            if len(text) >= 2 and text[0] == text[-1] == '"':
+                text = text[1:-1].replace('""', '"')
+            return text[2:-1] if text.startswith('="') and text.endswith('"') else text
+        key = identifier(edited.get('清单键'))
         source = by_key.get(key)
         if not source or key in used:
             issues.append(f'第{line}行订单键不存在或重复')
             continue
         used.add(key)
-        order = (edited.get('平台订单号') or '').strip().lstrip("'")
-        sub = (edited.get('子订单号') or '').strip().lstrip("'")
+        order = identifier(edited.get('平台订单号'))
+        sub = identifier(edited.get('子订单号'))
         if (source['order_count'] != 1 or source['context_sha'] !=
                 (edited.get('核对版本') or '').strip() or
                 order != (source.get('order_id') or '') or
