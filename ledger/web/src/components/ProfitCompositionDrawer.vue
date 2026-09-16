@@ -4,12 +4,12 @@ import { NButton } from 'naive-ui'
 import { commissionRequest } from './commissionRequest'
 import { useLatest } from './ui/useLatest'
 import LedgerTable from './ui/LedgerTable.vue'
-import { excludedProductIds, liveProfitTotals, matchesProduct, sameIds } from '../commissionProfit'
+import { excludedProductIds, liveProfitTotals, matchesProduct, profitCompositionCsv, sameIds } from '../commissionProfit'
 const props = defineProps({target:{type:Object,default:null}})
 const emit = defineEmits(['close', 'saved'])
 const request = useLatest()
 const data = ref(null), loading = ref(false), saving = ref(false), error = ref('')
-const search = ref(''), note = ref(''), included = ref([]), opened = ref('')
+const search = ref(''), note = ref(''), included = ref([]), opened = ref(''), exporting = ref(false)
 let serial = 0
 const money = value => value == null ? '—' : Number(value).toLocaleString('zh-CN',{minimumFractionDigits:2,maximumFractionDigits:2})
 const products = computed(() => data.value?.products || [])
@@ -44,8 +44,11 @@ const columns = computed(() => [
   }, `${row.orders} 笔`)},
   {title:'销售额', key:'sales', width:112, mobile:false, align:'right', render:row => money(row.sales)},
   {title:'毛利', key:'gross', width:112, mobile:false, align:'right', render:row => money(row.gross)},
-  {title:'本人创造利润', key:'profit', width:128, mobileWidth:110, align:'right',
-    render:row => h('span', {class:['table-money', row.profit < 0 ? 'negative' : '']}, money(row.profit))},
+  {title:() => h('div', {class:'profit-col-title'}, [h('span', '本人创造利润'), h('small', '未扣兼职')]),
+    key:'profit', width:132, mobileWidth:118, align:'right',
+    render:row => h('span', {class:['table-money', row.profit < 0 ? 'negative' : ''],
+      title: row.profit < 0 ? '该商品分到本人的经营利润为亏，尚未扣店级兼职' : '订单经营利润按本人份额拆到此商品，尚未扣店级兼职'},
+      money(row.profit))},
   {title:'点数', key:'rate', width:80, mobile:false, render:row => rateText(row)},
 ])
 async function load() {
@@ -105,23 +108,48 @@ async function save() {
     saving.value = false
   }
 }
+function exportTable() {
+  if (!data.value || exporting.value) return
+  exporting.value = true
+  try {
+    const csv = profitCompositionCsv(data.value, included.value)
+    const blob = new Blob([csv], {type: 'text/csv;charset=utf-8'})
+    const url = URL.createObjectURL(blob)
+    const link = document.createElement('a')
+    const who = data.value.person || '人员'
+    const store = data.value.store || data.value.store_id || '店铺'
+    link.href = url
+    link.download = `利润构成-${who}-${store}-${data.value.period || ''}.csv`
+    document.body.appendChild(link)
+    link.click()
+    link.remove()
+    setTimeout(() => URL.revokeObjectURL(url), 1000)
+  } finally {
+    exporting.value = false
+  }
+}
 </script>
 <template>
   <n-drawer :show="!!target" :width="'min(880px,100vw)'" @update:show="!$event && emit('close')">
     <n-drawer-content :title="`${target?.person || ''}的利润构成`" closable :native-scrollbar="false">
       <p class="profit-scope">{{ target?.store }} · {{ target?.period }}。勾掉不进阶梯的商品，上面合计马上变。本月已算提成不会改。</p>
+      <n-alert type="info" :bordered="false" class="profit-basis">
+        <b>本人创造利润</b>是订单经营利润按本人提成份额拆到每个商品上的金额，<b>还没有扣本店兼职</b>。
+        负数为这个商品分到本人的亏损，不是扣兼职之后的结果。销售额、毛利也是同一份额，未扣兼职。
+      </n-alert>
       <n-spin :show="loading">
         <div class="profit-kpis">
-          <div><span>全部商品利润</span><strong>¥{{ money(totals.all) }}</strong></div>
-          <div class="cut"><span>已剔除 {{ totals.excludedCount }} 个</span><strong>¥{{ money(totals.excluded) }}</strong></div>
-          <div class="keep"><span>计入阶梯</span><strong>¥{{ money(totals.included) }}</strong></div>
-          <div><span>当前提成试算</span><strong>¥{{ money(data?.commission_trial) }}</strong></div>
+          <div><span>全部商品利润<small>未扣兼职</small></span><strong>¥{{ money(totals.all) }}</strong></div>
+          <div class="cut"><span>已剔除 {{ totals.excludedCount }} 个<small>未扣兼职</small></span><strong>¥{{ money(totals.excluded) }}</strong></div>
+          <div class="keep"><span>计入阶梯<small>未扣兼职</small></span><strong>¥{{ money(totals.included) }}</strong></div>
+          <div><span>当前提成试算<small>订单试算，未扣兼职</small></span><strong>¥{{ money(data?.commission_trial) }}</strong></div>
         </div>
         <n-alert v-if="error" type="error" :bordered="false">{{ error }} <n-button text @click="load">重试</n-button></n-alert>
         <div class="profit-toolbar">
           <input v-model="search" class="commission-search" type="search" placeholder="搜索商品名称或宝贝ID" aria-label="搜索商品">
           <button type="button" class="text-button" :disabled="!visible.length" @click="includeVisible">全选计入</button>
           <button type="button" class="text-button" :disabled="!visible.length" @click="excludeVisible">全选剔除</button>
+          <n-button size="small" :disabled="!products.length" :loading="exporting" @click="exportTable">导出表格</n-button>
           <span class="profit-hint">勾选计入阶梯</span>
         </div>
         <p v-if="search.trim()" class="profit-filter">正在看 {{ visible.length }} / {{ products.length }} 个商品，顶栏合计仍是全部。</p>
@@ -133,17 +161,18 @@ async function save() {
             <button type="button" class="text-button" @click="opened=''">收起</button></div>
           <div v-for="line in openedOrders" :key="line.order_id" class="profit-order">
             <span>{{ line.order_id }}</span>
-            <span class="num">利润 ¥{{ money(line.profit) }}</span>
+            <span class="num">未扣兼职利润 ¥{{ money(line.profit) }}</span>
           </div>
           <p v-if="!openedOrders.length" class="muted">没有可展开的订单。</p>
         </div>
-        <p v-if="target?.labor_cost != null" class="profit-labor">本店本月兼职 ¥{{ money(target.labor_cost) }}，只作对照，不进阶梯加减。</p>
-        <p class="profit-foot">计入阶梯利润 <strong>¥{{ money(totals.included) }}</strong>。请按公司规则套在这个数上；系统不自动改本月已算提成。</p>
+        <p v-if="target?.labor_cost != null" class="profit-labor">本店本月兼职 ¥{{ money(target.labor_cost) }} 是店级分摊，只作对照：<b>没有从上面任何一行利润里扣除</b>，也不进阶梯加减。</p>
+        <p class="profit-foot">计入阶梯的未扣兼职利润 <strong>¥{{ money(totals.included) }}</strong>。请按公司规则套在这个数上；系统不自动改本月已算提成。</p>
         <n-input v-model:value="note" type="textarea" :rows="2" maxlength="500" show-count
           placeholder="写明为什么剔除这些商品，例如：样品链接不计入阶梯" />
       </n-spin>
       <template #footer>
         <n-space>
+          <n-button :disabled="!products.length" :loading="exporting" @click="exportTable">导出表格</n-button>
           <n-button @click="emit('close')">关闭</n-button>
           <n-button type="primary" :loading="saving" :disabled="!canSave" @click="save">保存剔除</n-button>
         </n-space>
@@ -152,10 +181,13 @@ async function save() {
   </n-drawer>
 </template>
 <style scoped>
-.profit-scope{font-size:12px;color:#8390a3;margin:0 0 16px;line-height:1.6}
+.profit-scope{font-size:12px;color:#8390a3;margin:0 0 12px;line-height:1.6}
+.profit-basis{margin:0 0 14px}
+.profit-basis :deep(.n-alert__content){font-size:12px;line-height:1.7;color:#3d4a5c}
 .profit-kpis{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px;margin-bottom:16px}
 .profit-kpis>div{background:#f4f7fc;border-radius:8px;padding:12px 14px}
 .profit-kpis span{display:block;font-size:12px;color:#718097}
+.profit-kpis small{display:block;margin-top:2px;font-size:11px;color:#8a94a3}
 .profit-kpis strong{display:block;margin-top:6px;font-size:20px;font-weight:650;letter-spacing:-.4px;font-variant-numeric:tabular-nums}
 .profit-kpis .cut{background:#fff4f2}
 .profit-kpis .cut strong{color:#b45248}
@@ -177,6 +209,8 @@ async function save() {
 :deep(.profit-product) strong{font-weight:550;color:#233247}
 :deep(.profit-product) small{color:#8390a2;font-size:12px}
 :deep(.profit-orders){color:#3468f0}
+:deep(.profit-col-title){display:grid;gap:2px;line-height:1.2}
+:deep(.profit-col-title) small{color:#8a94a3;font-weight:400;font-size:11px}
 @media(max-width:720px){
   .profit-kpis{grid-template-columns:repeat(2,minmax(0,1fr))}
   .profit-kpis strong{font-size:18px}

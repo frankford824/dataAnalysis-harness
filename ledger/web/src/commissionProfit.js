@@ -37,3 +37,45 @@ export function sameIds(left = [], right = []) {
   const other = new Set(right)
   return left.every(id => other.has(id))
 }
+
+export const PROFIT_BEFORE_LABOR = '本人创造利润（未扣兼职）'
+export const PROFIT_BASIS_NOTE = '订单经营利润按本人提成份额拆到商品；未扣店级兼职；负数为该商品分到本人的亏损'
+
+function csvCell(value) {
+  if (value == null || value === '') return ''
+  const text = String(value)
+  return /[",\n\r]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text
+}
+
+function rateLabel(row) {
+  if (row.rate_mixed) return '不一致'
+  if (row.rate == null) return ''
+  return `${(Number(row.rate) * 100).toLocaleString('zh-CN', {maximumFractionDigits: 4})}%`
+}
+
+export function profitCompositionExportRows(data, includedIds = []) {
+  const keep = new Set(includedIds)
+  return (data?.products || []).map(row => ({
+    人员: data.person || '',
+    店铺: data.store || '',
+    月份: data.period || '',
+    商品: row.product_name || '',
+    宝贝ID: row.product_id || '',
+    订单数: row.orders ?? '',
+    销售额: row.sales,
+    毛利: row.gross,
+    [PROFIT_BEFORE_LABOR]: row.profit,
+    点数: rateLabel(row),
+    是否计入阶梯: keep.has(row.product_id) ? '计入' : '剔除',
+    利润口径: PROFIT_BASIS_NOTE,
+  }))
+}
+
+export function profitCompositionCsv(data, includedIds = []) {
+  const headers = ['人员', '店铺', '月份', '商品', '宝贝ID', '订单数', '销售额', '毛利',
+    PROFIT_BEFORE_LABOR, '点数', '是否计入阶梯', '利润口径']
+  const rows = profitCompositionExportRows(data, includedIds)
+  const lines = [headers.map(csvCell).join(','),
+    ...rows.map(row => headers.map(key => csvCell(row[key])).join(','))]
+  return `\uFEFF${lines.join('\r\n')}`
+}
