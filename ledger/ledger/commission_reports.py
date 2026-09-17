@@ -19,6 +19,11 @@ from .labor_api import frozen_shares
 from .money import money_float
 
 
+def store_member_duties(registry, store_id):
+    """Load confirmed store member duties; unconfirmed defaults to produce."""
+    return {r['person_id']: r for r in registry.store_members(store_id)}
+
+
 def months(start, end):
     if not re.fullmatch(r"\d{4}-\d{2}", start or '') or not re.fullmatch(r"\d{4}-\d{2}", end or ''):
         raise RegistryError('请选择起止账期')
@@ -57,15 +62,18 @@ def labor_keep(base_total, labor_cut):
     return (base - decimal(labor_cut or 0)) / base
 
 
-def suggested_payouts(commission, labor_cut, *, operating=None, registry=None):
+def suggested_payouts(commission, labor_cut, *, operating=None, registry=None, duties=None):
     """Human-facing trial payouts after the store labor cut.
 
     A unique link rate uses attributed profit after labor. Scaling the raw
     order trial by the labor keep would ignore cost supplements and unassigned
     losses that already reduced the store profit the page shows.
+
+    When duties are provided, each person's payout = producer_profit_after_labor
+    × their own share rate (not total_rate).
     """
     people = commission.get('people') or []
-    profits = (attributed_profit(commission, operating, labor_cut, registry)
+    profits = (attributed_profit(commission, operating, labor_cut, registry, duties=duties)
                if operating is not None else {})
     keep = (Decimal(1) if commission.get('manual_amounts_after_labor')
             else labor_keep(commission.get('base_total'), labor_cut))
@@ -180,11 +188,14 @@ def _profit_from_sales(people, operating, labor):
     return {pid: money_float(sign * parts[pid]) for pid in parts}
 
 
-def attributed_profit(commission, operating, labor, registry, *, store_id='', manual_cost=False):
+def attributed_profit(commission, operating, labor, registry, *, store_id='', manual_cost=False, duties=None):
     """Additive person profit; keep full sales and gross output separate.
 
     Manual cost changes the store profit, not the ownership split. The
     allocated-to-operating residual already absorbs that gap.
+
+    When duties are provided and there are producers among the people,
+    profit goes 100% to producers; cut members get 0.
     """
     people = commission.get('people') or []
     if operating is None or not people:
@@ -194,6 +205,16 @@ def attributed_profit(commission, operating, labor, registry, *, store_id='', ma
         return {}
     if len(people) == 1:
         return {ids[0]: profit_after_labor(operating, labor)}
+    # duty-based: producers get all profit, cut members get 0
+    if duties and len(people) > 1:
+        producers = [p for p in people if duties.get(p['person_id'], {}).get('duty', 'produce') == 'produce']
+        if producers and len(producers) < len(people):
+            producer_result = attributed_profit(
+                {**commission, 'people': producers}, operating, labor, registry,
+                store_id=store_id, manual_cost=manual_cost)
+            result = {pid: 0.0 for pid in ids}
+            result.update(producer_result)
+            return result
     split = {p['person_id']: {'sales':p.get('allocated_sales'),
                               'gross':p.get('allocated_gross'),
                               'profit':p.get('allocated_profit')}
@@ -218,13 +239,22 @@ def attributed_profit(commission, operating, labor, registry, *, store_id='', ma
             for pid in weights}
 
 
-def attributed_outputs(commission, store_sales, store_gross, registry):
+def attributed_outputs(commission, store_sales, store_gross, registry, *, duties=None):
     people=commission.get('people') or []
     ids=[p.get('person_id') for p in people]
     if not people or any(not pid for pid in ids) or len(ids)!=len(set(ids)):
         return {}
     if len(people)==1:
         return {ids[0]:{'sales':store_sales,'gross':store_gross}}
+    # duty-based: producers get all sales/gross, cut members get 0
+    if duties and len(people) > 1:
+        producers = [p for p in people if duties.get(p['person_id'], {}).get('duty', 'produce') == 'produce']
+        if producers and len(producers) < len(people):
+            producer_result = attributed_outputs(
+                {**commission, 'people': producers}, store_sales, store_gross, registry)
+            result = {pid: {'sales': 0.0, 'gross': 0.0} for pid in ids}
+            result.update(producer_result)
+            return result
     split={p['person_id']:{'sales':p.get('allocated_sales'),'gross':p.get('allocated_gross')}
            for p in people if p.get('person_id') and
            p.get('allocated_sales') is not None and p.get('allocated_gross') is not None}
@@ -343,6 +373,12 @@ def build(workspace, registry, model, start, end, store_ids=None, person_ids=Non
     if len(keys)!=len(set(keys)):raise RegistryError('同店同账期只能选择一份计算结果')
     from .commission_confirm import active_for_runs
     confirmed = active_for_runs(registry, records)
+    _duties_cache = {}
+    def _get_duties(sid):
+        if sid not in _duties_cache:
+            members = registry.store_members(sid)
+            _duties_cache[sid] = {r['person_id']: r for r in members} if members else None
+        return _duties_cache[sid]
     scopes={}; lines=[]; store_person_rows=[]; available={}; people_totals={}; store_totals={}; store_people={}
     for record in records:
         c=json.loads(record['commission_json'] or '{}');sid=record['store_id'];period=record['period']
@@ -406,8 +442,9 @@ def build(workspace, registry, model, start, end, store_ids=None, person_ids=Non
         gross=statement_amount(statement,gross_node) if gross_node else None
         operating=statement_amount(statement,profit_node) if profit_node else None
         visible_labor=labor_cut if spread.total is not None else Decimal(0)
-        person_output=attributed_outputs(source_c,sales,gross,registry)
-        person_profit=attributed_profit(source_c,operating,visible_labor,registry,store_id=sid)
+        store_duties=_get_duties(sid)
+        person_output=attributed_outputs(source_c,sales,gross,registry,duties=store_duties)
+        person_profit=attributed_profit(source_c,operating,visible_labor,registry,store_id=sid,duties=store_duties)
         profit_rates={person.get('person_id'):confirmed_profit_rate(
             source_c,person.get('person_id'),sid) for person in source_c.get('people') or []}
         if not decision and any(

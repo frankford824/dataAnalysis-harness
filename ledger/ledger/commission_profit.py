@@ -178,7 +178,7 @@ def _sum_profit(products, pred):
     ), Decimal(0)))
 
 
-def compose(registry, store_id, period, person_id, run_id, *, store_name=''):
+def compose(registry, store_id, period, person_id, run_id, *, store_name='', duties=None):
     """Group one person's allocated output by product for a single store month."""
     if not person_id:
         raise RegistryError('请选择人员')
@@ -190,6 +190,17 @@ def compose(registry, store_id, period, person_id, run_id, *, store_name=''):
     assigned = (person_details.filter(pl.col('status') == 'distribute')
                 if 'status' in person_details.columns and not person_details.is_empty()
                 else person_details.head(0))
+    # When duties exist and this person is 'cut', only include products
+    # where this person is the sole person on the link.
+    if duties and duties.get(person_id, {}).get('duty') == 'cut' and not assigned.is_empty():
+        if 'product_id' in details.columns and 'person_id' in details.columns:
+            base = (details.filter(pl.col('status') == 'distribute')
+                    if 'status' in details.columns else details)
+            solo = (base.group_by('product_id')
+                    .agg(pl.col('person_id').n_unique().alias('n'))
+                    .filter(pl.col('n') == 1))
+            solo_products = set(solo['product_id'].to_list())
+            assigned = assigned.filter(pl.col('product_id').is_in(solo_products))
     parts = _allocated_parts(assigned)
     products = _product_rows(parts)
     person_name = next((row.get('person') for row in assigned.iter_rows(named=True)

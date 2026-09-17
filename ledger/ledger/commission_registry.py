@@ -126,6 +126,13 @@ CREATE TRIGGER IF NOT EXISTS profit_exclusion_no_update BEFORE UPDATE ON profit_
  BEGIN SELECT RAISE(ABORT,'profit exclusion history is immutable'); END;
 CREATE TRIGGER IF NOT EXISTS profit_exclusion_no_delete BEFORE DELETE ON profit_exclusion
  BEGIN SELECT RAISE(ABORT,'profit exclusion history is immutable'); END;
+CREATE TABLE IF NOT EXISTS store_member (
+ store_id TEXT NOT NULL, person_id TEXT NOT NULL,
+ duty TEXT NOT NULL DEFAULT 'produce',
+ leader_id TEXT NOT NULL DEFAULT '',
+ revision INTEGER NOT NULL DEFAULT 1,
+ PRIMARY KEY(store_id, person_id)
+);
 CREATE TABLE IF NOT EXISTS operator (
  id TEXT PRIMARY KEY, name TEXT NOT NULL, salt TEXT NOT NULL, password_hash TEXT NOT NULL,
  admin INTEGER NOT NULL DEFAULT 0, disabled INTEGER NOT NULL DEFAULT 0
@@ -260,6 +267,15 @@ class Registry:
                                                ("source_seq", "INTEGER NOT NULL DEFAULT 0"), ("source_fingerprint", "TEXT NOT NULL DEFAULT ''")]:
                         if column not in fields:
                             conn.execute(f"ALTER TABLE pending ADD COLUMN {column} {definition}")
+                    if 'store_member' not in {r['name'] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}:
+                        conn.executescript("""
+CREATE TABLE IF NOT EXISTS store_member (
+ store_id TEXT NOT NULL, person_id TEXT NOT NULL,
+ duty TEXT NOT NULL DEFAULT 'produce',
+ leader_id TEXT NOT NULL DEFAULT '',
+ revision INTEGER NOT NULL DEFAULT 1,
+ PRIMARY KEY(store_id, person_id)
+);""")
                 _initialized.add(key)
 
     @contextmanager
@@ -329,6 +345,32 @@ class Registry:
                          "revision=excluded.revision,note=excluded.note", result)
             self.audit(conn, actor, "person.save", pid, reason, before, result)
         return result
+
+    def store_members(self, store_id: str) -> list[dict]:
+        with self.connect() as conn:
+            return [dict(r) for r in conn.execute(
+                "SELECT * FROM store_member WHERE store_id=? ORDER BY person_id", (store_id,))]
+
+    def save_store_member(self, store_id: str, person_id: str, duty: str,
+                          leader_id: str, actor: str, reason: str) -> dict:
+        if duty not in ('produce', 'cut'):
+            raise RegistryError("身份应为做货或抽点")
+        with self.transaction() as conn:
+            if not conn.execute("SELECT 1 FROM person WHERE id=?", (person_id,)).fetchone():
+                raise RegistryError("人员不存在")
+            if leader_id and not conn.execute("SELECT 1 FROM person WHERE id=?", (leader_id,)).fetchone():
+                raise RegistryError("所属组长不存在")
+            row = conn.execute("SELECT * FROM store_member WHERE store_id=? AND person_id=?",
+                               (store_id, person_id)).fetchone()
+            before = dict(row) if row else None
+            revision = (before['revision'] if before else 0) + 1
+            result = {'store_id': store_id, 'person_id': person_id,
+                      'duty': duty, 'leader_id': leader_id or '', 'revision': revision}
+            conn.execute("INSERT OR REPLACE INTO store_member VALUES(?,?,?,?,?)",
+                         (store_id, person_id, duty, leader_id or '', revision))
+            self.audit(conn, actor, 'store_member.save', f'{store_id}/{person_id}',
+                       reason, before, result)
+            return result
 
     def scheme(self, sid: str) -> dict:
         with self.connect() as conn:

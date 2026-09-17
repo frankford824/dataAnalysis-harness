@@ -108,6 +108,14 @@ class ProfitExclusionChange(BaseModel):
     note: str = Field(min_length=1, max_length=500)
 
 
+class StoreMemberChange(BaseModel):
+    store_id: str
+    person_id: str
+    duty: str = 'produce'
+    leader_id: str = ''
+    reason: str = Field(min_length=1, max_length=500)
+
+
 class SettlementCreate(BaseModel):
     start: str
     end: str
@@ -278,6 +286,62 @@ def install(app, workspace, model, model_root: Path | None = None):
     @router.post("/people")
     def person_save(change: PersonChange, request: Request):
         return reg().person_save(change.person, actor(request)["id"], change.reason, change.expected_revision)
+
+    @router.get("/store-members")
+    def store_members(store_id: str):
+        if not store_id:
+            raise RegistryError("请选择店铺")
+        registry = reg()
+        saved = {r['person_id']: r for r in registry.store_members(store_id)}
+        with registry.connect() as conn:
+            rows = conn.execute("""
+                SELECT json_extract(a.value,'$.person_id') pid,
+                       json_extract(a.value,'$.role') role,
+                       count(*) n
+                FROM scheme s JOIN scheme_version v ON v.id=s.active_version
+                JOIN json_each(v.body,'$.segments') seg
+                JOIN json_each(seg.value,'$.allocations') a
+                WHERE s.store_id=?
+                GROUP BY pid, role ORDER BY n DESC""", (store_id,)).fetchall()
+        role_counts = {}
+        for r in rows:
+            pid = r['pid']
+            role_counts.setdefault(pid, []).append({'role': r['role'], 'count': r['n']})
+        suggestions = {}
+        for pid, roles in role_counts.items():
+            top_role = roles[0]['role'] if roles else ''
+            if top_role in ('组长', '高级组长'):
+                suggestions[pid] = 'cut'
+            elif top_role.startswith('运营'):
+                suggestions[pid] = 'produce'
+            else:
+                suggestions[pid] = 'produce'
+        roster = {p['id']: p for p in registry.people()}
+        members = []
+        seen = set()
+        for pid in list(saved) + [pid for pid in role_counts if pid not in saved]:
+            if pid in seen:
+                continue
+            seen.add(pid)
+            s = saved.get(pid)
+            members.append({
+                'store_id': store_id,
+                'person_id': pid,
+                'person_name': roster.get(pid, {}).get('name', ''),
+                'duty': s['duty'] if s else suggestions.get(pid, 'produce'),
+                'leader_id': s.get('leader_id', '') if s else '',
+                'leader_name': roster.get(s.get('leader_id', '') if s else '', {}).get('name', ''),
+                'revision': s['revision'] if s else 0,
+                'confirmed': s is not None,
+                'suggested_duty': suggestions.get(pid, 'produce'),
+            })
+        return {"members": members}
+
+    @router.post("/store-members")
+    def save_store_member(change: StoreMemberChange, request: Request):
+        return reg().save_store_member(
+            change.store_id, change.person_id, change.duty,
+            change.leader_id, actor(request)["id"], change.reason)
 
     @router.post("/catalog/refresh")
     def refresh_catalog(request: Request):
