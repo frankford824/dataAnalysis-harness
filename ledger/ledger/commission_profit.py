@@ -113,8 +113,12 @@ def _product_rows(parts):
         if 'product_name' in parts.columns else pl.lit('').alias('product_name'),
         pl.col('spine_row').n_unique().alias('orders')
         if 'spine_row' in parts.columns else pl.len().alias('orders'),
+        pl.col('__participation_sales').sum().alias('product_sales')
+        if '__participation_sales' in parts.columns else pl.lit(None).alias('product_sales'),
         pl.col('participation_sales').sum().alias('sales')
         if 'participation_sales' in parts.columns else pl.lit(None).alias('sales'),
+        pl.col('__participation_gross').sum().alias('product_gross')
+        if '__participation_gross' in parts.columns else pl.lit(None).alias('product_gross'),
         pl.col('participation_gross').sum().alias('gross')
         if 'participation_gross' in parts.columns else pl.lit(None).alias('gross'),
         pl.col('participation_profit').sum().alias('profit')
@@ -130,7 +134,9 @@ def _product_rows(parts):
             'product_id': row['product_id'] or '',
             'product_name': row.get('product_name') or '',
             'orders': int(row['orders'] or 0),
+            'product_sales': _money_or_none(row.get('product_sales')),
             'sales': _money_or_none(row.get('sales')),
+            'product_gross': _money_or_none(row.get('product_gross')),
             'gross': _money_or_none(row.get('gross')),
             'profit': _money_or_none(row.get('profit')),
             'rate': rates[0] if len(rates) == 1 else None,

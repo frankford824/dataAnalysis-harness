@@ -80,7 +80,10 @@ def test_shared_link_only_keeps_this_persons_share(tmp_path):
     mine = compose(registry, 's1', '2026-06', a['id'], 11)
     other = compose(registry, 's1', '2026-06', b['id'], 11)
     assert mine['products'][0]['profit'] == 60
+    assert mine['products'][0]['product_sales'] == 200
+    assert mine['products'][0]['sales'] == 120
     assert other['products'][0]['profit'] == 40
+    assert other['products'][0]['sales'] == 80
     assert mine['products'][0]['rate'] == 0.03
     assert other['products'][0]['rate'] == 0.02
     assert mine['included_profit'] == 60

@@ -39,7 +39,7 @@ export function sameIds(left = [], right = []) {
 }
 
 export const PROFIT_BEFORE_LABOR = '本人创造利润（未扣兼职）'
-export const PROFIT_BASIS_NOTE = '订单经营利润按本人提成份额拆到商品；未扣店级兼职；负数为该商品分到本人的亏损'
+export const PROFIT_BASIS_NOTE = '本人销售额/毛利/利润=商品全额×本人点数÷链接总点数，不是利润看板的商品全额；未扣店级兼职；负数为该商品分到本人的亏损'
 
 function csvCell(value) {
   if (value == null || value === '') return ''
@@ -70,10 +70,11 @@ export function profitCompositionExportRows(data, includedIds = []) {
     商品: row.product_name || '',
     宝贝ID: row.product_id || '',
     订单数: row.orders ?? '',
-    销售额: row.sales,
-    成本: row.sales != null && row.gross != null
+    '商品销售收入（全额）': row.product_sales,
+    本人销售额: row.sales,
+    本人成本: row.sales != null && row.gross != null
       ? Math.round((Number(row.sales) - Number(row.gross)) * 100) / 100 : null,
-    毛利: row.gross,
+    本人毛利: row.gross,
     [PROFIT_BEFORE_LABOR]: row.profit,
     本人点数: rateLabel(row),
     是否计入阶梯: keep.has(row.product_id) ? '计入' : '剔除',
@@ -82,7 +83,8 @@ export function profitCompositionExportRows(data, includedIds = []) {
 }
 
 export function profitCompositionCsv(data, includedIds = []) {
-  const headers = ['人员', '店铺', '月份', '商品', '宝贝ID', '订单数', '销售额', '成本', '毛利',
+  const headers = ['人员', '店铺', '月份', '商品', '宝贝ID', '订单数',
+    '商品销售收入（全额）', '本人销售额', '本人成本', '本人毛利',
     PROFIT_BEFORE_LABOR, '本人点数', '是否计入阶梯', '利润口径']
   const rows = profitCompositionExportRows(data, includedIds)
   const lines = [headers.map(csvCell).join(','),

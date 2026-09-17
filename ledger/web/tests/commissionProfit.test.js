@@ -33,11 +33,14 @@ test('export names the person and says profit is before labor', () => {
   }, [])
   const [header, row] = csv.replace(/^\uFEFF/, '').split(/\r\n/)
   assert.match(header, /人员/)
+  assert.match(header, /商品销售收入（全额）/)
+  assert.match(header, /本人销售额/)
+  assert.match(header, /本人毛利/)
   assert.match(header, /本人创造利润（未扣兼职）/)
   assert.match(header, /利润口径/)
   assert.match(row, /^陈慨,/)
   assert.match(row, /-88.3/)
-  assert.match(row, /未扣店级兼职/)
+  assert.match(row, /不是利润看板的商品全额/)
   const exported = profitCompositionExportRows({
     person: '陈慨', store: '店', period: '2026-06',
     products: [{product_id: 'p1', product_name: 'A', profit: -5, rate: 0.05}],

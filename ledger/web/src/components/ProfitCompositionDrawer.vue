@@ -40,14 +40,22 @@ const columns = computed(() => [
   {title:'订单', key:'orders', width:72, mobileWidth:56, align:'right', render:row => h('button', {
     type:'button', class:'profit-orders', onClick:() => openOrders(row),
   }, `${row.orders} 笔`)},
-  {title:'销售额', key:'sales', width:112, mobile:false, align:'right', render:row => money(row.sales)},
-  {title:'成本', key:'cost', width:112, mobile:false, align:'right', render:row =>
+  {title:() => h('div', {class:'profit-col-title'}, [h('span', '商品销售收入'), h('small', '全额，对看板')]),
+    key:'product_sales', width:124, mobile:false, align:'right',
+    render:row => h('span', {title:'该宝贝本月订单的财务销售收入全额，未按人头拆，用来对利润看板'}, money(row.product_sales))},
+  {title:() => h('div', {class:'profit-col-title'}, [h('span', '本人销售额'), h('small', '按点数拆')]),
+    key:'sales', width:112, mobile:false, align:'right',
+    render:row => h('span', {title:'商品销售收入 × 本人点数 ÷ 链接总点数，不是商品全额'}, money(row.sales))},
+  {title:() => h('div', {class:'profit-col-title'}, [h('span', '本人成本'), h('small', '按点数拆')]),
+    key:'cost', width:112, mobile:false, align:'right', render:row =>
     row.sales != null && row.gross != null ? money(Number(row.sales) - Number(row.gross)) : '—'},
-  {title:'毛利', key:'gross', width:112, mobile:false, align:'right', render:row => money(row.gross)},
-  {title:() => h('div', {class:'profit-col-title'}, [h('span', '本人创造利润'), h('small', '未扣兼职')]),
+  {title:() => h('div', {class:'profit-col-title'}, [h('span', '本人毛利'), h('small', '按点数拆')]),
+    key:'gross', width:112, mobile:false, align:'right',
+    render:row => h('span', {title:'商品毛利全额 × 本人点数 ÷ 链接总点数，不是商品全额'}, money(row.gross))},
+  {title:() => h('div', {class:'profit-col-title'}, [h('span', '本人创造利润'), h('small', '按点数拆，未扣兼职')]),
     key:'profit', width:132, mobileWidth:118, align:'right',
     render:row => h('span', {class:['table-money', row.profit < 0 ? 'negative' : ''],
-      title: row.profit < 0 ? '该商品分到本人的经营利润为亏，尚未扣店级兼职' : '订单经营利润按本人份额拆到此商品，尚未扣店级兼职'},
+      title: row.profit < 0 ? '该商品分到本人的经营利润为亏，尚未扣店级兼职' : '订单经营利润按本人点数拆到此商品，不是商品全额，尚未扣店级兼职'},
       money(row.profit))},
   {title:() => h('div', {class:'profit-col-title'}, [h('span', '本人点数'), h('small', '该商品上此人份额')]),
     key:'rate', width:96, mobile:false, render:row => h('span', {
@@ -133,17 +141,19 @@ function exportTable() {
 }
 </script>
 <template>
-  <n-drawer :show="!!target" :width="'min(880px,100vw)'" @update:show="!$event && emit('close')">
+  <n-drawer :show="!!target" :width="'min(1080px,100vw)'" @update:show="!$event && emit('close')">
     <n-drawer-content :title="`${target?.person || ''}的利润构成`" closable :native-scrollbar="false">
       <p class="profit-scope">{{ target?.store }} · {{ target?.period }}。勾掉不进阶梯的商品，上面合计马上变。本月已算提成不会改。</p>
       <n-alert type="info" :bordered="false" class="profit-basis">
-        <b>本人创造利润</b>是订单经营利润按本人提成份额拆到每个商品上的金额，<b>还没有扣本店兼职</b>。
-        负数为这个商品分到本人的亏损，不是扣兼职之后的结果。销售额、毛利也是同一份额，未扣兼职。
-        <b>本人点数</b>是提成设置里此人在这个宝贝上的份额：王岩3%+刘露2%时，王岩这张表写3%；王岩1.5%就写1.5%，不是链接合计。
+        <b>商品销售收入</b>是该宝贝本月财务销售收入全额，用来对利润看板。
+        <b>本人销售额 / 本人毛利 / 本人创造利润</b>都是全额 × 本人点数 ÷ 链接总点数，<b>不是商品全额</b>。
+        例如商品销售收入 10041.83、本人 2%、总点 3%，本人销售额 = 6694.55。
+        负数为这个商品分到本人的亏损，尚未扣店级兼职。
+        <b>本人点数</b>是此人在这个宝贝上的份额，不是链接合计。
       </n-alert>
       <n-spin :show="loading">
         <div class="profit-kpis">
-          <div><span>全部商品利润<small>未扣兼职</small></span><strong>¥{{ money(totals.all) }}</strong></div>
+          <div><span>本人全部商品利润<small>按点数拆，未扣兼职</small></span><strong>¥{{ money(totals.all) }}</strong></div>
           <div class="cut"><span>已剔除 {{ totals.excludedCount }} 个<small>未扣兼职</small></span><strong>¥{{ money(totals.excluded) }}</strong></div>
           <div class="keep"><span>计入阶梯<small>未扣兼职</small></span><strong>¥{{ money(totals.included) }}</strong></div>
           <div><span>当前提成试算<small>订单试算，未扣兼职</small></span><strong>¥{{ money(data?.commission_trial) }}</strong></div>
