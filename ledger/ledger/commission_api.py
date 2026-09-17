@@ -116,6 +116,18 @@ class StoreMemberChange(BaseModel):
     reason: str = Field(min_length=1, max_length=500)
 
 
+class StoreMemberItem(BaseModel):
+    person_id: str
+    duty: str = 'produce'
+    leader_id: str = ''
+
+
+class StoreMemberBatchChange(BaseModel):
+    store_id: str
+    members: list[StoreMemberItem] = Field(min_length=1, max_length=200)
+    reason: str = Field(min_length=1, max_length=500)
+
+
 class SettlementCreate(BaseModel):
     start: str
     end: str
@@ -342,6 +354,18 @@ def install(app, workspace, model, model_root: Path | None = None):
         return reg().save_store_member(
             change.store_id, change.person_id, change.duty,
             change.leader_id, actor(request)["id"], change.reason)
+
+    @router.post("/store-members/batch")
+    def save_store_members_batch(change: StoreMemberBatchChange, request: Request):
+        registry = reg()
+        acting = actor(request)["id"]
+        saved = []
+        for item in change.members:
+            result = registry.save_store_member(
+                change.store_id, item.person_id, item.duty,
+                item.leader_id, acting, change.reason)
+            saved.append(result)
+        return {"saved": saved, "count": len(saved)}
 
     @router.post("/catalog/refresh")
     def refresh_catalog(request: Request):

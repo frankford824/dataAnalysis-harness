@@ -48,6 +48,19 @@ async function saveMember(m){
   finally{const next={...memberSaving.value};delete next[key];memberSaving.value=next}
 }
 
+const batchSaving=ref(false)
+function setAllDuty(duty){members.value.forEach(m=>{m._duty=duty})}
+async function saveAll(){
+  if(!members.value.length||batchSaving.value)return
+  batchSaving.value=true
+  try{
+    await commissionRequest('/store-members/batch',{body:{store_id:memberStoreId.value,members:members.value.map(m=>({person_id:m.person_id,duty:m._duty,leader_id:m._leader_id||''})),reason:'批量设置本店身份'}})
+    message.success(`已保存 ${members.value.length} 人身份`)
+    await loadMembers()
+  }catch(e){message.error(e.message,{duration:4000})}
+  finally{batchSaving.value=false}
+}
+
 defineExpose({open,shown})
 </script>
 <template><n-modal v-model:show="shown" preset="card" title="人员名单与分配" style="width:min(860px,95vw)">
@@ -67,8 +80,13 @@ defineExpose({open,shown})
   <!-- 本店身份 -->
   <template v-if="tab==='identity'">
     <p class="hint">设置每位人员在各店铺的身份：做货人员参与销售额/毛利额/利润额归属，抽点人员仅计提成。</p>
-    <div class="identity-store-select">
+    <div class="identity-toolbar">
       <n-select v-model:value="memberStoreId" :options="storeOptions" placeholder="选择店铺" filterable clearable style="width:280px" aria-label="选择店铺" />
+      <template v-if="members.length">
+        <n-button size="small" @click="setAllDuty('produce')" :disabled="batchSaving">全部设做货</n-button>
+        <n-button size="small" @click="setAllDuty('cut')" :disabled="batchSaving">全部设抽点</n-button>
+        <n-button size="small" type="primary" :loading="batchSaving" :disabled="memberLoading||!members.length" @click="saveAll">一键保存全部</n-button>
+      </template>
     </div>
     <p v-if="memberError" class="error">{{ memberError }} <button class="text-button" @click="loadMembers">重试</button></p>
     <n-spin :show="memberLoading">
@@ -93,6 +111,6 @@ defineExpose({open,shown})
 </n-modal></template>
 <style scoped>
 .tab-bar{display:flex;gap:0;border-bottom:1px solid #e8edf4;margin-bottom:16px}.tab-item{padding:8px 18px;font-size:14px;border:none;background:none;cursor:pointer;color:#7b8490;border-bottom:2px solid transparent;transition:all .15s}.tab-item.active{color:#18a058;border-bottom-color:#18a058;font-weight:500}.tab-item:hover{color:#333}
-.identity-store-select{margin:12px 0 16px}.identity-empty{text-align:center;color:#8a919d;padding:40px 0;font-size:14px}
+.identity-toolbar{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin:12px 0 16px}.identity-empty{text-align:center;color:#8a919d;padding:40px 0;font-size:14px}
 .add{display:flex;gap:10px;flex-wrap:wrap;margin:16px 0}input{box-sizing:border-box;border:1px solid #dce0e6;border-radius:6px;padding:8px;font-size:14px;max-width:100%;width:160px}.table-wrap{max-height:60vh;overflow:auto}table{width:100%;border-collapse:collapse;min-width:620px}td,th{padding:10px;text-align:left;border-bottom:1px solid #eef0f3;font-size:13px}th{background:#f8fafc;position:sticky;top:0}td:last-child{white-space:nowrap}.hint{font-size:13px;color:#7b8490}.error{color:#b42318}.text-button{background:none;border:none;color:#18a058;cursor:pointer;font-size:13px;text-decoration:underline}
 </style>
