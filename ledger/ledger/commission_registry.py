@@ -351,6 +351,15 @@ CREATE TABLE IF NOT EXISTS store_member (
             return [dict(r) for r in conn.execute(
                 "SELECT * FROM store_member WHERE store_id=? ORDER BY person_id", (store_id,))]
 
+    def store_members_for_stores(self, store_ids: list[str]) -> list[dict]:
+        ids = [sid for sid in store_ids if sid]
+        if not ids:
+            return []
+        with self.connect() as conn:
+            marks = ','.join('?' for _ in ids)
+            return [dict(r) for r in conn.execute(
+                f"SELECT * FROM store_member WHERE store_id IN ({marks}) ORDER BY store_id,person_id", ids)]
+
     def save_store_member(self, store_id: str, person_id: str, duty: str,
                           leader_id: str, actor: str, reason: str) -> dict:
         if duty not in ('produce', 'cut'):

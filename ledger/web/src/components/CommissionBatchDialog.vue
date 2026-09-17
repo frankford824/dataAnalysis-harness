@@ -1,6 +1,7 @@
 <script setup>
 import { computed, ref } from 'vue'
 import { useMessage } from 'naive-ui'
+import { DUTY_OPTIONS, dutyLabel, saveStoreMembers } from '../storeMembers'
 const props = defineProps({stores:Array, people:Array})
 const emit = defineEmits(['saved'])
 const message = useMessage()
@@ -9,7 +10,7 @@ const selection=ref({}), shops=ref([]), text=ref(''), plan=ref(null), errors=ref
 const form=ref({})
 const stamp=()=>new Date().toLocaleString('sv-SE',{timeZone:'Asia/Shanghai'}).replace(' ','T')
 const rate=x=>`${Number((Number(x)*100).toFixed(6))}%`
-const names=a=>(a||[]).map(p=>`${p.name} ${rate(p.rate)}`).join('、') || '未分配'
+const names=a=>(a||[]).map(p=>`${p.name}${p.duty?`（${dutyLabel(p.duty)}）`:''} ${rate(p.rate)}`).join('、') || '未分配'
 const personOptions=computed(()=>props.people.map(p=>({value:p.id,label:p.name+(p.employee_no?`（${p.employee_no}）`:'')})))
 const storeOptions=computed(()=>props.stores.map(s=>({value:s.id,label:s.name})))
 const visibleRows=computed(()=>plan.value?.rows.slice(page.value*50,(page.value+1)*50)||[])
@@ -23,14 +24,14 @@ async function call(path, options={}) {
 function open(options={}) {
   selection.value=options;kind.value=options.kind||'selected';shops.value=options.store_id?[options.store_id]:[]
   text.value='';plan.value=null;errors.value=[];failure.value='';page.value=0;operation.value=kind.value==='selected'?'merge':'replace'
-  form.value={mode:'distribute',valid_from:options.valid_from||stamp(),valid_to:'',allocations:[{person:null,percent:null}]};shown.value=true
+  form.value={mode:'distribute',valid_from:options.valid_from||stamp(),valid_to:'',allocations:[{person:null,percent:null,duty:'produce'}]};shown.value=true
 }
 function prepared() {
   if(form.value.mode!=='distribute')return []
   if(!form.value.allocations.length||form.value.allocations.some(p=>!p.person))throw new Error('请先选择人员')
   return form.value.allocations.map(p=>{
     if(operation.value!=='remove'&&(p.percent==null||!Number.isFinite(Number(p.percent))||Number(p.percent)<=0))throw new Error('请填写大于0的提成比例')
-    return {...(props.people.some(x=>x.id===p.person)?{person_id:p.person}:{name:p.person}),rate:operation.value==='remove'?'0':(Number(p.percent)/100).toFixed(8)}
+    return {...(props.people.some(x=>x.id===p.person)?{person_id:p.person}:{name:p.person}),rate:operation.value==='remove'?'0':(Number(p.percent)/100).toFixed(8),duty:p.duty||'produce'}
   })
 }
 async function preview() {
@@ -45,6 +46,10 @@ async function preview() {
     } else if(selection.value.scope)request.scope=selection.value.scope
     else request.targets=selection.value.targets
     plan.value=await call('/settings/preview',{method:'POST',body:JSON.stringify(request)});page.value=0
+    const dutyByPerson=Object.fromEntries(form.value.allocations.filter(p=>p.person).map(p=>[p.person,p.duty||'produce']))
+    for(const row of plan.value.rows||[]){
+      for(const person of row.after||[])person.duty=dutyByPerson[person.person_id]||person.duty
+    }
   } catch(e){failure.value=e.message} finally {busy.value=false}
 }
 async function importFile(file) {
@@ -55,7 +60,16 @@ async function importFile(file) {
 }
 async function apply() {
   busy.value=true;failure.value=''
-  try {const r=await call(`/settings/apply/${plan.value.id}`,{method:'POST'});shown.value=false;message.success(`已保存${r.count}条设置，涉及${r.stores}家店铺`);emit('saved')}
+    try {
+      const r=await call(`/settings/apply/${plan.value.id}`,{method:'POST'})
+      const storeIds=[...new Set((plan.value.rows||[]).map(row=>row.store_id).filter(Boolean))]
+      const dutyMembers=form.value.allocations.filter(p=>p.person&&props.people.some(x=>x.id===p.person))
+        .map(p=>({person_id:p.person,duty:p.duty||'produce'}))
+      if(storeIds.length&&dutyMembers.length&&form.value.mode==='distribute'&&operation.value!=='remove'){
+        await saveStoreMembers(storeIds,dutyMembers,'随批量提成设置保存本店身份')
+      }
+      shown.value=false;message.success(`已保存${r.count}条设置，涉及${r.stores}家店铺`);emit('saved')
+    }
   catch(e){failure.value=e.message}finally{busy.value=false}
 }
 defineExpose({open,importFile,shown})
@@ -68,7 +82,7 @@ defineExpose({open,importFile,shown})
     <template v-if="kind==='new'"><label>店铺（可多选）</label><n-select v-model:value="shops" :options="storeOptions" multiple filterable placeholder="选择要新增设置的店铺" aria-label="批量新增店铺"/><label>宝贝ID（每行一个，可粘贴Excel两列：ID、商品名称）</label><textarea v-model="text" rows="6" aria-label="批量宝贝ID" placeholder="123456789001&#10;123456789002"/><p class="hint">以上宝贝会分别添加到每一家所选店铺，下一步可核对完整清单。</p></template>
     <p v-else class="hint">{{ selection.scope ? '处理当前筛选条件下的全部商品' : `已选${selection.targets?.length||0}个商品，涉及${new Set((selection.targets||[]).map(x=>x.store_id)).size}家店铺` }}</p>
     <div class="fields"><label>状态<select v-model="form.mode" aria-label="批量提成状态"><option value="distribute">提成中</option><option value="exclude">不提成</option><option value="hold">暂不设置</option></select></label><label v-if="kind!=='new' && form.mode==='distribute'">处理方式<select v-model="operation" aria-label="批量处理方式"><option value="replace">统一替换全部人员和比例</option><option value="merge">只调整指定人员，保留其他人员</option><option value="remove">移除指定人员，保留其他人员</option></select></label></div>
-    <template v-if="form.mode==='distribute'"><div v-for="(p,i) in form.allocations" :key="i" class="allocation"><n-select v-model:value="p.person" :options="personOptions" filterable tag placeholder="选择或输入姓名" :aria-label="`批量人员${i+1}`"/><label v-if="operation!=='remove'"><input v-model="p.percent" type="number" min="0" max="100" step="0.01" :aria-label="`批量比例${i+1}`"/> %</label><n-button text @click="form.allocations.splice(i,1)">移除</n-button></div><n-button text type="primary" @click="form.allocations.push({person:null,percent:null})">＋ 添加人员</n-button></template>
+    <template v-if="form.mode==='distribute'"><div v-for="(p,i) in form.allocations" :key="i" class="allocation"><n-select v-model:value="p.person" :options="personOptions" filterable tag placeholder="选择或输入姓名" :aria-label="`批量人员${i+1}`"/><n-select v-model:value="p.duty" :options="DUTY_OPTIONS" :aria-label="`批量身份${i+1}`"/><label v-if="operation!=='remove'"><input v-model="p.percent" type="number" min="0" max="100" step="0.01" :aria-label="`批量比例${i+1}`"/> %</label><n-button text @click="form.allocations.splice(i,1)">移除</n-button></div><n-button text type="primary" @click="form.allocations.push({person:null,percent:null,duty:'produce'})">＋ 添加人员</n-button><p class="hint">本店身份会写到本次涉及的每一家店铺：做货计销售/毛利/利润，抽点只计提成。</p></template>
     <div class="fields"><label>生效时间<input v-model="form.valid_from" type="datetime-local" step="1" aria-label="批量生效时间"/></label><label>结束时间（可留空）<input v-model="form.valid_to" type="datetime-local" step="1" aria-label="批量结束时间"/></label></div>
     <p class="hint">按北京时间生效，此前的人员及比例保留。{{ operation==='merge' ? '只调整指定人员，其他分配和已有后续安排保持原样。' : operation==='remove' ? '只移除指定人员，其他分配和已有后续安排保持原样。' : form.valid_to ? '指定时间段内按本次完整名单统一设置。' : '从生效时间起按本次完整名单持续生效，并覆盖已有后续安排。' }}</p>
   </template>
@@ -78,5 +92,5 @@ defineExpose({open,importFile,shown})
 </n-modal>
 </template>
 <style scoped>
-label{display:block;font-size:13px;color:#536071;margin:14px 0 6px}input,select,textarea{box-sizing:border-box;border:1px solid #dce0e6;border-radius:6px;padding:8px;background:white;font-size:14px;max-width:100%}label>select,label>input,textarea{display:block;width:100%;margin-top:6px}.fields{display:grid;grid-template-columns:1fr 1fr;gap:16px}.allocation{display:grid;grid-template-columns:minmax(150px,1fr) 130px 44px;gap:14px;align-items:center;margin:12px 0}.allocation label{display:flex;align-items:center;margin:0;gap:6px}.allocation input{width:105px;margin:0}.hint,small{color:#7b8490;font-size:12px;line-height:1.7}small{display:block}.overwritten{color:#a15c00}.error{color:#b42318}.summary{font-weight:600}.table-wrap{max-height:52vh;overflow:auto;border:1px solid #e5e7eb;border-radius:8px}table{border-collapse:collapse;width:100%;min-width:640px}td,th{padding:12px;text-align:left;border-bottom:1px solid #eef0f3;vertical-align:top;font-size:13px;overflow-wrap:anywhere}th{background:#f8fafc;position:sticky;top:0}.footer,.paging{display:flex;justify-content:flex-end;align-items:center;gap:12px;margin-top:18px}.paging{font-size:12px;color:#7b8490}@media(max-width:640px){.fields{grid-template-columns:1fr;gap:0}.allocation{grid-template-columns:minmax(110px,1fr) 92px 32px;gap:8px}.allocation input{width:70px;margin:0}}
+label{display:block;font-size:13px;color:#536071;margin:14px 0 6px}input,select,textarea{box-sizing:border-box;border:1px solid #dce0e6;border-radius:6px;padding:8px;background:white;font-size:14px;max-width:100%}label>select,label>input,textarea{display:block;width:100%;margin-top:6px}.fields{display:grid;grid-template-columns:1fr 1fr;gap:16px}.allocation{display:grid;grid-template-columns:minmax(150px,1fr) 100px 130px 44px;gap:14px;align-items:center;margin:12px 0}.allocation label{display:flex;align-items:center;margin:0;gap:6px}.allocation input{width:105px;margin:0}.hint,small{color:#7b8490;font-size:12px;line-height:1.7}small{display:block}.overwritten{color:#a15c00}.error{color:#b42318}.summary{font-weight:600}.table-wrap{max-height:52vh;overflow:auto;border:1px solid #e5e7eb;border-radius:8px}table{border-collapse:collapse;width:100%;min-width:640px}td,th{padding:12px;text-align:left;border-bottom:1px solid #eef0f3;vertical-align:top;font-size:13px;overflow-wrap:anywhere}th{background:#f8fafc;position:sticky;top:0}.footer,.paging{display:flex;justify-content:flex-end;align-items:center;gap:12px;margin-top:18px}.paging{font-size:12px;color:#7b8490}@media(max-width:640px){.fields{grid-template-columns:1fr;gap:0}.allocation{grid-template-columns:minmax(110px,1fr) 84px 92px 32px;gap:8px}.allocation input{width:70px;margin:0}}
 </style>

@@ -3,7 +3,7 @@ import { ref, computed, watch } from 'vue'
 import { storeToRefs } from 'pinia'
 import { useMessage } from 'naive-ui'
 import { useCommission } from '../commissionStore'
-import { commissionRequest } from './commissionRequest'
+import { DUTY_OPTIONS, loadStoreMembers, saveStoreMembers } from '../storeMembers'
 const emit=defineEmits(['changed','assignments'])
 const shared=useCommission()
 const { storeOptions }=storeToRefs(shared)
@@ -12,51 +12,68 @@ const tab=ref('people')
 
 async function call(path,options={}) {const r=await fetch('/api/commission-v2'+path,{...options,headers:{'Content-Type':'application/json'}});const b=await r.json();if(!r.ok)throw new Error(typeof b.detail==='string'?b.detail:'保存失败');return b}
 async function load(){rows.value=(await call('/people/summary')).people}
-async function open(){shown.value=true;tab.value='people';error.value='';busy.value=true;try{await load()}catch(e){error.value=e.message}finally{busy.value=false}}
+async function open(nextTab='people'){shown.value=true;tab.value=nextTab==='identity'?'identity':'people';error.value='';busy.value=true;try{await load();if(tab.value==='identity'&&!memberStoreIds.value.length&&shared.storeIds.length){memberStoreIds.value=[...shared.storeIds];await loadMembers()}}catch(e){error.value=e.message}finally{busy.value=false}}
 async function save(person=null){busy.value=true;error.value='';try{await call('/people',{method:'POST',body:JSON.stringify({person:person||{name:name.value,employee_no:employee.value},expected_revision:person?.revision||0,reason:person?'修改人员姓名或工号':'新增提成人员'})});name.value='';employee.value='';await load();emit('changed');message.success('人员名单已保存')}catch(e){error.value=e.message}finally{busy.value=false}}
 function assignments(person){shown.value=false;emit('assignments',person.id)}
 
 // --- 本店身份 ---
-const memberStoreId=ref(null)
+const memberStoreIds=ref([])
 const memberLoading=ref(false)
 const memberError=ref('')
 const members=ref([])
 const memberSaving=ref({})
-
-const dutyOptions=[{label:'做货',value:'produce'},{label:'抽点',value:'cut'}]
 const leaderOptions=computed(()=>members.value.map(m=>({label:m.person_name,value:m.person_id})))
+const multiStore=computed(()=>memberStoreIds.value.length>1)
+
+function mergeMembers(raw){
+  const byPerson=new Map()
+  for(const m of raw){
+    const current=byPerson.get(m.person_id)||{person_id:m.person_id,person_name:m.person_name,duties:new Set(),leaders:new Set(),confirmed:false}
+    current.duties.add(m.duty||m.suggested_duty||'produce')
+    if(m.leader_id)current.leaders.add(m.leader_id)
+    current.confirmed=current.confirmed||!!m.confirmed
+    current.person_name=current.person_name||m.person_name
+    byPerson.set(m.person_id,current)
+  }
+  return [...byPerson.values()].map(m=>({
+    person_id:m.person_id,person_name:m.person_name,
+    _duty:m.duties.size===1?[...m.duties][0]:'produce',
+    _leader_id:m.leaders.size===1?[...m.leaders][0]:null,
+    confirmed:m.confirmed,
+    mixed:m.duties.size>1,
+  }))
+}
 
 async function loadMembers(){
-  if(!memberStoreId.value)return
+  if(!memberStoreIds.value.length)return
   memberLoading.value=true;memberError.value=''
   try{
-    const result=await commissionRequest(`/store-members?store_id=${encodeURIComponent(memberStoreId.value)}`)
-    members.value=(result.members||[]).map(m=>({...m,_duty:m.duty||m.suggested_duty||'produce',_leader_id:m.leader_id||null}))
+    members.value=mergeMembers(await loadStoreMembers(memberStoreIds.value))
   }catch(e){memberError.value=e.message;members.value=[]}
   finally{memberLoading.value=false}
 }
 
-watch(memberStoreId,()=>{members.value=[];loadMembers()})
+watch(memberStoreIds,()=>{members.value=[];loadMembers()},{deep:true})
 
 async function saveMember(m){
   const key=m.person_id;memberSaving.value={...memberSaving.value,[key]:true}
   try{
-    await commissionRequest('/store-members',{body:{store_id:memberStoreId.value,person_id:m.person_id,duty:m._duty,leader_id:m._leader_id||'',reason:'设置本店身份'}})
-    message.success(`${m.person_name} 身份已保存`)
+    const result=await saveStoreMembers(memberStoreIds.value,[{person_id:m.person_id,duty:m._duty,leader_id:m._leader_id||''}],'设置本店身份')
+    message.success(multiStore.value?`${m.person_name} 已写入 ${result.stores} 家店`:`${m.person_name} 身份已保存`)
     await loadMembers()
   }catch(e){message.error(e.message,{duration:4000})}
   finally{const next={...memberSaving.value};delete next[key];memberSaving.value=next}
 }
 
 const batchSaving=ref(false)
-function setAllDuty(duty){members.value.forEach(m=>{m._duty=duty})}
+function setAllDuty(duty){members.value.forEach(m=>{m._duty=duty;m.mixed=false})}
 async function saveAll(){
   if(!members.value.length||batchSaving.value)return
   batchSaving.value=true
   try{
-    await commissionRequest('/store-members/batch',{body:{store_id:memberStoreId.value,members:members.value.map(m=>({person_id:m.person_id,duty:m._duty,leader_id:m._leader_id||''})),reason:'批量设置本店身份'}})
-    message.success(`已保存 ${members.value.length} 人身份`)
-    await loadMembers()
+    const result=await saveStoreMembers(memberStoreIds.value,members.value.map(m=>({person_id:m.person_id,duty:m._duty,leader_id:m._leader_id||''})),'批量设置本店身份')
+    message.success(`已保存 ${members.value.length} 人 × ${result.stores} 家店`)
+    await loadMembers();emit('changed')
   }catch(e){message.error(e.message,{duration:4000})}
   finally{batchSaving.value=false}
 }
@@ -79,26 +96,27 @@ defineExpose({open,shown})
 
   <!-- 本店身份 -->
   <template v-if="tab==='identity'">
-    <p class="hint">设置每位人员在各店铺的身份：做货人员参与销售额/毛利额/利润额归属，抽点人员仅计提成。</p>
+    <p class="hint">设置每位人员在店铺的身份：做货计销售/毛利/利润，抽点只计提成。可选多家店一次写入。</p>
     <div class="identity-toolbar">
-      <n-select v-model:value="memberStoreId" :options="storeOptions" placeholder="选择店铺" filterable clearable style="width:280px" aria-label="选择店铺" />
+      <n-select v-model:value="memberStoreIds" :options="storeOptions" multiple filterable clearable placeholder="选择店铺（可多选）" style="min-width:280px;flex:1" aria-label="选择店铺" />
       <template v-if="members.length">
         <n-button size="small" @click="setAllDuty('produce')" :disabled="batchSaving">全部设做货</n-button>
         <n-button size="small" @click="setAllDuty('cut')" :disabled="batchSaving">全部设抽点</n-button>
-        <n-button size="small" type="primary" :loading="batchSaving" :disabled="memberLoading||!members.length" @click="saveAll">一键保存全部</n-button>
+        <n-button size="small" type="primary" :loading="batchSaving" :disabled="memberLoading||!members.length" @click="saveAll">一键保存到所选店铺</n-button>
       </template>
     </div>
+    <p v-if="multiStore" class="hint">将写入 {{ memberStoreIds.length }} 家店。各店原身份不一致的人先按做货显示，保存后统一。</p>
     <p v-if="memberError" class="error">{{ memberError }} <button class="text-button" @click="loadMembers">重试</button></p>
     <n-spin :show="memberLoading">
-      <div v-if="!memberStoreId" class="identity-empty">请先选择一个店铺</div>
-      <div v-else-if="!memberLoading && !members.length && !memberError" class="identity-empty">该店铺暂无人员</div>
+      <div v-if="!memberStoreIds.length" class="identity-empty">请先选择店铺</div>
+      <div v-else-if="!memberLoading && !members.length && !memberError" class="identity-empty">所选店铺暂无人员</div>
       <div v-else class="table-wrap">
         <table>
           <thead><tr><th>姓名</th><th>身份</th><th>所属组长</th><th>状态</th><th></th></tr></thead>
           <tbody>
             <tr v-for="m in members" :key="m.person_id">
-              <td>{{ m.person_name }}</td>
-              <td><n-select v-model:value="m._duty" :options="dutyOptions" size="small" style="width:100px" :aria-label="`身份 ${m.person_name}`" /></td>
+              <td>{{ m.person_name }}<n-tag v-if="m.mixed" size="small" type="warning" :bordered="false" style="margin-left:6px">各店不一致</n-tag></td>
+              <td><n-select v-model:value="m._duty" :options="DUTY_OPTIONS" size="small" style="width:100px" :aria-label="`身份 ${m.person_name}`" /></td>
               <td><n-select v-model:value="m._leader_id" :options="leaderOptions.filter(o=>o.value!==m.person_id)" size="small" style="width:140px" clearable placeholder="无" filterable :aria-label="`组长 ${m.person_name}`" /></td>
               <td><n-tag :type="m.confirmed?'success':'warning'" size="small" :bordered="false">{{ m.confirmed?'已确认':'未确认' }}</n-tag></td>
               <td><n-button size="small" type="primary" :loading="!!memberSaving[m.person_id]" :disabled="memberLoading" @click="saveMember(m)">保存</n-button></td>

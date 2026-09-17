@@ -467,10 +467,12 @@ def build(workspace, registry, model, start, end, store_ids=None, person_ids=Non
             if pid not in roster:label+=f'（历史记录 · {names[sid]}）'
             available.setdefault(pid,{'id':pid,'name':label})
             if selected_people and pid not in selected_people:continue
+            duty=(store_duties or {}).get(person.get('person_id') or pid, {}).get('duty')
             if person.get('amount') is None:
                 if person.get('sales') is not None or person.get('gross') is not None:
                     member_rows.append({'kind':'person','person_id':pid,'person':name,
                                         'employee_no':roster.get(pid,{}).get('employee_no',''),
+                                        'duty':duty,
                                         'store_id':sid,'store':names[sid],'period':period,
                                         'sales':person_output.get(person.get('person_id'),{}).get('sales'),
                                         'gross':person_output.get(person.get('person_id'),{}).get('gross'),
@@ -495,6 +497,7 @@ def build(workspace, registry, model, start, end, store_ids=None, person_ids=Non
                           'calculated_at':record['at'],'finance_run':record['id'],'notes':scope['notes']})
             member_rows.append({'kind':'person','person_id':pid,'person':name,
                                 'employee_no':roster.get(pid,{}).get('employee_no',''),
+                                'duty':duty,
                                 'store_id':sid,'store':names[sid],'period':period,
                                 'sales':person_output.get(person.get('person_id'),{}).get('sales'),
                                 'gross':person_output.get(person.get('person_id'),{}).get('gross'),

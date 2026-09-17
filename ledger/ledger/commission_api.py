@@ -123,7 +123,8 @@ class StoreMemberItem(BaseModel):
 
 
 class StoreMemberBatchChange(BaseModel):
-    store_id: str
+    store_id: str = ''
+    store_ids: list[str] = Field(default_factory=list, max_length=200)
     members: list[StoreMemberItem] = Field(min_length=1, max_length=200)
     reason: str = Field(min_length=1, max_length=500)
 
@@ -299,11 +300,7 @@ def install(app, workspace, model, model_root: Path | None = None):
     def person_save(change: PersonChange, request: Request):
         return reg().person_save(change.person, actor(request)["id"], change.reason, change.expected_revision)
 
-    @router.get("/store-members")
-    def store_members(store_id: str):
-        if not store_id:
-            raise RegistryError("请选择店铺")
-        registry = reg()
+    def _store_member_rows(registry, store_id):
         saved = {r['person_id']: r for r in registry.store_members(store_id)}
         with registry.connect() as conn:
             rows = conn.execute("""
@@ -322,12 +319,7 @@ def install(app, workspace, model, model_root: Path | None = None):
         suggestions = {}
         for pid, roles in role_counts.items():
             top_role = roles[0]['role'] if roles else ''
-            if top_role in ('组长', '高级组长'):
-                suggestions[pid] = 'cut'
-            elif top_role.startswith('运营'):
-                suggestions[pid] = 'produce'
-            else:
-                suggestions[pid] = 'produce'
+            suggestions[pid] = 'cut' if top_role in ('组长', '高级组长') else 'produce'
         roster = {p['id']: p for p in registry.people()}
         members = []
         seen = set()
@@ -347,6 +339,17 @@ def install(app, workspace, model, model_root: Path | None = None):
                 'confirmed': s is not None,
                 'suggested_duty': suggestions.get(pid, 'produce'),
             })
+        return members
+
+    @router.get("/store-members")
+    def store_members(store_id: str = '', store_ids: list[str] = Query(default=[])):
+        ids = [sid for sid in ([store_id] if store_id else []) + list(store_ids) if sid]
+        if not ids:
+            raise RegistryError("请选择店铺")
+        registry = reg()
+        members = []
+        for sid in dict.fromkeys(ids):
+            members.extend(_store_member_rows(registry, sid))
         return {"members": members}
 
     @router.post("/store-members")
@@ -357,15 +360,18 @@ def install(app, workspace, model, model_root: Path | None = None):
 
     @router.post("/store-members/batch")
     def save_store_members_batch(change: StoreMemberBatchChange, request: Request):
+        store_ids = [sid for sid in ([change.store_id] if change.store_id else []) + list(change.store_ids) if sid]
+        if not store_ids:
+            raise RegistryError("请选择店铺")
         registry = reg()
         acting = actor(request)["id"]
         saved = []
-        for item in change.members:
-            result = registry.save_store_member(
-                change.store_id, item.person_id, item.duty,
-                item.leader_id, acting, change.reason)
-            saved.append(result)
-        return {"saved": saved, "count": len(saved)}
+        for sid in dict.fromkeys(store_ids):
+            for item in change.members:
+                saved.append(registry.save_store_member(
+                    sid, item.person_id, item.duty,
+                    item.leader_id, acting, change.reason))
+        return {"saved": saved, "count": len(saved), "stores": len(set(store_ids))}
 
     @router.post("/catalog/refresh")
     def refresh_catalog(request: Request):

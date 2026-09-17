@@ -183,4 +183,9 @@ def settings(registry: Registry, *, store_id="", search="", state="", after="", 
     more = len(rows)>limit
     rows = rows[:limit]
     total = next(iter_settings(registry, store_id=store_id, search=search, state=state, at=at, person_id=person_id, store_ids=store_ids, person_ids=person_ids, _count_only=True))["total"]
+    duties = {(r['store_id'], r['person_id']): r['duty']
+              for r in registry.store_members_for_stores({row['store_id'] for row in rows})}
+    for row in rows:
+        for person in row.get('people') or []:
+            person['duty'] = duties.get((row['store_id'], person['person_id']))
     return {'total':total,'total_pages':(total+limit-1)//limit,'page_size':limit,'rows':rows,'has_more':more,'next_after':rows[-1]['store_id']+'\x1f'+rows[-1]['product_id'] if rows and more else ''}

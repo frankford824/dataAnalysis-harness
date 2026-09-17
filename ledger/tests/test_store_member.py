@@ -170,3 +170,12 @@ def test_all_producers_no_change(tmp_path):
     result = attributed_outputs(commission, 1000, 500, reg, duties=duties)
     assert result[alice['id']]['sales'] == 800
     assert result[bob['id']]['sales'] == 200
+
+
+def test_store_members_for_stores(tmp_path):
+    reg = Registry(tmp_path)
+    alice = reg.person_save({'name': '甲'}, 'test', '登记')
+    reg.save_store_member('s1', alice['id'], 'produce', '', 'test', '店1')
+    reg.save_store_member('s2', alice['id'], 'cut', '', 'test', '店2')
+    rows = reg.store_members_for_stores(['s1', 's2'])
+    assert {(r['store_id'], r['duty']) for r in rows} == {('s1', 'produce'), ('s2', 'cut')}
