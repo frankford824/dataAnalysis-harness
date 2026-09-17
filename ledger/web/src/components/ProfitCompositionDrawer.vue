@@ -4,7 +4,7 @@ import { NButton } from 'naive-ui'
 import { commissionRequest } from './commissionRequest'
 import { useLatest } from './ui/useLatest'
 import LedgerTable from './ui/LedgerTable.vue'
-import { excludedProductIds, liveProfitTotals, matchesProduct, profitCompositionCsv, sameIds } from '../commissionProfit'
+import { excludedProductIds, liveProfitTotals, matchesProduct, profitCompositionCsv, rateLabel, sameIds } from '../commissionProfit'
 const props = defineProps({target:{type:Object,default:null}})
 const emit = defineEmits(['close', 'saved'])
 const request = useLatest()
@@ -19,9 +19,7 @@ const savedExcluded = computed(() => data.value?.saved?.excluded_product_ids || 
 const dirty = computed(() => !sameIds(excludedProductIds(products.value, included.value), savedExcluded.value))
 const canSave = computed(() => !!data.value && dirty.value && !!note.value.trim() && !loading.value && !saving.value)
 function rateText(row) {
-  if (row.rate_mixed) return '不一致'
-  if (row.rate == null) return '—'
-  return `${(Number(row.rate) * 100).toLocaleString('zh-CN', {maximumFractionDigits:4})}%`
+  return rateLabel(row) || '—'
 }
 function mergeChecked(keys) {
   const shown = new Set(visible.value.map(row => row.product_id))
@@ -49,7 +47,10 @@ const columns = computed(() => [
     render:row => h('span', {class:['table-money', row.profit < 0 ? 'negative' : ''],
       title: row.profit < 0 ? '该商品分到本人的经营利润为亏，尚未扣店级兼职' : '订单经营利润按本人份额拆到此商品，尚未扣店级兼职'},
       money(row.profit))},
-  {title:'点数', key:'rate', width:80, mobile:false, render:row => rateText(row)},
+  {title:() => h('div', {class:'profit-col-title'}, [h('span', '本人点数'), h('small', '该商品上此人份额')]),
+    key:'rate', width:96, mobile:false, render:row => h('span', {
+      title: row.rate_mixed ? '本月这个商品上此人登记过不同点数' : '提成设置里此人在这个宝贝上的份额，不是链接总点数',
+    }, rateText(row))},
 ])
 async function load() {
   if (!props.target) return
@@ -136,6 +137,7 @@ function exportTable() {
       <n-alert type="info" :bordered="false" class="profit-basis">
         <b>本人创造利润</b>是订单经营利润按本人提成份额拆到每个商品上的金额，<b>还没有扣本店兼职</b>。
         负数为这个商品分到本人的亏损，不是扣兼职之后的结果。销售额、毛利也是同一份额，未扣兼职。
+        <b>本人点数</b>是提成设置里此人在这个宝贝上的份额：王岩3%+刘露2%时，王岩这张表写3%；王岩1.5%就写1.5%，不是链接合计。
       </n-alert>
       <n-spin :show="loading">
         <div class="profit-kpis">

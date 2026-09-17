@@ -15,7 +15,7 @@ import polars as pl
 
 from .commission_engine import allocated_outputs
 from .commission_registry import RegistryError, RevisionConflict, json_text, now
-from .money import money_float
+from .money import decimal_amount, money_float
 
 _WANTED = (
     'status', 'person_id', 'person', 'product_id', 'product_name',
@@ -86,6 +86,25 @@ def _money_or_none(value):
     return None if value is None else money_float(value)
 
 
+def _rate_or_none(value):
+    """Keep commission shares like 1.5%; do not round them as money cents."""
+    if value is None:
+        return None
+    return float(decimal_amount(value).quantize(Decimal('0.00000001')))
+
+
+def _unique_rates(values):
+    seen, out = set(), []
+    for value in values or []:
+        rate = _rate_or_none(value)
+        if rate is None or rate <= 0 or rate in seen:
+            continue
+        seen.add(rate)
+        out.append(rate)
+    out.sort()
+    return out
+
+
 def _product_rows(parts):
     if parts.is_empty() or 'product_id' not in parts.columns:
         return []
@@ -100,22 +119,25 @@ def _product_rows(parts):
         if 'participation_gross' in parts.columns else pl.lit(None).alias('gross'),
         pl.col('participation_profit').sum().alias('profit')
         if 'participation_profit' in parts.columns else pl.lit(None).alias('profit'),
-        pl.col('share').cast(pl.Float64).n_unique().alias('rate_count'),
-        pl.col('share').cast(pl.Float64).first().alias('rate'),
+        pl.col('share').cast(pl.Float64).unique().alias('rates'),
     ]
     grouped = parts.group_by('product_id').agg(aggs)
     orders = _order_rows(parts)
-    products = [{
-        'product_id': row['product_id'] or '',
-        'product_name': row.get('product_name') or '',
-        'orders': int(row['orders'] or 0),
-        'sales': _money_or_none(row.get('sales')),
-        'gross': _money_or_none(row.get('gross')),
-        'profit': _money_or_none(row.get('profit')),
-        'rate': None if row['rate_count'] != 1 else money_float(row['rate']),
-        'rate_mixed': row['rate_count'] > 1,
-        'lines': orders.get(row['product_id'] or '', []),
-    } for row in grouped.iter_rows(named=True)]
+    products = []
+    for row in grouped.iter_rows(named=True):
+        rates = _unique_rates(row.get('rates'))
+        products.append({
+            'product_id': row['product_id'] or '',
+            'product_name': row.get('product_name') or '',
+            'orders': int(row['orders'] or 0),
+            'sales': _money_or_none(row.get('sales')),
+            'gross': _money_or_none(row.get('gross')),
+            'profit': _money_or_none(row.get('profit')),
+            'rate': rates[0] if len(rates) == 1 else None,
+            'rates': rates,
+            'rate_mixed': len(rates) > 1,
+            'lines': orders.get(row['product_id'] or '', []),
+        })
     products.sort(key=lambda row: (-(row['profit'] or 0), row['product_id']))
     return products
 

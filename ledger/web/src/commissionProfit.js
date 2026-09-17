@@ -47,10 +47,18 @@ function csvCell(value) {
   return /[",\n\r]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text
 }
 
-function rateLabel(row) {
-  if (row.rate_mixed) return '不一致'
-  if (row.rate == null) return ''
-  return `${(Number(row.rate) * 100).toLocaleString('zh-CN', {maximumFractionDigits: 4})}%`
+function percentLabel(rate) {
+  return `${(Number(rate) * 100).toLocaleString('zh-CN', {maximumFractionDigits: 4})}%`
+}
+
+export function rateLabel(row) {
+  const rates = (row?.rates || []).length ? row.rates
+    : row?.rate == null ? [] : [row.rate]
+  if (rates.length > 1 || row?.rate_mixed) {
+    return rates.length ? rates.map(percentLabel).join(' / ') : '不一致'
+  }
+  if (!rates.length) return ''
+  return percentLabel(rates[0])
 }
 
 export function profitCompositionExportRows(data, includedIds = []) {
@@ -65,7 +73,7 @@ export function profitCompositionExportRows(data, includedIds = []) {
     销售额: row.sales,
     毛利: row.gross,
     [PROFIT_BEFORE_LABOR]: row.profit,
-    点数: rateLabel(row),
+    本人点数: rateLabel(row),
     是否计入阶梯: keep.has(row.product_id) ? '计入' : '剔除',
     利润口径: PROFIT_BASIS_NOTE,
   }))
@@ -73,7 +81,7 @@ export function profitCompositionExportRows(data, includedIds = []) {
 
 export function profitCompositionCsv(data, includedIds = []) {
   const headers = ['人员', '店铺', '月份', '商品', '宝贝ID', '订单数', '销售额', '毛利',
-    PROFIT_BEFORE_LABOR, '点数', '是否计入阶梯', '利润口径']
+    PROFIT_BEFORE_LABOR, '本人点数', '是否计入阶梯', '利润口径']
   const rows = profitCompositionExportRows(data, includedIds)
   const lines = [headers.map(csvCell).join(','),
     ...rows.map(row => headers.map(key => csvCell(row[key])).join(','))]

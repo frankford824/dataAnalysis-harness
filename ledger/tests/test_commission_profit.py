@@ -81,7 +81,36 @@ def test_shared_link_only_keeps_this_persons_share(tmp_path):
     other = compose(registry, 's1', '2026-06', b['id'], 11)
     assert mine['products'][0]['profit'] == 60
     assert other['products'][0]['profit'] == 40
+    assert mine['products'][0]['rate'] == 0.03
+    assert other['products'][0]['rate'] == 0.02
     assert mine['included_profit'] == 60
+
+
+def test_compose_keeps_one_and_a_half_percent_share(tmp_path):
+    registry = Registry(tmp_path)
+    person = registry.person_save({'name': '王岩'}, 'tester', '登记')
+    other = registry.person_save({'name': '刘露'}, 'tester', '登记')
+    _persist(registry, person['id'], person='王岩', rows={
+        'status': ['distribute', 'distribute', 'distribute'],
+        'person_id': [person['id'], person['id'], other['id']],
+        'person': ['王岩', '王岩', '刘露'],
+        'product_id': ['111', '222', '111'],
+        'product_name': ['对半', '对半后改', '对半'],
+        'share': [0.015, 0.015, 0.015],
+        'total_rate': [0.03, 0.03, 0.03],
+        'original_base': [100.0, 80.0, 100.0],
+        'amount': [1.5, 1.2, 1.5],
+        'participation_sales': [200.0, 160.0, 200.0],
+        'participation_gross': [120.0, 90.0, 120.0],
+        'participation_profit': [100.0, 80.0, 100.0],
+        'spine_row': [1, 2, 1],
+        'order_id': ['o1', 'o2', 'o1'],
+    })
+    mine = compose(registry, 's1', '2026-06', person['id'], 11)
+    by_id = {row['product_id']: row for row in mine['products']}
+    assert by_id['111']['rate'] == 0.015
+    assert by_id['111']['rates'] == [0.015]
+    assert by_id['222']['rate'] == 0.015
 
 
 def test_save_exclusions_is_run_bound_and_rejects_stale_source(tmp_path):

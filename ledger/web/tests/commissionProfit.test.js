@@ -43,5 +43,18 @@ test('export names the person and says profit is before labor', () => {
     products: [{product_id: 'p1', product_name: 'A', profit: -5, rate: 0.05}],
   }, ['p1'])
   assert.equal(exported[0]['是否计入阶梯'], '计入')
-  assert.equal(exported[0]['点数'], '5%')
+  assert.equal(exported[0]['本人点数'], '5%')
+})
+
+test('export keeps this persons 1.5% share and lists mixed shares', () => {
+  const [half] = profitCompositionExportRows({
+    person: '王岩', store: '天猫皇莉诗旗舰店', period: '2026-06',
+    products: [{product_id: 'p1', product_name: 'A', profit: 10, rate: 0.015, rates: [0.015]}],
+  }, ['p1'])
+  assert.equal(half['本人点数'], '1.5%')
+  const [mixed] = profitCompositionExportRows({
+    person: '王岩', store: '店', period: '2026-06',
+    products: [{product_id: 'p2', rate_mixed: true, rates: [0.015, 0.03]}],
+  }, [])
+  assert.equal(mixed['本人点数'], '1.5% / 3%')
 })
