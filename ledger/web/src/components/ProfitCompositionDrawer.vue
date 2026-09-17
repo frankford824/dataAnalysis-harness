@@ -41,6 +41,8 @@ const columns = computed(() => [
     type:'button', class:'profit-orders', onClick:() => openOrders(row),
   }, `${row.orders} 笔`)},
   {title:'销售额', key:'sales', width:112, mobile:false, align:'right', render:row => money(row.sales)},
+  {title:'成本', key:'cost', width:112, mobile:false, align:'right', render:row =>
+    row.sales != null && row.gross != null ? money(Number(row.sales) - Number(row.gross)) : '—'},
   {title:'毛利', key:'gross', width:112, mobile:false, align:'right', render:row => money(row.gross)},
   {title:() => h('div', {class:'profit-col-title'}, [h('span', '本人创造利润'), h('small', '未扣兼职')]),
     key:'profit', width:132, mobileWidth:118, align:'right',

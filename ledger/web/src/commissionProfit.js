@@ -71,6 +71,8 @@ export function profitCompositionExportRows(data, includedIds = []) {
     宝贝ID: row.product_id || '',
     订单数: row.orders ?? '',
     销售额: row.sales,
+    成本: row.sales != null && row.gross != null
+      ? Math.round((Number(row.sales) - Number(row.gross)) * 100) / 100 : null,
     毛利: row.gross,
     [PROFIT_BEFORE_LABOR]: row.profit,
     本人点数: rateLabel(row),
@@ -80,7 +82,7 @@ export function profitCompositionExportRows(data, includedIds = []) {
 }
 
 export function profitCompositionCsv(data, includedIds = []) {
-  const headers = ['人员', '店铺', '月份', '商品', '宝贝ID', '订单数', '销售额', '毛利',
+  const headers = ['人员', '店铺', '月份', '商品', '宝贝ID', '订单数', '销售额', '成本', '毛利',
     PROFIT_BEFORE_LABOR, '本人点数', '是否计入阶梯', '利润口径']
   const rows = profitCompositionExportRows(data, includedIds)
   const lines = [headers.map(csvCell).join(','),
