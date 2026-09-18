@@ -91,6 +91,13 @@ try {
     if ($AllowTemplateUpdate -and $Name -eq 'templates.yaml' -and $TemplatePayload.Count -eq 1) { $ExpectedHash = $TemplatePayload[0].sha256 }
     if ((Get-FileHash -LiteralPath (Join-Path $AppRoot ('models\cn-ecommerce\'+$Name)) -Algorithm SHA256).Hash -ne $ExpectedHash) { throw "Model changed during code release: $Name" }
   }
+  # Warm immutable read projections while background writers are stopped.
+  # This does not recompute, settle, or alter business rules/amounts.
+  if (Test-Path -LiteralPath (Join-Path $AppRoot 'ledger\ledger\warm_reads.py')) {
+    $env:PYTHONPATH = Join-Path $AppRoot 'ledger'
+    & 'D:\ledger\venv\Scripts\python.exe' -m ledger.warm_reads --root 'D:\ledger\home' --model (Join-Path $AppRoot 'models\cn-ecommerce')
+    if ($LASTEXITCODE -ne 0) { throw 'Read projection warm-up failed' }
+  }
   Start-AndCheck
   Write-Output ("DEPLOYED " + $Version + " BACKUP " + $Backup)
 } catch {
