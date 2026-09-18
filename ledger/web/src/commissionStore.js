@@ -47,8 +47,16 @@ export const useCommission = defineStore('commission', () => {
     return bootstrap
   }
   function clear() { storeIds.value = []; personIds.value = [] }
-  function refresh() { refreshTick.value++;loadPeople().catch(()=>{}) }
-  async function changed() { await loadPeople(); refresh() }
+  let lastRefresh = 0
+  function refresh(options = {}) {
+    const force = options === true || options.force
+    const now = Date.now()
+    if (!force && now - lastRefresh < 60000) return
+    lastRefresh = now
+    refreshTick.value++
+    loadPeople().catch(() => {})
+  }
+  async function changed() { await loadPeople(); refresh({ force: true }) }
   return { storeIds, personIds, people, reportPeople, start, end, ready, refreshTick, settingsSearch, settingsState,
     reportView, updated, loading, initError, storeOptions, personOptions, scope, init, loadPeople, clear, refresh, changed }
 })

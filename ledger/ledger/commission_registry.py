@@ -30,12 +30,18 @@ CREATE TABLE IF NOT EXISTS setting_batch (
 );
 PRAGMA journal_mode=WAL;
 PRAGMA synchronous=FULL;
-CREATE TABLE IF NOT EXISTS meta (id INTEGER PRIMARY KEY CHECK(id=1), revision INTEGER NOT NULL);
-INSERT OR IGNORE INTO meta VALUES(1,0);
+CREATE TABLE IF NOT EXISTS meta (id INTEGER PRIMARY KEY CHECK(id=1), revision INTEGER NOT NULL, org_migrated INTEGER NOT NULL DEFAULT 0);
+INSERT OR IGNORE INTO meta(id, revision) VALUES(1,0);
 CREATE TABLE IF NOT EXISTS person (
  id TEXT PRIMARY KEY, name TEXT NOT NULL, employee_no TEXT NOT NULL DEFAULT '',
  external_user_id TEXT NOT NULL DEFAULT '', archived INTEGER NOT NULL DEFAULT 0,
- revision INTEGER NOT NULL DEFAULT 1, note TEXT NOT NULL DEFAULT ''
+ revision INTEGER NOT NULL DEFAULT 1, note TEXT NOT NULL DEFAULT '',
+ parent_id TEXT NOT NULL DEFAULT '', alias TEXT NOT NULL DEFAULT '',
+ sort_order INTEGER NOT NULL DEFAULT 0, default_cut_rate TEXT NOT NULL DEFAULT ''
+);
+CREATE TABLE IF NOT EXISTS org_store (
+ person_id TEXT NOT NULL, store_id TEXT NOT NULL,
+ PRIMARY KEY (person_id, store_id)
 );
 CREATE TABLE IF NOT EXISTS scheme (
  id TEXT PRIMARY KEY, store_id TEXT NOT NULL, product_id TEXT NOT NULL,
@@ -229,6 +235,8 @@ def validate_timeline(body: dict, person_ids: set[str]) -> dict:
             line_duty = str(source_line.get("duty") or "")
             if line_duty in ("produce", "cut"):
                 line["duty"] = line_duty
+            if str(source_line.get("source") or "") == "hierarchy":
+                line["source"] = "hierarchy"
             if line["person_id"] not in person_ids:
                 raise RegistryError("方案中有未登记的人员")
             key = (line["person_id"], line["role"])
@@ -286,6 +294,123 @@ CREATE INDEX IF NOT EXISTS store_member_scope ON store_member(store_id, person_i
     conn.execute("CREATE INDEX IF NOT EXISTS store_member_scope ON store_member(store_id, person_id, valid_from)")
 
 
+def _write_person(conn, record: dict):
+    conn.execute(
+        "INSERT INTO person(id,name,employee_no,external_user_id,archived,revision,note,"
+        "parent_id,alias,sort_order,default_cut_rate) "
+        "VALUES(:id,:name,:employee_no,:external_user_id,:archived,:revision,:note,"
+        ":parent_id,:alias,:sort_order,:default_cut_rate) "
+        "ON CONFLICT(id) DO UPDATE SET name=excluded.name,employee_no=excluded.employee_no,"
+        "external_user_id=excluded.external_user_id,archived=excluded.archived,"
+        "revision=excluded.revision,note=excluded.note,parent_id=excluded.parent_id,"
+        "alias=excluded.alias,sort_order=excluded.sort_order,"
+        "default_cut_rate=excluded.default_cut_rate",
+        record)
+
+
+def _blank_person(pid: str, name: str, **extra) -> dict:
+    record = {"id": pid, "name": name, "employee_no": "", "external_user_id": "",
+              "archived": 0, "revision": 1, "note": "", "parent_id": "", "alias": "",
+              "sort_order": 0, "default_cut_rate": ""}
+    record.update(extra)
+    return record
+
+
+def _parent_would_cycle(conn, person_id: str, parent_id: str) -> bool:
+    if not parent_id:
+        return False
+    if parent_id == person_id:
+        return True
+    seen = {person_id}
+    current = parent_id
+    while current:
+        if current in seen:
+            return True
+        seen.add(current)
+        row = conn.execute("SELECT parent_id FROM person WHERE id=?", (current,)).fetchone()
+        if not row:
+            return False
+        current = row["parent_id"] or ""
+    return False
+
+
+def _infer_org_from_legacy(conn):
+    people_ids = {r[0] for r in conn.execute("SELECT id FROM person")}
+    votes: dict[str, dict[str, int]] = {}
+    if "store_member" in {r["name"] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}:
+        for row in conn.execute("SELECT person_id, leader_id FROM store_member WHERE leader_id!=''"):
+            if row["person_id"] == row["leader_id"]:
+                continue
+            bucket = votes.setdefault(row["person_id"], {})
+            bucket[row["leader_id"]] = bucket.get(row["leader_id"], 0) + 1
+    for pid, counts in votes.items():
+        if pid not in people_ids:
+            continue
+        leader = max(counts, key=counts.get)
+        if leader in people_ids:
+            conn.execute("UPDATE person SET parent_id=? WHERE id=? AND parent_id=''", (leader, pid))
+    if conn.execute("SELECT 1 FROM org_store LIMIT 1").fetchone():
+        return
+    stores: dict[str, list] = {}
+    if "store_member" in {r["name"] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}:
+        for row in conn.execute("SELECT store_id, person_id, leader_id, duty FROM store_member"):
+            stores.setdefault(row["store_id"], []).append(row)
+    for store_id, members in stores.items():
+        leaders = {m["leader_id"] for m in members if m["leader_id"] and m["leader_id"] in people_ids}
+        owners = leaders or {m["person_id"] for m in members if m["duty"] == "produce" and m["person_id"] in people_ids}
+        if not owners:
+            owners = {m["person_id"] for m in members if m["person_id"] in people_ids}
+        for pid in owners:
+            conn.execute("INSERT OR IGNORE INTO org_store(person_id, store_id) VALUES(?,?)", (pid, store_id))
+    assigned = {r[0] for r in conn.execute("SELECT DISTINCT store_id FROM org_store")}
+    scheme_people: dict[str, set[str]] = {}
+    if "scheme" in {r["name"] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}:
+        for row in conn.execute("""
+            SELECT s.store_id, json_extract(a.value,'$.person_id') pid
+            FROM scheme s JOIN scheme_version v ON v.id=s.active_version
+            JOIN json_each(v.body,'$.segments') seg
+            JOIN json_each(seg.value,'$.allocations') a
+        """):
+            if row["store_id"] in assigned or not row["pid"]:
+                continue
+            scheme_people.setdefault(row["store_id"], set()).add(row["pid"])
+    parents = {r["id"]: r["parent_id"] for r in conn.execute("SELECT id,parent_id FROM person")}
+    for store_id, pids in scheme_people.items():
+        for pid in pids:
+            if pid not in people_ids:
+                continue
+            parent = parents.get(pid) or ""
+            if parent and parent in pids:
+                continue
+            conn.execute("INSERT OR IGNORE INTO org_store(person_id, store_id) VALUES(?,?)", (pid, store_id))
+
+
+def _migrate_person_org(conn):
+    cols = {r["name"] for r in conn.execute("PRAGMA table_info(person)")}
+    for column, definition in [
+        ("parent_id", "TEXT NOT NULL DEFAULT ''"),
+        ("alias", "TEXT NOT NULL DEFAULT ''"),
+        ("sort_order", "INTEGER NOT NULL DEFAULT 0"),
+        ("default_cut_rate", "TEXT NOT NULL DEFAULT ''"),
+    ]:
+        if column not in cols:
+            conn.execute(f"ALTER TABLE person ADD COLUMN {column} {definition}")
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS org_store (
+          person_id TEXT NOT NULL, store_id TEXT NOT NULL,
+          PRIMARY KEY (person_id, store_id)
+        )
+    """)
+    meta_cols = {r["name"] for r in conn.execute("PRAGMA table_info(meta)")}
+    if "org_migrated" not in meta_cols:
+        conn.execute("ALTER TABLE meta ADD COLUMN org_migrated INTEGER NOT NULL DEFAULT 0")
+    flag = conn.execute("SELECT org_migrated FROM meta WHERE id=1").fetchone()
+    if flag and flag[0]:
+        return
+    _infer_org_from_legacy(conn)
+    conn.execute("UPDATE meta SET org_migrated=1 WHERE id=1")
+
+
 def member_active_at(row, at: str) -> bool:
     if not at:
         return not row.get("valid_to")
@@ -310,6 +435,7 @@ class Registry:
                         if column not in fields:
                             conn.execute(f"ALTER TABLE pending ADD COLUMN {column} {definition}")
                     _migrate_store_member(conn)
+                    _migrate_person_org(conn)
                 _initialized.add(key)
 
     @contextmanager
@@ -356,27 +482,55 @@ class Registry:
 
     def people(self) -> list[dict]:
         with self.connect() as conn:
-            return [dict(r) for r in conn.execute("SELECT * FROM person ORDER BY archived,name,id")]
+            return [dict(r) for r in conn.execute(
+                "SELECT * FROM person ORDER BY archived,sort_order,name,id")]
 
     def person_save(self, data: dict, actor: str, reason: str, expected: int | None = None) -> dict:
         pid = str(data.get("id") or uuid.uuid4())
         name = str(data.get("name") or "").strip()
         if not name or len(name) > 100:
             raise RegistryError("请填写有效人员姓名")
+        alias = str(data.get("alias") or "").strip()
+        if len(alias) > 100:
+            raise RegistryError("别名请控制在100字以内")
+        parent_id = str(data.get("parent_id") or "").strip()
+        if parent_id == pid:
+            raise RegistryError("不能把人员设为自己的上级")
+        try:
+            sort_order = int(data.get("sort_order") or 0)
+        except (TypeError, ValueError) as exc:
+            raise RegistryError("排序请填写整数") from exc
+        cut = str(data.get("default_cut_rate") or "").strip()
+        default_cut = rate(cut) if cut else ""
         with self.transaction() as conn:
             row = conn.execute("SELECT * FROM person WHERE id=?", (pid,)).fetchone()
             before = dict(row) if row else None
             if before and expected != before["revision"]:
                 raise RevisionConflict("人员已被修改，请刷新后再保存")
+            if parent_id:
+                if not conn.execute("SELECT 1 FROM person WHERE id=?", (parent_id,)).fetchone():
+                    raise RegistryError("所选上级不存在")
+                if _parent_would_cycle(conn, pid, parent_id):
+                    raise RegistryError("不能把上级设到自己的下级下面")
             result = {"id": pid, "name": name, "employee_no": str(data.get("employee_no") or ""),
                       "external_user_id": str(data.get("external_user_id") or ""),
                       "archived": int(bool(data.get("archived"))),
                       "revision": (before["revision"] if before else 0) + 1,
-                      "note": str(data.get("note") or "")}
-            conn.execute("INSERT INTO person VALUES(:id,:name,:employee_no,:external_user_id,:archived,:revision,:note) "
-                         "ON CONFLICT(id) DO UPDATE SET name=excluded.name,employee_no=excluded.employee_no,"
-                         "external_user_id=excluded.external_user_id,archived=excluded.archived,"
-                         "revision=excluded.revision,note=excluded.note", result)
+                      "note": str(data.get("note") or ""),
+                      "parent_id": parent_id,
+                      "alias": alias,
+                      "sort_order": sort_order,
+                      "default_cut_rate": default_cut}
+            if before:
+                if "parent_id" not in data:
+                    result["parent_id"] = before.get("parent_id") or ""
+                if "alias" not in data:
+                    result["alias"] = before.get("alias") or ""
+                if "sort_order" not in data:
+                    result["sort_order"] = before.get("sort_order") or 0
+                if "default_cut_rate" not in data:
+                    result["default_cut_rate"] = before.get("default_cut_rate") or ""
+            _write_person(conn, result)
             self.audit(conn, actor, "person.save", pid, reason, before, result)
         return result
 
@@ -443,6 +597,221 @@ class Registry:
             self.audit(conn, actor, "store_member.save", f"{store_id}/{person_id}",
                        reason, existing, result)
             return result
+
+    def org_people(self) -> list[dict]:
+        return self.people()
+
+    def org_descendants(self, person_id: str) -> list[str]:
+        people = self.people()
+        children = {}
+        for person in people:
+            children.setdefault(person.get("parent_id") or "", []).append(person["id"])
+        found, stack = [], list(children.get(person_id, []))
+        while stack:
+            current = stack.pop()
+            if current in found:
+                continue
+            found.append(current)
+            stack.extend(children.get(current, []))
+        return found
+
+    def org_move(self, person_ids: list[str], parent_id: str, actor: str, reason: str) -> list[dict]:
+        ids = [pid for pid in dict.fromkeys(person_ids) if pid]
+        if not ids:
+            raise RegistryError("请选择要移动的人员")
+        parent_id = parent_id or ""
+        moved = []
+        with self.transaction() as conn:
+            if parent_id and not conn.execute("SELECT 1 FROM person WHERE id=?", (parent_id,)).fetchone():
+                raise RegistryError("所选上级不存在")
+            for pid in ids:
+                row = conn.execute("SELECT * FROM person WHERE id=?", (pid,)).fetchone()
+                if not row:
+                    raise RegistryError("人员不存在")
+                if parent_id == pid:
+                    raise RegistryError("不能把人员设为自己的上级")
+                if _parent_would_cycle(conn, pid, parent_id):
+                    raise RegistryError("不能把上级设到自己的下级下面")
+                before = dict(row)
+                result = {**before, "parent_id": parent_id, "revision": before["revision"] + 1}
+                _write_person(conn, result)
+                self.audit(conn, actor, "person.move", pid, reason, before, result)
+                moved.append(result)
+        return moved
+
+    def org_stores(self, person_id: str = "", *, include_descendants: bool = False) -> list[dict]:
+        with self.connect() as conn:
+            if not person_id:
+                return [dict(r) for r in conn.execute(
+                    "SELECT person_id,store_id FROM org_store ORDER BY person_id,store_id")]
+            ids = [person_id]
+            if include_descendants:
+                ids.extend(self.org_descendants(person_id))
+            marks = ",".join("?" for _ in ids)
+            return [dict(r) for r in conn.execute(
+                f"SELECT person_id,store_id FROM org_store WHERE person_id IN ({marks}) "
+                "ORDER BY person_id,store_id", ids)]
+
+    def save_org_stores(self, person_id: str, store_ids: list[str], actor: str, reason: str) -> dict:
+        ids = [sid for sid in dict.fromkeys(store_ids) if sid]
+        with self.transaction() as conn:
+            if not conn.execute("SELECT 1 FROM person WHERE id=?", (person_id,)).fetchone():
+                raise RegistryError("人员不存在")
+            before = [r[0] for r in conn.execute(
+                "SELECT store_id FROM org_store WHERE person_id=? ORDER BY store_id", (person_id,))]
+            conn.execute("DELETE FROM org_store WHERE person_id=?", (person_id,))
+            for store_id in ids:
+                conn.execute("INSERT INTO org_store(person_id, store_id) VALUES(?,?)", (person_id, store_id))
+            result = {"person_id": person_id, "store_ids": ids}
+            self.audit(conn, actor, "org_store.save", person_id, reason, before, result)
+            return result
+
+    def org_tree(self, store_names: dict[str, str] | None = None) -> dict:
+        names = store_names or {}
+        people = self.people()
+        assignments = self.org_stores()
+        stores_by_person: dict[str, list[dict]] = {}
+        assigned_stores = set()
+        for row in assignments:
+            assigned_stores.add(row["store_id"])
+            stores_by_person.setdefault(row["person_id"], []).append({
+                "id": row["store_id"], "name": names.get(row["store_id"], row["store_id"])})
+        index = {}
+        for person in people:
+            index[person["id"]] = {
+                **person,
+                "stores": stores_by_person.get(person["id"], []),
+                "children": [],
+                "child_count": 0,
+                "role": "成员",
+            }
+        roots = []
+        for person in people:
+            node = index[person["id"]]
+            parent_id = person.get("parent_id") or ""
+            if parent_id and parent_id in index:
+                index[parent_id]["children"].append(node)
+            else:
+                roots.append(node)
+
+        def finalize(nodes, inherited_parent=""):
+            nodes.sort(key=lambda item: (item.get("sort_order") or 0, item["name"], item["id"]))
+            for node in nodes:
+                parent_id = node.get("parent_id") or ""
+                if not parent_id or parent_id not in index:
+                    node["role"] = "团队长"
+                elif node["children"]:
+                    node["role"] = "组长"
+                else:
+                    node["role"] = "成员"
+                finalize(node["children"], node["id"])
+                node["child_count"] = len(node["children"]) + sum(child["child_count"] for child in node["children"])
+            return nodes
+
+        tree = finalize(roots)
+        unassigned = [{"id": sid, "name": names.get(sid, sid)}
+                      for sid in names if sid not in assigned_stores]
+        unassigned.sort(key=lambda item: item["name"])
+        return {"people": people, "tree": tree, "unassigned_stores": unassigned}
+
+    def hierarchy_allocations(self, allocations: list[dict]) -> list[dict]:
+        people = {p["id"]: p for p in self.people()}
+        existing = {str(line.get("person_id") or "") for line in allocations}
+        extras = []
+        for line in allocations:
+            if line.get("source") == "hierarchy":
+                continue
+            current = str(line.get("person_id") or "")
+            seen = {current}
+            while current:
+                person = people.get(current)
+                parent_id = (person or {}).get("parent_id") or ""
+                if not person or not parent_id or parent_id in seen:
+                    break
+                seen.add(parent_id)
+                parent = people.get(parent_id)
+                current = parent_id
+                if not parent or parent_id in existing:
+                    continue
+                cut = parent.get("default_cut_rate") or ""
+                if not cut:
+                    continue
+                extras.append({
+                    "person_id": parent_id,
+                    "role": "团队长" if not parent.get("parent_id") else "组长",
+                    "rate": cut,
+                    "duty": "cut",
+                    "source": "hierarchy",
+                    "name": parent.get("name") or "",
+                })
+                existing.add(parent_id)
+        return list(allocations) + extras
+
+    def fill_hierarchy(self, *, store_ids: list[str], product_ids: list[str],
+                       valid_from: str, actor: str, reason: str,
+                       apply: bool = False, replace: bool = False) -> dict:
+        start = local_time(valid_from)
+        stores = [sid for sid in dict.fromkeys(store_ids) if sid]
+        products = [pid for pid in dict.fromkeys(product_ids) if pid]
+        if not stores:
+            raise RegistryError("请选择店铺")
+        filled = []
+        with self.connect() as conn:
+            query = "SELECT * FROM scheme WHERE store_id IN ({})".format(",".join("?" for _ in stores))
+            params = list(stores)
+            if products:
+                query += " AND product_id IN ({})".format(",".join("?" for _ in products))
+                params.extend(products)
+            schemes = [dict(r) for r in conn.execute(query, params)]
+        for scheme in schemes:
+            with self.connect() as conn:
+                version = conn.execute("SELECT body FROM scheme_version WHERE id=?",
+                                       (scheme["active_version"],)).fetchone() if scheme.get("active_version") else None
+            body = json.loads(version[0]) if version else {}
+            current = next((seg for seg in body.get("segments", [])
+                            if seg["valid_from"] <= start and (not seg.get("valid_to") or start < seg["valid_to"])),
+                           {})
+            allocations = list(current.get("allocations") or [])
+            if (current.get("mode") or "distribute") != "distribute" or not allocations:
+                filled.append({
+                    "store_id": scheme["store_id"], "product_id": scheme["product_id"],
+                    "product_name": scheme.get("product_name") or body.get("product_name", ""),
+                    "revision": scheme.get("revision") or 0,
+                    "added": [], "allocations": allocations, "applied": False,
+                })
+                continue
+            if replace:
+                allocations = [line for line in allocations if line.get("source") != "hierarchy"]
+            merged = self.hierarchy_allocations(allocations)
+            added = [line for line in merged if line.get("source") == "hierarchy"
+                     and line["person_id"] not in {a["person_id"] for a in allocations}]
+            total = sum((Decimal(str(line.get("rate") or "0")) for line in merged), Decimal(0))
+            if apply and added and total > 1:
+                filled.append({
+                    "store_id": scheme["store_id"], "product_id": scheme["product_id"],
+                    "product_name": scheme.get("product_name") or body.get("product_name", ""),
+                    "revision": scheme.get("revision") or 0,
+                    "added": added, "allocations": merged, "applied": False,
+                    "error": "补上级后点数合计超过100%，请先手工调整",
+                })
+                continue
+            if apply and added:
+                self.save_setting({
+                    "store_id": scheme["store_id"], "product_id": scheme["product_id"],
+                    "product_name": scheme.get("product_name") or body.get("product_name", ""),
+                    "mode": current.get("mode") or "distribute",
+                    "allocations": merged, "valid_from": start,
+                    "expected_revision": scheme.get("revision") or 0,
+                    "reason": reason,
+                }, actor)
+            filled.append({
+                "store_id": scheme["store_id"], "product_id": scheme["product_id"],
+                "product_name": scheme.get("product_name") or body.get("product_name", ""),
+                "revision": scheme.get("revision") or 0,
+                "added": added, "allocations": merged, "applied": bool(apply and added),
+            })
+        return {"items": filled, "count": len(filled),
+                "added": sum(len(item["added"]) for item in filled)}
 
     def scheme(self, sid: str) -> dict:
         with self.connect() as conn:
@@ -542,8 +911,8 @@ class Registry:
                     pid = matches[0][0]
                 else:
                     pid = str(uuid.uuid4())
-                    person = {"id":pid,"name":name,"employee_no":"","external_user_id":"","archived":0,"revision":1,"note":""}
-                    conn.execute("INSERT INTO person VALUES(:id,:name,:employee_no,:external_user_id,:archived,:revision,:note)", person)
+                    person = _blank_person(pid, name)
+                    _write_person(conn, person)
                     self.audit(conn, actor, "person.save", pid, "设置提成人员", None, person)
             if pid in seen:
                 raise RegistryError("同一人员只需填写一次，比例填合计值")
@@ -553,12 +922,18 @@ class Registry:
             duty = str(item.get("duty") or "")
             if duty and duty not in ("produce", "cut"):
                 duty = ""
-            if parts and sum(Decimal(a["rate"]) for a in parts) == Decimal(share) and not duty:
+            source = str(item.get("source") or "")
+            if source != "hierarchy":
+                source = ""
+            if (parts and sum(Decimal(a["rate"]) for a in parts) == Decimal(share)
+                    and not duty and not source):
                 allocations.extend(parts)
             else:
-                entry = {"person_id":pid,"role":parts[0]["role"] if len(parts)==1 else "提成","rate":share}
+                entry = {"person_id":pid,"role":item.get("role") or (parts[0]["role"] if len(parts)==1 else "提成"),"rate":share}
                 if duty:
                     entry["duty"] = duty
+                if source:
+                    entry["source"] = source
                 allocations.append(entry)
         segment = {"valid_from":start,"valid_to":end,"mode":mode,"allocations":allocations,
                    "total_rate":str(sum((Decimal(a["rate"]) for a in allocations), Decimal(0))),

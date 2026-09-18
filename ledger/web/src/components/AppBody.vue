@@ -5,6 +5,7 @@ import { computed, defineAsyncComponent, onMounted, onUnmounted, ref, watch } fr
 import { useRouter } from 'vue-router'
 
 import { useApp } from '../store'
+import { useCommission } from '../commissionStore'
 import { api } from '../api'
 import FilterBar from './FilterBar.vue'
 
@@ -15,6 +16,7 @@ const props = defineProps({ dropped: { type: Array, default: null } })
 const emit = defineEmits(['taken'])
 
 const app = useApp()
+const commission = useCommission()
 const message = useMessage()
 const router = useRouter()
 function refreshCurrent(){app.uiRefresh++;app.loadNavigation(true).catch(e=>message.error(e.message))}
@@ -61,10 +63,14 @@ async function loadWorkJobs() {
     const current = (await api.recomputeProgress()).items || []
     const active = new Set(current.map(job => job.store_id))
     const now = Date.now()
+    let finished = false
     for (const job of workJobs.value) {
-      if (job.state === 'running' && !active.has(job.store_id))
+      if (job.state === 'running' && !active.has(job.store_id)) {
         completedJobs.set(job.store_id, {...job,state:'done',phase:'核算已完成',percent:100,until:now+3500})
+        finished = true
+      }
     }
+    if (finished) commission.refresh({ force: true })
     for (const [id, job] of completedJobs) if (job.until <= now || active.has(id)) completedJobs.delete(id)
     workJobs.value = [...current,...completedJobs.values()]
   }
@@ -130,7 +136,7 @@ onMounted(() => {
   window.addEventListener('ledger:page-load-error',pageFailed)
   app.loadNavigation().catch((e) => message.error(e.message, { duration: 6000 }))
   loadWorkJobs()
-  workTimer = setInterval(loadWorkJobs, 2500)
+  workTimer = setInterval(loadWorkJobs, 5000)
   if ('requestIdleCallback' in window) window.requestIdleCallback(preloadDeliver, { timeout: 1500 })
   else setTimeout(preloadDeliver, 500)
 })
@@ -164,7 +170,7 @@ defineExpose({ take })
       </router-link>
       <router-link
         class="navlink"
-        :class="{ on: $route.name === 'commission' || $route.name === 'commission-reports' }"
+        :class="{ on: $route.meta.commission }"
         :to="{name:'commission',query:$route.meta.commission ? $route.query : {}}"
       >
         <Coins class="nav-icon" aria-hidden="true"/>提成
@@ -172,6 +178,7 @@ defineExpose({ take })
       <nav v-if="$route.meta.commission" class="commission-subnav" aria-label="提成菜单">
         <router-link :to="{name:'commission',query:$route.query}">提成设置</router-link>
         <router-link :to="{name:'commission-reports',query:$route.query}">金额汇总</router-link>
+        <router-link :to="{name:'commission-org',query:$route.query}">组织架构</router-link>
       </nav>
       <router-link class="navlink" :class="{ on: $route.name === 'fees' }" to="/fees">
         <Tags class="nav-icon" aria-hidden="true"/>费项
@@ -181,7 +188,7 @@ defineExpose({ take })
     </nav>
 
     <div class="body">
-      <header v-if="!['commission', 'commission-reports', 'labor'].includes($route.name)" class="topbar">
+      <header v-if="!['commission', 'commission-reports', 'commission-org', 'labor'].includes($route.name)" class="topbar">
         <FilterBar />
         <n-button quaternary size="small" :disabled="app.loading || !!app.busy" aria-label="刷新当前页面" title="刷新当前页面" @click="refreshCurrent"><RefreshCw :size="16"/></n-button>
         <!-- 上传只有这一个固定入口，每一页都在同一个地方。上一版侧栏最下角那个

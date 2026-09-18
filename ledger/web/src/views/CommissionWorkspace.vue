@@ -82,7 +82,8 @@ const params = computed(() => {
 })
 const {data,error,loading,stale,load} = useCommissionQuery('settings', () => `${params.value}&after=${encodeURIComponent(after.value)}`,
   signal => commissionRequest(`/settings?${params.value}&after=${encodeURIComponent(after.value)}`,{signal}),
-  () => !busy.value && !showEditor.value && !batchDialog.value?.shown && !peopleDialog.value?.shown)
+  () => !busy.value && !showEditor.value && !batchDialog.value?.shown && !peopleDialog.value?.shown,
+  { followTick: false })
 const rows = computed(() => data.value?.rows || [])
 const next = computed(() => data.value?.next_after || '')
 const locked = computed(() => loading.value || stale.value || busy.value)
@@ -122,16 +123,16 @@ async function edit(row = {}) {
     const stamp=now()
     const current=segments.find(p=>p.valid_from<=stamp&&(!p.valid_to||stamp<p.valid_to))||segments.find(p=>p.valid_from>stamp)||row.setting||{}
     const grouped=new Map()
-    const allocDuty={}
-    for(const p of current.allocations||[]){grouped.set(p.person_id,(grouped.get(p.person_id)||0)+Number(p.rate));if(p.duty)allocDuty[p.person_id]=p.duty}
+    const allocDuty={},allocSource={}
+    for(const p of current.allocations||[]){grouped.set(p.person_id,(grouped.get(p.person_id)||0)+Number(p.rate));if(p.duty)allocDuty[p.person_id]=p.duty;if(p.source)allocSource[p.person_id]=p.source}
     const storeId=row.store_id||(shared.storeIds.length===1?shared.storeIds[0]:'')
     let storeDuties={}
     if(storeId){try{storeDuties=Object.fromEntries((await loadStoreMembers([storeId], current.valid_from||'')).map(m=>[m.person_id,m.duty||m.suggested_duty||'produce']))}catch{}}
     if(ticket!==editorSerial)return
-    const allocations=selected.value?[...grouped].map(([person,rate])=>({person,percent:Number((rate*100).toFixed(8)),duty:allocDuty[person]||storeDuties[person]||'produce'})):(row.people||[]).map(p=>({person:p.person_id,percent:Number((Number(p.rate)*100).toFixed(8)),duty:p.duty||allocDuty[p.person_id]||storeDuties[p.person_id]||'produce'}))
+    const allocations=selected.value?[...grouped].map(([person,rate])=>({person,percent:Number((rate*100).toFixed(8)),duty:allocDuty[person]||storeDuties[person]||'produce',source:allocSource[person]||''})):(row.people||[]).map(p=>({person:p.person_id,percent:Number((Number(p.rate)*100).toFixed(8)),duty:p.duty||allocDuty[p.person_id]||storeDuties[p.person_id]||'produce',source:p.source||allocSource[p.person_id]||''}))
     form.value={store_id:row.store_id||(shared.storeIds.length===1?shared.storeIds[0]:''),product_id:row.product_id||'',product_name:selected.value?.product_name||row.product_name||'',
       mode:current.mode||'distribute',valid_from:row.issue_valid_from||(current.valid_from>stamp?current.valid_from:stamp),valid_to:current.valid_to>stamp?current.valid_to:'',allocations}
-    if(!form.value.allocations.length)form.value.allocations.push({person:null,percent:null,duty:'produce'})
+    if(!form.value.allocations.length)form.value.allocations.push({person:null,percent:null,duty:'produce',source:''})
     editorOriginal.value=JSON.stringify(form.value)
   }catch(e){if(ticket===editorSerial&&e.name!=='AbortError')editorError.value=e.message}
   finally{if(ticket===editorSerial){busy.value=false;editorLoading.value=false}}
@@ -156,7 +157,8 @@ async function save() {
     const allocations = form.value.mode === 'distribute' ? form.value.allocations.map(p => ({
       ...(people.value.some(x => x.id === p.person) ? {person_id:p.person} : {name:p.person}),
       rate:(Number(p.percent)/100).toFixed(8),
-      duty: p.duty || 'produce'
+      duty: p.duty || 'produce',
+      ...(p.source === 'hierarchy' ? {source:'hierarchy'} : {}),
     })) : []
     await call('/settings', {method:'POST', body:JSON.stringify({...form.value, allocations, expected_revision:selected.value?.revision || 0})})
     showEditor.value = false; message.success('已保存')
@@ -168,8 +170,37 @@ function historicalPeople(segment) {
   return (segment.allocations || []).map(a => {
     const name = people.value.find(p => p.id === a.person_id)?.name || '原登记人员'
     const duty = a.duty ? `（${dutyLabel(a.duty)}）` : ''
-    return `${name}${duty} ${rateText(a.rate)}`
+    const source = a.source === 'hierarchy' ? '组织抽成' : ''
+    return `${name}${duty}${source ? ' ' + source : ''} ${rateText(a.rate)}`
   }).join('、')
+}
+async function fillHierarchy() {
+  const current = form.value.allocations.filter(p => p.person).map(p => ({
+    person_id: people.value.some(x => x.id === p.person) ? p.person : '',
+    name: people.value.some(x => x.id === p.person) ? undefined : p.person,
+    rate: (Number(p.percent || 0) / 100).toFixed(8),
+    duty: p.duty || 'produce',
+    source: p.source || '',
+  })).filter(p => p.person_id)
+  if (!current.length) { message.warning('请先填写本商品的做货或抽点人员'); return }
+  busy.value = true
+  try {
+    const result = await call('/org/fill-hierarchy', { method: 'POST', body: JSON.stringify({ allocations: current, reason: '按组织补上级抽成' }) })
+    const have = new Set(form.value.allocations.map(p => p.person))
+    for (const line of result.added || []) {
+      if (!have.has(line.person_id)) {
+        form.value.allocations.push({
+          person: line.person_id,
+          percent: Number((Number(line.rate) * 100).toFixed(8)),
+          duty: 'cut',
+          source: 'hierarchy',
+        })
+        have.add(line.person_id)
+      }
+    }
+    message.success((result.added || []).length ? `已补入 ${(result.added || []).length} 位上级抽成` : '组织上级没有默认抽成，或已经在名单里')
+  } catch (e) { message.error(e.message) }
+  finally { busy.value = false }
 }
 
 const visibleChecked=computed(()=>rows.value.filter(rowSelected).map(keyOf))
@@ -181,12 +212,12 @@ const tableColumns=computed(()=>[
   {title:'店铺',key:'store',width:210,mobile:false,render:row=>storeName(row.store_id)},
   {title:'人员 / 身份 / 比例',key:'people',width:250,mobileWidth:140,render:row=>row.people.length?row.people.map(p=>h('div',{class:'table-assignee'},[
     h('span',p.name),
-    h(NTag,{size:'tiny',bordered:false,type:dutyTagType(p.duty||'produce'),style:'margin:0 4px'},()=>dutyLabel(p.duty||'produce')),
+    h(NTag,{size:'tiny',bordered:false,type:dutyTagType(p.duty||'produce'),style:'margin:0 4px'},()=>p.source==='hierarchy'?'组织抽成':dutyLabel(p.duty||'produce')),
     h('strong',rateText(p.rate))])):h('span',{class:'table-secondary'},'未分配')},
   {title:'状态',key:'state',width:100,mobile:false,render:row=>h(NTag,{size:'small',bordered:false,type:row.state==='enabled'?'success':row.state==='pending'?'warning':'default'},()=>states[row.state])},
   {title:'操作',key:'action',width:74,mobileWidth:56,fixed:'right',render:row=>h(NButton,{text:true,type:'primary',size:'small',disabled:locked.value||row.store_id.startsWith('unmapped:'),onClick:()=>edit(row)},()=> '修改')},
 ])
-defineExpose({edit,menu,busy})
+defineExpose({edit,menu,busy,reload:load})
 </script>
 
 <template>
@@ -246,9 +277,10 @@ defineExpose({edit,menu,busy})
           <n-select v-model:value="p.duty" :options="DUTY_OPTIONS" size="small" :aria-label="`身份${i+1}`" />
           <label class="percentage"><input v-model="p.percent" type="number" min="0" max="100" step="0.01" :aria-label="`提成比率${i+1}`" /><span>%</span></label>
           <n-button text @click="form.allocations.splice(i,1)">移除</n-button>
+          <span v-if="p.source==='hierarchy'" class="hierarchy-tag">组织抽成</span>
         </div>
-        <div class="allocation-footer"><n-button text type="primary" @click="form.allocations.push({person:null,percent:null,duty:'produce'})">＋ 添加人员</n-button><span>合计 {{ Number(total.toFixed(6)) }}%</span></div>
-        <p class="duty-hint">身份跟着商品走：这里设的做货/抽点只影响本商品。同一家店不同商品可以给同一个人设不同身份。</p>
+        <div class="allocation-footer"><n-button text type="primary" @click="form.allocations.push({person:null,percent:null,duty:'produce',source:''})">＋ 添加人员</n-button><n-button text @click="fillHierarchy">按组织补上级抽成</n-button><span>合计 {{ Number(total.toFixed(6)) }}%</span></div>
+        <p class="duty-hint">身份跟着商品走：做货/抽点只影响本商品。上级抽成可按组织一键补入，单条仍可改。</p>
       </template>
       <details class="dates"><summary>生效时间 <span>{{ form.valid_from?.replace('T',' ') }}起{{ form.valid_to ? '，至'+form.valid_to.replace('T',' ') : '' }}</span></summary><div class="fields"><label>开始时间<input v-model="form.valid_from" type="datetime-local" step="1" aria-label="开始时间" /></label><label>结束时间（可留空）<input v-model="form.valid_to" type="datetime-local" step="1" aria-label="结束时间" /></label></div><small>北京时间；此前设置会保留。</small></details>
       <details v-if="selected?.versions?.length" class="history"><summary>查看修改记录</summary><div v-for="v in selected.versions" :key="v.id" class="history-item"><small><b :class="v.id===selected.active_version?'current-version':'old-version'">{{v.id===selected.active_version?'当前版本':'历史版本'}}</b> · {{ new Date(v.recorded_at).toLocaleString('zh-CN',{timeZone:'Asia/Shanghai'}) }}</small><p v-for="s in v.body.segments" :key="s.valid_from">{{ s.valid_from.replace('T',' ') }}起：{{ s.mode==='distribute' ? historicalPeople(s) : s.mode==='exclude' ? '不提成' : '暂不设置' }}{{ s.valid_to ? '（至'+s.valid_to.replace('T',' ')+ '）' : '' }}</p></div></details>
@@ -258,6 +290,7 @@ defineExpose({edit,menu,busy})
 </template>
 
 <style scoped>
+.hierarchy-tag{grid-column:1/-1;font-size:12px;color:#16734b;margin-top:-4px}
 .commission-edit-context{padding:0 0 18px;border-bottom:1px solid #e8edf4;margin-bottom:18px}.commission-edit-context strong{font-size:15px;line-height:1.7}.commission-edit-context p{font-size:12px;color:#8290a3;margin-top:7px}.editor-product-details{font-size:12px;color:#7e8b9c;margin-bottom:16px}.editor-product-details summary{cursor:pointer}
 
 .setting-person{display:flex;justify-content:space-between;gap:16px;line-height:1.85}.setting-person strong{font-weight:500;font-variant-numeric:tabular-nums}.empty-reset{display:block;margin:8px auto 0}.file-input{display:none}

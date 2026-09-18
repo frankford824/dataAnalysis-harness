@@ -173,10 +173,12 @@ def iter_settings(registry: Registry, *, store_id="", search="", state="", after
             from decimal import Decimal
             for a in (row['setting'] or {}).get('allocations', []):
                 pid = a['person_id']
-                person = grouped.setdefault(pid, {'person_id':pid,'name':people.get(pid,pid),'rate':Decimal(0),'allocation_duty':''})
+                person = grouped.setdefault(pid, {'person_id':pid,'name':people.get(pid,pid),'rate':Decimal(0),'allocation_duty':'','source':''})
                 person['rate'] += Decimal(a['rate'])
                 if a.get('duty'):
                     person['allocation_duty'] = a['duty']
+                if a.get('source') == 'hierarchy':
+                    person['source'] = 'hierarchy'
             row['people'] = [{**a,'rate':str(a['rate'])} for a in grouped.values()]
             row['product_name'] = row['product_name'] or body.get('product_name','')
             yield row

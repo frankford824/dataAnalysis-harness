@@ -23,6 +23,7 @@ export const router = createRouter({
       children: [
         { path: '', name: 'commission', component: () => import('./views/CommissionWorkspace.vue') },
         { path: 'reports', name: 'commission-reports', component: () => import('./views/CommissionReports.vue') },
+        { path: 'org', name: 'commission-org', component: () => import('./views/CommissionOrgTree.vue') },
       ],
     },
     {

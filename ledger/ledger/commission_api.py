@@ -135,6 +135,30 @@ class StoreMemberBatchChange(BaseModel):
     reason: str = Field(min_length=1, max_length=500)
 
 
+class OrgMoveChange(BaseModel):
+    person_ids: list[str] = Field(min_length=1, max_length=200)
+    parent_id: str = ''
+    reason: str = Field(min_length=1, max_length=500)
+
+
+class OrgStoresChange(BaseModel):
+    person_id: str
+    store_ids: list[str] = Field(default_factory=list, max_length=2000)
+    reason: str = Field(min_length=1, max_length=500)
+
+
+class FillHierarchyChange(BaseModel):
+    store_id: str = ''
+    product_id: str = ''
+    store_ids: list[str] = Field(default_factory=list, max_length=200)
+    product_ids: list[str] = Field(default_factory=list, max_length=500)
+    allocations: list[dict] = Field(default_factory=list)
+    valid_from: str = ''
+    apply: bool = False
+    replace: bool = False
+    reason: str = Field(default='按组织补上级抽成', min_length=1, max_length=500)
+
+
 class SettlementCreate(BaseModel):
     start: str
     end: str
@@ -397,6 +421,51 @@ def install(app, workspace, model, model_root: Path | None = None):
                     valid_from=item.valid_from or change.valid_from,
                     valid_to=item.valid_to or change.valid_to))
         return {"saved": saved, "count": len(saved), "stores": len(set(store_ids))}
+
+    @router.get("/org/tree")
+    def org_tree():
+        names = {s.id: s.name for s in model().stores}
+        return reg().org_tree(names)
+
+    @router.post("/org/person")
+    def org_person_save(change: PersonChange, request: Request):
+        return reg().person_save(change.person, actor(request)["id"], change.reason, change.expected_revision)
+
+    @router.post("/org/move")
+    def org_move(change: OrgMoveChange, request: Request):
+        return {"moved": reg().org_move(change.person_ids, change.parent_id, actor(request)["id"], change.reason)}
+
+    @router.get("/org/stores")
+    def org_stores(person_id: str = "", include_descendants: bool = False):
+        names = {s.id: s.name for s in model().stores}
+        rows = reg().org_stores(person_id, include_descendants=include_descendants)
+        stores = [{"person_id": row["person_id"], "store_id": row["store_id"],
+                   "store_name": names.get(row["store_id"], row["store_id"])} for row in rows]
+        return {"stores": stores}
+
+    @router.post("/org/stores")
+    def save_org_stores(change: OrgStoresChange, request: Request):
+        known = {s.id for s in model().stores}
+        unknown = [sid for sid in change.store_ids if sid not in known]
+        if unknown:
+            raise RegistryError("有尚未登记的店铺，无法分配")
+        return reg().save_org_stores(change.person_id, change.store_ids, actor(request)["id"], change.reason)
+
+    @router.post("/org/fill-hierarchy")
+    def fill_hierarchy(change: FillHierarchyChange, request: Request):
+        if change.allocations and not change.store_id and not change.store_ids:
+            merged = reg().hierarchy_allocations(change.allocations)
+            added = [line for line in merged if line.get("source") == "hierarchy"
+                     and line["person_id"] not in {a.get("person_id") for a in change.allocations}]
+            return {"allocations": merged, "added": added, "count": 1, "applied": False}
+        store_ids = [sid for sid in ([change.store_id] if change.store_id else []) + list(change.store_ids) if sid]
+        product_ids = [pid for pid in ([change.product_id] if change.product_id else []) + list(change.product_ids) if pid]
+        if not change.valid_from:
+            raise RegistryError("请填写生效时间")
+        return reg().fill_hierarchy(
+            store_ids=store_ids, product_ids=product_ids, valid_from=change.valid_from,
+            actor=actor(request)["id"], reason=change.reason,
+            apply=change.apply, replace=change.replace)
 
     @router.post("/catalog/refresh")
     def refresh_catalog(request: Request):

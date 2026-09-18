@@ -296,6 +296,7 @@ function renderRowActions(row) {
       }, action.label),
     ]))
 }
+defineExpose({reload:load})
 </script>
 <template>
   <div class="commission-content report-content">

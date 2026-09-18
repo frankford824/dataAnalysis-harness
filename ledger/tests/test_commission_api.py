@@ -144,3 +144,31 @@ def test_simple_edit_keeps_prior_dates_future_settings_and_role_parts(tmp_path):
     row = settings(registry, at='2026-09-10T00:00:00')['rows'][0]
     assert len(row['people']) == 1 and row['people'][0]['rate'] == '0.05'
     assert settings(registry, state='disabled', at='2026-10-10T00:00:00')['rows'][0]['setting']['mode'] == 'exclude'
+
+
+def test_org_tree_move_and_fill_endpoints(tmp_path):
+    _, registry, client = setup(tmp_path)
+    lead = registry.person_save({"name": "张总", "default_cut_rate": "0.01"}, "tester", "登记")
+    member = registry.person_save({"name": "宗玲"}, "tester", "登记")
+    client.post("/api/commission-v2/session", json={"name": "tester", "password": "test-password-strong"})
+    moved = client.post("/api/commission-v2/org/move", json={
+        "person_ids": [member["id"]], "parent_id": lead["id"], "reason": "挂到团队下"})
+    assert moved.status_code == 200
+    stores = client.post("/api/commission-v2/org/stores", json={
+        "person_id": lead["id"], "store_ids": ["s1"], "reason": "团队负责店铺"})
+    assert stores.status_code == 200
+    tree = client.get("/api/commission-v2/org/tree").json()
+    assert tree["tree"][0]["name"] == "张总"
+    assert tree["tree"][0]["children"][0]["name"] == "宗玲"
+    assert tree["tree"][0]["stores"][0]["id"] == "s1"
+    registry.save_setting({
+        "store_id": "s1", "product_id": "123456789001", "product_name": "礼盒",
+        "mode": "distribute", "valid_from": "2026-08-01T00:00:00",
+        "allocations": [{"person_id": member["id"], "rate": "0.05", "duty": "produce"}],
+        "expected_revision": 0, "reason": "组员做货",
+    }, "tester")
+    filled = client.post("/api/commission-v2/org/fill-hierarchy", json={
+        "store_id": "s1", "product_id": "123456789001",
+        "valid_from": "2026-08-01T00:00:00", "apply": True, "reason": "补上级"})
+    assert filled.status_code == 200
+    assert filled.json()["added"] == 1
