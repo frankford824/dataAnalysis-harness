@@ -1077,3 +1077,34 @@ def test_teams_view_and_payable_actual_amounts(tmp_path):
     assert export.status_code == 200
     assert '团队/团队长' in export.text
 
+
+def test_teams_report_drops_product_blob_and_keeps_confirmed_payout(tmp_path):
+    ws, registry, people, client = fixture(tmp_path)
+    products = [{'product_id': f'{100000000000 + i}', 'product_name': '占位商品' * 8,
+                 'total_rate': 0.05, 'people': [{'person_id': people[0]['id']}],
+                 'orders': [f'o{i}-{j}' for j in range(20)]} for i in range(80)]
+    run = ws.record('s1', '2026-06', {
+        'can_close': True, 'findings': [], 'missing_sources': [],
+        'commission': {
+            'engine': 'commission-v2', 'people': [
+                {'person_id': people[0]['id'], 'person': people[0]['name'],
+                 'amount': 12.34, 'base': 100}],
+            'total': 12.34, 'amount_complete': True, 'base_name': '利润',
+            'base_node': 'net_profit', 'products': products,
+        },
+    }, [])
+    teams = client.post('/api/commission-v2/reports/query', json={
+        'start': '2026-06', 'end': '2026-06', 'store_ids': ['s1'], 'view': 'teams'}).json()
+    assert teams['items'][0]['amount'] == 12.34
+    context = client.get('/api/commission-v2/payout-confirmations/context', params={
+        'store_id': 's1', 'period': '2026-06', 'run_id': run}).json()
+    saved = client.post('/api/commission-v2/payout-confirmations', json={
+        'store_id': 's1', 'period': '2026-06', 'run_id': run,
+        'source_sha': context['source_sha'], 'reason': '核对实发',
+        'payouts': [{'person_id': people[0]['id'], 'amount': '20.00'}]})
+    assert saved.status_code == 200, saved.text
+    confirmed = client.post('/api/commission-v2/reports/query', json={
+        'start': '2026-06', 'end': '2026-06', 'store_ids': ['s1'], 'view': 'teams'}).json()
+    assert confirmed['items'][0]['trial_amount'] == 12.34
+    assert confirmed['items'][0]['actual_amount'] == 20
+

@@ -354,8 +354,21 @@ def configured_people(registry, start, end, store_ids=()):
     return {sid:set(people) for sid,people in saved.items()}
 
 
+def _slim_products_sql(payload):
+    """Keep only the rate + person links that confirmed_profit_rate reads."""
+    return (
+        f"CASE WHEN json_extract({payload},'$.commission.base_node')='net_profit' "
+        f"THEN (SELECT json_group_array(json_object("
+        f"'total_rate',json_extract(prod.value,'$.total_rate'),"
+        f"'people',(SELECT json_group_array(json_object("
+        f"'person_id',json_extract(crew.value,'$.person_id'))) "
+        f"FROM json_each(prod.value,'$.people') crew))) "
+        f"FROM json_each({payload},'$.commission.products') prod) ELSE NULL END"
+    )
+
+
 def build(workspace, registry, model, start, end, store_ids=None, person_ids=None, run_ids=None,
-          model_root: Path | None = None):
+          model_root: Path | None = None, need_product_rates: bool = True):
     periods=months(start,end)
     selected_stores=set(store_ids or []); selected_people=set(person_ids or [])
     names={s.id:s.name for s in model.stores}
@@ -387,12 +400,45 @@ def build(workspace, registry, model, start, end, store_ids=None, person_ids=Non
         source='FROM run r LEFT JOIN period p ON p.store_id=r.store_id AND p.period=r.period'
         where.append('r.id IN ('+','.join('?' for _ in run_ids)+')' if run_ids else '0');args.extend(run_ids)
     manual_join=' LEFT JOIN manual_finance mf ON mf.run_id=r.id' if run_ids is not None else " LEFT JOIN manual_finance mf ON mf.run_id=r.id AND p.state='closed'"
-    records=[dict(r) for r in workspace.conn.execute("SELECT r.id,r.store_id,r.period,r.at,json_extract(coalesce(mf.result_json,r.result),'$.commission') commission_json,json_extract(coalesce(mf.result_json,r.result),'$.statement') statement_json,json_extract(coalesce(mf.result_json,r.result),'$.manual_cost') manual_cost_json,json_extract(coalesce(mf.result_json,r.result),'$.store') store_name,p.state,p.run_id frozen_id,rl.amount frozen_labor_cut "+source+' LEFT JOIN run_labor rl ON rl.run_id=r.id'+manual_join+' WHERE '+' AND '.join(where)+' ORDER BY r.period DESC,r.store_id',args)]
+    payload='coalesce(mf.result_json,r.result)'
+    products_select=_slim_products_sql(payload) if need_product_rates else 'NULL'
+    records=[dict(r) for r in workspace.conn.execute(
+        "SELECT r.id,r.store_id,r.period,r.at,"
+        f"json_remove(json_extract({payload},'$.commission'),'$.products') commission_json,"
+        f"{products_select} products_json,"
+        f"json_extract({payload},'$.statement') statement_json,"
+        f"json_extract({payload},'$.manual_cost') manual_cost_json,"
+        f"json_extract({payload},'$.store') store_name,"
+        "p.state,p.run_id frozen_id,rl.amount frozen_labor_cut "
+        +source+' LEFT JOIN run_labor rl ON rl.run_id=r.id'+manual_join
+        +' WHERE '+' AND '.join(where)+' ORDER BY r.period DESC,r.store_id',args)]
     if run_ids is not None and len(records)!=len(run_ids):raise RegistryError('部分计算记录已不存在或不在所选范围，请重新查询')
     keys=[(r['store_id'],r['period']) for r in records]
     if len(keys)!=len(set(keys)):raise RegistryError('同店同账期只能选择一份计算结果')
     from .commission_confirm import active_for_runs
     confirmed = active_for_runs(registry, records)
+    full_commission = {}
+    confirmed_ids = [record['id'] for record in records
+                     if confirmed.get((record['store_id'], record['period'], record['id']))]
+    if confirmed_ids:
+        marks = ','.join('?' for _ in confirmed_ids)
+        if run_ids is None:
+            sha_sql = (
+                "SELECT r.id,json_extract(coalesce("
+                "CASE WHEN p.state='closed' THEN mf.result_json END,r.result),'$.commission') "
+                "commission_json FROM run r "
+                "LEFT JOIN period p ON p.store_id=r.store_id AND p.period=r.period "
+                "LEFT JOIN manual_finance mf ON mf.run_id=r.id "
+                f"WHERE r.id IN ({marks})"
+            )
+        else:
+            sha_sql = (
+                "SELECT r.id,json_extract(coalesce(mf.result_json,r.result),'$.commission') "
+                "commission_json FROM run r LEFT JOIN manual_finance mf ON mf.run_id=r.id "
+                f"WHERE r.id IN ({marks})"
+            )
+        for row in workspace.conn.execute(sha_sql, confirmed_ids):
+            full_commission[row['id']] = json.loads(row['commission_json'] or '{}')
     _duties_cache = {}
     def _get_duties(sid, period=''):
         key = (sid, period)
@@ -402,7 +448,13 @@ def build(workspace, registry, model, start, end, store_ids=None, person_ids=Non
         return _duties_cache[key]
     scopes={}; lines=[]; store_person_rows=[]; available={}; people_totals={}; store_totals={}; store_people={}
     for record in records:
-        c=json.loads(record['commission_json'] or '{}');sid=record['store_id'];period=record['period']
+        if record['id'] in full_commission:
+            c=full_commission[record['id']]
+        else:
+            c=json.loads(record['commission_json'] or '{}')
+            if record.get('products_json'):
+                c['products']=json.loads(record['products_json'])
+        sid=record['store_id'];period=record['period']
         source_c=c
         decision=confirmed.get((sid,period,record['id']))
         if decision and hashlib.sha256(json_text(c).encode()).hexdigest() == decision['source_sha']:

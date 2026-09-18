@@ -109,6 +109,7 @@ class TestBootstrap:
     def test_health_and_version_are_explicit(self, client):
         assert client.get("/api/health").json()["ok"] is True
         assert client.get("/api/version").json()["version"]
+        assert client.get("/favicon.ico").status_code == 204
 
     def test_nas_mode_disables_web_upload(self, client, monkeypatch):
         monkeypatch.setenv("LEDGER_INGEST_MODE", "nas")

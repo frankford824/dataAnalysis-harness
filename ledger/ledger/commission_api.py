@@ -500,11 +500,14 @@ def install(app, workspace, model, model_root: Path | None = None):
         return reg().enqueue("catalog", {}, actor(request)["id"])
 
     @router.get("/settings")
-    def settings(store_id: str = "", search: str = "", state: str = "", after: str = "",
+    async def settings(store_id: str = "", search: str = "", state: str = "", after: str = "",
                  limit: int = Query(60, ge=1, le=500), person_id: str = "",
                  store_ids: list[str] = Query(default=[]), person_ids: list[str] = Query(default=[]),
                  include_total: bool = True):
-        return commission_catalog.settings(reg(), store_id=store_id, search=search, state=state, after=after, limit=limit, person_id=person_id, store_ids=store_ids, person_ids=person_ids, include_total=include_total)
+        return await run_in_threadpool(
+            commission_catalog.settings, reg(), store_id=store_id, search=search, state=state,
+            after=after, limit=limit, person_id=person_id, store_ids=store_ids,
+            person_ids=person_ids, include_total=include_total)
 
     @router.post("/settings/preview")
     async def settings_preview(request: Request):
@@ -741,17 +744,22 @@ def install(app, workspace, model, model_root: Path | None = None):
         row = workspace().conn.execute("SELECT ifnull(max(id),0) FROM run").fetchone()
         return int(row[0])
 
-    def report_cache_key(selection: ReportSelection):
+    def report_needs_product_rates(selection: ReportSelection, view: str | None = None):
+        effective = selection.view if view is None else view
+        return effective in ('', 'store_people')
+
+    def report_cache_key(selection: ReportSelection, need_product_rates: bool):
         return (selection.start, selection.end, tuple(selection.store_ids or []),
                 tuple(selection.person_ids or []), tuple(selection.run_ids or []),
-                report_watermark())
+                report_watermark(), need_product_rates)
 
     def clear_report_cache():
         with report_cache_lock:
             report_cache.clear()
 
-    def report_result(selection: ReportSelection):
-        key = report_cache_key(selection)
+    def report_result(selection: ReportSelection, *, view: str | None = None):
+        need_product_rates = report_needs_product_rates(selection, view)
+        key = report_cache_key(selection, need_product_rates)
         now_ts = time.time()
         with report_cache_lock:
             hit = report_cache.get(key)
@@ -762,7 +770,7 @@ def install(app, workspace, model, model_root: Path | None = None):
                 return {**report, "fingerprint": fingerprint}
         report = commission_reports.build(workspace(), reg(), model(), selection.start, selection.end,
                                           selection.store_ids, selection.person_ids, selection.run_ids,
-                                          model_root=model_root)
+                                          model_root=model_root, need_product_rates=need_product_rates)
         fingerprint = hashlib.sha256(json_text(report).encode()).hexdigest()
         if selection.fingerprint and selection.fingerprint != fingerprint:
             raise RevisionConflict("计算状态或人员信息已变化，请重新查询后导出")
@@ -773,8 +781,7 @@ def install(app, workspace, model, model_root: Path | None = None):
                 report_cache.pop(oldest, None)
         return {**report, "fingerprint": fingerprint}
 
-    @router.post("/reports/query")
-    def report_query(selection: ReportSelection):
+    def report_payload(selection: ReportSelection):
         report = report_result(selection)
         if not selection.view:
             return report
@@ -806,6 +813,10 @@ def install(app, workspace, model, model_root: Path | None = None):
                                for row in report['coverage'] if row.get('unassigned_orders')
                                and '试算' in row['status']],
         }
+
+    @router.post("/reports/query")
+    async def report_query(selection: ReportSelection):
+        return await run_in_threadpool(report_payload, selection)
 
     def profit_scope(store_id, period, person_id, run_id):
         if store_id not in {store.id for store in model().stores}:
@@ -855,7 +866,7 @@ def install(app, workspace, model, model_root: Path | None = None):
     def report_export(kind: str, selection: ReportSelection):
         if kind not in commission_reports.COLUMNS:
             raise RegistryError("请选择导出类型")
-        report = report_result(selection)
+        report = report_result(selection, view=kind)
         if selection.presentation:
             columns, rows = commission_reports.business_export(report, kind)
             return csv_response(f"commission-{kind}-{selection.start}-{selection.end}.csv", columns, rows)

@@ -287,6 +287,11 @@ def _store(model: Model, store_id: str) -> Store:
     return store
 
 
+@app.get("/favicon.ico", include_in_schema=False)
+def favicon() -> Response:
+    return Response(status_code=204)
+
+
 @app.get("/", response_class=HTMLResponse)
 def index() -> HTMLResponse:
     """入口页一律不缓存。
