@@ -544,7 +544,13 @@ def install(app, workspace, model, model_root: Path | None = None):
     def people_summary():
         from datetime import datetime, timezone, timedelta
         moment = datetime.now(timezone(timedelta(hours=8))).replace(tzinfo=None).isoformat(timespec='seconds')
-        with reg().connect() as conn:
+        registry=reg()
+        with registry.connect() as conn:
+            boundary=conn.execute('SELECT max(t) FROM (SELECT max(valid_from) t FROM scheme_read_segment WHERE valid_from<=? UNION ALL SELECT max(valid_to) t FROM scheme_read_segment WHERE valid_to<=?)',(moment,moment)).fetchone()[0]
+        from .read_cache import cached
+        key=(str(registry.root.resolve()),registry.revision(),boundary)
+        def compute():
+          with registry.connect() as conn:
             counts = {r['person_id']:dict(r) for r in conn.execute("""
                 SELECT a.person_id person_id,
                        count(DISTINCT s.scheme_id) products,count(DISTINCT s.store_id) stores
@@ -554,7 +560,8 @@ def install(app, workspace, model, model_root: Path | None = None):
                 GROUP BY a.person_id""", (moment,moment))}
             people = [{**dict(r), 'products':counts.get(r['id'],{}).get('products',0),
                        'stores':counts.get(r['id'],{}).get('stores',0)} for r in conn.execute('SELECT * FROM person ORDER BY archived,name,id')]
-        return {'people':people}
+          return {'people':people}
+        return cached(people_summary_cache,key,compute,8)
 
     @router.post("/settings")
     def setting_save(change: SettingChange, request: Request):
@@ -747,6 +754,7 @@ def install(app, workspace, model, model_root: Path | None = None):
 
     from collections import OrderedDict
     report_cache = OrderedDict()
+    people_summary_cache = OrderedDict()
     report_cache_lock = threading.Lock()
 
     def report_watermark():
@@ -973,16 +981,24 @@ def install(app, workspace, model, model_root: Path | None = None):
     def calculations(store_id: str = "", period: str = "", after: int = 0, limit: int = Query(50, ge=1, le=500)):
         with reg().connect() as conn:
             rows = [dict(r) for r in conn.execute(
-                "SELECT id,finance_run,store_id,period,at,registry_revision,summary_json FROM calculation "
+                "SELECT id,finance_run,store_id,period,at,registry_revision,json_remove(summary_json,'$.products','$.people') summary_json FROM calculation "
                 "WHERE (?='' OR store_id=?) AND (?='' OR period=?) AND (?=0 OR finance_run<?) "
                 "ORDER BY finance_run DESC LIMIT ?", (store_id, store_id, period, period, after, after, limit))]
-        headers = {sid: {item['period']: item for item in workspace().period_headers(sid)} for sid in {r['store_id'] for r in rows}}
+        pairs=sorted({(r['store_id'],r['period']) for r in rows})
+        headers={}
+        if pairs:
+            marks=','.join('(?,?)' for _ in pairs)
+            for state in workspace().conn.execute(
+                "SELECT p.store_id,p.period,p.state,CASE WHEN p.state='closed' AND p.run_id IS NOT NULL THEN p.run_id "
+                "ELSE (SELECT max(id) FROM run r WHERE r.store_id=p.store_id AND r.period=p.period) END run_id "
+                f"FROM period p WHERE (p.store_id,p.period) IN (VALUES {marks})",[v for pair in pairs for v in pair]):
+                headers[(state['store_id'],state['period'])]=dict(state)
         for row in rows:
             summary = json.loads(row.pop("summary_json"))
             row.update(total=summary["total"], base_total=summary["base_total"], unassigned_orders=summary.get("unassigned_orders", 0),
                        amount_complete=summary.get("amount_complete", False), notes=summary.get("notes", []),
                        wage_preview_orders=summary.get("wage_preview_orders", 0))
-            state = headers.get(row['store_id'], {}).get(row['period'], {})
+            state = headers.get((row['store_id'],row['period']), {})
             row["shown"] = state.get('run_id') == row["finance_run"]
             row["closed"] = state.get('state') == 'closed'
         return {"calculations": rows}
