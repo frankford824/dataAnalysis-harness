@@ -747,6 +747,13 @@ TREND_PERIODS = 12
 
 @app.get("/api/trend")
 def trend(store_id: str = "", platform: str = "", periods: int = TREND_PERIODS) -> dict:
+    ws=workspace()
+    generation=ws.read_generation(store_id=store_id) if store_id and hasattr(ws,'read_generation') else ws.generation()
+    key=('trend',str(getattr(ws,'root','')), _model_revision(),generation,store_id,platform,periods)
+    return _bounded_parallel_cache(_payload_cache,key,lambda:_trend_data(store_id,platform,periods),_READ_CACHE_MAX)
+
+
+def _trend_data(store_id: str = "", platform: str = "", periods: int = TREND_PERIODS) -> dict:
     """损益表逐月：行是利润项，列是账期。
 
     总览那三个数（收入、利润、利润率）只够回答「这个月怎么样」。真正要解释的是
