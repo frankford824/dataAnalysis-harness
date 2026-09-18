@@ -394,6 +394,11 @@ watch(
     <n-alert v-if="failed" type="error" :bordered="false">{{ failed }}</n-alert>
 
     <template v-else-if="info">
+      <n-alert v-if="snap?.file_errors?.length" type="error" :bordered="false" style="margin-bottom:16px">
+        <strong>{{ snap.file_errors.length }} 份源文件解析失败，当前金额不完整</strong>
+        <p>这些文件尚未生成核算流水，因此不会出现在金额明细的「没进账」列表。</p>
+        <div v-for="item in snap.file_errors" :key="item.file" style="margin-top:8px;overflow-wrap:anywhere">{{ item.file }}：{{ item.reason }}</div>
+      </n-alert>
       <PageHead
         kicker="店铺账期"
         :title="info.store?.name || ''"

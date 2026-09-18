@@ -452,6 +452,7 @@ def _recompute_locked(
                     person["sales"] = None
                 if not gross_node or not gross_node.get("available"):
                     person["gross"] = None
+        _attach_parse_failures(payload, out.unknown_tables)
         if allocation:
             c = payload["commission"]
             sales_node = next((n for n in payload.get("statement", []) if n["name"] == "销售收入"), None)
@@ -612,6 +613,24 @@ def facts_of(ws: Workspace, run_id: int) -> pl.DataFrame | None:
         return pl.read_parquet(path)
     except Exception:  # pragma: no cover
         return None
+
+
+def _attach_parse_failures(payload: dict, errors: list[dict]) -> None:
+    """A successful channel must not hide a failed file from the same source."""
+    if not errors:
+        return
+    payload['file_errors'] = [{'file': e['file'], 'reason': e['reason']} for e in errors]
+    payload['can_close'] = False
+    details = [f"{e['file']}：{e['reason']}" for e in errors]
+    payload.setdefault('findings', []).append({
+        'id': 'input_parse_errors', 'name': '源文件解析失败', 'passed': False, 'blocking': True,
+        'message': f"{len(errors)} 份源文件未进入核算，当前金额可能不完整。" + '；'.join(details),
+        'head': f"{len(errors)} 份源文件未进入核算，当前金额可能不完整。", 'lines': details,
+    })
+    commission = payload.get('commission')
+    if isinstance(commission, dict):
+        commission['amount_complete'] = False
+        commission.setdefault('notes', []).append('源文件解析失败，当前提成仅按已成功解析的数据试算')
 
 
 def unknown_tables(ing: Ingestion, store: Store) -> list[dict[str, Any]]:

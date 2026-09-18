@@ -156,8 +156,8 @@
   bindings:
     - {role: txn_id, columns: [账务流水号]}
     - {role: subject, columns: [业务描述]}
-    - {role: income, columns: ["收入金额（+元）"]}
-    - {role: outgo, columns: ["支出金额（-元）"]}
+    - {role: income, columns: ["收入金额（+元）", "收入金额"]}
+    - {role: outgo, columns: ["支出金额（-元）", "支出金额"]}
     - {role: base_order_id, columns: [业务基础订单号], required: false}
     - {role: merchant_order_id, columns: [商户订单号], required: false}
     - {role: remark, columns: [备注], required: false}

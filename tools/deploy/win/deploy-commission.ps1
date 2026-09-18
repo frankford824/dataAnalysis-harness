@@ -1,7 +1,8 @@
 param(
   [Parameter(Mandatory=$true)][string]$Payload,
   [Parameter(Mandatory=$true)][string]$ExpectedVersion,
-  [Parameter(Mandatory=$true)][string]$Version
+  [Parameter(Mandatory=$true)][string]$Version,
+  [switch]$AllowTemplateUpdate
 )
 $ErrorActionPreference = 'Stop'
 [Console]::OutputEncoding = [Text.Encoding]::UTF8
@@ -18,7 +19,8 @@ try {
     if ($Entry.FullName.EndsWith('/')) { continue }
     $Name = $Entry.FullName.Replace('\','/')
     if ($Name -eq 'manifest.json') { continue }
-    if ($Name -ne 'VERSION' -and -not $Name.StartsWith('ledger/ledger/')) { throw "Unexpected file: $Name" }
+    if ($Name -ne 'VERSION' -and -not $Name.StartsWith('ledger/ledger/') -and
+        -not ($AllowTemplateUpdate -and $Name -eq 'models/cn-ecommerce/templates.yaml')) { throw "Unexpected file: $Name" }
     $Destination = [IO.Path]::GetFullPath((Join-Path $AppRoot $Name))
     if (-not $Destination.StartsWith($AppRoot + '\',[StringComparison]::OrdinalIgnoreCase)) { throw "Unsafe destination: $Name" }
   }
@@ -84,7 +86,10 @@ try {
     Copy-Item -LiteralPath (Join-Path $Stage $File.path) -Destination $Target -Force
   }
   foreach ($Name in $ModelHashes.Keys) {
-    if ((Get-FileHash -LiteralPath (Join-Path $AppRoot ('models\cn-ecommerce\'+$Name)) -Algorithm SHA256).Hash -ne $ModelHashes[$Name]) { throw "Model changed during code release: $Name" }
+    $ExpectedHash = $ModelHashes[$Name]
+    $TemplatePayload = @($Manifest.files | Where-Object { $_.path -eq 'models/cn-ecommerce/templates.yaml' })
+    if ($AllowTemplateUpdate -and $Name -eq 'templates.yaml' -and $TemplatePayload.Count -eq 1) { $ExpectedHash = $TemplatePayload[0].sha256 }
+    if ((Get-FileHash -LiteralPath (Join-Path $AppRoot ('models\cn-ecommerce\'+$Name)) -Algorithm SHA256).Hash -ne $ExpectedHash) { throw "Model changed during code release: $Name" }
   }
   Start-AndCheck
   Write-Output ("DEPLOYED " + $Version + " BACKUP " + $Backup)
