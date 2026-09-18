@@ -67,3 +67,13 @@ def test_catalog_cache_tracks_catalog_writes_without_business_audit(tmp_path):
     with reg.connect() as conn:
         conn.execute("INSERT INTO catalog VALUES('s','123456789001','Name','','{}','2026-01-01')")
     assert len(settings(reg)['rows'])==1
+
+
+def test_derived_cache_rejects_corrupted_payload(tmp_path):
+    from ledger.derived_read_cache import get,put
+    reg=Registry(tmp_path)
+    put(reg,'test',{'amount':12.34})
+    assert get(reg,'test')=={'amount':12.34}
+    with reg.connect() as conn:
+        conn.execute("UPDATE derived_read_cache SET value='{}' WHERE key='test'")
+    assert get(reg,'test') is None

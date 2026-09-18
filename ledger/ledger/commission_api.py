@@ -547,11 +547,16 @@ def install(app, workspace, model, model_root: Path | None = None):
         registry=reg()
         with registry.connect() as conn:
             boundary=conn.execute('SELECT max(t) FROM (SELECT max(valid_from) t FROM scheme_read_segment WHERE valid_from<=? UNION ALL SELECT max(valid_to) t FROM scheme_read_segment WHERE valid_to<=?)',(moment,moment)).fetchone()[0]
+            rule_generation=conn.execute('SELECT generation FROM scheme_read_clock WHERE id=1').fetchone()[0]
         from .read_cache import cached
         key=(str(registry.root.resolve()),registry.revision(),boundary)
         def compute():
+          from . import derived_read_cache
+          persistent_key='people:'+hashlib.sha256(json_text([rule_generation,boundary,people_count_code]).encode()).hexdigest()
+          counts=derived_read_cache.get(registry,persistent_key)
+          missing_counts=counts is None
           with registry.connect() as conn:
-            counts = {r['person_id']:dict(r) for r in conn.execute("""
+            if counts is None: counts = {r['person_id']:dict(r) for r in conn.execute("""
                 SELECT a.person_id person_id,
                        count(DISTINCT s.scheme_id) products,count(DISTINCT s.store_id) stores
                 FROM scheme_read_segment s JOIN scheme_read_person a
@@ -560,6 +565,7 @@ def install(app, workspace, model, model_root: Path | None = None):
                 GROUP BY a.person_id""", (moment,moment))}
             people = [{**dict(r), 'products':counts.get(r['id'],{}).get('products',0),
                        'stores':counts.get(r['id'],{}).get('stores',0)} for r in conn.execute('SELECT * FROM person ORDER BY archived,name,id')]
+          if missing_counts:derived_read_cache.put(registry,persistent_key,counts)
           return {'people':people}
         return cached(people_summary_cache,key,compute,8)
 
@@ -755,6 +761,8 @@ def install(app, workspace, model, model_root: Path | None = None):
     from collections import OrderedDict
     report_cache = OrderedDict()
     people_summary_cache = OrderedDict()
+    from . import commission_read_index
+    people_count_code=hashlib.sha256(Path(__file__).read_bytes()+Path(commission_read_index.__file__).read_bytes()).hexdigest()
     report_cache_lock = threading.Lock()
 
     def report_watermark():

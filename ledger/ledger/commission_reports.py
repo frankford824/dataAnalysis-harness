@@ -127,9 +127,11 @@ def _output_residual(total, values, field):
 _profit_lock = threading.RLock()
 _profit_cache: OrderedDict[tuple, dict[str, dict[str, float]] | None] = OrderedDict()
 _PROFIT_CACHE_LIMIT = 512  # Small person totals only, never full Parquet frames.
+_OUTPUT_CODE = None
 
 
 def _archived_allocated_outputs(registry, commission, *, production=False):
+    global _OUTPUT_CODE
     calculation = commission.get('calculation_id')
     if not calculation:
         return None
@@ -145,6 +147,18 @@ def _archived_allocated_outputs(registry, commission, *, production=False):
             return _profit_cache[key]
     path = registry.root / 'calculations' / Path(row['path']).name
     try:
+        from . import commission_engine, money, derived_read_cache
+        if _OUTPUT_CODE is None:
+            _OUTPUT_CODE=hashlib.sha256(Path(commission_engine.__file__).read_bytes()+Path(money.__file__).read_bytes()+Path(__file__).read_bytes()).hexdigest()
+        stat=path.stat()
+        persistent_key='output:'+hashlib.sha256(json.dumps([calculation,row['sha'],stat.st_size,stat.st_mtime_ns,_OUTPUT_CODE,commission.get('base_node'),commission.get('on_loss')]).encode()).hexdigest()
+        saved=derived_read_cache.get(registry,persistent_key)
+        if saved is not None:
+            results={False:saved['legacy'],True:saved['production']}
+            with _profit_lock:
+                for mode,value in results.items():_profit_cache[(*key[:3],mode)]=value
+                while len(_profit_cache)>_PROFIT_CACHE_LIMIT:_profit_cache.popitem(last=False)
+            return results[production]
         payload = path.read_bytes()
         if hashlib.sha256(payload).hexdigest() != row['sha']:
             return None
@@ -157,6 +171,7 @@ def _archived_allocated_outputs(registry, commission, *, production=False):
         details = pl.read_parquet(BytesIO(payload), columns=cols)
         basis = commission.get('base_node') == 'net_profit' and commission.get('on_loss') == 'deduct'
         results = {mode: allocated_outputs(details, production=mode, net_profit_basis=basis) for mode in (False, True)}
+        derived_read_cache.put(registry,persistent_key,{'legacy':results[False],'production':results[True]})
     except (OSError, ValueError, pl.exceptions.PolarsError):
         results = {False: None, True: None}
     with _profit_lock:

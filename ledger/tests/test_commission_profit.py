@@ -136,6 +136,24 @@ def test_multiple_producers_exclude_cut_from_denominator():
     assert all(r['sales']==0 for r in allocated_outputs(only_cut,production=True).values())
 
 
+def test_verified_output_cache_survives_memory_cache_clear(tmp_path,monkeypatch):
+    from ledger.commission_reports import _archived_allocated_outputs,_profit_cache
+    registry=Registry(tmp_path)
+    person=registry.person_save({'name':'A'},'test','register')
+    calc=_persist(registry,person['id'])
+    commission={'calculation_id':calc,'base_node':'net_profit','on_loss':'deduct'}
+    first=_archived_allocated_outputs(registry,commission,production=True)
+    _profit_cache.clear()
+    def fail(*a,**k):raise AssertionError('Verified unchanged evidence should reuse durable totals')
+    monkeypatch.setattr(pl,'read_parquet',fail)
+    assert _archived_allocated_outputs(registry,commission,production=True)==first
+    _profit_cache.clear()
+    with registry.connect() as conn:row=conn.execute('SELECT path FROM calculation WHERE id=?',(calc,)).fetchone()
+    path=registry.root/'calculations'/row['path']
+    path.write_bytes(path.read_bytes()+b'corrupt')
+    assert _archived_allocated_outputs(registry,commission,production=True) is None
+
+
 def test_compose_keeps_one_and_a_half_percent_share(tmp_path):
     registry = Registry(tmp_path)
     person = registry.person_save({'name': '王岩'}, 'tester', '登记')
