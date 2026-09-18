@@ -122,12 +122,13 @@ async function edit(row = {}) {
     const stamp=now()
     const current=segments.find(p=>p.valid_from<=stamp&&(!p.valid_to||stamp<p.valid_to))||segments.find(p=>p.valid_from>stamp)||row.setting||{}
     const grouped=new Map()
-    for(const p of current.allocations||[])grouped.set(p.person_id,(grouped.get(p.person_id)||0)+Number(p.rate))
+    const allocDuty={}
+    for(const p of current.allocations||[]){grouped.set(p.person_id,(grouped.get(p.person_id)||0)+Number(p.rate));if(p.duty)allocDuty[p.person_id]=p.duty}
     const storeId=row.store_id||(shared.storeIds.length===1?shared.storeIds[0]:'')
-    let duties={}
-    if(storeId){try{duties=Object.fromEntries((await loadStoreMembers([storeId], current.valid_from||'')).map(m=>[m.person_id,m.duty||m.suggested_duty||'produce']))}catch{}}
+    let storeDuties={}
+    if(storeId){try{storeDuties=Object.fromEntries((await loadStoreMembers([storeId], current.valid_from||'')).map(m=>[m.person_id,m.duty||m.suggested_duty||'produce']))}catch{}}
     if(ticket!==editorSerial)return
-    const allocations=selected.value?[...grouped].map(([person,rate])=>({person,percent:Number((rate*100).toFixed(8)),duty:duties[person]||'produce'})):(row.people||[]).map(p=>({person:p.person_id,percent:Number((Number(p.rate)*100).toFixed(8)),duty:p.duty||duties[p.person_id]||'produce'}))
+    const allocations=selected.value?[...grouped].map(([person,rate])=>({person,percent:Number((rate*100).toFixed(8)),duty:allocDuty[person]||storeDuties[person]||'produce'})):(row.people||[]).map(p=>({person:p.person_id,percent:Number((Number(p.rate)*100).toFixed(8)),duty:p.duty||allocDuty[p.person_id]||storeDuties[p.person_id]||'produce'}))
     form.value={store_id:row.store_id||(shared.storeIds.length===1?shared.storeIds[0]:''),product_id:row.product_id||'',product_name:selected.value?.product_name||row.product_name||'',
       mode:current.mode||'distribute',valid_from:row.issue_valid_from||(current.valid_from>stamp?current.valid_from:stamp),valid_to:current.valid_to>stamp?current.valid_to:'',allocations}
     if(!form.value.allocations.length)form.value.allocations.push({person:null,percent:null,duty:'produce'})
@@ -158,14 +159,6 @@ async function save() {
       duty: p.duty || 'produce'
     })) : []
     await call('/settings', {method:'POST', body:JSON.stringify({...form.value, allocations, expected_revision:selected.value?.revision || 0})})
-    const dutyRows = form.value.mode === 'distribute'
-      ? form.value.allocations.filter(p => p.person && people.value.some(x => x.id === p.person))
-          .map(p => ({person_id:p.person, duty:p.duty || 'produce'}))
-      : []
-    if (dutyRows.length && form.value.store_id) {
-      await saveStoreMembers([form.value.store_id], dutyRows, '随提成设置保存本店身份',
-        {valid_from: form.value.valid_from, valid_to: form.value.valid_to})
-    }
     showEditor.value = false; message.success('已保存')
     await shared.changed();load()
   } catch(e) { message.error(e.message, {duration:5000}) }
