@@ -215,31 +215,44 @@ def iter_settings(registry: Registry, *, store_id="", search="", state="", after
     stores = sorted(set(store_ids or ([store_id] if store_id else [])))
     persons = sorted(set(person_ids or ([person_id] if person_id else [])))
     tokens = parse_search_tokens(search)
-    clauses = []; params = []
-    if stores:
-        store_sql, store_params = _store_condition(stores)
-        clauses.append(store_sql); params.extend(store_params)
+    after_parts = None
     if after:
-        parts = after.split('\x1f', 1)
-        if len(parts) != 2: raise RegistryError('请重新打开商品列表')
-        clauses.append('(store_id,product_id)>(?,?)'); params.extend(parts)
-    condition = ' AND '.join(clauses) or '1'
-    candidate_name = ("coalesce(nullif((SELECT s.product_name FROM scheme s "
-                      "WHERE s.store_id=items.store_id AND s.product_id=items.product_id),''),product_name)")
-    cand_sql, cand_params = product_search_sql(tokens, 'product_id', candidate_name)
+        after_parts = after.split('\x1f', 1)
+        if len(after_parts) != 2: raise RegistryError('请重新打开商品列表')
+    def scope_sql(alias):
+        parts, values = [], []
+        if stores:
+            parts.append(f'{alias}.store_id IN ({",".join("?" for _ in stores)})')
+            values.extend(stores)
+        if after_parts:
+            parts.append(f'({alias}.store_id,{alias}.product_id)>(?,?)')
+            values.extend(after_parts)
+        return ' AND '.join(parts) or '1', values
+    catalog_cond, catalog_params = scope_sql('c')
+    scheme_cond, scheme_params = scope_sql('s')
+    catalog_name = ("coalesce(nullif((SELECT z.product_name FROM scheme z "
+                    "WHERE z.store_id=c.store_id AND z.product_id=c.product_id),''),c.product_name)")
+    search_c, search_c_params = product_search_sql(tokens, 'c.product_id', catalog_name)
+    search_s, search_s_params = product_search_sql(tokens, 's.product_id', "coalesce(s.product_name,'')")
     row_sql, row_params = product_search_sql(tokens, 'product_id', 'product_name')
-    # Apply indexed shop/cursor bounds before joining version JSON. For the common
-    # unfiltered page, only decode the requested page, not the whole catalogue.
+    # Key-only scan first. Payload/JSON is joined only for the page (or the
+    # state/person filter set), not the whole 100k-row catalogue.
     candidate_limit = limit if not (state or persons or _count_only) else -1
     person_condition = '1' if not persons else "EXISTS (SELECT 1 FROM json_each(coalesce(setting,(SELECT f.value FROM json_each(body,'$.segments') f WHERE json_extract(f.value,'$.valid_from')>? ORDER BY json_extract(f.value,'$.valid_from') LIMIT 1),'{}'),'$.allocations') a WHERE json_extract(a.value,'$.person_id') IN ("+','.join('?' for _ in persons)+'))'
-    sql = f"""WITH items AS (
-      SELECT store_id,product_id,product_name,payload FROM catalog WHERE {condition}
-      UNION ALL
-      SELECT s.store_id,s.product_id,s.product_name,'{{}}' payload FROM scheme s WHERE {condition}
-      AND NOT EXISTS (SELECT 1 FROM catalog c WHERE c.store_id=s.store_id AND c.product_id=s.product_id)
+    sql = f"""WITH keys AS (
+      SELECT store_id,product_id FROM (
+        SELECT c.store_id,c.product_id FROM catalog c WHERE {catalog_cond} AND {search_c}
+        UNION
+        SELECT s.store_id,s.product_id FROM scheme s WHERE {scheme_cond}
+          AND NOT EXISTS (SELECT 1 FROM catalog x WHERE x.store_id=s.store_id AND x.product_id=s.product_id)
+          AND {search_s}
+      ) ORDER BY store_id,product_id LIMIT ?
     ), candidates AS (
-      SELECT * FROM items WHERE {cand_sql}
-      ORDER BY store_id,product_id LIMIT ?
+      SELECT k.store_id,k.product_id,coalesce(c.product_name,s.product_name,'') product_name,
+             coalesce(c.payload,'{{}}') payload
+      FROM keys k
+      LEFT JOIN catalog c ON c.store_id=k.store_id AND c.product_id=k.product_id
+      LEFT JOIN scheme s ON s.store_id=k.store_id AND s.product_id=k.product_id
     ), rows AS (
       SELECT c.store_id,c.product_id,coalesce(nullif(s.product_name,''),c.product_name) product_name,c.payload,
         s.id scheme_id,s.revision,v.body,j.value setting,
@@ -262,7 +275,8 @@ def iter_settings(registry: Registry, *, store_id="", search="", state="", after
     with registry.connect(thread_affine=False) as conn:
         conn.execute("BEGIN")
         people = {r['id']:r['name'] for r in conn.execute('SELECT id,name FROM person')}
-        cursor = conn.execute(sql, [*params,*params,*cand_params,candidate_limit,moment,moment,moment,
+        cursor = conn.execute(sql, [*catalog_params,*search_c_params,*scheme_params,*search_s_params,
+                              candidate_limit,moment,moment,moment,
                               *row_params,state,state,*([moment,*persons] if persons else []),limit])
         for record in cursor:
             if _count_only:
