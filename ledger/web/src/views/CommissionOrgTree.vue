@@ -2,30 +2,20 @@
 import { computed, onActivated, ref, watch } from 'vue'
 import { useMessage } from 'naive-ui'
 import {
-  Search,
   Plus,
   Users,
   AlertTriangle,
   Sparkles,
-  LayoutGrid,
-  Network,
   RefreshCw,
   Building2,
   Check,
-  ChevronRight,
   ArrowRight,
 } from '@lucide/vue'
 import { useCommission } from '../commissionStore'
-import OrgMacColumnView from '../components/OrgMacColumnView.vue'
-import OrgMindMap from '../components/OrgMindMap.vue'
-import OrgEditPanel from '../components/OrgEditPanel.vue'
+import OrgColumnView from '../components/OrgColumnView.vue'
 
 const shared = useCommission()
 const message = useMessage()
-
-// View mode: 'mac' (macOS Miller columns) | 'mindmap' (XMind canvas)
-const viewMode = ref(localStorage.getItem('org_view_mode') || 'mac')
-watch(viewMode, val => localStorage.setItem('org_view_mode', val))
 
 const tree = ref([])
 const people = ref([])
@@ -33,13 +23,10 @@ const unassigned = ref([])
 const error = ref('')
 const loading = ref(false)
 const saving = ref(false)
-const search = ref('')
 const selectedId = ref('')
-const collapsed = ref({})
 const adding = ref(null)
 const newName = ref('')
 const products = ref([])
-const mindmapBoard = ref(null)
 
 // Smart Auto-Organize Modal state
 const showSmartModal = ref(false)
@@ -63,9 +50,6 @@ function flatten(nodes, acc = []) {
   }
   return acc
 }
-
-const index = computed(() => Object.fromEntries(flatten(tree.value).map(node => [node.id, node])))
-const selected = computed(() => index.value[selectedId.value] || null)
 
 const stats = computed(() => {
   const all = flatten(tree.value)
@@ -102,22 +86,6 @@ function startAdd(parent) {
   adding.value = parent || { id: '', name: '根节点' }
   newName.value = ''
   if (parent?.id) selectedId.value = parent.id
-}
-
-function toggle(id) {
-  collapsed.value = { ...collapsed.value, [id]: !collapsed.value[id] }
-}
-
-function expandAll() {
-  collapsed.value = {}
-}
-
-function collapseAll() {
-  const all = {}
-  for (const node of flatten(tree.value)) {
-    if (node.children?.length) all[node.id] = true
-  }
-  collapsed.value = all
 }
 
 async function createPerson() {
@@ -286,30 +254,6 @@ defineExpose({ reload: load })
         </div>
       </div>
 
-      <!-- Center: High-End View Switcher -->
-      <div class="org-nav-center">
-        <div class="org-view-switcher">
-          <button
-            type="button"
-            class="org-view-btn"
-            :class="{ active: viewMode === 'mac' }"
-            @click="viewMode = 'mac'"
-          >
-            <LayoutGrid :size="15" />
-            <span>macOS 栏式分级</span>
-          </button>
-          <button
-            type="button"
-            class="org-view-btn"
-            :class="{ active: viewMode === 'mindmap' }"
-            @click="viewMode = 'mindmap'"
-          >
-            <Network :size="15" />
-            <span>XMind 思维导图</span>
-          </button>
-        </div>
-      </div>
-
       <!-- Right: Action Buttons -->
       <div class="org-nav-right">
         <!-- 智能理顺团队快捷按钮 -->
@@ -322,13 +266,6 @@ defineExpose({ reload: load })
           <Sparkles :size="14" class="text-indigo-500" />
           <span>智能理顺团队</span>
         </button>
-
-        <!-- 视图专属按钮 -->
-        <template v-if="viewMode === 'mindmap'">
-          <n-button text size="small" :disabled="loading" @click="expandAll">全部展开</n-button>
-          <n-button text size="small" :disabled="loading" @click="collapseAll">全部收起</n-button>
-          <n-button text size="small" :disabled="loading" @click="mindmapBoard?.fit()">适应画布</n-button>
-        </template>
 
         <button
           type="button"
@@ -357,11 +294,9 @@ defineExpose({ reload: load })
       <button class="text-button" @click="load">重试</button>
     </div>
 
-    <!-- MAIN WORKSPACE -->
+    <!-- MAIN WORKSPACE: Column Hierarchy View -->
     <main class="org-main-area" :class="{ loading }">
-      <!-- VIEW 1: macOS Miller Columns -->
-      <OrgMacColumnView
-        v-if="viewMode === 'mac'"
+      <OrgColumnView
         :tree="tree"
         :people="people"
         :products="products"
@@ -374,36 +309,6 @@ defineExpose({ reload: load })
         @add-child="startAdd"
         @create-team="startAdd(null)"
       />
-
-      <!-- VIEW 2: XMind Mind Map Canvas -->
-      <div v-else class="org-mindmap-view-shell">
-        <OrgMindMap
-          ref="mindmapBoard"
-          :tree="tree"
-          :people="people"
-          :selected-id="selectedId"
-          :collapsed="collapsed"
-          @select="select"
-          @drop="drop"
-          @add="startAdd"
-          @toggle="toggle"
-        />
-
-        <!-- Slide-out Edit Inspector for Mindmap view -->
-        <transition name="slide-panel">
-          <OrgEditPanel
-            v-if="selected"
-            class="mindmap-inspector-dock"
-            :person="selected"
-            :people="people"
-            :products="products"
-            :saving="saving"
-            @save="savePerson"
-            @stores="saveStores"
-            @close="selectedId = ''"
-          />
-        </transition>
-      </div>
     </main>
 
     <!-- SMART AUTO-ORGANIZE MODAL -->
