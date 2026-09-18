@@ -714,6 +714,76 @@ class Registry:
         unassigned.sort(key=lambda item: item["name"])
         return {"people": people, "tree": tree, "unassigned_stores": unassigned}
 
+    def infer_org_hierarchy(self, store_names: dict[str, str] | None = None) -> dict:
+        names = store_names or {}
+        people = self.people()
+        assignments = self.org_stores()
+        pbyid = {p["id"]: p for p in people}
+        pbyname = {p["name"]: p for p in people}
+
+        top_11_names = ["宋永康", "刘露", "陈慨", "吴鹏", "汪学成", "何润华", "蔡果", "姜惠卉", "谷本文", "周毛毛", "叶真"]
+        leaders = [pbyname[n] for n in top_11_names if n in pbyname]
+        leader_ids = {l["id"]: l["name"] for l in leaders}
+
+        # Store names by person
+        person_stores: dict[str, list[str]] = {}
+        for a in assignments:
+            sname = names.get(a["store_id"], a["store_id"])
+            person_stores.setdefault(a["person_id"], []).append(sname)
+
+        # Stores associated with each leader
+        leader_store_sets = {
+            lname: set(person_stores.get(lid, []))
+            for lid, lname in leader_ids.items()
+        }
+
+        suggestions = []
+        for p in people:
+            if p["id"] in leader_ids or p.get("parent_id"):
+                continue
+            stores = person_stores.get(p["id"], [])
+            if not stores:
+                continue
+
+            matched_leader_name = None
+            matched_reason = ""
+
+            # Rule 1: Store name prefix match
+            for sname in stores:
+                for lname in top_11_names:
+                    if sname.startswith(lname + "-") or f"-{lname}-" in sname:
+                        matched_leader_name = lname
+                        matched_reason = f"店铺前缀匹配「{sname}」"
+                        break
+                if matched_leader_name:
+                    break
+
+            # Rule 2: Shared store with leader
+            if not matched_leader_name:
+                p_set = set(stores)
+                for lname, l_set in leader_store_sets.items():
+                    common = p_set & l_set
+                    if common:
+                        matched_leader_name = lname
+                        matched_reason = f"共同负责店铺「{list(common)[0]}」"
+                        break
+
+            if matched_leader_name and matched_leader_name in pbyname:
+                target_leader = pbyname[matched_leader_name]
+                suggestions.append({
+                    "person_id": p["id"],
+                    "person_name": p["name"],
+                    "suggested_parent_id": target_leader["id"],
+                    "suggested_parent_name": target_leader["name"],
+                    "reason": matched_reason,
+                })
+
+        return {
+            "leaders": [{"id": l["id"], "name": l["name"]} for l in leaders],
+            "suggestions": suggestions,
+            "total": len(suggestions),
+        }
+
     def hierarchy_allocations(self, allocations: list[dict]) -> list[dict]:
         people = {p["id"]: p for p in self.people()}
         existing = {str(line.get("person_id") or "") for line in allocations}

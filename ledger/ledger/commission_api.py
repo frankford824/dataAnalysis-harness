@@ -147,6 +147,11 @@ class OrgStoresChange(BaseModel):
     reason: str = Field(min_length=1, max_length=500)
 
 
+class OrgInferApply(BaseModel):
+    items: list[dict] = Field(default_factory=list, max_length=500)
+    reason: str = Field(default="一键按店铺理顺架构", min_length=1, max_length=500)
+
+
 class FillHierarchyChange(BaseModel):
     store_id: str = ''
     product_id: str = ''
@@ -450,6 +455,27 @@ def install(app, workspace, model, model_root: Path | None = None):
         if unknown:
             raise RegistryError("有尚未登记的店铺，无法分配")
         return reg().save_org_stores(change.person_id, change.store_ids, actor(request)["id"], change.reason)
+
+    @router.get("/org/infer")
+    def org_infer_preview():
+        names = {s.id: s.name for s in model().stores}
+        return reg().infer_org_hierarchy(names)
+
+    @router.post("/org/infer/apply")
+    def org_infer_apply(payload: OrgInferApply, request: Request):
+        applied = 0
+        act = actor(request)["id"]
+        # Group by target parent_id for efficient org_move calls
+        by_parent: dict[str, list[str]] = {}
+        for item in payload.items:
+            pid = item.get("person_id")
+            parent_id = item.get("parent_id")
+            if pid and parent_id:
+                by_parent.setdefault(parent_id, []).append(pid)
+        for parent_id, pids in by_parent.items():
+            res = reg().org_move(pids, parent_id, act, payload.reason)
+            applied += len(res)
+        return {"applied": applied}
 
     @router.post("/org/fill-hierarchy")
     def fill_hierarchy(change: FillHierarchyChange, request: Request):

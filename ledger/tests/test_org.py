@@ -123,3 +123,16 @@ def test_legacy_leader_migrates_to_parent_and_org_store(tmp_path):
     _initialized.discard(path.resolve())
     again = Registry(tmp_path)
     assert again.org_stores() == []
+
+
+def test_infer_org_hierarchy_by_store_prefix(tmp_path):
+    reg = Registry(tmp_path)
+    lead, member = _people(reg, ("宋永康", "宗玲玲"))
+    reg.save_org_stores(member["id"], ["s_song"], "test", "分配店铺")
+    inferred = reg.infer_org_hierarchy({"s_song": "宋永康-PDD婚庆节日礼品"})
+    assert inferred["total"] == 1
+    sug = inferred["suggestions"][0]
+    assert sug["person_id"] == member["id"]
+    assert sug["suggested_parent_id"] == lead["id"]
+    assert "店铺前缀匹配" in sug["reason"]
+
