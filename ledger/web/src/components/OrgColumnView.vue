@@ -14,6 +14,8 @@ import {
   X,
 } from '@lucide/vue'
 import { useApp } from '../store'
+import { useMessage } from 'naive-ui'
+import { DUTY_OPTIONS, dutyLabel, loadStoreMembers, saveStoreMembers } from '../storeMembers'
 
 const props = defineProps({
   tree: { type: Array, default: () => [] },
@@ -26,6 +28,11 @@ const props = defineProps({
 const emit = defineEmits(['select', 'save-person', 'save-stores', 'move', 'add-child', 'create-team'])
 
 const app = useApp()
+const message = useMessage()
+const storeDuties = ref([])
+const dutyFrom = ref('')
+const dutySaving = ref(false)
+const dutyError = ref('')
 const teamSearch = ref('')
 const selectedTeamId = ref('')
 const activePersonId = ref('')
@@ -184,6 +191,50 @@ function submitStores() {
     person_id: form.value.id,
     store_ids: [...formStoreIds.value],
   })
+}
+
+async function loadDuties() {
+  dutyError.value = ''
+  const personId = form.value.id
+  const ids = [...formStoreIds.value]
+  if (!personId || !ids.length) {
+    storeDuties.value = []
+    return
+  }
+  try {
+    const members = await loadStoreMembers(ids)
+    storeDuties.value = ids.map(sid => {
+      const mine = members.find(m => m.person_id === personId && m.store_id === sid)
+      return {
+        store_id: sid,
+        duty: mine?.duty || mine?.suggested_duty || 'produce',
+        segments: mine?.segments || [],
+      }
+    })
+  } catch (e) {
+    dutyError.value = e.message
+    storeDuties.value = ids.map(sid => ({ store_id: sid, duty: 'produce', segments: [] }))
+  }
+}
+
+watch([formStoreIds, () => form.value.id], loadDuties, { deep: true })
+
+async function saveDuties() {
+  if (!form.value.id || !storeDuties.value.length || dutySaving.value) return
+  dutySaving.value = true
+  dutyError.value = ''
+  try {
+    for (const row of storeDuties.value) {
+      await saveStoreMembers([row.store_id], [{ person_id: form.value.id, duty: row.duty }], '组织架构设置店铺默认身份', { valid_from: dutyFrom.value })
+    }
+    await loadDuties()
+    message.success('店铺默认身份已保存')
+  } catch (e) {
+    dutyError.value = e.message
+    message.error(e.message)
+  } finally {
+    dutySaving.value = false
+  }
 }
 
 function removeStore(sid) {
@@ -569,6 +620,30 @@ const initials = computed(() => (activePerson.value?.name || '?').slice(0, 1))
               >
                 保存店铺
               </n-button>
+            </div>
+          </div>
+
+          <div class="org-form-group">
+            <h4 class="org-section-title">
+              <Briefcase :size="14" />
+              <span>店铺默认身份</span>
+            </h4>
+            <p class="org-section-desc">
+              做货 = 归属销售/毛利/利润；抽点 = 只计提成。商品未单独标注身份时按此生效，可按时间节点分段。
+            </p>
+            <div class="org-field" style="max-width:240px;margin-bottom:10px">
+              <label>本次生效时间（可空，空则立即生效）</label>
+              <input v-model="dutyFrom" type="datetime-local" step="1" class="org-input" />
+            </div>
+            <p v-if="dutyError" class="org-section-desc" style="color:#b42318">{{ dutyError }}</p>
+            <div v-if="!storeDuties.length" class="org-no-store-tip">先保存负责店铺后，再设置做货 / 抽点</div>
+            <div v-else class="org-duty-list">
+              <div v-for="row in storeDuties" :key="row.store_id" class="org-duty-row">
+                <span class="org-duty-store">{{ storeOptions.find(o => o.value === row.store_id)?.label || row.store_id }}</span>
+                <n-select v-model:value="row.duty" :options="DUTY_OPTIONS" size="small" style="width:168px" />
+                <span class="org-duty-seg">{{ row.segments?.length ? row.segments.map(s => `${dutyLabel(s.duty)} ${s.valid_from?.slice(0,10) || ''}`).join('；') : '尚未分段' }}</span>
+              </div>
+              <n-button size="small" type="primary" :loading="dutySaving" @click="saveDuties">保存身份</n-button>
             </div>
           </div>
 

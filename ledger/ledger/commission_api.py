@@ -9,6 +9,8 @@ import io
 import json
 import sqlite3
 import re
+import threading
+import time
 import uuid
 from decimal import Decimal
 from contextlib import closing
@@ -500,8 +502,9 @@ def install(app, workspace, model, model_root: Path | None = None):
     @router.get("/settings")
     def settings(store_id: str = "", search: str = "", state: str = "", after: str = "",
                  limit: int = Query(60, ge=1, le=500), person_id: str = "",
-                 store_ids: list[str] = Query(default=[]), person_ids: list[str] = Query(default=[])):
-        return commission_catalog.settings(reg(), store_id=store_id, search=search, state=state, after=after, limit=limit, person_id=person_id, store_ids=store_ids, person_ids=person_ids)
+                 store_ids: list[str] = Query(default=[]), person_ids: list[str] = Query(default=[]),
+                 include_total: bool = True):
+        return commission_catalog.settings(reg(), store_id=store_id, search=search, state=state, after=after, limit=limit, person_id=person_id, store_ids=store_ids, person_ids=person_ids, include_total=include_total)
 
     @router.post("/settings/preview")
     async def settings_preview(request: Request):
@@ -731,13 +734,43 @@ def install(app, workspace, model, model_root: Path | None = None):
             registry.audit(conn, who, "import.resolve", batch_id, change.reason, dict(row), result)
         return result
 
+    report_cache = {}
+    report_cache_lock = threading.Lock()
+
+    def report_watermark():
+        row = workspace().conn.execute("SELECT ifnull(max(id),0) FROM run").fetchone()
+        return int(row[0])
+
+    def report_cache_key(selection: ReportSelection):
+        return (selection.start, selection.end, tuple(selection.store_ids or []),
+                tuple(selection.person_ids or []), tuple(selection.run_ids or []),
+                report_watermark())
+
+    def clear_report_cache():
+        with report_cache_lock:
+            report_cache.clear()
+
     def report_result(selection: ReportSelection):
+        key = report_cache_key(selection)
+        now_ts = time.time()
+        with report_cache_lock:
+            hit = report_cache.get(key)
+            if hit and now_ts - hit[0] < 45 and (not selection.fingerprint or selection.fingerprint == hit[2]):
+                report, fingerprint = hit[1], hit[2]
+                if selection.fingerprint and selection.fingerprint != fingerprint:
+                    raise RevisionConflict("计算状态或人员信息已变化，请重新查询后导出")
+                return {**report, "fingerprint": fingerprint}
         report = commission_reports.build(workspace(), reg(), model(), selection.start, selection.end,
                                           selection.store_ids, selection.person_ids, selection.run_ids,
                                           model_root=model_root)
         fingerprint = hashlib.sha256(json_text(report).encode()).hexdigest()
         if selection.fingerprint and selection.fingerprint != fingerprint:
             raise RevisionConflict("计算状态或人员信息已变化，请重新查询后导出")
+        with report_cache_lock:
+            report_cache[key] = (now_ts, report, fingerprint)
+            if len(report_cache) > 8:
+                oldest = min(report_cache, key=lambda item: report_cache[item][0])
+                report_cache.pop(oldest, None)
         return {**report, "fingerprint": fingerprint}
 
     @router.post("/reports/query")
@@ -808,13 +841,15 @@ def install(app, workspace, model, model_root: Path | None = None):
 
     @router.post('/payout-confirmations')
     def payout_confirmation_save(change: PayoutConfirmationChange, request: Request):
-        return commission_confirm.confirm(
+        result = commission_confirm.confirm(
             workspace(), reg(), model(), store_id=change.store_id,
             period=change.period, run_id=change.run_id,
             source_sha=change.source_sha,
             expected_confirmation_id=change.expected_confirmation_id,
             payouts=change.payouts, no_payout=change.no_payout,
             reason=change.reason, actor=actor(request)['id'])
+        clear_report_cache()
+        return result
 
     @router.post("/export/reports/{kind}")
     def report_export(kind: str, selection: ReportSelection):

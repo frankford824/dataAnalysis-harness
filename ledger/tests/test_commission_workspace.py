@@ -42,6 +42,22 @@ def test_filtered_cursor_does_not_skip_sparse_matches_or_duplicate_stores(tmp_pa
     assert len(pending['rows'])==60 and pending['has_more']
 
 
+def test_batch_search_splits_comma_and_ideographic_separators(tmp_path):
+    registry, model, a, b = setup(tmp_path)
+    with registry.transaction() as conn:
+        conn.executemany('INSERT INTO catalog VALUES(?,?,?,?,?,?)', [
+            ('s1', '123456789001', '甲商品', '', '{}', '2000-01-01'),
+            ('s1', '123456789002', '乙商品', '', '{}', '2000-01-01'),
+            ('s1', '123456789003', '丙商品', '', '{}', '2000-01-01'),
+        ])
+    ids = {row['product_id'] for row in settings(registry, search='123456789001,123456789003')['rows']}
+    assert ids == {'123456789001', '123456789003'}
+    ids = {row['product_id'] for row in settings(registry, search='123456789002、123456789003')['rows']}
+    assert ids == {'123456789002', '123456789003'}
+    ids = {row['product_id'] for row in settings(registry, search='123456789001 123456789002')['rows']}
+    assert ids == {'123456789001', '123456789002'}
+
+
 def test_search_uses_edited_product_name_and_treats_wildcards_as_text(tmp_path):
     registry,model,a,b=setup(tmp_path)
     registry.save_setting({'store_id':'s1','product_id':'123456789001','expected_revision':1,

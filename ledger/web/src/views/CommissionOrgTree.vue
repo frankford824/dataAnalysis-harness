@@ -216,7 +216,7 @@ watch(selectedId, async id => {
   products.value = []
   if (!id) return
   try {
-    const query = new URLSearchParams({ limit: '40' })
+    const query = new URLSearchParams({ limit: '40', include_total: 'false' })
     query.append('person_ids', id)
     products.value = (await call('/settings?' + query.toString())).rows || []
   } catch {
@@ -237,6 +237,7 @@ defineExpose({ reload: load })
         <div class="org-nav-brand">
           <Building2 :size="18" class="text-indigo-600" />
           <h1>销售组织架构</h1>
+          <p class="org-nav-hint">人员、上下级、负责店铺与默认做货/抽点都在这里维护</p>
         </div>
         <div class="org-stat-pills">
           <span class="org-pill leaders">

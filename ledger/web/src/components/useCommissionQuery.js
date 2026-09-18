@@ -2,7 +2,7 @@ import { computed, onActivated, onDeactivated, onUnmounted, ref, watch } from 'v
 import { useCommission } from '../commissionStore'
 import { latestRequest } from './commissionRequest'
 
-export function useCommissionQuery(section, getKey, fetcher, mayRefresh = () => true, { followTick = true } = {}) {
+export function useCommissionQuery(section, getKey, fetcher, mayRefresh = () => true, { followTick = true, delay = 180 } = {}) {
   const state = useCommission(), data = ref(null), error = ref(''), loading = ref(false), loadedKey = ref('')
   const key = computed(getKey), request = latestRequest()
   let active = false, timer, generation = 0
@@ -21,11 +21,11 @@ export function useCommissionQuery(section, getKey, fetcher, mayRefresh = () => 
     } catch (e) { if(current === generation) error.value = e.message }
     finally { if (current === generation) loading.value = false }
   }
-  function schedule(delay = 180) {
+  function schedule(wait = delay) {
     generation++; clearTimeout(timer); request.cancel()
     if (!active) return
     loading.value = true
-    timer = setTimeout(load, delay)
+    timer = setTimeout(load, wait)
   }
   watch(key, () => schedule())
   watch(() => state.ready, () => schedule(0))

@@ -71,6 +71,7 @@ CREATE TABLE IF NOT EXISTS catalog (
  order_store_id TEXT NOT NULL, payload TEXT NOT NULL, refreshed_at TEXT NOT NULL,
  PRIMARY KEY(store_id,product_id)
 );
+CREATE INDEX IF NOT EXISTS catalog_product_id ON catalog(product_id);
 CREATE TABLE IF NOT EXISTS external_person (id TEXT PRIMARY KEY, payload TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS import_batch (
  id TEXT PRIMARY KEY, sha TEXT NOT NULL, filename TEXT NOT NULL, at TEXT NOT NULL,

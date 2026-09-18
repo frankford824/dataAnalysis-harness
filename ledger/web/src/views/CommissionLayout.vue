@@ -37,7 +37,7 @@ function applyQuery(query) {
   }
   if (/^\d{4}-\d{2}$/.test(query.from || '')) state.start = query.from
   if (/^\d{4}-\d{2}$/.test(query.to || '')) state.end = query.to
-  if(['people','stores','breakdown','coverage'].includes(query.view))state.reportView=query.view
+  if(['teams','people','stores','store_people','breakdown','coverage'].includes(query.view))state.reportView=query.view
 }
 watch(() => route.query, query => {if(!localQueries.has(queryKey(query)))applyQuery(query)})
 function syncQuery() {
@@ -56,7 +56,7 @@ watch(() => [state.storeIds, state.personIds, state.start, state.end, state.repo
     <nav class="commission-mobile-nav" aria-label="提成菜单"><router-link :to="{name:'commission',query:route.query}">提成设置</router-link><router-link :to="{name:'commission-reports',query:route.query}">金额汇总</router-link><router-link :to="{name:'commission-org',query:route.query}">组织架构</router-link></nav>
     <div v-if="section!=='org'" class="workflow-scope">
       <div class="workflow-scope-controls">
-        <n-input v-if="section==='settings'" v-model:value="state.settingsSearch" class="workflow-product-search" placeholder="搜索商品或宝贝ID" aria-label="搜索商品" clearable><template #prefix><Search :size="15"/></template></n-input>
+        <n-input v-if="section==='settings'" v-model:value="state.settingsSearch" class="workflow-product-search" placeholder="搜索商品或宝贝ID，多个用逗号、顿号分隔" aria-label="搜索商品" clearable><template #prefix><Search :size="15"/></template></n-input>
         <LedgerMultiSelect v-model="state.storeIds" :options="state.storeOptions" label="家店铺" aria-label="筛选店铺" :disabled="!state.ready" :show-chips="false"/>
         <LedgerMultiSelect v-model="state.personIds" :options="state.personOptions" label="位人员" aria-label="筛选人员" :disabled="!state.ready" :show-chips="false"/>
         <n-button text class="workflow-refresh" :disabled="state.loading[section]||!state.ready" @click="refreshPage"><RefreshCw :size="14" style="margin-right:6px"/>刷新</n-button>

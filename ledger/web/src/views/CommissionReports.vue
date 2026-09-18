@@ -126,6 +126,9 @@ function targetsFor(row) {
     targets=(report.value.confirmation_scopes||[]).filter(item=>item.store_id===row.store_id)
   }else if(state.reportView==='people'){
     targets=(report.value.person_confirmation_scopes||[]).filter(item=>item.person_id===row.person_id)
+  }else if(state.reportView==='teams'){
+    const memberIds=new Set((row.members||[]).map(m=>m.person_id).filter(Boolean))
+    targets=(report.value.person_confirmation_scopes||[]).filter(item=>memberIds.has(item.person_id))
   }
   const unique=new Map()
   for(const target of targets)if(target.run_id)unique.set(`${target.store_id}:${target.period}:${target.run_id}`,target)
@@ -137,7 +140,16 @@ function choosePayout(row) {
   if(!targets.length){payoutError.value='当前行没有可确认的店铺月份核算记录';return}
   if(targets.length===1){openPayout(targets[0]);return}
   payoutTargets.value=targets
-  payoutTargetTitle.value=row.person||row.store||'提成'
+  payoutTargetTitle.value=row.person||row.team||row.store||'提成'
+  payoutTargetsOpen.value=true
+}
+function openToolbarPayout() {
+  if(locked.value||!report.value)return
+  const targets=report.value.confirmation_scopes||[]
+  if(!targets.length)return
+  if(targets.length===1){openPayout(targets[0]);return}
+  payoutTargets.value=targets
+  payoutTargetTitle.value='本期'
   payoutTargetsOpen.value=true
 }
 function pickPayout(target){payoutTargetsOpen.value=false;openPayout(target)}
@@ -276,9 +288,17 @@ const tableColumns=computed(()=>{
       }
       if(key==='amount'){
         if(row.kind==='store')return h('strong',money(row.store_amount))
-        return h('div',{class:['table-money',row[key]<0?'negative':'']},[
+        const canEdit=targetsFor(row).length>0
+        return h('button',{
+          type:'button',
+          class:['table-money','actual-payout-cell',row[key]<0?'negative':'',canEdit?'is-editable':''],
+          disabled:locked.value||!canEdit,
+          title:canEdit?'点击核定或修改实发金额':'系统应发由核算自动得出；有核算记录后可在此核定实发',
+          onClick:()=>canEdit&&choosePayout(row),
+        },[
           h('strong',cell(row,key)),
-          row.is_confirmed?h(NTag,{size:'tiny',type:'success',bordered:false,style:'margin-left:4px'},()=>'实发'):null
+          row.is_confirmed?h(NTag,{size:'tiny',type:'success',bordered:false,style:'margin-left:4px'},()=>'已核定'):
+            canEdit?h('span',{class:'actual-payout-hint'},'点此核定'):null
         ])
       }
       return h('div',{class:['amount','selected_amount','labor_cost','sales','gross','profit_after_labor','base','store_amount'].includes(key)?['table-money',row[key]<0?'negative':'']:undefined,
@@ -345,7 +365,8 @@ defineExpose({reload:load})
       <template v-else>当前金额与该次结算一致。</template>
     </n-alert>
     <p v-if="state.reportView==='stores'" style="color:#64748b;margin:0 0 12px">提成设置人数按所选月份的有效设置统计；已出金额人数只统计已有结算金额的人员。</p>
-    <div class="report-tabs-row"><LedgerTabs v-model="state.reportView" :options="kinds" label="汇总方式" @update:model-value="detail=null" /><div class="report-actions"><n-button :disabled="!canSettle" @click="openSettlement">确认员工结算</n-button><n-button type="primary" :disabled="!report || locked" :loading="downloading" @click="download">导出表格</n-button></div></div>
+    <p class="report-grain-note">系统应发由订单与利润规则自动算出，不能手改。实发提成可点表格中的金额或右侧「核定实发」填写，保存后作为本期发放与人工成本归档。</p>
+    <div class="report-tabs-row"><LedgerTabs v-model="state.reportView" :options="kinds" label="汇总方式" @update:model-value="detail=null" /><div class="report-actions"><n-button type="primary" :disabled="!report || locked || !(report.confirmation_scopes||[]).length" @click="openToolbarPayout">核定实发</n-button><n-button :disabled="!canSettle" @click="openSettlement">确认员工结算</n-button><n-button :disabled="!report || locked" :loading="downloading" @click="download">导出表格</n-button></div></div>
     <p v-if="state.reportView==='store_people'" class="report-grain-note"><template v-if="state.personIds.length">当前仅显示所选人员；请清空人员筛选后再核对店铺合计。 </template>店铺销售额、毛利额和利润额是真实总额；个人三项金额均按有效提成点数拆分，可相加核对。兼职与未归属净亏损按成员销售额分摊，未归属净利润留在店铺；仅一位分配人时整店金额归本人。人员涉及的链接总点数唯一时，提成＝人员利润额×该点数；点数不一致时保留订单明细计算。兼职额仍只在店铺行显示。人员行可打开利润构成，勾掉不进阶梯的商品。已配置本店身份时，销售额/毛利额/利润额仅归属做货人员，抽点人员只计提成不计产出。</p>
 
     <div v-if="loading" class="commission-loading-line"/>
@@ -419,7 +440,7 @@ defineExpose({reload:load})
 
 .report-content{padding-top:0}.report-months{display:flex;align-items:center;gap:12px;min-height:76px;border-bottom:1px solid #e9edf2;flex-wrap:wrap;padding:14px 0}.month-label{font-size:13px;margin-right:4px;color:#566176}.report-months input{height:35px;width:145px;max-width:100%;border:1px solid #dce2eb;border-radius:5px;padding:0 10px;background:#fff;font-size:13px;color:#30415c}.date-separator{font-size:13px;color:#8a94a3}.month-shortcuts{display:flex;gap:18px;margin-left:12px}.report-overview{display:flex;align-items:center;gap:0;padding:26px 0 27px;min-height:129px;border-bottom:1px solid #e9edf2}.report-total{padding-right:42px;min-width:240px}.report-total>span{font-size:13px;color:#67748a}.report-total strong{display:block;margin-top:7px;font-size:33px;line-height:1.3;font-weight:650;letter-spacing:-.7px;font-variant-numeric:tabular-nums}.report-total small{font-size:25px;margin-right:3px}.report-count{border-left:1px solid #e9edf2;padding:8px 32px;display:flex;align-items:baseline;gap:9px;white-space:nowrap}.report-count strong{font-size:28px;font-weight:600}.report-count span{color:#6e7b90;font-size:13px}.report-attention{display:flex;gap:8px;align-items:center;margin-left:auto;background:transparent;border:0;padding:0;color:#b88734;font-size:12px;cursor:pointer;text-align:left}.report-attention>span:last-child{color:#3468f0;margin-left:3px}.attention-dot{width:6px;height:6px;background:#d9a13d;border-radius:50%;flex:none}.report-tabs-row{display:flex;align-items:center;justify-content:space-between;gap:16px;min-height:76px}.report-tabs{display:flex;gap:28px;align-self:stretch;min-width:0;overflow:auto}.report-tabs button{border:0;border-bottom:2px solid transparent;background:transparent;color:#768397;font-size:13px;white-space:nowrap;padding:17px 0 13px;cursor:pointer}.report-tabs button.active{color:#3468f0;border-color:#3468f0;font-weight:550}.report-table th:first-child{width:22%}.report-table td:first-child{color:#30415b;font-weight:500}.report-state{font-size:12px;color:#8490a0}.report-state.review{color:#b18741}.report-empty-action{display:block;margin:9px auto 0}.report-back{padding:0 0 13px}.report-table{min-width:780px}
 .report-actions{display:flex;gap:10px}.settlement-history{border-top:1px solid #e9edf2;margin-top:22px;padding-top:22px}.settlement-history h3{font-size:15px;margin:0}.settlement-history p,.settlement-help{font-size:12px;color:#718097;margin:5px 0 14px}.settlement-footer{display:flex;justify-content:flex-end;gap:10px}
-.report-person{display:flex;align-items:center;gap:6px;flex-wrap:wrap}.report-grain-note{font-size:12px;color:#718097;line-height:1.7;margin:0 0 14px}.report-row-actions{display:inline-flex;align-items:center;gap:0;max-width:100%;padding:3px;background:#f4f6f9;border:1px solid #e3e8f0;border-radius:9px;white-space:nowrap}.report-row-action{appearance:none;border:0;background:transparent;height:26px;padding:0 10px;border-radius:6px;font:inherit;font-size:12px;line-height:26px;color:#5a6578;cursor:pointer}.report-row-action:hover:not(:disabled){background:#fff;color:#1f5eff}.report-row-action.is-main{background:#fff;color:#1f5eff;font-weight:600;box-shadow:0 0 0 1px #d7e2ff}.report-row-action.is-main:hover:not(:disabled){background:#f4f7ff}.report-row-action:disabled{opacity:.4;cursor:default}.report-row-action-split{width:1px;height:14px;background:#d9dee8;flex:none}.report-row-actions-empty{color:#9aa3b2}.payout-people{display:grid;gap:12px;margin-top:14px}.payout-people label{display:grid;grid-template-columns:minmax(0,1fr) 145px;align-items:center;gap:10px;font-size:13px}.payout-people small{display:block;color:#8490a0;font-size:11px;margin-top:3px}.report-inline-action{display:inline-flex;margin-top:6px;border:0;background:#eef2f7;color:#3d4a5c;border-radius:999px;padding:2px 9px;font:inherit;font-size:11px;cursor:pointer}.report-inline-action:hover{background:#e4ebff;color:#1f5eff}.payout-sum{display:flex;justify-content:space-between;margin:2px 0 0;border-top:1px solid #e9edf2;padding-top:12px;font-size:13px}.payout-sum strong{font-size:17px;font-variant-numeric:tabular-nums}
+.report-person{display:flex;align-items:center;gap:6px;flex-wrap:wrap}.report-grain-note{font-size:12px;color:#718097;line-height:1.7;margin:0 0 14px}.actual-payout-cell{appearance:none;border:0;background:transparent;padding:0;font:inherit;text-align:right;color:inherit}.actual-payout-cell.is-editable{cursor:pointer;border-radius:6px;padding:2px 6px}.actual-payout-cell.is-editable:hover{background:#eef4ff}.actual-payout-hint{display:block;font-size:11px;color:#3b82f6;font-weight:500;margin-top:2px}.report-row-actions{display:inline-flex;align-items:center;gap:0;max-width:100%;padding:3px;background:#f4f6f9;border:1px solid #e3e8f0;border-radius:9px;white-space:nowrap}.report-row-action{appearance:none;border:0;background:transparent;height:26px;padding:0 10px;border-radius:6px;font:inherit;font-size:12px;line-height:26px;color:#5a6578;cursor:pointer}.report-row-action:hover:not(:disabled){background:#fff;color:#1f5eff}.report-row-action.is-main{background:#fff;color:#1f5eff;font-weight:600;box-shadow:0 0 0 1px #d7e2ff}.report-row-action.is-main:hover:not(:disabled){background:#f4f7ff}.report-row-action:disabled{opacity:.4;cursor:default}.report-row-action-split{width:1px;height:14px;background:#d9dee8;flex:none}.report-row-actions-empty{color:#9aa3b2}.payout-people{display:grid;gap:12px;margin-top:14px}.payout-people label{display:grid;grid-template-columns:minmax(0,1fr) 145px;align-items:center;gap:10px;font-size:13px}.payout-people small{display:block;color:#8490a0;font-size:11px;margin-top:3px}.report-inline-action{display:inline-flex;margin-top:6px;border:0;background:#eef2f7;color:#3d4a5c;border-radius:999px;padding:2px 9px;font:inherit;font-size:11px;cursor:pointer}.report-inline-action:hover{background:#e4ebff;color:#1f5eff}.payout-sum{display:flex;justify-content:space-between;margin:2px 0 0;border-top:1px solid #e9edf2;padding-top:12px;font-size:13px}.payout-sum strong{font-size:17px;font-variant-numeric:tabular-nums}
 .payout-history{margin-top:14px;border-top:1px solid #e9edf2;padding-top:10px;font-size:12px;color:#536176}.payout-history summary{cursor:pointer;color:#3468f0}.payout-history>div{margin-top:10px;display:grid;gap:3px}.payout-history small{color:#8490a0;font-size:11px;margin-left:4px}
 .payout-targets{display:grid;gap:8px}.payout-targets button{border:1px solid #e3e8f0;background:#fff;border-radius:7px;padding:11px 13px;display:flex;justify-content:space-between;align-items:center;text-align:left;cursor:pointer;color:#334155}.payout-targets button:hover{border-color:#91adf8;background:#f7f9ff}.payout-targets strong{display:block;font-size:13px}.payout-targets small{display:block;color:#7b8798;font-size:11px;margin-top:4px}.payout-targets .num{font-weight:600;font-size:14px}
 @media(max-width:1180px){.report-total{min-width:200px;padding-right:24px}.report-count{padding:8px 20px}.report-overview{flex-wrap:wrap;row-gap:18px}.report-attention{margin-left:0;flex-basis:100%}.report-tabs{gap:22px}}

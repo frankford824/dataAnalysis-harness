@@ -11,7 +11,6 @@ import { useCommission } from '../commissionStore'
 import { useCommissionQuery } from '../components/useCommissionQuery'
 import { commissionRequest } from '../components/commissionRequest'
 import CommissionBatchDialog from '../components/CommissionBatchDialog.vue'
-import CommissionPeople from '../components/CommissionPeople.vue'
 import { DUTY_OPTIONS, dutyLabel, dutyTagType, loadStoreMembers, saveStoreMembers } from '../storeMembers'
 
 const router = useRouter()
@@ -31,7 +30,6 @@ const selected = ref(null)
 const checked = ref({})
 const allScope = ref(null)
 const batchDialog = ref(null)
-const peopleDialog = ref(null)
 const fileInput = ref(null)
 const issue = ref(null), issueShow = ref(false), issueError = ref('')
 let issueTicket = 0
@@ -67,7 +65,6 @@ function clearSelection(){checked.value={};allScope.value=null}
 function selectAll(){checked.value={};allScope.value={...shared.scope,search:search.value,state:state.value}}
 function bulk(){batchDialog.value.open(allScope.value?{scope:{...allScope.value}}:{targets:chosen.value})}
 async function saved(){clearSelection();await shared.changed();load()}
-function showAssignments(id){clearSelection();shared.personIds=[id];shared.storeIds=[];state.value='';search.value=''}
 function importFile(event){const file=event.target.files?.[0];event.target.value='';batchDialog.value.importFile(file)}
 const form = ref({ allocations: [] })
 const states = { enabled:'提成中', disabled:'不提成', pending:'未设置', scheduled:'待生效', expired:'已到期' }
@@ -84,16 +81,14 @@ const params = computed(() => {
 })
 const {data,error,loading,stale,load} = useCommissionQuery('settings', () => `${params.value}&after=${encodeURIComponent(after.value)}`,
   signal => commissionRequest(`/settings?${params.value}&after=${encodeURIComponent(after.value)}`,{signal}),
-  () => !busy.value && !showEditor.value && !batchDialog.value?.shown && !peopleDialog.value?.shown,
-  { followTick: false })
+  () => !busy.value && !showEditor.value && !batchDialog.value?.shown,
+  { followTick: false, delay: 420 })
 const rows = computed(() => data.value?.rows || [])
 const next = computed(() => data.value?.next_after || '')
 const locked = computed(() => loading.value || stale.value || busy.value)
 const menuOptions = [
   {label:'批量新增',key:'new'},
   {label:'销售组织架构',key:'org'},
-  {label:'人员名单',key:'people'},
-  {label:'店铺默认身份',key:'identity'},
   {type:'divider',key:'line'},
   {label:'下载模板',key:'template'},
   {label:'导出设置',key:'export'}
@@ -102,8 +97,6 @@ const otherStates = [{label:'待生效',key:'scheduled'},{label:'已到期',key:
 function menu(key) {
   if(key==='new')batchDialog.value.open({kind:'new',store_id:shared.storeIds.length===1?shared.storeIds[0]:''})
   if(key==='org')router.push({name:'commission-org'})
-  if(key==='people')peopleDialog.value.open('people')
-  if(key==='identity')peopleDialog.value.open('identity')
   if(key==='import')fileInput.value.click()
   if(key==='template'||key==='export'){
     const a=document.createElement('a');a.href=key==='template'?'/static/commission-template.xlsx':`/api/commission-v2/export/settings?${params.value}`
@@ -267,7 +260,6 @@ defineExpose({edit,menu,busy,reload:load})
         </div>
       </n-drawer-content>
     </n-drawer>
-    <CommissionPeople ref="peopleDialog" @changed="shared.changed();load()" @assignments="showAssignments" />
     <n-drawer :show="showEditor" :width="'min(640px,100vw)'" :mask-closable="!busy || editorLoading" :close-on-esc="!busy || editorLoading" @update:show="closeEditor"><n-drawer-content :title="editorRow?.scheme_id?'修改提成':'新增设置'" closable class="commission-editor">
       <div v-if="editorRow?.scheme_id" class="commission-edit-context"><strong>{{form.product_name || '未填写商品名称'}}</strong><p>{{storeName(form.store_id)}} · {{form.product_id}}</p></div>
       <n-alert v-if="editorError" type="error" :bordered="false">{{editorError}} <n-button text @click="edit(editorRow)">重试</n-button></n-alert>

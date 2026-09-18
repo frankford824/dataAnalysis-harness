@@ -2,12 +2,46 @@
 from __future__ import annotations
 
 import json
+import re
 import polars as pl
 
 from datetime import datetime, timezone, timedelta
 
 from .commission_registry import Registry, RegistryError, json_text, now, local_time, member_active_at
 from .order_feed import Client
+
+SEARCH_SPLIT = re.compile(r'[,，、;；|/\n\r]+')
+
+
+def parse_search_tokens(search: str) -> list[str]:
+    """Split pasted IDs on comma /顿号 / semicolon / newline; keep a single name intact."""
+    raw = (search or '').strip()
+    if not raw:
+        return []
+    tokens = [part.strip() for part in SEARCH_SPLIT.split(raw) if part.strip()]
+    if len(tokens) == 1 and re.search(r'\s', tokens[0]):
+        pieces = [part for part in re.split(r'\s+', tokens[0]) if part]
+        if len(pieces) > 1 and all(re.fullmatch(r'\d{6,}', part) for part in pieces):
+            return pieces
+    return tokens
+
+
+def product_search_sql(tokens: list[str], id_expr: str, name_expr: str) -> tuple[str, list[str]]:
+    if not tokens:
+        return '1', []
+    if len(tokens) == 1:
+        token = tokens[0]
+        return f'(instr({id_expr},?)>0 OR instr({name_expr},?)>0)', [token, token]
+    ids = [token for token in tokens if re.fullmatch(r'\d{6,}', token)]
+    rest = [token for token in tokens if token not in ids]
+    parts, params = [], []
+    if ids:
+        parts.append(f'{id_expr} IN ({",".join("?" for _ in ids)})')
+        params.extend(ids)
+    for token in rest:
+        parts.append(f'(instr({id_expr},?)>0 OR instr({name_expr},?)>0)')
+        params.extend([token, token])
+    return f'({" OR ".join(parts)})', params
 
 
 def refresh(registry: Registry, model, client=None) -> dict:
@@ -108,20 +142,58 @@ def products(registry: Registry, *, store_id="", search="", missing=False, after
             "next_after": rows[-1]["store_id"] + "\x1f" + rows[-1]["product_id"] if rows and has_more else ""}
 
 
+def _store_condition(stores):
+    if not stores:
+        return '1', []
+    return 'store_id IN (' + ','.join('?' for _ in stores) + ')', list(stores)
+
+
+def count_settings(registry: Registry, *, store_id="", search="", state="", at=None, person_id="", store_ids=None, person_ids=None) -> int:
+    """Count without decoding every scheme JSON when the filter does not need it."""
+    stores = sorted(set(store_ids or ([store_id] if store_id else [])))
+    persons = sorted(set(person_ids or ([person_id] if person_id else [])))
+    tokens = parse_search_tokens(search)
+    if state or persons:
+        return next(iter_settings(registry, store_id=store_id, search=search, state=state, at=at,
+                                  person_id=person_id, store_ids=store_ids, person_ids=person_ids,
+                                  _count_only=True))['total']
+    store_sql, store_params = _store_condition(stores)
+    catalog_name = ("coalesce(nullif((SELECT s.product_name FROM scheme s "
+                    "WHERE s.store_id=c.store_id AND s.product_id=c.product_id),''),c.product_name)")
+    search_c, search_c_params = product_search_sql(tokens, 'c.product_id', catalog_name)
+    search_s, search_s_params = product_search_sql(tokens, 's.product_id', "coalesce(s.product_name,'')")
+    sql = f"""SELECT (
+      SELECT count(*) FROM catalog c WHERE {store_sql} AND {search_c}
+    ) + (
+      SELECT count(*) FROM scheme s WHERE {store_sql}
+        AND NOT EXISTS (SELECT 1 FROM catalog c WHERE c.store_id=s.store_id AND c.product_id=s.product_id)
+        AND {search_s}
+    ) AS total"""
+    with registry.connect(thread_affine=False) as conn:
+        row = conn.execute(sql, [*store_params, *search_c_params, *store_params, *search_s_params]).fetchone()
+    return int(row['total'] if row else 0)
+
+
 def iter_settings(registry: Registry, *, store_id="", search="", state="", after="", limit=-1, at=None, person_id="", store_ids=None, person_ids=None, _count_only=False):
     from datetime import datetime, timezone, timedelta
     moment = at or datetime.now(timezone(timedelta(hours=8))).replace(tzinfo=None).isoformat(timespec="seconds")
     # Include historical bindings even when the live catalogue no longer lists the item.
     stores = sorted(set(store_ids or ([store_id] if store_id else [])))
     persons = sorted(set(person_ids or ([person_id] if person_id else [])))
+    tokens = parse_search_tokens(search)
     clauses = []; params = []
     if stores:
-        clauses.append('store_id IN ('+','.join('?' for _ in stores)+')'); params.extend(stores)
+        store_sql, store_params = _store_condition(stores)
+        clauses.append(store_sql); params.extend(store_params)
     if after:
         parts = after.split('\x1f', 1)
         if len(parts) != 2: raise RegistryError('请重新打开商品列表')
         clauses.append('(store_id,product_id)>(?,?)'); params.extend(parts)
     condition = ' AND '.join(clauses) or '1'
+    candidate_name = ("coalesce(nullif((SELECT s.product_name FROM scheme s "
+                      "WHERE s.store_id=items.store_id AND s.product_id=items.product_id),''),product_name)")
+    cand_sql, cand_params = product_search_sql(tokens, 'product_id', candidate_name)
+    row_sql, row_params = product_search_sql(tokens, 'product_id', 'product_name')
     # Apply indexed shop/cursor bounds before joining version JSON. For the common
     # unfiltered page, only decode the requested page, not the whole catalogue.
     candidate_limit = limit if not (state or persons or _count_only) else -1
@@ -132,8 +204,7 @@ def iter_settings(registry: Registry, *, store_id="", search="", state="", after
       SELECT s.store_id,s.product_id,s.product_name,'{{}}' payload FROM scheme s WHERE {condition}
       AND NOT EXISTS (SELECT 1 FROM catalog c WHERE c.store_id=s.store_id AND c.product_id=s.product_id)
     ), candidates AS (
-      SELECT * FROM items WHERE (?='' OR instr(product_id,?)>0 OR
-        instr(coalesce(nullif((SELECT s.product_name FROM scheme s WHERE s.store_id=items.store_id AND s.product_id=items.product_id),''),product_name),?)>0)
+      SELECT * FROM items WHERE {cand_sql}
       ORDER BY store_id,product_id LIMIT ?
     ), rows AS (
       SELECT c.store_id,c.product_id,coalesce(nullif(s.product_name,''),c.product_name) product_name,c.payload,
@@ -148,7 +219,7 @@ def iter_settings(registry: Registry, *, store_id="", search="", state="", after
       LEFT JOIN json_each(v.body,'$.segments') j
         ON json_extract(j.value,'$.valid_from')<=?
         AND (coalesce(json_extract(j.value,'$.valid_to'),'')='' OR json_extract(j.value,'$.valid_to')>?)
-    ) SELECT * FROM rows WHERE (?='' OR instr(product_id,?)>0 OR instr(product_name,?)>0)
+    ) SELECT * FROM rows WHERE {row_sql}
       AND (?='' OR state=?)
       AND {person_condition}
       ORDER BY store_id,product_id LIMIT ?"""
@@ -157,8 +228,8 @@ def iter_settings(registry: Registry, *, store_id="", search="", state="", after
     with registry.connect(thread_affine=False) as conn:
         conn.execute("BEGIN")
         people = {r['id']:r['name'] for r in conn.execute('SELECT id,name FROM person')}
-        cursor = conn.execute(sql, [*params,*params,search,search,search,candidate_limit,moment,moment,moment,
-                              search,search,search,state,state,*([moment,*persons] if persons else []),limit])
+        cursor = conn.execute(sql, [*params,*params,*cand_params,candidate_limit,moment,moment,moment,
+                              *row_params,state,state,*([moment,*persons] if persons else []),limit])
         for record in cursor:
             if _count_only:
                 yield {"total": record["total"]}
@@ -184,11 +255,13 @@ def iter_settings(registry: Registry, *, store_id="", search="", state="", after
             yield row
 
 
-def settings(registry: Registry, *, store_id="", search="", state="", after="", limit=60, at=None, person_id="", store_ids=None, person_ids=None) -> dict:
+def settings(registry: Registry, *, store_id="", search="", state="", after="", limit=60, at=None, person_id="", store_ids=None, person_ids=None, include_total=True) -> dict:
     rows = list(iter_settings(registry, store_id=store_id, search=search, state=state, after=after, limit=limit+1, at=at, person_id=person_id, store_ids=store_ids, person_ids=person_ids))
     more = len(rows)>limit
     rows = rows[:limit]
-    total = next(iter_settings(registry, store_id=store_id, search=search, state=state, at=at, person_id=person_id, store_ids=store_ids, person_ids=person_ids, _count_only=True))["total"]
+    total = (count_settings(registry, store_id=store_id, search=search, state=state, at=at,
+                            person_id=person_id, store_ids=store_ids, person_ids=person_ids)
+             if include_total else len(rows) + (1 if more else 0))
     segments = {}
     for r in registry.store_members_for_stores({row['store_id'] for row in rows}):
         segments.setdefault((r['store_id'], r['person_id']), []).append(r)
