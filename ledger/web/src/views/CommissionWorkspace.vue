@@ -154,7 +154,8 @@ async function save() {
     if (form.value.mode === 'distribute' && total.value > 100) throw new Error('提成比例合计不能超过100%')
     const allocations = form.value.mode === 'distribute' ? form.value.allocations.map(p => ({
       ...(people.value.some(x => x.id === p.person) ? {person_id:p.person} : {name:p.person}),
-      rate:(Number(p.percent)/100).toFixed(8)
+      rate:(Number(p.percent)/100).toFixed(8),
+      duty: p.duty || 'produce'
     })) : []
     await call('/settings', {method:'POST', body:JSON.stringify({...form.value, allocations, expected_revision:selected.value?.revision || 0})})
     const dutyRows = form.value.mode === 'distribute'

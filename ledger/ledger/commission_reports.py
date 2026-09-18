@@ -447,8 +447,13 @@ def build(workspace, registry, model, start, end, store_ids=None, person_ids=Non
         operating=statement_amount(statement,profit_node) if profit_node else None
         visible_labor=labor_cut if spread.total is not None else Decimal(0)
         store_duties=_get_duties(sid, period)
-        person_output=attributed_outputs(source_c,sales,gross,registry,duties=store_duties)
-        person_profit=attributed_profit(source_c,operating,visible_labor,registry,store_id=sid,duties=store_duties)
+        effective_duties = dict(store_duties) if store_duties else {}
+        for person in source_c.get('people', []):
+            pid = person.get('person_id')
+            if pid and person.get('duty') and person['duty'] in ('produce', 'cut'):
+                effective_duties[pid] = {'duty': person['duty']}
+        person_output=attributed_outputs(source_c,sales,gross,registry,duties=effective_duties)
+        person_profit=attributed_profit(source_c,operating,visible_labor,registry,store_id=sid,duties=effective_duties)
         profit_rates={person.get('person_id'):confirmed_profit_rate(
             source_c,person.get('person_id'),sid) for person in source_c.get('people') or []}
         if not decision and any(
@@ -471,7 +476,7 @@ def build(workspace, registry, model, start, end, store_ids=None, person_ids=Non
             if pid not in roster:label+=f'（历史记录 · {names[sid]}）'
             available.setdefault(pid,{'id':pid,'name':label})
             if selected_people and pid not in selected_people:continue
-            duty=(store_duties or {}).get(person.get('person_id') or pid, {}).get('duty')
+            duty=person.get('duty') or (store_duties or {}).get(person.get('person_id') or pid, {}).get('duty')
             if person.get('amount') is None:
                 if person.get('sales') is not None or person.get('gross') is not None:
                     member_rows.append({'kind':'person','person_id':pid,'person':name,

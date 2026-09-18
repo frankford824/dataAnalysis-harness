@@ -173,8 +173,10 @@ def iter_settings(registry: Registry, *, store_id="", search="", state="", after
             from decimal import Decimal
             for a in (row['setting'] or {}).get('allocations', []):
                 pid = a['person_id']
-                person = grouped.setdefault(pid, {'person_id':pid,'name':people.get(pid,pid),'rate':Decimal(0)})
+                person = grouped.setdefault(pid, {'person_id':pid,'name':people.get(pid,pid),'rate':Decimal(0),'allocation_duty':''})
                 person['rate'] += Decimal(a['rate'])
+                if a.get('duty'):
+                    person['allocation_duty'] = a['duty']
             row['people'] = [{**a,'rate':str(a['rate'])} for a in grouped.values()]
             row['product_name'] = row['product_name'] or body.get('product_name','')
             yield row
@@ -190,13 +192,17 @@ def settings(registry: Registry, *, store_id="", search="", state="", after="", 
         segments.setdefault((r['store_id'], r['person_id']), []).append(r)
     now_stamp = datetime.now(timezone(timedelta(hours=8))).replace(tzinfo=None).isoformat(timespec='seconds')
     for row in rows:
-        at = (row.get('setting') or {}).get('valid_from') or now_stamp
+        lookup_at = (row.get('setting') or {}).get('valid_from') or now_stamp
         try:
-            at = local_time(at)
+            lookup_at = local_time(lookup_at)
         except Exception:
-            at = now_stamp
+            lookup_at = now_stamp
         for person in row.get('people') or []:
-            current = next((seg for seg in segments.get((row['store_id'], person['person_id']), [])
-                            if member_active_at(seg, at)), None)
-            person['duty'] = current['duty'] if current else None
+            alloc_duty = person.get('allocation_duty') or ''
+            if alloc_duty in ('produce', 'cut'):
+                person['duty'] = alloc_duty
+            else:
+                current = next((seg for seg in segments.get((row['store_id'], person['person_id']), [])
+                                if member_active_at(seg, lookup_at)), None)
+                person['duty'] = current['duty'] if current else None
     return {'total':total,'total_pages':(total+limit-1)//limit,'page_size':limit,'rows':rows,'has_more':more,'next_after':rows[-1]['store_id']+'\x1f'+rows[-1]['product_id'] if rows and more else ''}

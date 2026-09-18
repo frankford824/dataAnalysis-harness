@@ -52,18 +52,20 @@ def _frames(versions, people, wages="pending"):
                 pid = line["person_id"]
                 allocations.append({"rule_key": key, "person_id": pid,
                                     "person": people.get(pid, {}).get("name") or line.get("person", pid),
-                                    "role": line["role"], "share": line["rate"]})
+                                    "role": line["role"], "share": line["rate"],
+                                    "duty": line.get("duty", "")})
     schema = {k: pl.Utf8 for k in ["rule_key", "product_id", "valid_from", "valid_to", "mode",
                                   "total_rate", "rule_version", "rule_name", "amount_hold"]} | {"priority": pl.Int64, "wage_preview": pl.Boolean}
     rf = pl.DataFrame(rules, schema=schema).with_columns(
         pl.col("valid_from").str.to_datetime("%Y-%m-%dT%H:%M:%S").alias("from_at"),
         pl.col("valid_to").str.to_datetime("%Y-%m-%dT%H:%M:%S", strict=False).alias("to_at"),
     ).sort("priority").unique(subset=["product_id", "valid_from"], keep="last")
-    af = pl.DataFrame(allocations, schema={k: pl.Utf8 for k in ["rule_key", "person_id", "person", "role", "share"]})
+    af = pl.DataFrame(allocations, schema={k: pl.Utf8 for k in ["rule_key", "person_id", "person", "role", "share", "duty"]})
     af = af.group_by("rule_key", "person_id", "person", maintain_order=True).agg(
         pl.col("role").str.join(" / "),
         pl.col("share").cast(pl.Decimal(16, 8)).sum(),
         pl.struct("role", "share").alias("allocation_parts"),
+        pl.col("duty").first(),
     )
     return rf, af
 
@@ -373,25 +375,31 @@ def calculate(result, model, store_id: str, period: str, registry: Registry,
         pl.col("participation_sales").sum(), pl.col("participation_gross").sum(),
         pl.col("participation_profit").sum(),
         pl.col("product_id").n_unique().alias("products"),
+        pl.col("duty").drop_nulls().unique().alias("_duties"),
     ).sort("amount", descending=True)
     split_output = allocated_outputs(paid) if (has_sales or has_gross or has_profit) else None
-    person_rows = [
-        {**r, "amount": money_float(r["amount"]), "base": money_float(r["base"]),
+    person_rows = []
+    for r in people_lines.iter_rows(named=True):
+        duties_set = [d for d in (r.pop("_duties") or []) if d]
+        entry = {**r, "amount": money_float(r["amount"]), "base": money_float(r["base"]),
          "sales": money_float(r["participation_sales"]) if has_sales else None,
          "gross": money_float(r["participation_gross"]) if has_gross else None,
          "profit": money_float(r["participation_profit"]) if has_profit else None,
          "allocated_sales": split_output.get(r['person_id'],{}).get('sales') if split_output is not None else None,
          "allocated_gross": split_output.get(r['person_id'],{}).get('gross') if split_output is not None else None,
          "allocated_profit": split_output.get(r['person_id'],{}).get('profit') if split_output is not None else None}
-        for r in people_lines.iter_rows(named=True)
-    ]
-    for row in person_rows:
-        row.pop("participation_sales")
-        row.pop("participation_gross")
-        row.pop("participation_profit")
+        if len(duties_set) == 1:
+            entry["duty"] = duties_set[0]
+        entry.pop("participation_sales")
+        entry.pop("participation_gross")
+        entry.pop("participation_profit")
+        person_rows.append(entry)
     by_product = defaultdict(list)
-    for r in paid.group_by("product_id", "person_id", "person").agg(pl.col("amount").sum()).iter_rows(named=True):
-        by_product[r["product_id"]].append({"person_id": r["person_id"], "person": r["person"], "amount": money_float(r["amount"])})
+    for r in paid.group_by("product_id", "person_id", "person").agg(pl.col("amount").sum(), pl.col("duty").first()).iter_rows(named=True):
+        entry = {"person_id": r["person_id"], "person": r["person"], "amount": money_float(r["amount"])}
+        if r.get("duty"):
+            entry["duty"] = r["duty"]
+        by_product[r["product_id"]].append(entry)
     products = []
     for r in matched.group_by("product_id").agg(
         pl.col("product_name").drop_nulls().first(), pl.col("base").sum(), pl.len().alias("sub_orders"),

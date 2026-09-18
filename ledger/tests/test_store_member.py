@@ -227,3 +227,39 @@ def test_duty_time_segments_keep_earlier_period(tmp_path):
     assert june[zong['id']]['duty'] == 'produce'
     assert august[song['id']]['duty'] == 'produce'
     assert zong['id'] not in august
+
+
+def test_person_duty_from_commission_overrides_store_member(tmp_path):
+    """Commission result carrying per-product duty takes precedence over store_member."""
+    reg = Registry(tmp_path)
+    alice = reg.person_save({'name': '甲'}, 'test', '登记')
+    bob = reg.person_save({'name': '乙'}, 'test', '登记')
+    reg.save_store_member('s1', alice['id'], 'produce', '', 'test', '默认做货')
+    reg.save_store_member('s1', bob['id'], 'produce', '', 'test', '默认做货')
+    store_duties = store_member_duties(reg, 's1')
+    effective = dict(store_duties)
+    effective[bob['id']] = {'duty': 'cut'}
+    commission = _commission([
+        {'person_id': alice['id'], 'person': '甲',
+         'allocated_sales': 700, 'allocated_gross': 350, 'amount': 10},
+        {'person_id': bob['id'], 'person': '乙',
+         'allocated_sales': 300, 'allocated_gross': 150, 'amount': 5},
+    ])
+    result = attributed_outputs(commission, 1000, 500, reg, duties=effective)
+    assert result[alice['id']]['sales'] == 1000
+    assert result[bob['id']]['sales'] == 0.0
+
+
+def test_allocation_duty_saved_in_scheme(tmp_path):
+    """Duty written into allocation body is persisted and retrievable."""
+    reg = Registry(tmp_path)
+    alice = reg.person_save({'name': '甲'}, 'test', '登记')
+    result = reg.save_setting({
+        'store_id': 's1', 'product_id': 'p1', 'product_name': '测试商品',
+        'mode': 'distribute', 'valid_from': '2026-06-01T00:00:00',
+        'allocations': [{'person_id': alice['id'], 'rate': '0.05', 'duty': 'cut'}],
+        'expected_revision': 0, 'reason': '测试商品级抽点',
+    }, 'test')
+    body = result['body']
+    alloc = body['segments'][0]['allocations'][0]
+    assert alloc['duty'] == 'cut'

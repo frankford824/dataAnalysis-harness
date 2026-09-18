@@ -226,6 +226,9 @@ def validate_timeline(body: dict, person_ids: set[str]) -> dict:
             line = {"person_id": str(source_line.get("person_id") or ""),
                     "role": str(source_line.get("role") or "运营").strip(),
                     "rate": rate(source_line.get("rate", "0"))}
+            line_duty = str(source_line.get("duty") or "")
+            if line_duty in ("produce", "cut"):
+                line["duty"] = line_duty
             if line["person_id"] not in person_ids:
                 raise RegistryError("方案中有未登记的人员")
             key = (line["person_id"], line["role"])
@@ -547,10 +550,16 @@ class Registry:
             seen.add(pid)
             share = rate(item.get("rate", "0"))
             parts = [a for a in current.get("allocations", []) if a["person_id"] == pid]
-            if parts and sum(Decimal(a["rate"]) for a in parts) == Decimal(share):
+            duty = str(item.get("duty") or "")
+            if duty and duty not in ("produce", "cut"):
+                duty = ""
+            if parts and sum(Decimal(a["rate"]) for a in parts) == Decimal(share) and not duty:
                 allocations.extend(parts)
             else:
-                allocations.append({"person_id":pid,"role":parts[0]["role"] if len(parts)==1 else "提成","rate":share})
+                entry = {"person_id":pid,"role":parts[0]["role"] if len(parts)==1 else "提成","rate":share}
+                if duty:
+                    entry["duty"] = duty
+                allocations.append(entry)
         segment = {"valid_from":start,"valid_to":end,"mode":mode,"allocations":allocations,
                    "total_rate":str(sum((Decimal(a["rate"]) for a in allocations), Decimal(0))),
                    "amount_hold":current.get("amount_hold", "")}
