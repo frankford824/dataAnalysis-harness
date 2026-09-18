@@ -10,6 +10,8 @@ CREATE TABLE IF NOT EXISTS scheme_read_segment(
  mode TEXT NOT NULL, value TEXT NOT NULL, PRIMARY KEY(scheme_id,segment_no));
 CREATE INDEX IF NOT EXISTS scheme_read_from ON scheme_read_segment(valid_from);
 CREATE INDEX IF NOT EXISTS scheme_read_to ON scheme_read_segment(valid_to);
+CREATE INDEX IF NOT EXISTS scheme_read_lookup ON scheme_read_segment(scheme_id,segment_no,valid_from,valid_to,mode,store_id,product_id);
+CREATE INDEX IF NOT EXISTS scheme_read_mode ON scheme_read_segment(mode,valid_from,valid_to,store_id,scheme_id);
 CREATE TABLE IF NOT EXISTS scheme_read_person(
  person_id TEXT NOT NULL, scheme_id TEXT NOT NULL, segment_no INTEGER NOT NULL,
  duty TEXT NOT NULL, PRIMARY KEY(person_id,scheme_id,segment_no,duty));

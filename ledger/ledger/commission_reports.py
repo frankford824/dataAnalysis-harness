@@ -126,7 +126,7 @@ def _output_residual(total, values, field):
 
 _profit_lock = threading.RLock()
 _profit_cache: OrderedDict[tuple, dict[str, dict[str, float]] | None] = OrderedDict()
-_PROFIT_CACHE_LIMIT = 128
+_PROFIT_CACHE_LIMIT = 512  # Small person totals only, never full Parquet frames.
 
 
 def _archived_allocated_outputs(registry, commission, *, production=False):

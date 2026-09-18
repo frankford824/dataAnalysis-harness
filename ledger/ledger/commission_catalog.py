@@ -193,6 +193,12 @@ def count_settings(registry: Registry, *, store_id="", search="", state="", at=N
     stores = sorted(set(store_ids or ([store_id] if store_id else [])))
     persons = sorted(set(person_ids or ([person_id] if person_id else [])))
     tokens = parse_search_tokens(search)
+    if state in ('enabled','disabled') and not persons and not tokens:
+        moment = at or datetime.now(timezone(timedelta(hours=8))).replace(tzinfo=None).isoformat(timespec='seconds')
+        scope, scope_params = _store_condition(stores)
+        with registry.connect() as conn:
+            return conn.execute(f"SELECT count(*) FROM scheme_read_segment WHERE mode=? AND valid_from<=? AND (valid_to='' OR valid_to>?) AND {scope}",
+                ['distribute' if state=='enabled' else 'exclude',moment,moment,*scope_params]).fetchone()[0]
     if persons and not state and not tokens:
         from .commission_read_index import person_keys
         moment = at or datetime.now(timezone(timedelta(hours=8))).replace(tzinfo=None).isoformat(timespec='seconds')
