@@ -39,7 +39,7 @@ export function sameIds(left = [], right = []) {
 }
 
 export const PROFIT_BEFORE_LABOR = '本人创造利润（未扣兼职）'
-export const PROFIT_BASIS_NOTE = '本人销售额/毛利/利润=商品全额×本人点数÷链接总点数，不是利润看板的商品全额；未扣店级兼职；负数为该商品分到本人的亏损'
+export const PROFIT_BASIS_NOTE = '销售额/毛利/利润按商品做货归属：单人做货归全额，多人仅按做货人员点数分摊，抽点不参与；历史缺身份记录沿用原分摊；未扣店级兼职；负数为归属本人的亏损'
 
 function csvCell(value) {
   if (value == null || value === '') return ''

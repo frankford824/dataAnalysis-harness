@@ -318,8 +318,8 @@ const tableColumns=computed(()=>{
       }
       if(key==='person' && row.person_id)return h('button',{type:'button',class:'text-button',disabled:locked.value||!targetsFor(row).length,onClick:()=>choosePayout(row)},row.person)
       return h('div',{class:['amount','selected_amount','labor_cost','sales','gross','profit_after_labor','base','store_amount'].includes(key)?['table-money',row[key]<0?'negative':'']:undefined,
-               title:state.reportView==='store_people'&&row.kind==='person'&&['sales','gross'].includes(key)?'共享订单按提成点数占比分拆，可与其他成员相加':
-                 state.reportView==='store_people'&&key==='profit_after_labor'?row.kind==='person'?'共享订单利润按提成点数拆分；兼职和未归属净亏损按成员参与销售额分摊，可与其他成员相加':'店铺经营账利润减本店兼职额':
+               title:state.reportView==='store_people'&&row.kind==='person'&&['sales','gross'].includes(key)?'产出按商品做货身份归属，抽点不参与分摊':
+                 state.reportView==='store_people'&&key==='profit_after_labor'?row.kind==='person'?'商品利润按做货身份归属；兼职及未归属净亏损按归属销售额分摊':'店铺经营账利润减本店兼职额':
                  state.reportView==='store_people'&&row.kind==='person'&&key==='labor_cost'?'兼职额按店铺分摊':undefined},
         index===0?[h('span',{class:row.kind==='store'?'store-total-name':''},cell(row,key)),h('div',{class:'table-secondary table-mobile-only'},status(row.status))]:
           key==='person'&&row.kind==='store'?h('strong','店铺合计'):
@@ -383,7 +383,7 @@ defineExpose({reload:load})
     <p v-if="state.reportView==='stores'" style="color:#64748b;margin:0 0 12px">提成设置人数按所选月份的有效设置统计；已出金额人数只统计已有结算金额的人员。</p>
     <p class="report-grain-note">系统应发来自核算；实发列只显示人工核定金额，部分核定时仅合计已核定部分，尚未核定显示「—」。核定不代表已付款。点击人员或「核定实发」选择店铺月份；保存范围为该店该月全部提成人员。团队按当前组织归属展示。</p>
     <div class="report-tabs-row"><LedgerTabs v-model="state.reportView" :options="kinds" label="汇总方式" @update:model-value="detail=null" /><div class="report-actions"><n-button type="primary" :disabled="!report || locked || !(report.confirmation_scopes||[]).length" @click="openToolbarPayout">核定实发</n-button><n-button :disabled="!canSettle" @click="openSettlement">确认员工结算</n-button><n-button :disabled="!report || locked" :loading="downloading" @click="download">导出表格</n-button></div></div>
-    <p v-if="state.reportView==='store_people'" class="report-grain-note"><template v-if="state.personIds.length">当前仅显示所选人员；请清空人员筛选后再核对店铺合计。 </template>店铺销售额、毛利额和利润额是真实总额；个人三项金额均按有效提成点数拆分，可相加核对。兼职与未归属净亏损按成员销售额分摊，未归属净利润留在店铺；仅一位分配人时整店金额归本人。人员涉及的链接总点数唯一时，提成＝人员利润额×该点数；点数不一致时保留订单明细计算。兼职额仍只在店铺行显示。人员行可打开利润构成，勾掉不进阶梯的商品。本店商品上有做货身份的人计销售额/毛利/利润；只有抽点、没有任何做货商品的人才不计产出。店铺默认抽点不会盖掉商品做货。</p>
+    <p v-if="state.reportView==='store_people'" class="report-grain-note"><template v-if="state.personIds.length">当前仅显示所选人员；请清空人员筛选后再核对店铺合计。 </template>销售额、毛利和利润按每笔订单的商品做货身份归属：一位做货人员归全额，多位做货人员按他们之间的点数比例分摊，抽点不分走产出。同一人在不同商品可有不同身份。兼职及未归属净亏损按归属销售额分摊；未归属净利润留在店铺。提成金额沿用原核算规则及已核定记录，不能直接用展示利润乘链接总点数。历史明细缺少身份时沿用原分摊口径。</p>
 
     <div v-if="loading" class="commission-loading-line"/>
     <LedgerTable :rows="rows" :columns="tableColumns" :row-key="rowKey" :loading="loading" :max-height="440" empty="没有找到提成记录，可调整店铺、人员或月份" />

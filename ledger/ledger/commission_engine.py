@@ -226,12 +226,33 @@ def _participation_facts(result, model, store_id: str, period: str) -> tuple[pl.
     return combined, bool(sales_metrics), bool(gross_metrics), bool(profit_metrics)
 
 
-def allocated_outputs(details: pl.DataFrame, *, net_profit_basis: bool = False) -> dict[str, dict[str, float]] | None:
+def production_weights(details: pl.DataFrame) -> pl.DataFrame:
+    """Output ownership per order/product, independent of commission entitlement.
+
+    Legacy evidence without duties retains its original share basis. Explicit
+    cut rows receive zero output, even if nobody produced that order.
+    """
+    if '__output_share' in details.columns:
+        return details
+    if 'duty' not in details.columns or 'spine_row' not in details.columns:
+        return details.with_columns(pl.col('share').alias('__output_share'), pl.col('total_rate').alias('__output_rate'))
+    keys = ['spine_row'] + (['product_id'] if 'product_id' in details.columns else [])
+    weighted = details.with_columns(
+        pl.when((pl.col('duty') != 'cut').fill_null(True))
+        .then(pl.col('share').cast(pl.Decimal(16, 8))).otherwise(pl.lit(0).cast(pl.Decimal(16, 8)))
+        .alias('__output_share'))
+    return weighted.with_columns(pl.col('__output_share').sum().over(keys).alias('__output_rate')).with_columns(
+        pl.when(pl.col('__output_rate') > 0).then(pl.col('__output_rate')).otherwise(1).alias('__output_rate'))
+
+
+def allocated_outputs(details: pl.DataFrame, *, net_profit_basis: bool = False, production: bool = False) -> dict[str, dict[str, float]] | None:
     """Split order output by each participant's share of the link's total rate."""
     required = {'status', 'person_id', 'share', 'total_rate'}
     if not required <= set(details.columns):
         return None
     assigned = details.filter(pl.col('status') == 'distribute')
+    if production:
+        assigned = production_weights(assigned)
     if assigned.is_empty():
         return {}
     fields = {name: name for name in ('participation_sales','participation_gross',
@@ -241,8 +262,8 @@ def allocated_outputs(details: pl.DataFrame, *, net_profit_basis: bool = False) 
     if not fields:
         return None
     assigned = assigned.with_columns(
-        pl.col('share').cast(pl.Decimal(16, 8)).alias('__share'),
-        pl.col('total_rate').cast(pl.Decimal(16, 8), strict=False).alias('__rate'),
+        pl.col('__output_share' if production else 'share').cast(pl.Decimal(16, 8)).alias('__share'),
+        pl.col('__output_rate' if production else 'total_rate').cast(pl.Decimal(16, 8), strict=False).alias('__rate'),
         *[pl.col(source).cast(pl.Decimal(28, 10), strict=False).alias('__'+name)
           for name, source in fields.items()],
     )

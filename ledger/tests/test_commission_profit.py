@@ -89,6 +89,47 @@ def test_shared_link_only_keeps_this_persons_share(tmp_path):
     assert mine['included_profit'] == 60
 
 
+def test_product_duties_control_output_but_not_commission_entitlement(tmp_path):
+    registry=Registry(tmp_path)
+    a=registry.person_save({'name':'王岩'},'test','register')
+    b=registry.person_save({'name':'刘露'},'test','register')
+    _persist(registry,a['id'],rows={
+        'status':['distribute']*4,'person_id':[a['id'],b['id'],a['id'],b['id']],
+        'person':['王岩','刘露','王岩','刘露'],'product_id':['111','111','222','222'],
+        'product_name':['A','A','B','B'],'duty':['produce','cut','cut','produce'],
+        'share':[.03,.02,.02,.03],'total_rate':[.05]*4,
+        'original_base':[73.27,73.27,100.,100.],'amount':[2.20,1.47,2.,3.],
+        'participation_sales':[175.87,175.87,200.,200.],
+        'participation_gross':[105.04,105.04,120.,120.],
+        'participation_profit':[73.27,73.27,100.,100.],
+        'spine_row':[1,1,2,2],'order_id':['o1','o1','o2','o2']})
+    mine=compose(registry,'s1','2026-06',a['id'],11,duties={a['id']:{'duty':'cut'}})
+    other=compose(registry,'s1','2026-06',b['id'],11)
+    by_id={p['product_id']:p for p in mine['products']}
+    assert by_id['111']['sales']==175.87
+    assert by_id['111']['gross']==105.04
+    assert by_id['111']['profit']==73.27
+    assert by_id['222']['sales']==0
+    assert mine['commission_trial']==4.20
+    assert other['commission_trial']==4.47
+    assert mine['included_profit']==73.27
+    assert other['included_profit']==100
+
+
+def test_multiple_producers_exclude_cut_from_denominator():
+    from ledger.commission_engine import allocated_outputs
+    frame=pl.DataFrame({'status':['distribute']*3,'spine_row':[1]*3,'product_id':['p']*3,
+        'person_id':['a','b','leader'],'duty':['produce','produce','cut'],
+        'share':[.03,.01,.02],'total_rate':[.06]*3,
+        'participation_sales':[200.]*3,'participation_gross':[120.]*3,'participation_profit':[-40.]*3})
+    result=allocated_outputs(frame,production=True)
+    assert result['a']=={'sales':150.,'gross':90.,'profit':-30.}
+    assert result['b']=={'sales':50.,'gross':30.,'profit':-10.}
+    assert result['leader']=={'sales':0.,'gross':0.,'profit':0.}
+    only_cut=frame.with_columns(pl.lit('cut').alias('duty'))
+    assert all(r['sales']==0 for r in allocated_outputs(only_cut,production=True).values())
+
+
 def test_compose_keeps_one_and_a_half_percent_share(tmp_path):
     registry = Registry(tmp_path)
     person = registry.person_save({'name': '王岩'}, 'tester', '登记')

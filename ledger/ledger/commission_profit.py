@@ -13,7 +13,7 @@ from pathlib import Path
 
 import polars as pl
 
-from .commission_engine import allocated_outputs
+from .commission_engine import allocated_outputs, production_weights
 from .commission_registry import RegistryError, RevisionConflict, json_text, now
 from .money import decimal_amount, money_float
 
@@ -21,7 +21,7 @@ _WANTED = (
     'status', 'person_id', 'person', 'product_id', 'product_name',
     'share', 'total_rate', 'original_base', 'amount',
     'participation_sales', 'participation_gross', 'participation_profit',
-    'spine_row', 'order_id',
+    'spine_row', 'order_id', 'duty',
 )
 
 
@@ -71,8 +71,8 @@ def _allocated_parts(assigned):
     if not fields or assigned.is_empty():
         return assigned.head(0)
     ready = assigned.with_columns(
-        pl.col('share').cast(pl.Decimal(16, 8)).alias('__share'),
-        pl.col('total_rate').cast(pl.Decimal(16, 8), strict=False).alias('__rate'),
+        pl.col('__output_share').cast(pl.Decimal(16, 8)).alias('__share'),
+        pl.col('__output_rate').cast(pl.Decimal(16, 8), strict=False).alias('__rate'),
         *[pl.col(source).cast(pl.Decimal(28, 10), strict=False).alias('__' + name)
           for name, source in fields.items()],
     ).filter(pl.col('__rate').is_not_null() & (pl.col('__rate') > 0))
@@ -191,6 +191,7 @@ def compose(registry, store_id, period, person_id, run_id, *, store_name='', dut
     meta, path = _calculation(registry, store_id, period, run_id)
     available = set(pl.scan_parquet(path).collect_schema().names())
     details = pl.read_parquet(path, columns=[name for name in _WANTED if name in available])
+    details = production_weights(details.filter(pl.col('status') == 'distribute'))
     roster = {row['id']: row for row in registry.people()}
     person_details = _person_rows(details, store_id, person_id, set(roster))
     assigned = (person_details.filter(pl.col('status') == 'distribute')
@@ -198,7 +199,7 @@ def compose(registry, store_id, period, person_id, run_id, *, store_name='', dut
                 else person_details.head(0))
     # When duties exist and this person is 'cut', only include products
     # where this person is the sole person on the link.
-    if duties and duties.get(person_id, {}).get('duty') == 'cut' and not assigned.is_empty():
+    if 'duty' not in available and duties and duties.get(person_id, {}).get('duty') == 'cut' and not assigned.is_empty():
         if 'product_id' in details.columns and 'person_id' in details.columns:
             base = (details.filter(pl.col('status') == 'distribute')
                     if 'status' in details.columns else details)
@@ -211,7 +212,7 @@ def compose(registry, store_id, period, person_id, run_id, *, store_name='', dut
     products = _product_rows(parts)
     person_name = next((row.get('person') for row in assigned.iter_rows(named=True)
                         if row.get('person')), '') or roster.get(person_id, {}).get('name') or person_id
-    split = allocated_outputs(assigned)
+    split = allocated_outputs(assigned, production=True)
     engine_pid = assigned['person_id'][0] if not assigned.is_empty() else person_id
     trial = None
     if not assigned.is_empty() and 'amount' in assigned.columns:
@@ -223,7 +224,8 @@ def compose(registry, store_id, period, person_id, run_id, *, store_name='', dut
     return {
         'store_id': store_id, 'store': store_name or store_id, 'period': period,
         'person_id': person_id, 'person': person_name, 'run_id': run_id,
-        'calculation_id': meta['id'], 'source_sha': meta['sha'],
+        'calculation_id': meta['id'], 'calculation_sha': meta['sha'],
+        'source_sha': hashlib.sha256((meta['sha'] + '|producer-output-v1').encode()).hexdigest(),
         'commission_trial': trial,
         'allocated_profit': None if split is None or engine_pid not in split
         else split[engine_pid].get('profit'),
@@ -257,9 +259,10 @@ def latest_for_run(registry, store_id, period, run_id):
     for row in rows:
         if row['person_id'] in out:
             continue
+        current = compose(registry, store_id, period, row['person_id'], run_id)
         out[row['person_id']] = {
-            'included_profit': money_float(row['included_profit']),
-            'excluded_count': len(json.loads(row['excluded_json'])),
+            'included_profit': current['included_profit'],
+            'excluded_count': len(current['excluded_product_ids']),
         }
     return out
 

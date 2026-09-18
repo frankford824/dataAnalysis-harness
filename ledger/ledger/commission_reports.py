@@ -129,7 +129,7 @@ _profit_cache: OrderedDict[tuple, dict[str, dict[str, float]] | None] = OrderedD
 _PROFIT_CACHE_LIMIT = 128
 
 
-def _archived_allocated_outputs(registry, commission):
+def _archived_allocated_outputs(registry, commission, *, production=False):
     calculation = commission.get('calculation_id')
     if not calculation:
         return None
@@ -138,7 +138,7 @@ def _archived_allocated_outputs(registry, commission):
                            (calculation,)).fetchone()
     if not row:
         return None
-    key = (str(registry.root.resolve()), calculation, row['sha'])
+    key = (str(registry.root.resolve()), calculation, row['sha'], production)
     with _profit_lock:
         if key in _profit_cache:
             _profit_cache.move_to_end(key)
@@ -150,21 +150,21 @@ def _archived_allocated_outputs(registry, commission):
             return None
         from io import BytesIO
         schema = pl.read_parquet_schema(BytesIO(payload))
-        cols = [name for name in ('status', 'person_id', 'share', 'total_rate',
+        cols = [name for name in ('status', 'person_id', 'share', 'total_rate', 'duty', 'spine_row', 'product_id',
                                   'participation_sales','participation_gross',
                                   'participation_profit', 'original_base')
                 if name in schema]
         details = pl.read_parquet(BytesIO(payload), columns=cols)
-        result = allocated_outputs(details, net_profit_basis=(
-            commission.get('base_node') == 'net_profit'
-            and commission.get('on_loss') == 'deduct'))
+        basis = commission.get('base_node') == 'net_profit' and commission.get('on_loss') == 'deduct'
+        results = {mode: allocated_outputs(details, production=mode, net_profit_basis=basis) for mode in (False, True)}
     except (OSError, ValueError, pl.exceptions.PolarsError):
-        result = None
+        results = {False: None, True: None}
     with _profit_lock:
-        _profit_cache[key] = result
-        if len(_profit_cache) > _PROFIT_CACHE_LIMIT:
+        for mode, result in results.items():
+            _profit_cache[(*key[:3], mode)] = result
+        while len(_profit_cache) > _PROFIT_CACHE_LIMIT:
             _profit_cache.popitem(last=False)
-    return result
+    return results[production]
 
 
 def _split_cents(total, weights):
@@ -208,7 +208,7 @@ def _profit_from_sales(people, operating, labor):
     return {pid: money_float(sign * parts[pid]) for pid in parts}
 
 
-def attributed_profit(commission, operating, labor, registry, *, store_id='', manual_cost=False, duties=None):
+def attributed_profit(commission, operating, labor, registry, *, store_id='', manual_cost=False, duties=None, production=False):
     """Additive person profit; keep full sales and gross output separate.
 
     Manual cost changes the store profit, not the ownership split. The
@@ -224,10 +224,11 @@ def attributed_profit(commission, operating, labor, registry, *, store_id='', ma
     ids = [p.get('person_id') for p in people]
     if any(not pid for pid in ids) or len(ids) != len(set(ids)):
         return {}
-    if len(people) == 1:
+    production_split = _archived_allocated_outputs(registry, commission, production=True) if production else None
+    if len(people) == 1 and production_split is None:
         return {ids[0]: profit_after_labor(operating, labor)}
     # duty-based: producers get all profit, cut members get 0
-    if duties and len(people) > 1:
+    if duties and len(people) > 1 and production_split is None:
         producers = [p for p in people if duties.get(p['person_id'], {}).get('duty', 'produce') == 'produce']
         if producers and len(producers) < len(people):
             producer_result = attributed_profit(
@@ -242,7 +243,9 @@ def attributed_profit(commission, operating, labor, registry, *, store_id='', ma
              for p in people if p.get('person_id') and
              all(p.get(key) is not None for key in
                  ('allocated_sales','allocated_gross','allocated_profit'))}
-    if len(split) != len(people):
+    if production_split is not None:
+        split = production_split
+    elif len(split) != len(people):
         split = _archived_allocated_outputs(registry, commission)
     if split is None or any(p.get('person_id') not in split for p in people):
         return _profit_from_sales(people, operating, labor)
@@ -260,15 +263,16 @@ def attributed_profit(commission, operating, labor, registry, *, store_id='', ma
             for pid in weights}
 
 
-def attributed_outputs(commission, store_sales, store_gross, registry, *, duties=None):
+def attributed_outputs(commission, store_sales, store_gross, registry, *, duties=None, production=False):
     people=commission.get('people') or []
     ids=[p.get('person_id') for p in people]
     if not people or any(not pid for pid in ids) or len(ids)!=len(set(ids)):
         return {}
-    if len(people)==1:
+    production_split = _archived_allocated_outputs(registry, commission, production=True) if production else None
+    if len(people)==1 and production_split is None:
         return {ids[0]:{'sales':store_sales,'gross':store_gross}}
     # duty-based: producers get all sales/gross; cut-only members get 0
-    if duties and len(people) > 1:
+    if duties and len(people) > 1 and production_split is None:
         producers = [p for p in people if duties.get(p['person_id'], {}).get('duty', 'produce') == 'produce']
         if producers and len(producers) < len(people):
             producer_result = attributed_outputs(
@@ -279,7 +283,9 @@ def attributed_outputs(commission, store_sales, store_gross, registry, *, duties
     split={p['person_id']:{'sales':p.get('allocated_sales'),'gross':p.get('allocated_gross')}
            for p in people if p.get('person_id') and
            p.get('allocated_sales') is not None and p.get('allocated_gross') is not None}
-    if len(split)!=len(people):
+    if production_split is not None:
+        split={pid:{'sales':value.get('sales'),'gross':value.get('gross')} for pid,value in production_split.items()}
+    elif len(split)!=len(people):
         archived=_archived_allocated_outputs(registry,commission)
         if archived is None:return {}
         split={pid:{'sales':value.get('sales'),'gross':value.get('gross')}
@@ -618,17 +624,18 @@ def build(workspace, registry, model, start, end, store_ids=None, person_ids=Non
                 effective_duties[pid] = {'duty': 'produce'}
             elif person.get('duty') in ('produce', 'cut'):
                 effective_duties[pid] = {'duty': person['duty']}
-        person_output=attributed_outputs(source_c,sales,gross,registry,duties=effective_duties)
-        person_profit=attributed_profit(source_c,operating,visible_labor,registry,store_id=sid,duties=effective_duties)
+        person_output=attributed_outputs(source_c,sales,gross,registry,duties=effective_duties,production=True)
+        payout_profit=attributed_profit(source_c,operating,visible_labor,registry,store_id=sid,duties=effective_duties)
+        person_profit=attributed_profit(source_c,operating,visible_labor,registry,store_id=sid,duties=effective_duties,production=True)
         profit_rates={person.get('person_id'):confirmed_profit_rate(
             source_c,person.get('person_id'),sid) for person in source_c.get('people') or []}
         if not decision and any(
                 rate is not None and person_profit.get(pid) is not None
                 for pid,rate in profit_rates.items()):
             if len(source_c.get('people') or [])==1:
-                notes.append(f'本店仅一位分配人：店铺利润全部归本人，提成按利润额乘唯一有效点数{money_float(next(iter(profit_rates.values()))*100):g}%计算')
+                notes.append('提成沿用原核算基数与点数；产出按商品做货身份另行归属')
             else:
-                notes.append('人员销售、毛利、利润按提成点数拆分；总点数唯一时，提成按人员利润额乘该点数计算')
+                notes.append('产出按商品做货身份归属，抽点不参与产出分摊；提成金额沿用原核算基数与点数')
             scope['notes']='；'.join(notes)
         member_rows=[]
         original_people = {}
@@ -663,9 +670,9 @@ def build(workspace, registry, model, start, end, store_ids=None, person_ids=Non
                 continue
             orig_person = original_people.get(pid)
             orig_profit_rate = profit_rates.get(pid)
-            if (orig_profit_rate is not None and pid in person_profit
+            if (orig_profit_rate is not None and pid in payout_profit
                     and orig_person and orig_person.get('amount') is not None):
-                system_trial = decimal(money_float(decimal(person_profit[pid]) * orig_profit_rate))
+                system_trial = decimal(money_float(decimal(payout_profit[pid]) * orig_profit_rate))
             elif orig_person and orig_person.get('amount') is not None:
                 system_trial = decimal(money_float(decimal(orig_person['amount']) * keep))
             else:
@@ -673,9 +680,9 @@ def build(workspace, registry, model, start, end, store_ids=None, person_ids=Non
 
             profit_rate=(profit_rates.get(person.get('person_id'))
                          if not decision else None)
-            if (profit_rate is not None and person.get('person_id') in person_profit
+            if (profit_rate is not None and person.get('person_id') in payout_profit
                     and person.get('amount') is not None):
-                amount=decimal(money_float(decimal(person_profit[person['person_id']])*profit_rate))
+                amount=decimal(money_float(decimal(payout_profit[person['person_id']])*profit_rate))
             else:
                 amount=decimal(money_float(decimal(person['amount'])*keep))
 

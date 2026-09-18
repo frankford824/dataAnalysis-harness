@@ -40,7 +40,8 @@ test('export names the person and says profit is before labor', () => {
   assert.match(header, /利润口径/)
   assert.match(row, /^陈慨,/)
   assert.match(row, /-88.3/)
-  assert.match(row, /不是利润看板的商品全额/)
+  assert.match(row, /单人做货归全额/)
+  assert.match(row, /抽点不参与/)
   const exported = profitCompositionExportRows({
     person: '陈慨', store: '店', period: '2026-06',
     products: [{product_id: 'p1', product_name: 'A', profit: -5, rate: 0.05}],
