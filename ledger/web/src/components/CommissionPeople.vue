@@ -94,7 +94,7 @@ defineExpose({open,shown})
 <template><n-modal v-model:show="shown" preset="card" title="人员名单与分配" style="width:min(860px,95vw)">
   <div class="tab-bar">
     <button :class="['tab-item',{active:tab==='people'}]" @click="tab='people'">人员名单</button>
-    <button :class="['tab-item',{active:tab==='identity'}]" @click="tab='identity'">本店身份</button>
+    <button :class="['tab-item',{active:tab==='identity'}]" @click="tab='identity'">店铺默认身份</button>
   </div>
 
   <!-- 人员名单 -->
@@ -107,7 +107,7 @@ defineExpose({open,shown})
 
   <!-- 本店身份 -->
   <template v-if="tab==='identity'">
-    <p class="hint">设置每位人员在店铺的身份：做货计销售/毛利/利润，抽点只计提成。身份跟提成点数一样按生效时间分段，8月1日后改宋做货不会盖掉8月1日前宋/宗的配置。</p>
+    <p class="hint">这里设置的是<b>店铺默认身份</b>——当某个商品没有单独标注身份时，自动采用这里的设置。如需给不同商品设不同身份，请在商品设置里逐条修改或批量操作。做货 = 归属销售/毛利/利润，抽点 = 只计提成。</p>
     <div class="identity-toolbar">
       <n-select v-model:value="memberStoreIds" :options="storeOptions" multiple filterable clearable placeholder="选择店铺（可多选）" style="min-width:240px;flex:1" aria-label="选择店铺" />
       <label class="identity-date">查看时点<input v-model="memberAt" type="datetime-local" step="1" aria-label="查看身份时点" /></label>
@@ -119,7 +119,7 @@ defineExpose({open,shown})
         <n-button size="small" type="primary" :loading="batchSaving" :disabled="memberLoading||!members.length" @click="saveAll">一键保存到所选店铺</n-button>
       </template>
     </div>
-    <p v-if="multiStore" class="hint">将写入 {{ memberStoreIds.length }} 家店。各店原身份不一致的人先按做货显示，保存后统一。</p>
+    <p v-if="multiStore" class="hint">同时修改 {{ memberStoreIds.length }} 家店铺的默认身份。各店原身份不一致的人员暂按做货显示，保存后统一。</p>
     <p v-if="memberError" class="error">{{ memberError }} <button class="text-button" @click="loadMembers">重试</button></p>
     <n-spin :show="memberLoading">
       <div v-if="!memberStoreIds.length" class="identity-empty">请先选择店铺</div>

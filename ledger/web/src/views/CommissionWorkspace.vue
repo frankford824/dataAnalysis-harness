@@ -86,7 +86,7 @@ const {data,error,loading,stale,load} = useCommissionQuery('settings', () => `${
 const rows = computed(() => data.value?.rows || [])
 const next = computed(() => data.value?.next_after || '')
 const locked = computed(() => loading.value || stale.value || busy.value)
-const menuOptions = [{label:'批量新增',key:'new'},{label:'人员名单',key:'people'},{label:'本店身份',key:'identity'},{type:'divider',key:'line'},
+const menuOptions = [{label:'批量新增',key:'new'},{label:'人员名单',key:'people'},{label:'店铺默认身份',key:'identity'},{type:'divider',key:'line'},
   {label:'下载模板',key:'template'},{label:'导出设置',key:'export'}]
 const otherStates = [{label:'待生效',key:'scheduled'},{label:'已到期',key:'expired'}]
 function menu(key) {
@@ -165,7 +165,11 @@ async function save() {
   finally { busy.value = false }
 }
 function historicalPeople(segment) {
-  return (segment.allocations || []).map(a => `${people.value.find(p => p.id === a.person_id)?.name || '原登记人员'} ${rateText(a.rate)}`).join('、')
+  return (segment.allocations || []).map(a => {
+    const name = people.value.find(p => p.id === a.person_id)?.name || '原登记人员'
+    const duty = a.duty ? `（${dutyLabel(a.duty)}）` : ''
+    return `${name}${duty} ${rateText(a.rate)}`
+  }).join('、')
 }
 
 const visibleChecked=computed(()=>rows.value.filter(rowSelected).map(keyOf))
@@ -175,9 +179,9 @@ const tableColumns=computed(()=>[
   {title:'商品',key:'product',minWidth:230,mobileWidth:140,render:row=>h('div',[
     h('div',{class:'table-product'},row.product_name||'未填写商品名称'),h('div',{class:'table-secondary'},row.product_id==='*'?'店铺通用':row.product_id),h('div',{class:'table-secondary table-mobile-only'},`${storeName(row.store_id)} · ${states[row.state]}`)])},
   {title:'店铺',key:'store',width:210,mobile:false,render:row=>storeName(row.store_id)},
-  {title:'所属人员 / 比例',key:'people',width:230,mobileWidth:130,render:row=>row.people.length?row.people.map(p=>h('div',{class:'table-assignee'},[
+  {title:'人员 / 身份 / 比例',key:'people',width:250,mobileWidth:140,render:row=>row.people.length?row.people.map(p=>h('div',{class:'table-assignee'},[
     h('span',p.name),
-    p.duty?h(NTag,{size:'tiny',bordered:false,type:dutyTagType(p.duty),style:'margin:0 4px'},()=>dutyLabel(p.duty)):null,
+    h(NTag,{size:'tiny',bordered:false,type:dutyTagType(p.duty||'produce'),style:'margin:0 4px'},()=>dutyLabel(p.duty||'produce')),
     h('strong',rateText(p.rate))])):h('span',{class:'table-secondary'},'未分配')},
   {title:'状态',key:'state',width:100,mobile:false,render:row=>h(NTag,{size:'small',bordered:false,type:row.state==='enabled'?'success':row.state==='pending'?'warning':'default'},()=>states[row.state])},
   {title:'操作',key:'action',width:74,mobileWidth:56,fixed:'right',render:row=>h(NButton,{text:true,type:'primary',size:'small',disabled:locked.value||row.store_id.startsWith('unmapped:'),onClick:()=>edit(row)},()=> '修改')},
@@ -236,15 +240,15 @@ defineExpose({edit,menu,busy})
       <details v-else class="editor-product-details"><summary>商品信息</summary><label>商品名称<input v-model="form.product_name" aria-label="商品名称"/></label></details>
       <label>状态<select v-model="form.mode" aria-label="提成状态"><option value="distribute">提成中</option><option value="exclude">不提成</option><option value="hold">暂不设置</option></select></label>
       <template v-if="form.mode === 'distribute'">
-        <div class="allocation-head"><span>所属人员</span><span>本店身份</span><span>提成比率</span></div>
+        <div class="allocation-head"><span>所属人员</span><span>身份</span><span>提成比率</span></div>
         <div v-for="(p,i) in form.allocations" :key="i" class="allocation-row">
           <n-select v-model:value="p.person" :options="personOptions" filterable tag placeholder="选择或输入姓名" :aria-label="`所属人员${i+1}`" />
-          <n-select v-model:value="p.duty" :options="DUTY_OPTIONS" size="small" :aria-label="`本店身份${i+1}`" />
+          <n-select v-model:value="p.duty" :options="DUTY_OPTIONS" size="small" :aria-label="`身份${i+1}`" />
           <label class="percentage"><input v-model="p.percent" type="number" min="0" max="100" step="0.01" :aria-label="`提成比率${i+1}`" /><span>%</span></label>
           <n-button text @click="form.allocations.splice(i,1)">移除</n-button>
         </div>
         <div class="allocation-footer"><n-button text type="primary" @click="form.allocations.push({person:null,percent:null,duty:'produce'})">＋ 添加人员</n-button><span>合计 {{ Number(total.toFixed(6)) }}%</span></div>
-        <p class="duty-hint">本店身份跟店铺和时间走，不是跟这个宝贝走。保存时按上面的生效时间分段：8月1日后改宋做货，不会改8月1日前宋/宗的身份。</p>
+        <p class="duty-hint">身份跟着商品走：这里设的做货/抽点只影响本商品。同一家店不同商品可以给同一个人设不同身份。</p>
       </template>
       <details class="dates"><summary>生效时间 <span>{{ form.valid_from?.replace('T',' ') }}起{{ form.valid_to ? '，至'+form.valid_to.replace('T',' ') : '' }}</span></summary><div class="fields"><label>开始时间<input v-model="form.valid_from" type="datetime-local" step="1" aria-label="开始时间" /></label><label>结束时间（可留空）<input v-model="form.valid_to" type="datetime-local" step="1" aria-label="结束时间" /></label></div><small>北京时间；此前设置会保留。</small></details>
       <details v-if="selected?.versions?.length" class="history"><summary>查看修改记录</summary><div v-for="v in selected.versions" :key="v.id" class="history-item"><small><b :class="v.id===selected.active_version?'current-version':'old-version'">{{v.id===selected.active_version?'当前版本':'历史版本'}}</b> · {{ new Date(v.recorded_at).toLocaleString('zh-CN',{timeZone:'Asia/Shanghai'}) }}</small><p v-for="s in v.body.segments" :key="s.valid_from">{{ s.valid_from.replace('T',' ') }}起：{{ s.mode==='distribute' ? historicalPeople(s) : s.mode==='exclude' ? '不提成' : '暂不设置' }}{{ s.valid_to ? '（至'+s.valid_to.replace('T',' ')+ '）' : '' }}</p></div></details>

@@ -1,8 +1,8 @@
 import { commissionRequest } from './components/commissionRequest'
 
 export const DUTY_OPTIONS = [
-  { label: '做货', value: 'produce' },
-  { label: '抽点', value: 'cut' },
+  { label: '做货（归属产出）', value: 'produce' },
+  { label: '抽点（只计提成）', value: 'cut' },
 ]
 
 export function dutyLabel(duty) {
