@@ -1,7 +1,7 @@
 <script setup>
 import { computed, onActivated, ref, watch } from 'vue'
 import { useMessage } from 'naive-ui'
-import { Search, Plus } from '@lucide/vue'
+import { Search, Plus, Users, Building2, AlertTriangle } from '@lucide/vue'
 import { useCommission } from '../commissionStore'
 import OrgTreeNode from '../components/OrgTreeNode.vue'
 import OrgEditPanel from '../components/OrgEditPanel.vue'
@@ -65,6 +65,14 @@ const visibleTree = computed(() => {
   return walk(tree.value)
 })
 
+const stats = computed(() => {
+  const all = flatten(tree.value)
+  const leaders = all.filter(n => n.role === '团队长').length
+  const managers = all.filter(n => n.role === '组长').length
+  const members = all.filter(n => n.role === '成员').length
+  return { total: all.length, leaders, managers, members }
+})
+
 async function load() {
   loading.value = true
   error.value = ''
@@ -81,7 +89,18 @@ async function load() {
 
 function toggle(id) { expanded.value = { ...expanded.value, [id]: expanded.value[id] === false } }
 function select(node) { selectedId.value = node.id; adding.value = null }
-function startAdd(parent) { adding.value = parent || { id: '', name: '团队长' }; newName.value = ''; selectedId.value = parent?.id || '' }
+function startAdd(parent) { adding.value = parent || { id: '', name: '根节点' }; newName.value = ''; selectedId.value = parent?.id || '' }
+
+function expandAll() {
+  const all = {}
+  for (const node of flatten(tree.value)) all[node.id] = true
+  expanded.value = all
+}
+function collapseAll() {
+  const all = {}
+  for (const node of flatten(tree.value)) all[node.id] = false
+  expanded.value = all
+}
 
 async function createPerson() {
   const name = newName.value.trim()
@@ -171,41 +190,62 @@ defineExpose({ reload: load })
 
 <template>
   <div class="org-page">
-    <div class="org-toolbar">
-      <n-input v-model:value="search" class="org-search" placeholder="搜索人员、别名或店铺" clearable>
-        <template #prefix><Search :size="15" /></template>
-      </n-input>
-      <n-button text :disabled="loading" @click="load">刷新</n-button>
-      <n-button type="primary" @click="startAdd(null)"><Plus :size="14" style="margin-right:6px" />新建团队</n-button>
+    <div class="org-header">
+      <div class="org-stats">
+        <div class="org-stat"><Users :size="15" /><span>{{ stats.total }} 人</span></div>
+        <div class="org-stat leader"><span class="org-stat-dot" />{{ stats.leaders }} 团队</div>
+        <div class="org-stat manager" v-if="stats.managers"><span class="org-stat-dot" />{{ stats.managers }} 组</div>
+        <div class="org-stat member"><span class="org-stat-dot" />{{ stats.members }} 成员</div>
+      </div>
+      <div class="org-toolbar">
+        <n-input v-model:value="search" class="org-search" placeholder="搜索人员、别名或店铺" clearable>
+          <template #prefix><Search :size="15" /></template>
+        </n-input>
+        <n-button text :disabled="loading" @click="expandAll">全部展开</n-button>
+        <n-button text :disabled="loading" @click="collapseAll">全部收起</n-button>
+        <n-button text :disabled="loading" @click="load">刷新</n-button>
+        <n-button type="primary" size="small" @click="startAdd(null)"><Plus :size="14" style="margin-right:4px" />新建团队</n-button>
+      </div>
     </div>
-    <p class="org-lead">团队和组都是具体的人。拖到另一位下面就是下级；店铺挂在负责人身上，下级跟着做。组长本人也算组里的成员。</p>
+    <p class="org-lead">
+      拖一个人到另一个人上面 → 变成他的下级。拖到顶部虚框 → 独立成团队长。
+      <strong>组长即成员</strong>，店铺跟组织走。
+    </p>
     <div v-if="error" class="commission-error" role="alert">{{ error }} <button class="text-button" @click="load">重试</button></div>
     <div class="org-layout" :class="{ loading }">
-      <div class="org-tree" @dragend="draggingId=''">
+      <div class="org-tree-wrap" @dragend="draggingId=''">
         <div
           class="org-root-drop"
+          :class="{ active: !!draggingId }"
           @dragover.prevent
           @drop="dropRoot"
-        >拖到这里成为团队长</div>
-        <OrgTreeNode
-          v-for="node in visibleTree"
-          :key="node.id"
-          :node="node"
-          :selected-id="selectedId"
-          :matches="matches"
-          :expanded="expanded"
-          :dragging-id="draggingId"
-          @select="select"
-          @toggle="toggle"
-          @add="startAdd"
-          @drag-start="draggingId=$event"
-          @drop="drop"
-        />
+        >
+          <Building2 :size="16" />
+          拖到这里成为独立团队长
+        </div>
+        <ul class="org-tree-root">
+          <OrgTreeNode
+            v-for="(node, idx) in visibleTree"
+            :key="node.id"
+            :node="node"
+            :selected-id="selectedId"
+            :matches="matches"
+            :expanded="expanded"
+            :dragging-id="draggingId"
+            :is-last="idx === visibleTree.length - 1"
+            @select="select"
+            @toggle="toggle"
+            @add="startAdd"
+            @drag-start="draggingId=$event"
+            @drop="drop"
+          />
+        </ul>
         <div v-if="!loading && !visibleTree.length" class="org-empty">
           {{ search ? '没有匹配的人员' : '还没有组织层级。先建一位团队长，再把其他人拖到他下面。' }}
         </div>
         <div v-if="unassigned.length && !search" class="org-unassigned">
-          尚未挂到组织上的店铺：{{ unassigned.map(s => s.name).join('、') }}
+          <AlertTriangle :size="14" style="flex:none" />
+          <span>{{ unassigned.length }} 个店铺尚未挂到组织：{{ unassigned.slice(0, 8).map(s => s.name).join('、') }}{{ unassigned.length > 8 ? '…' : '' }}</span>
         </div>
       </div>
       <OrgEditPanel
@@ -220,8 +260,9 @@ defineExpose({ reload: load })
     </div>
     <n-modal :show="!!adding" :mask-closable="!saving" @update:show="open => { if (!open) adding = null }">
       <div class="org-add-dialog">
-        <h3>添加{{ adding?.id ? `到 ${adding.name} 下面` : '团队长' }}</h3>
-        <label>姓名<input v-model="newName" maxlength="100" @keyup.enter="createPerson" /></label>
+        <h3>{{ adding?.id ? `添加到「${adding.name}」下面` : '新建团队' }}</h3>
+        <p class="org-add-hint">{{ adding?.id ? '添加后会成为这个人的下级' : '创建一个新的团队长节点' }}</p>
+        <label>姓名<input v-model="newName" maxlength="100" placeholder="输入人员姓名" @keyup.enter="createPerson" /></label>
         <div class="org-add-actions">
           <n-button :disabled="saving" @click="adding=null">取消</n-button>
           <n-button type="primary" :loading="saving" :disabled="!newName.trim()" @click="createPerson">添加</n-button>

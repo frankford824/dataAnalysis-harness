@@ -1,6 +1,7 @@
 <script setup>
 import { computed, ref, watch } from 'vue'
 import { useApp } from '../store'
+import { User, Store, Package, X } from '@lucide/vue'
 
 const props = defineProps({
   person: { type: Object, default: null },
@@ -33,6 +34,9 @@ const parentOptions = computed(() => props.people
   .filter(p => p.id !== form.value.id)
   .map(p => ({ value: p.id, label: p.alias ? `${p.name}（${p.alias}）` : p.name })))
 const storeOptions = computed(() => app.stores.map(s => ({ value: s.id, label: s.name })))
+const initials = computed(() => (props.person?.name || '?').slice(0, 1))
+const roleColors = { '团队长': 'leader', '组长': 'manager', '成员': 'member' }
+const roleClass = computed(() => roleColors[props.person?.role] || 'member')
 
 function blank() {
   return { id: '', name: '', alias: '', employee_no: '', parent_id: null, default_cut_rate: null, note: '', archived: false, revision: 0 }
@@ -49,38 +53,71 @@ function saveStores() { emit('stores', { person_id: form.value.id, store_ids: [.
 </script>
 
 <template>
-  <aside class="org-panel" :aria-label="person ? '编辑人员' : '人员详情'">
-    <header>
-      <div>
-        <h2>{{ person ? person.name : '选择一位人员' }}</h2>
-        <p>{{ person ? `${person.role}。组长本人也是组里的成员，店铺跟组织走。` : '点树上的人，或把人拖到另一位下面调整上下级。' }}</p>
+  <aside class="org-panel" :class="{ empty: !person }" :aria-label="person ? '编辑人员' : '人员详情'">
+    <template v-if="!person">
+      <div class="org-panel-empty">
+        <User :size="40" />
+        <h3>选择一位人员</h3>
+        <p>点击左侧树中的人员卡片查看详情，<br/>或拖动卡片调整上下级关系。</p>
       </div>
-      <n-button v-if="person" text @click="emit('close')">关闭</n-button>
-    </header>
-    <template v-if="person">
-      <label>姓名<input v-model="form.name" maxlength="100" aria-label="姓名" /></label>
-      <label>别名 / 团队名<input v-model="form.alias" maxlength="100" placeholder="例如：运营一部、宋永康组" aria-label="别名" /></label>
-      <label>工号<input v-model="form.employee_no" aria-label="工号" /></label>
-      <label>上级
-        <n-select v-model:value="form.parent_id" :options="parentOptions" clearable filterable placeholder="无上级，即团队长" />
-      </label>
-      <label>作为上级时的默认抽成
-        <span class="cut-field"><input v-model="form.default_cut_rate" type="number" min="0" max="100" step="0.01" aria-label="默认抽成" /><span>%</span></span>
-        <small>下级商品保存时，可一键把这个比例补到本商品上。单条商品仍可改。</small>
-      </label>
-      <label>备注<input v-model="form.note" aria-label="备注" /></label>
-      <label class="check"><input v-model="form.archived" type="checkbox" />已停用</label>
-      <n-button type="primary" block :loading="saving" :disabled="!form.name.trim()" @click="submit">保存人员</n-button>
-      <div class="org-stores">
-        <h3>负责店铺</h3>
-        <p>挂在这个人身上的店，下级一起做。商品级做货/抽点仍在提成设置里。</p>
-        <n-select v-model:value="storeIds" :options="storeOptions" multiple filterable placeholder="选择店铺" />
-        <n-button style="margin-top:10px" :disabled="saving" @click="saveStores">保存店铺归属</n-button>
+    </template>
+    <template v-else>
+      <header class="org-panel-header">
+        <div class="org-panel-identity">
+          <div :class="['org-panel-avatar', roleClass]">{{ initials }}</div>
+          <div>
+            <h2>{{ person.name }}</h2>
+            <span :class="['tree-role-badge', roleClass]">{{ person.role }}</span>
+          </div>
+        </div>
+        <button class="org-panel-close" @click="emit('close')" title="关闭"><X :size="16" /></button>
+      </header>
+
+      <div class="org-panel-form">
+        <div class="org-field">
+          <label>姓名</label>
+          <input v-model="form.name" maxlength="100" aria-label="姓名" />
+        </div>
+        <div class="org-field">
+          <label>别名 / 团队名</label>
+          <input v-model="form.alias" maxlength="100" placeholder="如：运营一部" aria-label="别名" />
+        </div>
+        <div class="org-field-row">
+          <div class="org-field">
+            <label>工号</label>
+            <input v-model="form.employee_no" aria-label="工号" />
+          </div>
+          <div class="org-field">
+            <label>默认抽成</label>
+            <div class="org-cut-input">
+              <input v-model="form.default_cut_rate" type="number" min="0" max="100" step="0.01" aria-label="默认抽成" />
+              <span>%</span>
+            </div>
+          </div>
+        </div>
+        <div class="org-field">
+          <label>上级</label>
+          <n-select v-model:value="form.parent_id" :options="parentOptions" clearable filterable placeholder="无上级 = 团队长" size="small" />
+        </div>
+        <div class="org-field">
+          <label>备注</label>
+          <input v-model="form.note" aria-label="备注" placeholder="备注信息" />
+        </div>
+        <label class="org-check"><input v-model="form.archived" type="checkbox" />已停用</label>
+        <n-button type="primary" block :loading="saving" :disabled="!form.name.trim()" @click="submit">保存人员</n-button>
       </div>
-      <div v-if="products.length" class="org-products">
-        <h3>参与的商品</h3>
-        <p>这里只看当前生效的设置。改点数请到提成设置。</p>
-        <ul>
+
+      <div class="org-panel-section">
+        <h3><Store :size="14" /> 负责店铺</h3>
+        <p>挂在此人名下的店铺，下级共同负责。</p>
+        <n-select v-model:value="storeIds" :options="storeOptions" multiple filterable placeholder="选择店铺" size="small" />
+        <n-button size="small" style="margin-top:8px" :disabled="saving" @click="saveStores">保存店铺</n-button>
+      </div>
+
+      <div v-if="products.length" class="org-panel-section">
+        <h3><Package :size="14" /> 参与商品</h3>
+        <p>当前生效的提成设置。改点数请到提成设置页。</p>
+        <ul class="org-product-list">
           <li v-for="row in products" :key="row.store_id+row.product_id">
             <strong>{{ row.product_name || row.product_id }}</strong>
             <span>{{ row.people.filter(p => p.person_id === person.id).map(p => `${p.source==='hierarchy'?'组织抽成':(p.duty==='cut'?'抽点':'做货')} ${(Number(p.rate)*100).toFixed(2)}%`).join('、') }}</span>
