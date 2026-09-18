@@ -127,12 +127,13 @@ CREATE TRIGGER IF NOT EXISTS profit_exclusion_no_update BEFORE UPDATE ON profit_
 CREATE TRIGGER IF NOT EXISTS profit_exclusion_no_delete BEFORE DELETE ON profit_exclusion
  BEGIN SELECT RAISE(ABORT,'profit exclusion history is immutable'); END;
 CREATE TABLE IF NOT EXISTS store_member (
- store_id TEXT NOT NULL, person_id TEXT NOT NULL,
+ id TEXT PRIMARY KEY, store_id TEXT NOT NULL, person_id TEXT NOT NULL,
+ valid_from TEXT NOT NULL, valid_to TEXT NOT NULL DEFAULT '',
  duty TEXT NOT NULL DEFAULT 'produce',
  leader_id TEXT NOT NULL DEFAULT '',
- revision INTEGER NOT NULL DEFAULT 1,
- PRIMARY KEY(store_id, person_id)
+ revision INTEGER NOT NULL DEFAULT 1
 );
+CREATE INDEX IF NOT EXISTS store_member_scope ON store_member(store_id, person_id, valid_from);
 CREATE TABLE IF NOT EXISTS operator (
  id TEXT PRIMARY KEY, name TEXT NOT NULL, salt TEXT NOT NULL, password_hash TEXT NOT NULL,
  admin INTEGER NOT NULL DEFAULT 0, disabled INTEGER NOT NULL DEFAULT 0
@@ -250,6 +251,45 @@ def validate_timeline(body: dict, person_ids: set[str]) -> dict:
     return {**body, "segments": segments}
 
 
+STORE_MEMBER_EPOCH = "1970-01-01T00:00:00"
+
+
+def _migrate_store_member(conn):
+    tables = {r["name"] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    create = """
+CREATE TABLE IF NOT EXISTS store_member (
+ id TEXT PRIMARY KEY, store_id TEXT NOT NULL, person_id TEXT NOT NULL,
+ valid_from TEXT NOT NULL, valid_to TEXT NOT NULL DEFAULT '',
+ duty TEXT NOT NULL DEFAULT 'produce',
+ leader_id TEXT NOT NULL DEFAULT '',
+ revision INTEGER NOT NULL DEFAULT 1
+);
+CREATE INDEX IF NOT EXISTS store_member_scope ON store_member(store_id, person_id, valid_from);
+"""
+    if "store_member" not in tables:
+        conn.executescript(create)
+        return
+    cols = {r["name"] for r in conn.execute("PRAGMA table_info(store_member)")}
+    if "valid_from" in cols and "id" in cols:
+        return
+    rows = [dict(r) for r in conn.execute("SELECT * FROM store_member")]
+    conn.execute("ALTER TABLE store_member RENAME TO store_member_legacy")
+    conn.executescript(create)
+    for row in rows:
+        conn.execute(
+            "INSERT INTO store_member(id,store_id,person_id,valid_from,valid_to,duty,leader_id,revision) "
+            "VALUES(?,?,?,?,?,?,?,?)",
+            (str(uuid.uuid4()), row["store_id"], row["person_id"], STORE_MEMBER_EPOCH, "",
+             row["duty"], row.get("leader_id") or "", row.get("revision") or 1))
+    conn.execute("DROP TABLE store_member_legacy")
+
+
+def member_active_at(row, at: str) -> bool:
+    if not at:
+        return not row.get("valid_to")
+    return row["valid_from"] <= at and (not row.get("valid_to") or at < row["valid_to"])
+
+
 class Registry:
     def __init__(self, root: str | Path):
         self.root = Path(root) / "commission"
@@ -267,15 +307,7 @@ class Registry:
                                                ("source_seq", "INTEGER NOT NULL DEFAULT 0"), ("source_fingerprint", "TEXT NOT NULL DEFAULT ''")]:
                         if column not in fields:
                             conn.execute(f"ALTER TABLE pending ADD COLUMN {column} {definition}")
-                    if 'store_member' not in {r['name'] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}:
-                        conn.executescript("""
-CREATE TABLE IF NOT EXISTS store_member (
- store_id TEXT NOT NULL, person_id TEXT NOT NULL,
- duty TEXT NOT NULL DEFAULT 'produce',
- leader_id TEXT NOT NULL DEFAULT '',
- revision INTEGER NOT NULL DEFAULT 1,
- PRIMARY KEY(store_id, person_id)
-);""")
+                    _migrate_store_member(conn)
                 _initialized.add(key)
 
     @contextmanager
@@ -349,7 +381,7 @@ CREATE TABLE IF NOT EXISTS store_member (
     def store_members(self, store_id: str) -> list[dict]:
         with self.connect() as conn:
             return [dict(r) for r in conn.execute(
-                "SELECT * FROM store_member WHERE store_id=? ORDER BY person_id", (store_id,))]
+                "SELECT * FROM store_member WHERE store_id=? ORDER BY person_id,valid_from", (store_id,))]
 
     def store_members_for_stores(self, store_ids: list[str]) -> list[dict]:
         ids = [sid for sid in store_ids if sid]
@@ -358,27 +390,56 @@ CREATE TABLE IF NOT EXISTS store_member (
         with self.connect() as conn:
             marks = ','.join('?' for _ in ids)
             return [dict(r) for r in conn.execute(
-                f"SELECT * FROM store_member WHERE store_id IN ({marks}) ORDER BY store_id,person_id", ids)]
+                f"SELECT * FROM store_member WHERE store_id IN ({marks}) "
+                "ORDER BY store_id,person_id,valid_from", ids)]
+
+    def store_members_at(self, store_id: str, at: str) -> list[dict]:
+        stamp = local_time(at) if at else ""
+        latest = {}
+        for row in self.store_members(store_id):
+            if member_active_at(row, stamp):
+                latest[row["person_id"]] = row
+        return list(latest.values())
 
     def save_store_member(self, store_id: str, person_id: str, duty: str,
-                          leader_id: str, actor: str, reason: str) -> dict:
+                          leader_id: str, actor: str, reason: str, *,
+                          valid_from: str = "", valid_to: str = "") -> dict:
         if duty not in ('produce', 'cut'):
             raise RegistryError("身份应为做货或抽点")
+        start = local_time(valid_from) if valid_from else local_time(
+            datetime.now(timezone(timedelta(hours=8))).replace(tzinfo=None).isoformat(timespec="seconds"))
+        end = local_time(valid_to, optional=True) if valid_to else ""
+        if end and end <= start:
+            raise RegistryError("身份失效时间必须晚于生效时间")
         with self.transaction() as conn:
             if not conn.execute("SELECT 1 FROM person WHERE id=?", (person_id,)).fetchone():
                 raise RegistryError("人员不存在")
             if leader_id and not conn.execute("SELECT 1 FROM person WHERE id=?", (leader_id,)).fetchone():
                 raise RegistryError("所属组长不存在")
-            row = conn.execute("SELECT * FROM store_member WHERE store_id=? AND person_id=?",
-                               (store_id, person_id)).fetchone()
-            before = dict(row) if row else None
-            revision = (before['revision'] if before else 0) + 1
-            result = {'store_id': store_id, 'person_id': person_id,
-                      'duty': duty, 'leader_id': leader_id or '', 'revision': revision}
-            conn.execute("INSERT OR REPLACE INTO store_member VALUES(?,?,?,?,?)",
-                         (store_id, person_id, duty, leader_id or '', revision))
-            self.audit(conn, actor, 'store_member.save', f'{store_id}/{person_id}',
-                       reason, before, result)
+            existing = [dict(r) for r in conn.execute(
+                "SELECT * FROM store_member WHERE store_id=? AND person_id=? ORDER BY valid_from",
+                (store_id, person_id))]
+            if not end:
+                later = [seg["valid_from"] for seg in existing if seg["valid_from"] > start]
+                if later:
+                    end = min(later)
+            for seg in existing:
+                if end and seg["valid_from"] >= end:
+                    continue
+                if seg["valid_from"] >= start:
+                    conn.execute("DELETE FROM store_member WHERE id=?", (seg["id"],))
+                elif not seg["valid_to"] or seg["valid_to"] > start:
+                    conn.execute("UPDATE store_member SET valid_to=? WHERE id=?", (start, seg["id"]))
+            revision = (max((seg["revision"] for seg in existing), default=0)) + 1
+            result = {"id": str(uuid.uuid4()), "store_id": store_id, "person_id": person_id,
+                      "valid_from": start, "valid_to": end, "duty": duty,
+                      "leader_id": leader_id or "", "revision": revision}
+            conn.execute(
+                "INSERT INTO store_member(id,store_id,person_id,valid_from,valid_to,duty,leader_id,revision) "
+                "VALUES(?,?,?,?,?,?,?,?)",
+                (result["id"], store_id, person_id, start, end, duty, leader_id or "", revision))
+            self.audit(conn, actor, "store_member.save", f"{store_id}/{person_id}",
+                       reason, existing, result)
             return result
 
     def scheme(self, sid: str) -> dict:

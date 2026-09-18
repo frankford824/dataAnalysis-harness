@@ -179,3 +179,29 @@ def test_store_members_for_stores(tmp_path):
     reg.save_store_member('s2', alice['id'], 'cut', '', 'test', '店2')
     rows = reg.store_members_for_stores(['s1', 's2'])
     assert {(r['store_id'], r['duty']) for r in rows} == {('s1', 'produce'), ('s2', 'cut')}
+
+
+def test_duty_time_segments_keep_earlier_period(tmp_path):
+    reg = Registry(tmp_path)
+    song = reg.person_save({'name': '宋永康'}, 'test', '登记')
+    zong = reg.person_save({'name': '宗玲'}, 'test', '登记')
+    reg.save_store_member('s1', song['id'], 'produce', '', 'test', '6月做货',
+                          valid_from='2026-06-01T00:00:00', valid_to='2026-08-01T00:00:00')
+    reg.save_store_member('s1', zong['id'], 'produce', '', 'test', '6月做货',
+                          valid_from='2026-06-01T00:00:00', valid_to='2026-08-01T00:00:00')
+    reg.save_store_member('s1', song['id'], 'produce', '', 'test', '8月后只宋做货',
+                          valid_from='2026-08-01T00:00:00')
+    june = store_member_duties(reg, 's1', '2026-06')
+    august = store_member_duties(reg, 's1', '2026-08')
+    assert june[song['id']]['duty'] == 'produce'
+    assert june[zong['id']]['duty'] == 'produce'
+    assert august[song['id']]['duty'] == 'produce'
+    assert zong['id'] not in august
+    reg.save_store_member('s1', song['id'], 'produce', '', 'test', '再改6月不应盖掉8月',
+                          valid_from='2026-06-01T00:00:00')
+    june = store_member_duties(reg, 's1', '2026-06')
+    august = store_member_duties(reg, 's1', '2026-08')
+    assert june[song['id']]['duty'] == 'produce'
+    assert june[zong['id']]['duty'] == 'produce'
+    assert august[song['id']]['duty'] == 'produce'
+    assert zong['id'] not in august

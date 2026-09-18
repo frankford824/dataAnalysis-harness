@@ -125,7 +125,7 @@ async function edit(row = {}) {
     for(const p of current.allocations||[])grouped.set(p.person_id,(grouped.get(p.person_id)||0)+Number(p.rate))
     const storeId=row.store_id||(shared.storeIds.length===1?shared.storeIds[0]:'')
     let duties={}
-    if(storeId){try{duties=Object.fromEntries((await loadStoreMembers([storeId])).map(m=>[m.person_id,m.duty||m.suggested_duty||'produce']))}catch{}}
+    if(storeId){try{duties=Object.fromEntries((await loadStoreMembers([storeId], current.valid_from||'')).map(m=>[m.person_id,m.duty||m.suggested_duty||'produce']))}catch{}}
     if(ticket!==editorSerial)return
     const allocations=selected.value?[...grouped].map(([person,rate])=>({person,percent:Number((rate*100).toFixed(8)),duty:duties[person]||'produce'})):(row.people||[]).map(p=>({person:p.person_id,percent:Number((Number(p.rate)*100).toFixed(8)),duty:p.duty||duties[p.person_id]||'produce'}))
     form.value={store_id:row.store_id||(shared.storeIds.length===1?shared.storeIds[0]:''),product_id:row.product_id||'',product_name:selected.value?.product_name||row.product_name||'',
@@ -162,7 +162,8 @@ async function save() {
           .map(p => ({person_id:p.person, duty:p.duty || 'produce'}))
       : []
     if (dutyRows.length && form.value.store_id) {
-      await saveStoreMembers([form.value.store_id], dutyRows, '随提成设置保存本店身份')
+      await saveStoreMembers([form.value.store_id], dutyRows, '随提成设置保存本店身份',
+        {valid_from: form.value.valid_from, valid_to: form.value.valid_to})
     }
     showEditor.value = false; message.success('已保存')
     await shared.changed();load()
@@ -249,7 +250,7 @@ defineExpose({edit,menu,busy})
           <n-button text @click="form.allocations.splice(i,1)">移除</n-button>
         </div>
         <div class="allocation-footer"><n-button text type="primary" @click="form.allocations.push({person:null,percent:null,duty:'produce'})">＋ 添加人员</n-button><span>合计 {{ Number(total.toFixed(6)) }}%</span></div>
-        <p class="duty-hint">本店身份跟店铺走，不是跟这个宝贝走：做货计销售/毛利/利润，抽点只计提成。这里改完会一并保存到该店。</p>
+        <p class="duty-hint">本店身份跟店铺和时间走，不是跟这个宝贝走。保存时按上面的生效时间分段：8月1日后改宋做货，不会改8月1日前宋/宗的身份。</p>
       </template>
       <details class="dates"><summary>生效时间 <span>{{ form.valid_from?.replace('T',' ') }}起{{ form.valid_to ? '，至'+form.valid_to.replace('T',' ') : '' }}</span></summary><div class="fields"><label>开始时间<input v-model="form.valid_from" type="datetime-local" step="1" aria-label="开始时间" /></label><label>结束时间（可留空）<input v-model="form.valid_to" type="datetime-local" step="1" aria-label="结束时间" /></label></div><small>北京时间；此前设置会保留。</small></details>
       <details v-if="selected?.versions?.length" class="history"><summary>查看修改记录</summary><div v-for="v in selected.versions" :key="v.id" class="history-item"><small><b :class="v.id===selected.active_version?'current-version':'old-version'">{{v.id===selected.active_version?'当前版本':'历史版本'}}</b> · {{ new Date(v.recorded_at).toLocaleString('zh-CN',{timeZone:'Asia/Shanghai'}) }}</small><p v-for="s in v.body.segments" :key="s.valid_from">{{ s.valid_from.replace('T',' ') }}起：{{ s.mode==='distribute' ? historicalPeople(s) : s.mode==='exclude' ? '不提成' : '暂不设置' }}{{ s.valid_to ? '（至'+s.valid_to.replace('T',' ')+ '）' : '' }}</p></div></details>

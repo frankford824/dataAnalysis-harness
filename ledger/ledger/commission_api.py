@@ -113,6 +113,8 @@ class StoreMemberChange(BaseModel):
     person_id: str
     duty: str = 'produce'
     leader_id: str = ''
+    valid_from: str = ''
+    valid_to: str = ''
     reason: str = Field(min_length=1, max_length=500)
 
 
@@ -120,12 +122,16 @@ class StoreMemberItem(BaseModel):
     person_id: str
     duty: str = 'produce'
     leader_id: str = ''
+    valid_from: str = ''
+    valid_to: str = ''
 
 
 class StoreMemberBatchChange(BaseModel):
     store_id: str = ''
     store_ids: list[str] = Field(default_factory=list, max_length=200)
     members: list[StoreMemberItem] = Field(min_length=1, max_length=200)
+    valid_from: str = ''
+    valid_to: str = ''
     reason: str = Field(min_length=1, max_length=500)
 
 
@@ -300,8 +306,17 @@ def install(app, workspace, model, model_root: Path | None = None):
     def person_save(change: PersonChange, request: Request):
         return reg().person_save(change.person, actor(request)["id"], change.reason, change.expected_revision)
 
-    def _store_member_rows(registry, store_id):
-        saved = {r['person_id']: r for r in registry.store_members(store_id)}
+    def _store_member_rows(registry, store_id, at=''):
+        from .commission_registry import member_active_at
+        stamp = local_time(at) if at else ''
+        segments = {}
+        for row in registry.store_members(store_id):
+            segments.setdefault(row['person_id'], []).append(row)
+        saved = {}
+        for pid, rows in segments.items():
+            current = next((row for row in rows if member_active_at(row, stamp)), rows[-1] if not stamp else None)
+            if current:
+                saved[pid] = current
         with registry.connect() as conn:
             rows = conn.execute("""
                 SELECT json_extract(a.value,'$.person_id') pid,
@@ -338,25 +353,33 @@ def install(app, workspace, model, model_root: Path | None = None):
                 'revision': s['revision'] if s else 0,
                 'confirmed': s is not None,
                 'suggested_duty': suggestions.get(pid, 'produce'),
+                'valid_from': s.get('valid_from', '') if s else '',
+                'valid_to': s.get('valid_to', '') if s else '',
+                'segments': [
+                    {'valid_from': row['valid_from'], 'valid_to': row['valid_to'],
+                     'duty': row['duty'], 'leader_id': row.get('leader_id', '')}
+                    for row in segments.get(pid, [])
+                ],
             })
         return members
 
     @router.get("/store-members")
-    def store_members(store_id: str = '', store_ids: list[str] = Query(default=[])):
+    def store_members(store_id: str = '', store_ids: list[str] = Query(default=[]), at: str = ''):
         ids = [sid for sid in ([store_id] if store_id else []) + list(store_ids) if sid]
         if not ids:
             raise RegistryError("请选择店铺")
         registry = reg()
         members = []
         for sid in dict.fromkeys(ids):
-            members.extend(_store_member_rows(registry, sid))
+            members.extend(_store_member_rows(registry, sid, at))
         return {"members": members}
 
     @router.post("/store-members")
     def save_store_member(change: StoreMemberChange, request: Request):
         return reg().save_store_member(
             change.store_id, change.person_id, change.duty,
-            change.leader_id, actor(request)["id"], change.reason)
+            change.leader_id, actor(request)["id"], change.reason,
+            valid_from=change.valid_from, valid_to=change.valid_to)
 
     @router.post("/store-members/batch")
     def save_store_members_batch(change: StoreMemberBatchChange, request: Request):
@@ -370,7 +393,9 @@ def install(app, workspace, model, model_root: Path | None = None):
             for item in change.members:
                 saved.append(registry.save_store_member(
                     sid, item.person_id, item.duty,
-                    item.leader_id, acting, change.reason))
+                    item.leader_id, acting, change.reason,
+                    valid_from=item.valid_from or change.valid_from,
+                    valid_to=item.valid_to or change.valid_to))
         return {"saved": saved, "count": len(saved), "stores": len(set(store_ids))}
 
     @router.post("/catalog/refresh")
@@ -667,8 +692,9 @@ def install(app, workspace, model, model_root: Path | None = None):
     @router.get('/profit-composition')
     def profit_composition(store_id: str, period: str, person_id: str, run_id: int):
         store_name = profit_scope(store_id, period, person_id, run_id)
+        duties = commission_reports.store_member_duties(reg(), store_id, period)
         return commission_profit.compose(reg(), store_id, period, person_id, run_id,
-                                         store_name=store_name)
+                                         store_name=store_name, duties=duties)
 
     @router.post('/profit-exclusions')
     def profit_exclusion_save(change: ProfitExclusionChange, request: Request):

@@ -4,7 +4,9 @@ from __future__ import annotations
 import json
 import polars as pl
 
-from .commission_registry import Registry, RegistryError, json_text, now
+from datetime import datetime, timezone, timedelta
+
+from .commission_registry import Registry, RegistryError, json_text, now, local_time, member_active_at
 from .order_feed import Client
 
 
@@ -183,9 +185,18 @@ def settings(registry: Registry, *, store_id="", search="", state="", after="", 
     more = len(rows)>limit
     rows = rows[:limit]
     total = next(iter_settings(registry, store_id=store_id, search=search, state=state, at=at, person_id=person_id, store_ids=store_ids, person_ids=person_ids, _count_only=True))["total"]
-    duties = {(r['store_id'], r['person_id']): r['duty']
-              for r in registry.store_members_for_stores({row['store_id'] for row in rows})}
+    segments = {}
+    for r in registry.store_members_for_stores({row['store_id'] for row in rows}):
+        segments.setdefault((r['store_id'], r['person_id']), []).append(r)
+    now_stamp = datetime.now(timezone(timedelta(hours=8))).replace(tzinfo=None).isoformat(timespec='seconds')
     for row in rows:
+        at = (row.get('setting') or {}).get('valid_from') or now_stamp
+        try:
+            at = local_time(at)
+        except Exception:
+            at = now_stamp
         for person in row.get('people') or []:
-            person['duty'] = duties.get((row['store_id'], person['person_id']))
+            current = next((seg for seg in segments.get((row['store_id'], person['person_id']), [])
+                            if member_active_at(seg, at)), None)
+            person['duty'] = current['duty'] if current else None
     return {'total':total,'total_pages':(total+limit-1)//limit,'page_size':limit,'rows':rows,'has_more':more,'next_after':rows[-1]['store_id']+'\x1f'+rows[-1]['product_id'] if rows and more else ''}

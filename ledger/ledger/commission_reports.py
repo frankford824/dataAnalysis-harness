@@ -19,9 +19,12 @@ from .labor_api import frozen_shares
 from .money import money_float
 
 
-def store_member_duties(registry, store_id):
-    """Load confirmed store member duties; unconfirmed defaults to produce."""
-    return {r['person_id']: r for r in registry.store_members(store_id)}
+def store_member_duties(registry, store_id, at=None):
+    """Load confirmed store member duties at a point in time."""
+    stamp = at or ''
+    if stamp and len(stamp) == 7:
+        stamp = f'{stamp}-01T00:00:00'
+    return {r['person_id']: r for r in registry.store_members_at(store_id, stamp)}
 
 
 def months(start, end):
@@ -374,11 +377,12 @@ def build(workspace, registry, model, start, end, store_ids=None, person_ids=Non
     from .commission_confirm import active_for_runs
     confirmed = active_for_runs(registry, records)
     _duties_cache = {}
-    def _get_duties(sid):
-        if sid not in _duties_cache:
-            members = registry.store_members(sid)
-            _duties_cache[sid] = {r['person_id']: r for r in members} if members else None
-        return _duties_cache[sid]
+    def _get_duties(sid, period=''):
+        key = (sid, period)
+        if key not in _duties_cache:
+            found = store_member_duties(registry, sid, period)
+            _duties_cache[key] = found or None
+        return _duties_cache[key]
     scopes={}; lines=[]; store_person_rows=[]; available={}; people_totals={}; store_totals={}; store_people={}
     for record in records:
         c=json.loads(record['commission_json'] or '{}');sid=record['store_id'];period=record['period']
@@ -442,7 +446,7 @@ def build(workspace, registry, model, start, end, store_ids=None, person_ids=Non
         gross=statement_amount(statement,gross_node) if gross_node else None
         operating=statement_amount(statement,profit_node) if profit_node else None
         visible_labor=labor_cut if spread.total is not None else Decimal(0)
-        store_duties=_get_duties(sid)
+        store_duties=_get_duties(sid, period)
         person_output=attributed_outputs(source_c,sales,gross,registry,duties=store_duties)
         person_profit=attributed_profit(source_c,operating,visible_labor,registry,store_id=sid,duties=store_duties)
         profit_rates={person.get('person_id'):confirmed_profit_rate(

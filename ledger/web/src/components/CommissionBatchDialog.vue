@@ -66,7 +66,8 @@ async function apply() {
       const dutyMembers=form.value.allocations.filter(p=>p.person&&props.people.some(x=>x.id===p.person))
         .map(p=>({person_id:p.person,duty:p.duty||'produce'}))
       if(storeIds.length&&dutyMembers.length&&form.value.mode==='distribute'&&operation.value!=='remove'){
-        await saveStoreMembers(storeIds,dutyMembers,'随批量提成设置保存本店身份')
+        await saveStoreMembers(storeIds,dutyMembers,'随批量提成设置保存本店身份',
+          {valid_from:form.value.valid_from,valid_to:form.value.valid_to})
       }
       shown.value=false;message.success(`已保存${r.count}条设置，涉及${r.stores}家店铺`);emit('saved')
     }
