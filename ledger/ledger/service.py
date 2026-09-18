@@ -619,13 +619,13 @@ def _attach_parse_failures(payload: dict, errors: list[dict]) -> None:
     """A successful channel must not hide a failed file from the same source."""
     if not errors:
         return
-    payload['file_errors'] = [{'file': e['file'], 'reason': e['reason']} for e in errors]
+    payload['file_errors'] = [{'file': e['file'], 'sheet': e.get('sheet') or '', 'reason': e['reason']} for e in errors]
     payload['can_close'] = False
-    details = [f"{e['file']}：{e['reason']}" for e in errors]
+    details = [f"{e['file']}{' · ' + e['sheet'] if e.get('sheet') else ''}：{e['reason']}" for e in errors]
     payload.setdefault('findings', []).append({
         'id': 'input_parse_errors', 'name': '源文件解析失败', 'passed': False, 'blocking': True,
-        'message': f"{len(errors)} 份源文件未进入核算，当前金额可能不完整。" + '；'.join(details),
-        'head': f"{len(errors)} 份源文件未进入核算，当前金额可能不完整。", 'lines': details,
+        'message': f"{len(errors)} 张源表未进入核算，请核对是否为业务明细或辅助表。" + '；'.join(details),
+        'head': f"{len(errors)} 张源表未进入核算，请核对是否为业务明细或辅助表。", 'lines': details,
     })
     commission = payload.get('commission')
     if isinstance(commission, dict):
