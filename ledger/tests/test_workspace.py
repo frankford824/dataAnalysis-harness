@@ -63,6 +63,28 @@ def test_startup_warm_includes_old_months_but_not_superseded_runs(ws, monkeypatc
     assert {r[0] for r in ws.conn.execute('SELECT run_id FROM run_report_slice')} == {ids[-1]}
 
 
+def test_slice_warm_and_foreground_queries_share_bounded_write_transactions(ws):
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Barrier
+    from ledger.commission_reports import _fill_report_slices
+    for i in range(48):
+        ws.record(f's{i}', '2026-06', {'commission': {'people': [], 'products': [
+            {'name':'x' * 10000, 'total_rate':0.01,'people':[]} for _ in range(4)]}}, [])
+    with ws.conn:
+        ws.conn.execute('DELETE FROM run_report_slice')
+    barrier = Barrier(4)
+    def query():
+        try:
+            barrier.wait(timeout=10)
+            return _fill_report_slices(ws, '2026-06', '2026-06')
+        finally:
+            ws.close()
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        results = list(pool.map(lambda _: query(), range(4)))
+    assert sum(results) == 48
+    assert ws.conn.execute('SELECT count(*) FROM run_report_slice WHERE overview_json IS NOT NULL').fetchone()[0] == 48
+
+
 # --------------------------------------------------------------------------- #
 # 留档
 # --------------------------------------------------------------------------- #

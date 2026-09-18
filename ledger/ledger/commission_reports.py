@@ -415,9 +415,16 @@ def _fill_report_slices(workspace, start, end, run_ids=None, store_id=None, visi
         args)]
     if not missing:
         return 0
-    marks = ','.join('?' for _ in missing)
     filled = 0
-    with workspace.conn as conn:
+    # SQLite cannot upgrade a stale WAL read snapshot to a writer. Acquire the
+    # writer before opening the JSON cursor; commit small batches so foreground
+    # writes can interleave with historical warm-up.
+    for offset in range(0, len(missing), 16):
+      batch = missing[offset:offset + 16]
+      marks = ','.join('?' for _ in batch)
+      with workspace.conn as conn:
+        if not conn.in_transaction:
+            conn.execute('BEGIN IMMEDIATE')
         for row in conn.execute(
             f"SELECT r.id,{payload_kind} payload_kind,length({payload}) payload_bytes,"
             f"json_remove(json_extract({payload},'$.commission'),'$.products') commission_json,"
@@ -426,7 +433,9 @@ def _fill_report_slices(workspace, start, end, run_ids=None, store_id=None, visi
             f"json_extract({payload},'$.store') store_name,"
             f"json_extract({payload},'$.manual_cost') manual_cost_json "
             f",json_remove({payload},'$.commission.products') overview_json "
-            f"{source}{manual_join} WHERE r.id IN ({marks})", missing):
+            f"{source}{manual_join} LEFT JOIN run_report_slice existing "
+            f"ON existing.run_id=r.id AND existing.payload_kind={payload_kind} "
+            f"WHERE r.id IN ({marks}) AND (existing.run_id IS NULL OR existing.overview_json IS NULL)", batch):
             conn.execute(
                 "INSERT OR REPLACE INTO run_report_slice("
                 "run_id,payload_kind,payload_bytes,commission_json,products_slim_json,"
