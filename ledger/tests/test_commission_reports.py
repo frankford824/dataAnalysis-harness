@@ -219,12 +219,12 @@ def test_configured_people_scan_is_reused_and_published_changes_invalidate_it(tm
     _, registry, people, _ = fixture(tmp_path)
     registry.save_scheme('s1','p1',{'segments':[segment('2026-06-01',people[0]['id'])]},
                          'tester','初版',publish=True)
-    original = commission_reports._scan_configured_people
+    original = commission_reports._scan_configured_rows
     scans = []
     def counted(*args, **kwargs):
         scans.append(1)
         return original(*args, **kwargs)
-    monkeypatch.setattr(commission_reports,'_scan_configured_people',counted)
+    monkeypatch.setattr(commission_reports,'_scan_configured_rows',counted)
     for _ in range(2):
         assert commission_reports.configured_people(registry,'2026-06','2026-06',('s1',)) == {
             's1':{people[0]['id']},
@@ -1107,4 +1107,108 @@ def test_teams_report_drops_product_blob_and_keeps_confirmed_payout(tmp_path):
         'start': '2026-06', 'end': '2026-06', 'store_ids': ['s1'], 'view': 'teams'}).json()
     assert confirmed['items'][0]['trial_amount'] == 12.34
     assert confirmed['items'][0]['actual_amount'] == 20
+
+
+def test_record_writes_report_slice_so_list_skips_product_blob(tmp_path, monkeypatch):
+    ws, _, people, client = fixture(tmp_path)
+    products = [{'product_id': f'{100000000000 + i}', 'total_rate': 0.05,
+                 'people': [{'person_id': people[0]['id'], 'duty': 'produce'}]}
+                for i in range(40)]
+    rid = ws.record('s1', '2026-06', {
+        'can_close': True, 'findings': [], 'missing_sources': [],
+        'statement': [{'id': 'n_receipt', 'value': 1000, 'available': True},
+                      {'id': 'gross', 'value': 400, 'available': True}],
+        'commission': {
+            'engine': 'commission-v2', 'people': [
+                {'person_id': people[0]['id'], 'person': people[0]['name'],
+                 'amount': 12.34, 'base': 100, 'allocated_sales': 1000,
+                 'allocated_gross': 400}],
+            'total': 12.34, 'amount_complete': True, 'base_name': '利润',
+            'base_node': 'net_profit', 'products': products,
+        },
+    }, [])
+    saved = ws.conn.execute(
+        'SELECT commission_json,products_slim_json FROM run_report_slice WHERE run_id=?',
+        (rid,)).fetchone()
+    assert saved is not None
+    assert 'products' not in json.loads(saved['commission_json'])
+    assert len(json.loads(saved['products_slim_json'])) == 40
+    from ledger import commission_reports
+    original = commission_reports._fill_report_slices
+    def no_blob_refill(*args, **kwargs):
+        filled = original(*args, **kwargs)
+        assert filled == 0, 'amount list must reuse run_report_slice'
+        return filled
+    monkeypatch.setattr(commission_reports, '_fill_report_slices', no_blob_refill)
+    report = client.post('/api/commission-v2/reports/query', json={
+        'start': '2026-06', 'end': '2026-06', 'store_ids': ['s1'], 'view': 'store_people'}).json()
+    assert report['items'][0]['sales'] == 1000
+    assert report['items'][1]['sales'] == 1000
+
+
+def test_scheme_produce_keeps_sales_when_store_default_is_cut(tmp_path):
+    ws, registry, people, client = fixture(tmp_path)
+    cut_person, producer = people[0], people[1]
+    registry.save_store_member('s1', cut_person['id'], 'cut', '', 'test', '店默认抽点')
+    registry.save_store_member('s1', producer['id'], 'produce', '', 'test', '做货')
+    registry.save_setting({
+        'store_id': 's1', 'product_id': '69648247076', 'product_name': '投影灯',
+        'mode': 'distribute', 'valid_from': '2026-06-01T00:00:00',
+        'allocations': [{'person_id': cut_person['id'], 'rate': '0.05', 'duty': 'produce'}],
+        'expected_revision': 0, 'reason': '商品做货',
+    }, 'test')
+    ws.record('s1', '2026-06', {
+        'can_close': True, 'findings': [], 'missing_sources': [],
+        'statement': [{'id': 'n_receipt', 'value': 1000, 'available': True},
+                      {'id': 'gross', 'value': 400, 'available': True}],
+        'commission': {
+            'engine': 'commission-v2', 'people': [
+                {'person_id': cut_person['id'], 'person': cut_person['name'],
+                 'amount': 10, 'duty': 'cut', 'allocated_sales': 200,
+                 'allocated_gross': 80, 'allocated_profit': 40},
+                {'person_id': producer['id'], 'person': producer['name'],
+                 'amount': 20, 'duty': 'produce', 'allocated_sales': 800,
+                 'allocated_gross': 320, 'allocated_profit': 160},
+            ],
+            'total': 30, 'amount_complete': True, 'base_name': '利润',
+            'products': [{'product_id': '69648247076', 'total_rate': 0.05,
+                          'people': [{'person_id': cut_person['id'], 'duty': 'produce'}]}],
+        },
+    }, [])
+    rows = client.post('/api/commission-v2/reports/query', json={
+        'start': '2026-06', 'end': '2026-06', 'store_ids': ['s1'], 'view': 'store_people'}).json()['items']
+    by_name = {row['person']: row for row in rows if row['kind'] == 'person'}
+    assert by_name[cut_person['name']]['duty'] == 'produce'
+    assert by_name[cut_person['name']]['sales'] == 200
+    assert by_name[producer['name']]['sales'] == 800
+
+
+def test_cut_only_person_still_has_zero_sales(tmp_path):
+    ws, registry, people, client = fixture(tmp_path)
+    cutter, producer = people[0], people[1]
+    registry.save_store_member('s1', cutter['id'], 'cut', '', 'test', '抽点')
+    registry.save_store_member('s1', producer['id'], 'produce', '', 'test', '做货')
+    ws.record('s1', '2026-06', {
+        'statement': [{'id': 'n_receipt', 'value': 1000, 'available': True},
+                      {'id': 'gross', 'value': 400, 'available': True}],
+        'commission': {
+            'engine': 'commission-v2', 'people': [
+                {'person_id': cutter['id'], 'person': cutter['name'],
+                 'amount': 5, 'duty': 'cut', 'allocated_sales': 200,
+                 'allocated_gross': 80, 'allocated_profit': 40},
+                {'person_id': producer['id'], 'person': producer['name'],
+                 'amount': 20, 'duty': 'produce', 'allocated_sales': 800,
+                 'allocated_gross': 320, 'allocated_profit': 160},
+            ],
+            'total': 25, 'amount_complete': True,
+            'products': [{'product_id': 'p1', 'total_rate': 0.05,
+                          'people': [{'person_id': producer['id'], 'duty': 'produce'},
+                                     {'person_id': cutter['id'], 'duty': 'cut'}]}],
+        },
+    }, [])
+    rows = client.post('/api/commission-v2/reports/query', json={
+        'start': '2026-06', 'end': '2026-06', 'store_ids': ['s1'], 'view': 'store_people'}).json()['items']
+    by_name = {row['person']: row for row in rows if row['kind'] == 'person'}
+    assert by_name[cutter['name']]['sales'] == 0
+    assert by_name[producer['name']]['sales'] == 1000
 

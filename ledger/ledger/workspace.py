@@ -38,6 +38,7 @@ from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import IO, Any, Iterator
 
+from . import commission_slice
 from .version import engine_version
 
 #: 账期状态。只有两个——「算过了」不是一种状态，那是有没有快照的事。
@@ -180,6 +181,19 @@ create table if not exists workspace_meta (
   generation integer not null default 0
 );
 insert or ignore into workspace_meta (id, generation) values (1, 0);
+
+-- 金额汇总只读这份切片，不再每次解开 run.result 里的商品明细。
+create table if not exists run_report_slice (
+  run_id integer not null,
+  payload_kind text not null,
+  payload_bytes integer not null,
+  commission_json text not null,
+  products_slim_json text,
+  statement_json text not null default '[]',
+  store_name text,
+  manual_cost_json text,
+  primary key (run_id, payload_kind)
+);
 
 create trigger if not exists bump_file_insert after insert on file begin
   update workspace_meta set generation=generation+1 where id=1;
@@ -631,6 +645,7 @@ class Workspace:
             state = conn.execute(
                 "select state from period where store_id=? and period=?", (store_id, period)
             ).fetchone()
+            payload = json.dumps(result, ensure_ascii=False)
             cur = conn.execute(
                 "insert into run "
                 "(store_id, period, at, can_close, evidence_ready, engine, "
@@ -640,15 +655,17 @@ class Workspace:
                     store_id, period, _now(), int(bool(result.get("can_close"))),
                     int(evidence_ready), engine_version(),
                     model_revision or None, input_fingerprint or None,
-                    json.dumps(sorted(shas)), json.dumps(result, ensure_ascii=False),
+                    json.dumps(sorted(shas)), payload,
                 ),
             )
+            run_id = int(cur.lastrowid or 0)
+            commission_slice.save(conn, run_id, result, kind='run', payload_text=payload)
             if state is None:
                 conn.execute(
                     "insert into period (store_id, period, state, changed_at) values (?,?,?,?)",
                     (store_id, period, OPEN, _now()),
                 )
-            return int(cur.lastrowid or 0)
+            return run_id
 
     def mark_evidence(self, run_id: int, *, ready: bool, error: str = "") -> None:
         """Finalize a run only after its row-level evidence archive is durable."""
@@ -671,13 +688,15 @@ class Workspace:
                         "passed": False,
                         "message": message,
                     })
+            payload = json.dumps(result, ensure_ascii=False)
             conn.execute(
                 "update run set evidence_ready=?, evidence_error=?, can_close=?, result=? where id=?",
                 (
                     int(ready), error[:1000], int(bool(result.get("can_close"))),
-                    json.dumps(result, ensure_ascii=False), run_id,
+                    payload, run_id,
                 ),
             )
+            commission_slice.save(conn, run_id, result, kind='run', payload_text=payload)
 
     def facts_path(self, run_id: int) -> Path:
         """这次算账的事实行存哪。
@@ -968,14 +987,17 @@ class Workspace:
                     (run["id"], store_id, period, labor_cut, _now(), by),
                 )
             if manual_result is not None:
+                manual_payload = json.dumps(manual_result, ensure_ascii=False)
                 conn.execute(
                     "insert into manual_finance(run_id,store_id,period,result_json,decision_json,original_sha,at,by) "
                     "values (?,?,?,?,?,?,?,?)",
                     (run["id"], store_id, period,
-                     json.dumps(manual_result, ensure_ascii=False),
+                     manual_payload,
                      json.dumps(manual_decision, ensure_ascii=False),
                      hashlib.sha256(run["result"].encode("utf-8")).hexdigest(), _now(), by),
                 )
+                commission_slice.save(
+                    conn, run["id"], manual_result, kind='manual', payload_text=manual_payload)
             if ignored_names:
                 conn.execute(
                     "insert into config_log (at,by,kind,summary,before_json,after_json) values (?,?,?,?,?,?)",

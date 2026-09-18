@@ -12,7 +12,7 @@ from pathlib import Path
 
 import polars as pl
 
-from . import overhead
+from . import commission_slice, overhead
 from .commission_engine import allocated_outputs
 from .commission_registry import RegistryError, json_text
 from .labor_api import frozen_shares
@@ -215,7 +215,8 @@ def attributed_profit(commission, operating, labor, registry, *, store_id='', ma
     allocated-to-operating residual already absorbs that gap.
 
     When duties are provided and there are producers among the people,
-    profit goes 100% to producers; cut members get 0.
+    profit goes 100% to producers; cut-only members get 0. A person who
+    also has 做货 product IDs is a producer even if the store default is 抽点.
     """
     people = commission.get('people') or []
     if operating is None or not people:
@@ -266,7 +267,7 @@ def attributed_outputs(commission, store_sales, store_gross, registry, *, duties
         return {}
     if len(people)==1:
         return {ids[0]:{'sales':store_sales,'gross':store_gross}}
-    # duty-based: producers get all sales/gross, cut members get 0
+    # duty-based: producers get all sales/gross; cut-only members get 0
     if duties and len(people) > 1:
         producers = [p for p in people if duties.get(p['person_id'], {}).get('duty', 'produce') == 'produce']
         if producers and len(producers) < len(people):
@@ -318,53 +319,129 @@ _configured_cache: OrderedDict[tuple, dict[str, frozenset[str]]] = OrderedDict()
 _CONFIGURED_CACHE_LIMIT = 64
 
 
-def _scan_configured_people(registry, start, end, store_ids=()):
+def _scan_configured_rows(registry, start, end, store_ids=()):
     year, month = map(int, end.split('-'))
     upper = f"{year + (month == 12):04d}-{month % 12 + 1:02d}-01T00:00:00"
     lower = start + '-01T00:00:00'
     where = (' AND s.store_id IN (' + ','.join('?' for _ in store_ids) + ')') if store_ids else ''
     with registry.connect() as conn:
-        rows = conn.execute("""SELECT DISTINCT s.store_id,json_extract(a.value,'$.person_id') pid
+        rows = conn.execute("""SELECT DISTINCT s.store_id,json_extract(a.value,'$.person_id') pid,
+          json_extract(a.value,'$.duty') duty
           FROM scheme s JOIN scheme_version v ON v.id=s.active_version
           JOIN json_each(v.body,'$.segments') seg JOIN json_each(seg.value,'$.allocations') a
           WHERE json_extract(seg.value,'$.mode')='distribute'
           AND json_extract(seg.value,'$.valid_from')<?
           AND (coalesce(json_extract(seg.value,'$.valid_to'),'')='' OR json_extract(seg.value,'$.valid_to')>?)"""+where,
           (upper,lower,*store_ids)).fetchall()
-    out = {}
+    people, producers = {}, {}
     for row in rows:
-        if row['pid']:out.setdefault(row['store_id'],set()).add(row['pid'])
-    return out
+        pid = row['pid']
+        if not pid:
+            continue
+        people.setdefault(row['store_id'], set()).add(pid)
+        if (row['duty'] or 'produce') == 'produce':
+            producers.setdefault(row['store_id'], set()).add(pid)
+    return people, producers
 
 
-def configured_people(registry, start, end, store_ids=()):
+def _scan_configured_people(registry, start, end, store_ids=()):
+    return _scan_configured_rows(registry, start, end, store_ids)[0]
+
+
+def _configured_bundle(registry, start, end, store_ids=()):
     """Amortize the 100k-scheme scan across reads; business audit revision invalidates it."""
     scope=tuple(sorted(store_ids))
     key=(str(registry.root.resolve()), registry.revision(), start, end, scope)
     with _configured_lock:
         saved=_configured_cache.get(key)
         if saved is None:
-            fresh=_scan_configured_people(registry,start,end,scope)
-            saved={sid:frozenset(people) for sid,people in fresh.items()}
+            people, producers = _scan_configured_rows(registry, start, end, scope)
+            saved={
+                'people': {sid: frozenset(pids) for sid, pids in people.items()},
+                'producers': {sid: frozenset(pids) for sid, pids in producers.items()},
+            }
             _configured_cache[key]=saved
             if len(_configured_cache)>_CONFIGURED_CACHE_LIMIT:
                 _configured_cache.popitem(last=False)
         else:
             _configured_cache.move_to_end(key)
-    return {sid:set(people) for sid,people in saved.items()}
+    return saved
+
+
+def configured_people(registry, start, end, store_ids=()):
+    return {sid: set(pids) for sid, pids in _configured_bundle(registry, start, end, store_ids)['people'].items()}
+
+
+def configured_producers(registry, start, end, store_ids=()):
+    """People who have at least one 做货 allocation in the store during the range."""
+    return {sid: set(pids) for sid, pids in _configured_bundle(registry, start, end, store_ids)['producers'].items()}
 
 
 def _slim_products_sql(payload):
-    """Keep only the rate + person links that confirmed_profit_rate reads."""
-    return (
-        f"CASE WHEN json_extract({payload},'$.commission.base_node')='net_profit' "
-        f"THEN (SELECT json_group_array(json_object("
-        f"'total_rate',json_extract(prod.value,'$.total_rate'),"
-        f"'people',(SELECT json_group_array(json_object("
-        f"'person_id',json_extract(crew.value,'$.person_id'))) "
-        f"FROM json_each(prod.value,'$.people') crew))) "
-        f"FROM json_each({payload},'$.commission.products') prod) ELSE NULL END"
-    )
+    return commission_slice.slim_products_sql(payload)
+
+
+def _visible_run_sql(run_ids):
+    if run_ids is None:
+        source = """FROM period p JOIN run r ON r.id=CASE WHEN p.state='closed' AND p.run_id IS NOT NULL THEN p.run_id
+          ELSE (SELECT id FROM run latest WHERE latest.store_id=p.store_id AND latest.period=p.period ORDER BY id DESC LIMIT 1) END"""
+        payload_kind = "CASE WHEN p.state='closed' AND mf.result_json IS NOT NULL THEN 'manual' ELSE 'run' END"
+        payload = "coalesce(CASE WHEN p.state='closed' THEN mf.result_json END, r.result)"
+        manual_join = " LEFT JOIN manual_finance mf ON mf.run_id=r.id AND p.state='closed'"
+        return source, payload_kind, payload, manual_join
+    if len(run_ids) != len(set(run_ids)):
+        raise RegistryError('计算记录不能重复')
+    source = 'FROM run r LEFT JOIN period p ON p.store_id=r.store_id AND p.period=r.period'
+    payload_kind = "CASE WHEN mf.result_json IS NOT NULL THEN 'manual' ELSE 'run' END"
+    payload = 'coalesce(mf.result_json,r.result)'
+    manual_join = ' LEFT JOIN manual_finance mf ON mf.run_id=r.id'
+    return source, payload_kind, payload, manual_join
+
+
+def _fill_report_slices(workspace, start, end, run_ids=None):
+    source, payload_kind, payload, manual_join = _visible_run_sql(run_ids)
+    where = ['r.period>=?', 'r.period<=?']
+    args = [start, end]
+    if run_ids is not None:
+        where.append('r.id IN (' + ','.join('?' for _ in run_ids) + ')' if run_ids else '0')
+        args.extend(run_ids)
+    missing = [row['id'] for row in workspace.conn.execute(
+        f"SELECT r.id {source}{manual_join} LEFT JOIN run_report_slice s "
+        f"ON s.run_id=r.id AND s.payload_kind={payload_kind} "
+        f"WHERE {' AND '.join(where)} AND (s.run_id IS NULL OR s.payload_bytes!=length({payload}))",
+        args)]
+    if not missing:
+        return 0
+    marks = ','.join('?' for _ in missing)
+    filled = 0
+    with workspace.conn as conn:
+        for row in conn.execute(
+            f"SELECT r.id,{payload_kind} payload_kind,length({payload}) payload_bytes,"
+            f"json_remove(json_extract({payload},'$.commission'),'$.products') commission_json,"
+            f"{commission_slice.slim_products_sql(payload)} products_slim_json,"
+            f"{commission_slice.compact_statement_sql(payload)} statement_json,"
+            f"json_extract({payload},'$.store') store_name,"
+            f"json_extract({payload},'$.manual_cost') manual_cost_json "
+            f"{source}{manual_join} WHERE r.id IN ({marks})", missing):
+            conn.execute(
+                "INSERT OR REPLACE INTO run_report_slice("
+                "run_id,payload_kind,payload_bytes,commission_json,products_slim_json,"
+                "statement_json,store_name,manual_cost_json) VALUES (?,?,?,?,?,?,?,?)",
+                (row['id'], row['payload_kind'], row['payload_bytes'],
+                 row['commission_json'] or '{}', row['products_slim_json'],
+                 row['statement_json'] or '[]', row['store_name'] or '',
+                 row['manual_cost_json']))
+            filled += 1
+    return filled
+
+
+def ensure_report_slices(workspace, start, end, run_ids=None):
+    """Fill slim rows for latest/closed runs in range, plus any pinned run ids."""
+    months(start, end)
+    filled = _fill_report_slices(workspace, start, end)
+    if run_ids:
+        filled += _fill_report_slices(workspace, start, end, run_ids=run_ids)
+    return filled
 
 
 def build(workspace, registry, model, start, end, store_ids=None, person_ids=None, run_ids=None,
@@ -374,17 +451,22 @@ def build(workspace, registry, model, start, end, store_ids=None, person_ids=Non
     names={s.id:s.name for s in model.stores}
     roster={p['id']:p for p in registry.people()}
     configured=configured_people(registry,start,end,selected_stores)
+    produce_by_store=configured_producers(registry,start,end,selected_stores)
     revenue_node=next((n.id for n in model.statement if n.headline=='revenue'),'')
     sales_node=next((n.id for n in model.statement if n.name=='销售收入' and n.level==2),'')
     gross_node=next((n.id for n in model.statement if n.name=='毛利' and n.is_total),'')
     profit_node=next((n.id for n in model.statement if n.headline=='profit' and n.is_total),'')
-    basis_rows=workspace.conn.execute("""SELECT r.store_id,r.period,
-      CASE WHEN coalesce(json_extract(node.value,'$.available'),1)=1
-           THEN json_extract(node.value,'$.value') ELSE NULL END revenue
-      FROM period p JOIN run r ON r.id=CASE WHEN p.state='closed' AND p.run_id IS NOT NULL THEN p.run_id
-        ELSE (SELECT id FROM run latest WHERE latest.store_id=p.store_id AND latest.period=p.period ORDER BY id DESC LIMIT 1) END
-      LEFT JOIN json_each(r.result,'$.statement') node ON json_extract(node.value,'$.id')=?
-      WHERE r.period>=? AND r.period<=?""",(revenue_node,start,end)).fetchall()
+    ensure_report_slices(workspace, start, end, run_ids)
+    source, payload_kind, _payload, manual_join = _visible_run_sql(None)
+    basis_rows=[]
+    for row in workspace.conn.execute(
+        "SELECT r.store_id,r.period,s.statement_json "
+        +source+manual_join+
+        " JOIN run_report_slice s ON s.run_id=r.id AND s.payload_kind="+payload_kind+
+        " WHERE r.period>=? AND r.period<=?", (start, end)):
+        statement=json.loads(row['statement_json'] or '[]')
+        basis_rows.append({'store_id':row['store_id'],'period':row['period'],
+                           'revenue':statement_amount(statement, revenue_node)})
     labor_spreads={period:overhead.allocate(period,model.overhead(period),[
         (row['store_id'],float(row['revenue'] or 0)) for row in basis_rows if row['period']==period
     ]) for period in periods}
@@ -392,25 +474,17 @@ def build(workspace, registry, model, start, end, store_ids=None, person_ids=Non
     where=['r.period>=?','r.period<=?']; args=[start,end]
     if selected_stores:
         where.append('r.store_id IN ('+','.join('?' for _ in selected_stores)+')');args.extend(sorted(selected_stores))
-    if run_ids is None:
-        source="""FROM period p JOIN run r ON r.id=CASE WHEN p.state='closed' AND p.run_id IS NOT NULL THEN p.run_id
-          ELSE (SELECT id FROM run latest WHERE latest.store_id=p.store_id AND latest.period=p.period ORDER BY id DESC LIMIT 1) END"""
-    else:
-        if len(run_ids)!=len(set(run_ids)):raise RegistryError('计算记录不能重复')
-        source='FROM run r LEFT JOIN period p ON p.store_id=r.store_id AND p.period=r.period'
+    source, payload_kind, _payload, manual_join = _visible_run_sql(run_ids)
+    if run_ids is not None:
         where.append('r.id IN ('+','.join('?' for _ in run_ids)+')' if run_ids else '0');args.extend(run_ids)
-    manual_join=' LEFT JOIN manual_finance mf ON mf.run_id=r.id' if run_ids is not None else " LEFT JOIN manual_finance mf ON mf.run_id=r.id AND p.state='closed'"
-    payload='coalesce(mf.result_json,r.result)'
-    products_select=_slim_products_sql(payload) if need_product_rates else 'NULL'
     records=[dict(r) for r in workspace.conn.execute(
         "SELECT r.id,r.store_id,r.period,r.at,"
-        f"json_remove(json_extract({payload},'$.commission'),'$.products') commission_json,"
-        f"{products_select} products_json,"
-        f"json_extract({payload},'$.statement') statement_json,"
-        f"json_extract({payload},'$.manual_cost') manual_cost_json,"
-        f"json_extract({payload},'$.store') store_name,"
+        "s.commission_json,s.products_slim_json products_json,"
+        "s.statement_json,s.manual_cost_json,s.store_name,"
         "p.state,p.run_id frozen_id,rl.amount frozen_labor_cut "
-        +source+' LEFT JOIN run_labor rl ON rl.run_id=r.id'+manual_join
+        +source+manual_join+
+        " JOIN run_report_slice s ON s.run_id=r.id AND s.payload_kind="+payload_kind+
+        " LEFT JOIN run_labor rl ON rl.run_id=r.id"
         +' WHERE '+' AND '.join(where)+' ORDER BY r.period DESC,r.store_id',args)]
     if run_ids is not None and len(records)!=len(run_ids):raise RegistryError('部分计算记录已不存在或不在所选范围，请重新查询')
     keys=[(r['store_id'],r['period']) for r in records]
@@ -517,9 +591,15 @@ def build(workspace, registry, model, start, end, store_ids=None, person_ids=Non
         visible_labor=labor_cut if spread.total is not None else Decimal(0)
         store_duties=_get_duties(sid, period)
         effective_duties = dict(store_duties) if store_duties else {}
+        run_producers = commission_slice.producer_ids(source_c)
+        scheme_producers = produce_by_store.get(sid, set())
         for person in source_c.get('people', []):
             pid = person.get('person_id')
-            if pid and person.get('duty') and person['duty'] in ('produce', 'cut'):
+            if not pid:
+                continue
+            if pid in run_producers or pid in scheme_producers:
+                effective_duties[pid] = {'duty': 'produce'}
+            elif person.get('duty') in ('produce', 'cut'):
                 effective_duties[pid] = {'duty': person['duty']}
         person_output=attributed_outputs(source_c,sales,gross,registry,duties=effective_duties)
         person_profit=attributed_profit(source_c,operating,visible_labor,registry,store_id=sid,duties=effective_duties)
@@ -545,7 +625,9 @@ def build(workspace, registry, model, start, end, store_ids=None, person_ids=Non
             if pid not in roster:label+=f'（历史记录 · {names[sid]}）'
             available.setdefault(pid,{'id':pid,'name':label})
             if selected_people and pid not in selected_people:continue
-            duty=person.get('duty') or (store_duties or {}).get(person.get('person_id') or pid, {}).get('duty')
+            duty=((effective_duties.get(person.get('person_id') or pid) or {}).get('duty')
+                  or person.get('duty')
+                  or (store_duties or {}).get(person.get('person_id') or pid, {}).get('duty'))
             if person.get('amount') is None:
                 if person.get('sales') is not None or person.get('gross') is not None:
                     member_rows.append({'kind':'person','person_id':pid,'person':name,

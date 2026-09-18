@@ -753,22 +753,17 @@ def install(app, workspace, model, model_root: Path | None = None):
         row = workspace().conn.execute("SELECT ifnull(max(id),0) FROM run").fetchone()
         return int(row[0])
 
-    def report_needs_product_rates(selection: ReportSelection, view: str | None = None):
-        effective = selection.view if view is None else view
-        return effective in ('', 'store_people')
-
-    def report_cache_key(selection: ReportSelection, need_product_rates: bool):
+    def report_cache_key(selection: ReportSelection):
         return (str(workspace().root.resolve()), selection.start, selection.end,
                 tuple(selection.store_ids or []), tuple(selection.person_ids or []),
-                tuple(selection.run_ids or []), report_watermark(), need_product_rates)
+                tuple(selection.run_ids or []), report_watermark())
 
     def clear_report_cache():
         with report_cache_lock:
             report_cache.clear()
 
     def report_result(selection: ReportSelection, *, view: str | None = None):
-        need_product_rates = report_needs_product_rates(selection, view)
-        key = report_cache_key(selection, need_product_rates)
+        key = report_cache_key(selection)
         now_ts = time.time()
         with report_cache_lock:
             hit = report_cache.get(key)
@@ -779,7 +774,7 @@ def install(app, workspace, model, model_root: Path | None = None):
                 return {**report, "fingerprint": fingerprint}
         report = commission_reports.build(workspace(), reg(), model(), selection.start, selection.end,
                                           selection.store_ids, selection.person_ids, selection.run_ids,
-                                          model_root=model_root, need_product_rates=need_product_rates)
+                                          model_root=model_root, need_product_rates=True)
         fingerprint = hashlib.sha256(json_text(report).encode()).hexdigest()
         if selection.fingerprint and selection.fingerprint != fingerprint:
             raise RevisionConflict("计算状态或人员信息已变化，请重新查询后导出")

@@ -229,6 +229,27 @@ def test_duty_time_segments_keep_earlier_period(tmp_path):
     assert zong['id'] not in august
 
 
+def test_product_produce_overrides_store_cut_for_outputs(tmp_path):
+    """A 抽点 store default must not zero someone who is 做货 on products."""
+    from ledger.commission_slice import producer_ids
+    commission = _commission([
+        {'person_id': 'a', 'person': '刘露', 'allocated_sales': 200, 'allocated_gross': 80, 'amount': 10},
+        {'person_id': 'b', 'person': '王冰洁', 'allocated_sales': 800, 'allocated_gross': 320, 'amount': 20},
+    ])
+    commission['products'] = [
+        {'people': [{'person_id': 'a', 'duty': 'produce'}]},
+        {'people': [{'person_id': 'b', 'duty': 'produce'}]},
+    ]
+    assert producer_ids(commission) == {'a', 'b'}
+    duties = {'a': {'duty': 'cut'}, 'b': {'duty': 'produce'}}
+    for pid in producer_ids(commission):
+        duties[pid] = {'duty': 'produce'}
+    reg = Registry(tmp_path)
+    result = attributed_outputs(commission, 1000, 400, reg, duties=duties)
+    assert result['a']['sales'] == 200
+    assert result['b']['sales'] == 800
+
+
 def test_person_duty_from_commission_overrides_store_member(tmp_path):
     """Commission result carrying per-product duty takes precedence over store_member."""
     reg = Registry(tmp_path)

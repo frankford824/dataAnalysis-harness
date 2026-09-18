@@ -21,7 +21,7 @@ import uuid
 from urllib.parse import quote
 from collections import Counter, OrderedDict
 from contextlib import asynccontextmanager
-from datetime import datetime
+from datetime import date, datetime
 from decimal import Decimal
 from hashlib import sha256
 from pathlib import Path
@@ -68,6 +68,8 @@ async def lifespan(_app: FastAPI):
     _snapshot()
     workspace()
     if hasattr(workspace(), "root"):
+        threading.Thread(target=_warm_commission_report_slices, daemon=True,
+                         name="report-slice-warm").start()
         _storage_worker=storage_maintenance.Worker(workspace().root)
         _storage_worker.start()
         _commission_worker = commission_manager.Manager(lambda: workspace(), lambda: _model())
@@ -241,6 +243,23 @@ def workspace() -> Workspace:
             _ws.close()
         _ws = Workspace(Path(root))
     return _ws
+
+
+def _warm_commission_report_slices() -> None:
+    """Fill slim report rows for recent months so the amount list is not cold."""
+    try:
+        from . import commission_reports
+        today = date.today()
+        end = f"{today.year:04d}-{today.month:02d}"
+        month = today.month - 5
+        year = today.year
+        if month <= 0:
+            month += 12
+            year -= 1
+        start = f"{year:04d}-{month:02d}"
+        commission_reports.ensure_report_slices(workspace(), start, end)
+    except Exception:
+        return
 
 
 _commission_actor = commission_api.install(app, lambda: workspace(), lambda: _model(), DEFAULT_MODEL)

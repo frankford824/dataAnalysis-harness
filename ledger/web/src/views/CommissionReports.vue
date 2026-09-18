@@ -26,9 +26,10 @@ const kinds = [{key:'teams',label:'按团队汇总'},{key:'people',label:'按人
 const scope = computed(() => ({start:state.start,end:state.end,...state.scope}))
 const monthError = computed(() => state.start && state.end && state.start > state.end ? '结束月份不能早于开始月份' : '')
 const queryKey = computed(() => JSON.stringify({...scope.value,view:state.reportView,offset:(page.value-1)*50}))
-const {data:report,error,loading,stale,load} = useCommissionQuery('reports', () => queryKey.value,
+const {data:report,error,loading,stale,load,prefetch} = useCommissionQuery('reports', () => queryKey.value,
   signal => commissionRequest('/reports/query',{signal,body:{...scope.value,view:state.reportView,offset:(page.value-1)*50,limit:50}}),
-  () => !!state.start && !!state.end && !monthError.value && !downloading.value)
+  () => !!state.start && !!state.end && !monthError.value && !downloading.value,
+  { followTick: true, delay: 120, remember: true })
 const rows = computed(() => report.value?.view === state.reportView ? report.value.items : [])
 const money = value => value == null ? '—' : Number(value).toLocaleString('zh-CN',{minimumFractionDigits:2,maximumFractionDigits:2})
 const locked = computed(() => stale.value || loading.value || !!monthError.value)
@@ -207,6 +208,12 @@ async function savePayout() {
 }
 watch(() => JSON.stringify(scope.value), () => {page.value=1;downloadError.value='';detail.value=null;profit.value=null;payoutNotice.value=''})
 watch(() => state.reportView, () => {page.value=1;downloadError.value='';detail.value=null;profit.value=null})
+watch(() => report.value?.count, () => {
+  const nextOffset = page.value * 50
+  if (!report.value || nextOffset >= (report.value.count || 0)) return
+  const nextKey = JSON.stringify({...scope.value,view:state.reportView,offset:nextOffset})
+  prefetch(nextKey, () => commissionRequest('/reports/query',{body:{...scope.value,view:state.reportView,offset:nextOffset,limit:50}}))
+})
 onDeactivated(()=>{detail.value=null;profit.value=null})
 watch(report, value => { if(value)state.reportPeople=value.available_people || [] })
 async function download() {
@@ -367,7 +374,7 @@ defineExpose({reload:load})
     <p v-if="state.reportView==='stores'" style="color:#64748b;margin:0 0 12px">提成设置人数按所选月份的有效设置统计；已出金额人数只统计已有结算金额的人员。</p>
     <p class="report-grain-note">系统应发由订单与利润规则自动算出，不能手改。实发提成可点表格中的金额或右侧「核定实发」填写，保存后作为本期发放与人工成本归档。</p>
     <div class="report-tabs-row"><LedgerTabs v-model="state.reportView" :options="kinds" label="汇总方式" @update:model-value="detail=null" /><div class="report-actions"><n-button type="primary" :disabled="!report || locked || !(report.confirmation_scopes||[]).length" @click="openToolbarPayout">核定实发</n-button><n-button :disabled="!canSettle" @click="openSettlement">确认员工结算</n-button><n-button :disabled="!report || locked" :loading="downloading" @click="download">导出表格</n-button></div></div>
-    <p v-if="state.reportView==='store_people'" class="report-grain-note"><template v-if="state.personIds.length">当前仅显示所选人员；请清空人员筛选后再核对店铺合计。 </template>店铺销售额、毛利额和利润额是真实总额；个人三项金额均按有效提成点数拆分，可相加核对。兼职与未归属净亏损按成员销售额分摊，未归属净利润留在店铺；仅一位分配人时整店金额归本人。人员涉及的链接总点数唯一时，提成＝人员利润额×该点数；点数不一致时保留订单明细计算。兼职额仍只在店铺行显示。人员行可打开利润构成，勾掉不进阶梯的商品。已配置本店身份时，销售额/毛利额/利润额仅归属做货人员，抽点人员只计提成不计产出。</p>
+    <p v-if="state.reportView==='store_people'" class="report-grain-note"><template v-if="state.personIds.length">当前仅显示所选人员；请清空人员筛选后再核对店铺合计。 </template>店铺销售额、毛利额和利润额是真实总额；个人三项金额均按有效提成点数拆分，可相加核对。兼职与未归属净亏损按成员销售额分摊，未归属净利润留在店铺；仅一位分配人时整店金额归本人。人员涉及的链接总点数唯一时，提成＝人员利润额×该点数；点数不一致时保留订单明细计算。兼职额仍只在店铺行显示。人员行可打开利润构成，勾掉不进阶梯的商品。本店商品上有做货身份的人计销售额/毛利/利润；只有抽点、没有任何做货商品的人才不计产出。店铺默认抽点不会盖掉商品做货。</p>
 
     <div v-if="loading" class="commission-loading-line"/>
     <LedgerTable :rows="rows" :columns="tableColumns" :row-key="rowKey" :loading="loading" :max-height="440" empty="没有找到提成记录，可调整店铺、人员或月份" />
