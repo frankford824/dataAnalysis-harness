@@ -1,10 +1,11 @@
 """Tests for store_member CRUD and duty-based attribution."""
 import json
+import sqlite3
 from decimal import Decimal
 
 import pytest
 
-from ledger.commission_registry import Registry, RegistryError
+from ledger.commission_registry import STORE_MEMBER_EPOCH, Registry, RegistryError
 from ledger.commission_reports import (
     attributed_outputs,
     attributed_profit,
@@ -15,6 +16,27 @@ from ledger.commission_reports import (
 # ---------------------------------------------------------------------------
 # CRUD
 # ---------------------------------------------------------------------------
+
+def test_opens_legacy_store_member_database(tmp_path):
+    db_dir = tmp_path / 'commission'
+    db_dir.mkdir()
+    with sqlite3.connect(db_dir / 'registry.db') as conn:
+        conn.execute("""
+            CREATE TABLE store_member (
+             store_id TEXT NOT NULL, person_id TEXT NOT NULL,
+             duty TEXT NOT NULL DEFAULT 'produce',
+             leader_id TEXT NOT NULL DEFAULT '',
+             revision INTEGER NOT NULL DEFAULT 1,
+             PRIMARY KEY(store_id, person_id)
+            )""")
+        conn.execute("INSERT INTO store_member VALUES ('s1','p1','produce','',2)")
+    rows = Registry(tmp_path).store_members('s1')
+    assert len(rows) == 1
+    assert rows[0]['person_id'] == 'p1'
+    assert rows[0]['duty'] == 'produce'
+    assert rows[0]['valid_from'] == STORE_MEMBER_EPOCH
+    assert rows[0]['valid_to'] == ''
+
 
 def test_store_member_crud(tmp_path):
     reg = Registry(tmp_path)

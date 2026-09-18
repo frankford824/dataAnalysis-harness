@@ -133,7 +133,6 @@ CREATE TABLE IF NOT EXISTS store_member (
  leader_id TEXT NOT NULL DEFAULT '',
  revision INTEGER NOT NULL DEFAULT 1
 );
-CREATE INDEX IF NOT EXISTS store_member_scope ON store_member(store_id, person_id, valid_from);
 CREATE TABLE IF NOT EXISTS operator (
  id TEXT PRIMARY KEY, name TEXT NOT NULL, salt TEXT NOT NULL, password_hash TEXT NOT NULL,
  admin INTEGER NOT NULL DEFAULT 0, disabled INTEGER NOT NULL DEFAULT 0
@@ -268,20 +267,20 @@ CREATE INDEX IF NOT EXISTS store_member_scope ON store_member(store_id, person_i
 """
     if "store_member" not in tables:
         conn.executescript(create)
-        return
-    cols = {r["name"] for r in conn.execute("PRAGMA table_info(store_member)")}
-    if "valid_from" in cols and "id" in cols:
-        return
-    rows = [dict(r) for r in conn.execute("SELECT * FROM store_member")]
-    conn.execute("ALTER TABLE store_member RENAME TO store_member_legacy")
-    conn.executescript(create)
-    for row in rows:
-        conn.execute(
-            "INSERT INTO store_member(id,store_id,person_id,valid_from,valid_to,duty,leader_id,revision) "
-            "VALUES(?,?,?,?,?,?,?,?)",
-            (str(uuid.uuid4()), row["store_id"], row["person_id"], STORE_MEMBER_EPOCH, "",
-             row["duty"], row.get("leader_id") or "", row.get("revision") or 1))
-    conn.execute("DROP TABLE store_member_legacy")
+    else:
+        cols = {r["name"] for r in conn.execute("PRAGMA table_info(store_member)")}
+        if "valid_from" not in cols or "id" not in cols:
+            rows = [dict(r) for r in conn.execute("SELECT * FROM store_member")]
+            conn.execute("ALTER TABLE store_member RENAME TO store_member_legacy")
+            conn.executescript(create)
+            for row in rows:
+                conn.execute(
+                    "INSERT INTO store_member(id,store_id,person_id,valid_from,valid_to,duty,leader_id,revision) "
+                    "VALUES(?,?,?,?,?,?,?,?)",
+                    (str(uuid.uuid4()), row["store_id"], row["person_id"], STORE_MEMBER_EPOCH, "",
+                     row["duty"], row.get("leader_id") or "", row.get("revision") or 1))
+            conn.execute("DROP TABLE store_member_legacy")
+    conn.execute("CREATE INDEX IF NOT EXISTS store_member_scope ON store_member(store_id, person_id, valid_from)")
 
 
 def member_active_at(row, at: str) -> bool:
