@@ -1,5 +1,5 @@
 <script setup>
-import { computed, h, ref, watch, onDeactivated } from 'vue'
+import { computed, h, ref, watch, onDeactivated, onActivated } from 'vue'
 import { storeToRefs } from 'pinia'
 import { onBeforeRouteLeave, useRouter } from 'vue-router'
 import { useMessage, useDialog, NButton, NTag } from 'naive-ui'
@@ -80,6 +80,9 @@ const params = computed(() => {
   return query.toString()
 })
 const totals = new Map()
+const countsActive=ref(false)
+onActivated(()=>{countsActive.value=true})
+onDeactivated(()=>{countsActive.value=false})
 const {data,error,loading,stale,load,prefetch,forget} = useCommissionQuery('settings', () => `${params.value}&after=${encodeURIComponent(after.value)}`,
   async signal => {
     const page = await commissionRequest(`/settings?${params.value}&after=${encodeURIComponent(after.value)}&include_total=false`,{signal})
@@ -88,19 +91,25 @@ const {data,error,loading,stale,load,prefetch,forget} = useCommissionQuery('sett
     return { ...page, total: undefined, total_pages: undefined }
   },
   () => !busy.value && !showEditor.value && !batchDialog.value?.shown,
-  { followTick: false, delay: 120, remember: true })
-watch(params, key => {
+  { followTick: true, delay: 200, remember: true })
+watch(()=>shared.refreshTick,()=>totals.clear())
+watch([params,countsActive,()=>shared.refreshTick], ([key,active],_,cleanup) => {
+  if(!active)return
   if (totals.has(key)) return
-  commissionRequest(`/settings/count?${key}`).then(result => {
+  const controller=new AbortController()
+  const timer=setTimeout(()=>commissionRequest(`/settings/count?${key}`,{signal:controller.signal}).then(result => {
+    if(controller.signal.aborted)return
     const pageSize = data.value?.page_size || 60
     totals.set(key, { total: result.total, total_pages: Math.max(1, Math.ceil(result.total / pageSize)) })
+    while(totals.size>24)totals.delete(totals.keys().next().value)
     if (params.value === key && data.value) data.value = { ...data.value, ...totals.get(key) }
-  }).catch(() => {})
+  }).catch(() => {}),300)
+  cleanup(()=>{clearTimeout(timer);controller.abort()})
 }, { immediate: true })
 watch(() => data.value?.next_after, cursor => {
   if (!cursor) return
   const key = `${params.value}&after=${encodeURIComponent(cursor)}`
-  prefetch(key, () => commissionRequest(`/settings?${key}&include_total=false`).then(page => {
+  prefetch(key, signal => commissionRequest(`/settings?${key}&include_total=false`,{signal}).then(page => {
     const cached = totals.get(params.value)
     return cached ? { ...page, total: cached.total, total_pages: cached.total_pages } : page
   }))

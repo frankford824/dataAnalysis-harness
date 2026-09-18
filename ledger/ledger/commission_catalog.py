@@ -34,6 +34,8 @@ def product_search_sql(tokens: list[str], id_expr: str, name_expr: str) -> tuple
         return '1', []
     if len(tokens) == 1:
         token = tokens[0]
+        if re.fullmatch(r'\d{9,20}', token):
+            return f'{id_expr}=?', [token]
         return f'(instr({id_expr},?)>0 OR instr({name_expr},?)>0)', [token, token]
     ids = [token for token in tokens if re.fullmatch(r'\d{6,}', token)]
     rest = [token for token in tokens if token not in ids]
@@ -160,8 +162,12 @@ _COUNT_CACHE_LIMIT = 24
 
 def _settings_scope(registry: Registry, *, store_id="", search="", state="", at=None,
                     person_id="", store_ids=None, person_ids=None):
+    moment = at or datetime.now(timezone(timedelta(hours=8))).replace(tzinfo=None).isoformat(timespec='seconds')
+    with registry.connect() as conn:
+        catalog_generation = conn.execute('SELECT generation FROM catalog_read_meta WHERE id=1').fetchone()[0]
+        boundary = conn.execute('SELECT max(t) FROM (SELECT max(valid_from) t FROM scheme_read_segment WHERE valid_from<=? UNION ALL SELECT max(valid_to) t FROM scheme_read_segment WHERE valid_to<=?)', (moment,moment)).fetchone()[0]
     return (str(registry.root.resolve()), registry.revision(), store_id, search, state,
-            at or '', person_id, tuple(sorted(store_ids or [])), tuple(sorted(person_ids or [])))
+            at or boundary or '', person_id, tuple(sorted(store_ids or [])), tuple(sorted(person_ids or [])), catalog_generation)
 
 
 def cached_count(registry: Registry, *, store_id="", search="", state="", at=None,
@@ -187,6 +193,13 @@ def count_settings(registry: Registry, *, store_id="", search="", state="", at=N
     stores = sorted(set(store_ids or ([store_id] if store_id else [])))
     persons = sorted(set(person_ids or ([person_id] if person_id else [])))
     tokens = parse_search_tokens(search)
+    if persons and not state and not tokens:
+        from .commission_read_index import person_keys
+        moment = at or datetime.now(timezone(timedelta(hours=8))).replace(tzinfo=None).isoformat(timespec='seconds')
+        sql, params = person_keys(persons, moment)
+        scope, scope_params = _store_condition(stores)
+        with registry.connect() as conn:
+            return conn.execute(f'SELECT count(*) FROM ({sql}) WHERE {scope}', [*params,*scope_params]).fetchone()[0]
     if state or persons:
         return next(iter_settings(registry, store_id=store_id, search=search, state=state, at=at,
                                   person_id=person_id, store_ids=store_ids, person_ids=person_ids,
@@ -227,6 +240,11 @@ def iter_settings(registry: Registry, *, store_id="", search="", state="", after
         if after_parts:
             parts.append(f'({alias}.store_id,{alias}.product_id)>(?,?)')
             values.extend(after_parts)
+        if persons:
+            from .commission_read_index import person_keys
+            sql, params = person_keys(persons, moment)
+            parts.append(f'({alias}.store_id,{alias}.product_id) IN ({sql})')
+            values.extend(params)
         return ' AND '.join(parts) or '1', values
     catalog_cond, catalog_params = scope_sql('c')
     scheme_cond, scheme_params = scope_sql('s')
@@ -237,8 +255,8 @@ def iter_settings(registry: Registry, *, store_id="", search="", state="", after
     row_sql, row_params = product_search_sql(tokens, 'product_id', 'product_name')
     # Key-only scan first. Payload/JSON is joined only for the page (or the
     # state/person filter set), not the whole 100k-row catalogue.
-    candidate_limit = limit if not (state or persons or _count_only) else -1
-    person_condition = '1' if not persons else "EXISTS (SELECT 1 FROM json_each(coalesce(setting,(SELECT f.value FROM json_each(body,'$.segments') f WHERE json_extract(f.value,'$.valid_from')>? ORDER BY json_extract(f.value,'$.valid_from') LIMIT 1),'{}'),'$.allocations') a WHERE json_extract(a.value,'$.person_id') IN ("+','.join('?' for _ in persons)+'))'
+    candidate_limit = limit if not (state or _count_only) else -1
+    person_condition = '1'
     sql = f"""WITH keys AS (
       SELECT store_id,product_id FROM (
         SELECT c.store_id,c.product_id FROM catalog c WHERE {catalog_cond} AND {search_c}
@@ -256,16 +274,15 @@ def iter_settings(registry: Registry, *, store_id="", search="", state="", after
     ), rows AS (
       SELECT c.store_id,c.product_id,coalesce(nullif(s.product_name,''),c.product_name) product_name,c.payload,
         s.id scheme_id,s.revision,v.body,j.value setting,
-        CASE WHEN json_extract(j.value,'$.mode')='distribute' THEN 'enabled'
-             WHEN json_extract(j.value,'$.mode')='exclude' THEN 'disabled'
+        CASE WHEN j.mode='distribute' THEN 'enabled'
+             WHEN j.mode='exclude' THEN 'disabled'
              WHEN j.value IS NOT NULL OR v.body IS NULL THEN 'pending'
-             WHEN EXISTS (SELECT 1 FROM json_each(v.body,'$.segments') f WHERE json_extract(f.value,'$.valid_from')>?) THEN 'scheduled'
+             WHEN EXISTS (SELECT 1 FROM scheme_read_segment f WHERE f.scheme_id=s.id AND f.valid_from>?) THEN 'scheduled'
              ELSE 'expired' END state
       FROM candidates c LEFT JOIN scheme s ON s.store_id=c.store_id AND s.product_id=c.product_id
       LEFT JOIN scheme_version v ON v.id=s.active_version
-      LEFT JOIN json_each(v.body,'$.segments') j
-        ON json_extract(j.value,'$.valid_from')<=?
-        AND (coalesce(json_extract(j.value,'$.valid_to'),'')='' OR json_extract(j.value,'$.valid_to')>?)
+      LEFT JOIN scheme_read_segment j ON j.scheme_id=s.id
+        AND j.valid_from<=? AND (j.valid_to='' OR j.valid_to>?)
     ) SELECT * FROM rows WHERE {row_sql}
       AND (?='' OR state=?)
       AND {person_condition}
@@ -277,7 +294,7 @@ def iter_settings(registry: Registry, *, store_id="", search="", state="", after
         people = {r['id']:r['name'] for r in conn.execute('SELECT id,name FROM person')}
         cursor = conn.execute(sql, [*catalog_params,*search_c_params,*scheme_params,*search_s_params,
                               candidate_limit,moment,moment,moment,
-                              *row_params,state,state,*([moment,*persons] if persons else []),limit])
+                              *row_params,state,state,limit])
         for record in cursor:
             if _count_only:
                 yield {"total": record["total"]}

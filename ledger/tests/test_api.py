@@ -400,8 +400,8 @@ class TestTrend:
 
 
 class _FakeWorkspace:
-    def overview_summaries(self):
-        return self.overview()
+    def overview_summaries(self, *, store_id=None, period=None):
+        return [s for s in self.overview() if (not store_id or s.store_id==store_id) and (not period or s.period==period)]
 
     def __init__(self, states):
         self._states = states

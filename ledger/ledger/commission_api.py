@@ -546,13 +546,12 @@ def install(app, workspace, model, model_root: Path | None = None):
         moment = datetime.now(timezone(timedelta(hours=8))).replace(tzinfo=None).isoformat(timespec='seconds')
         with reg().connect() as conn:
             counts = {r['person_id']:dict(r) for r in conn.execute("""
-                SELECT json_extract(a.value,'$.person_id') person_id,
-                       count(DISTINCT s.id) products,count(DISTINCT s.store_id) stores
-                FROM scheme s JOIN scheme_version v ON v.id=s.active_version
-                JOIN json_each(v.body,'$.segments') t JOIN json_each(t.value,'$.allocations') a
-                WHERE json_extract(t.value,'$.valid_from')<=?
-                  AND (coalesce(json_extract(t.value,'$.valid_to'),'')='' OR json_extract(t.value,'$.valid_to')>?)
-                GROUP BY person_id""", (moment,moment))}
+                SELECT a.person_id person_id,
+                       count(DISTINCT s.scheme_id) products,count(DISTINCT s.store_id) stores
+                FROM scheme_read_segment s JOIN scheme_read_person a
+                ON a.scheme_id=s.scheme_id AND a.segment_no=s.segment_no
+                WHERE s.valid_from<=? AND (s.valid_to='' OR s.valid_to>?)
+                GROUP BY a.person_id""", (moment,moment))}
             people = [{**dict(r), 'products':counts.get(r['id'],{}).get('products',0),
                        'stores':counts.get(r['id'],{}).get('stores',0)} for r in conn.execute('SELECT * FROM person ORDER BY archived,name,id')]
         return {'people':people}
@@ -746,7 +745,8 @@ def install(app, workspace, model, model_root: Path | None = None):
             registry.audit(conn, who, "import.resolve", batch_id, change.reason, dict(row), result)
         return result
 
-    report_cache = {}
+    from collections import OrderedDict
+    report_cache = OrderedDict()
     report_cache_lock = threading.Lock()
 
     def report_watermark():
@@ -756,7 +756,7 @@ def install(app, workspace, model, model_root: Path | None = None):
     def report_cache_key(selection: ReportSelection):
         return (str(workspace().root.resolve()), selection.start, selection.end,
                 tuple(selection.store_ids or []), tuple(selection.person_ids or []),
-                tuple(selection.run_ids or []), workspace().generation(), reg().revision())
+                tuple(selection.run_ids or []), workspace().read_generation(start=selection.start,end=selection.end), reg().revision(), id(model()))
 
     def clear_report_cache():
         with report_cache_lock:
@@ -767,22 +767,17 @@ def install(app, workspace, model, model_root: Path | None = None):
         now_ts = time.time()
         with report_cache_lock:
             hit = report_cache.get(key)
-            if hit and now_ts - hit[0] < 45 and (not selection.fingerprint or selection.fingerprint == hit[2]):
-                report, fingerprint = hit[1], hit[2]
-                if selection.fingerprint and selection.fingerprint != fingerprint:
-                    raise RevisionConflict("计算状态或人员信息已变化，请重新查询后导出")
-                return {**report, "fingerprint": fingerprint}
-        report = commission_reports.build(workspace(), reg(), model(), selection.start, selection.end,
+            if hit and now_ts - hit[0] >= 45:
+                report_cache.pop(key, None)
+        def build_report():
+            report = commission_reports.build(workspace(), reg(), model(), selection.start, selection.end,
                                           selection.store_ids, selection.person_ids, selection.run_ids,
                                           model_root=model_root, need_product_rates=True)
-        fingerprint = hashlib.sha256(json_text(report).encode()).hexdigest()
+            return (time.time(), report, hashlib.sha256(json_text(report).encode()).hexdigest())
+        from .read_cache import cached
+        _, report, fingerprint = cached(report_cache, key, build_report, 16)
         if selection.fingerprint and selection.fingerprint != fingerprint:
             raise RevisionConflict("计算状态或人员信息已变化，请重新查询后导出")
-        with report_cache_lock:
-            report_cache[key] = (now_ts, report, fingerprint)
-            if len(report_cache) > 8:
-                oldest = min(report_cache, key=lambda item: report_cache[item][0])
-                report_cache.pop(oldest, None)
         return {**report, "fingerprint": fingerprint}
 
     def report_payload(selection: ReportSelection):
@@ -794,7 +789,7 @@ def install(app, workspace, model, model_root: Path | None = None):
         rows = report['rows' if selection.view == 'breakdown' else selection.view]
         visible_stores = (len({row['store_id'] for row in rows if row['kind'] == 'store'})
                           if selection.view == 'store_people' else len(report['stores']))
-        return {k:v for k,v in report.items() if k not in {'people','stores','rows','coverage','teams'}} | {
+        return {k:v for k,v in report.items() if k not in {'people','stores','rows','coverage','teams','store_people'}} | {
             'items': rows[selection.offset:selection.offset+selection.limit], 'count': len(rows),
             'people_count':len(report['people']), 'store_count':visible_stores,
             'view':selection.view, 'offset':selection.offset,
@@ -833,11 +828,11 @@ def install(app, workspace, model, model_root: Path | None = None):
         return model().store(store_id).name
 
     @router.get('/profit-composition')
-    def profit_composition(store_id: str, period: str, person_id: str, run_id: int):
+    def profit_composition(store_id: str, period: str, person_id: str, run_id: int, include_orders: bool = True, product_id: str = ''):
         store_name = profit_scope(store_id, period, person_id, run_id)
         duties = commission_reports.store_member_duties(reg(), store_id, period)
         return commission_profit.compose(reg(), store_id, period, person_id, run_id,
-                                         store_name=store_name, duties=duties)
+                                         store_name=store_name, duties=duties, include_orders=include_orders, product_id=product_id)
 
     @router.post('/profit-exclusions')
     def profit_exclusion_save(change: ProfitExclusionChange, request: Request):
@@ -981,14 +976,15 @@ def install(app, workspace, model, model_root: Path | None = None):
                 "SELECT id,finance_run,store_id,period,at,registry_revision,summary_json FROM calculation "
                 "WHERE (?='' OR store_id=?) AND (?='' OR period=?) AND (?=0 OR finance_run<?) "
                 "ORDER BY finance_run DESC LIMIT ?", (store_id, store_id, period, period, after, after, limit))]
+        headers = {sid: {item['period']: item for item in workspace().period_headers(sid)} for sid in {r['store_id'] for r in rows}}
         for row in rows:
             summary = json.loads(row.pop("summary_json"))
             row.update(total=summary["total"], base_total=summary["base_total"], unassigned_orders=summary.get("unassigned_orders", 0),
                        amount_complete=summary.get("amount_complete", False), notes=summary.get("notes", []),
                        wage_preview_orders=summary.get("wage_preview_orders", 0))
-            state = workspace().state(row["store_id"], row["period"])
-            row["shown"] = bool(state and state.run_id == row["finance_run"])
-            row["closed"] = bool(state and state.state == "closed")
+            state = headers.get(row['store_id'], {}).get(row['period'], {})
+            row["shown"] = state.get('run_id') == row["finance_run"]
+            row["closed"] = state.get('state') == 'closed'
         return {"calculations": rows}
 
     def detail_frame(calculation_id):
@@ -1073,7 +1069,7 @@ def install(app, workspace, model, model_root: Path | None = None):
 
     @router.get("/payout")
     def payout(store_id: str = "", period: str = ""):
-        states = workspace().periods_of_store(store_id) if store_id else workspace().overview()
+        states = workspace().overview_summaries(store_id=store_id or None,period=period or None)
         states = [s for s in states if not period or s.period == period]
         people = {}
         stores = []

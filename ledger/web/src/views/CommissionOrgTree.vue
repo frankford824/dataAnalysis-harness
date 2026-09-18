@@ -217,16 +217,18 @@ async function applySmartOrganize() {
   }
 }
 
-watch([selectedId, () => shared.refreshTick], async ([id]) => {
+watch([selectedId, () => shared.refreshTick], async ([id], _, cleanup) => {
   products.value = []
   if (!id) return
+  const controller=new AbortController()
+  cleanup(()=>controller.abort())
   try {
     const query = new URLSearchParams({ limit: '40', include_total: 'false' })
     query.append('person_ids', id)
-    const result = await call('/settings?' + query.toString())
+    const result = await call('/settings?' + query.toString(),{signal:controller.signal})
     if (id === selectedId.value) products.value = result.rows || []
   } catch {
-    products.value = []
+    if(id===selectedId.value&&!controller.signal.aborted)products.value = []
   }
 })
 

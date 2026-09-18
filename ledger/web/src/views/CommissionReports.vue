@@ -217,7 +217,7 @@ watch(() => report.value?.count, () => {
   const nextOffset = page.value * 50
   if (!report.value || nextOffset >= (report.value.count || 0)) return
   const nextKey = JSON.stringify({...scope.value,view:state.reportView,offset:nextOffset})
-  prefetch(nextKey, () => commissionRequest('/reports/query',{body:{...scope.value,view:state.reportView,offset:nextOffset,limit:50}}))
+  prefetch(nextKey, signal => commissionRequest('/reports/query',{signal,body:{...scope.value,view:state.reportView,offset:nextOffset,limit:50}}))
 })
 onDeactivated(()=>{detail.value=null;profit.value=null})
 watch(report, value => { if(value)state.reportPeople=value.available_people || [] })

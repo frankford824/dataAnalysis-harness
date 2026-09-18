@@ -331,13 +331,11 @@ def _scan_configured_rows(registry, start, end, store_ids=()):
     lower = start + '-01T00:00:00'
     where = (' AND s.store_id IN (' + ','.join('?' for _ in store_ids) + ')') if store_ids else ''
     with registry.connect() as conn:
-        rows = conn.execute("""SELECT DISTINCT s.store_id,json_extract(a.value,'$.person_id') pid,
-          json_extract(a.value,'$.duty') duty
-          FROM scheme s JOIN scheme_version v ON v.id=s.active_version
-          JOIN json_each(v.body,'$.segments') seg JOIN json_each(seg.value,'$.allocations') a
-          WHERE json_extract(seg.value,'$.mode')='distribute'
-          AND json_extract(seg.value,'$.valid_from')<?
-          AND (coalesce(json_extract(seg.value,'$.valid_to'),'')='' OR json_extract(seg.value,'$.valid_to')>?)"""+where,
+        rows = conn.execute("""SELECT DISTINCT s.store_id,a.person_id pid,a.duty duty
+          FROM scheme_read_segment s JOIN scheme_read_person a
+          ON a.scheme_id=s.scheme_id AND a.segment_no=s.segment_no
+          WHERE s.mode='distribute' AND s.valid_from<?
+          AND (s.valid_to='' OR s.valid_to>?)"""+where,
           (upper,lower,*store_ids)).fetchall()
     people, producers = {}, {}
     for row in rows:

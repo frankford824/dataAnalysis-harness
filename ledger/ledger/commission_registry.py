@@ -429,6 +429,8 @@ class Registry:
                 with self.connect() as conn:
                     conn.execute("PRAGMA journal_mode=WAL")
                     conn.executescript(SCHEMA)
+                    from .commission_read_index import install as install_read_index
+                    install_read_index(conn)
                 with self.transaction() as conn:
                     fields = {r["name"] for r in conn.execute("PRAGMA table_info(pending)")}
                     for column, definition in [("next_attempt", "INTEGER NOT NULL DEFAULT 0"), ("error", "TEXT NOT NULL DEFAULT ''"),
@@ -446,6 +448,9 @@ class Registry:
         conn = sqlite3.connect(self.path, timeout=30, check_same_thread=thread_affine)
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA foreign_keys=ON")
+        conn.execute("PRAGMA cache_size=-16384")
+        conn.execute("PRAGMA mmap_size=268435456")
+        conn.execute("PRAGMA temp_store=MEMORY")
         try:
             with conn:
                 yield conn

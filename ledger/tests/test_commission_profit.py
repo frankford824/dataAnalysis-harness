@@ -55,6 +55,12 @@ def test_compose_groups_allocated_profit_and_skips_excluded_orders(tmp_path):
     assert second['profit'] == 80 and len(second['lines']) == 1
     assert result['included_profit'] == 230
     assert result['excluded_product_ids'] == []
+    summary = compose(registry, 's1', '2026-06', person['id'], 11, include_orders=False)
+    assert summary['included_profit'] == result['included_profit']
+    assert all(row['lines'] == [] for row in summary['products'])
+    assert [{k:v for k,v in row.items() if k!='lines'} for row in summary['products']] == [{k:v for k,v in row.items() if k!='lines'} for row in result['products']]
+    detail = compose(registry, 's1', '2026-06', person['id'], 11, product_id='111')
+    assert detail['products'] == [first]
 
 
 def test_shared_link_only_keeps_this_persons_share(tmp_path):

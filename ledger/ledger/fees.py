@@ -366,7 +366,7 @@ def unmatched_from(ws) -> list[dict]:
     看起来一样的条目。按「该配哪一列、配什么词」合并，一条规则就能盖住同一类。
     """
     buckets: dict[str, dict] = {}
-    for st in ws.overview():
+    for st in (ws.overview_summaries() if hasattr(ws, 'overview_summaries') else ws.overview()):
         payload = st.result or {}
         plat = payload.get("platform") or ""
         for item in payload.get("unclassified") or []:

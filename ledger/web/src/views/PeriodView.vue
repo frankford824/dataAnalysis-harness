@@ -87,12 +87,7 @@ async function load(force=false, quiet=false) {
     info.value=result.value.detail
     if(!quiet||JSON.stringify(snap.value)!==JSON.stringify(result.value.snapshot))snap.value=result.value.snapshot
     if(result.value.wanted && result.value.snapshot)snapCache.set(`${id}:${result.value.wanted}`, result.value.snapshot)
-    const months=result.value.detail?.periods || []
-    const at=months.findIndex(item=>item.period===result.value.wanted)
-    for(const neighbor of [months[at-1], months[at+1]].filter(Boolean)){
-      const key=`${id}:${neighbor.period}`
-      if(!snapCache.has(key)) api.period(id, neighbor.period).then(s=>snapCache.set(key,s)).catch(()=>{})
-    }
+    while(snapCache.size>8)snapCache.delete(snapCache.keys().next().value)
     refreshFailed.value=false
     if(result.value.wanted)app.pick({store:id,platform:result.value.detail.store?.platform,period:result.value.wanted})
   }catch(e){if(serial===loadSerial){if(quiet)refreshFailed.value=true;else failed.value=e.message}}

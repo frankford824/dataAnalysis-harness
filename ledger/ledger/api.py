@@ -176,33 +176,13 @@ def _conditional_headers(
 
 
 def _bounded_cache(cache: OrderedDict, key: tuple, build, maximum: int):
-    with _read_cache_guard:
-        if key in cache:
-            value = cache.pop(key)
-            cache[key] = value
-            return value
-        # 首次构建也在同一把可重入锁里做：同一revision的20个并发请求只算一次。
-        value = build()
-        cache[key] = value
-        while len(cache) > maximum:
-            cache.popitem(last=False)
-        return value
+    from .read_cache import cached
+    return cached(cache, key, build, maximum)
 
 
 def _bounded_parallel_cache(cache: OrderedDict, key: tuple, build, maximum: int):
     """Bounded cache whose cold build does not block unrelated read keys."""
-    with _read_cache_guard:
-        if key in cache:
-            value = cache.pop(key)
-            cache[key] = value
-            return value
-    value = build()
-    with _read_cache_guard:
-        existing = cache.pop(key, None)
-        cache[key] = existing if existing is not None else value
-        while len(cache) > maximum:
-            cache.popitem(last=False)
-        return cache[key]
+    return _bounded_cache(cache, key, build, maximum)
 
 
 def _snapshot() -> ModelSnapshot:
@@ -294,6 +274,13 @@ def _periods_of_store(ws: Any, store_id: str) -> list[PeriodState]:
     if callable(scoped):
         return scoped(store_id)
     return [state for state in ws.overview() if state.store_id == store_id]
+
+
+def _summary_states(ws, store_id='', period=''):
+    reader = getattr(ws, 'overview_summaries', None)
+    if reader:
+        return reader(store_id=store_id or None, period=period or None)
+    return [s for s in ws.overview() if (not store_id or s.store_id == store_id) and (not period or s.period == period)]
 
 
 def _store(model: Model, store_id: str) -> Store:
@@ -775,7 +762,7 @@ def trend(store_id: str = "", platform: str = "", periods: int = TREND_PERIODS) 
         s.id for s in model.stores
         if (not store_id or s.id == store_id) and (not platform or s.platform == platform)
     }
-    available = _periods_of_store(ws, store_id) if store_id else ws.overview()
+    available = _summary_states(ws, store_id)
     snaps = [
         st for st in available
         if st.store_id in keep and st.result
@@ -876,7 +863,7 @@ async def store_detail(store_id: str, request: Request, response: Response) -> A
     model = snapshot.model
     store = _store(model, store_id)
     ws = workspace()
-    generation = ws.generation()
+    generation = ws.read_generation(store_id=store_id) if hasattr(ws,'read_generation') else ws.generation()
     data_revision = f"{snapshot.revision}:{generation}"
     tag = _etag("store", store_id, data_revision)
     not_modified = _conditional_headers(request, response, tag, data_revision)
@@ -917,7 +904,7 @@ async def period_detail(
     model = snapshot.model
     _store(model, store_id)
     ws = workspace()
-    generation = ws.generation()
+    generation = ws.read_generation(store_id=store_id,period=period) if hasattr(ws,'read_generation') else ws.generation()
     data_revision = f"{snapshot.revision}:{generation}"
     tag = _etag("period", store_id, period, data_revision)
     not_modified = _conditional_headers(request, response, tag, data_revision)
@@ -1045,7 +1032,7 @@ def all_gaps(platform: str = "", store_id: str = "", period: str = "") -> dict:
     ws = workspace()
     by_id = {s.id: s for s in model.stores}
     # 同一家店的账期按时间排，好让每个账期都能拿到它前一个账期做比对。
-    available = _periods_of_store(ws, store_id) if store_id else ws.overview()
+    available = _summary_states(ws, store_id)
     states = sorted(
         (st for st in available if st.result),
         key=lambda st: (st.store_id, st.period),
@@ -1694,7 +1681,7 @@ def commission_summary(period: str = "") -> dict:
     ws = workspace()
     by_id = {s.id: s for s in model.stores}
 
-    states = list(ws.overview())
+    states = _summary_states(ws)
     periods = sorted({st.period for st in states}, reverse=True)
     chosen = period or (periods[0] if periods else "")
 
@@ -1922,7 +1909,8 @@ def commission_product_list(period: str = "", store_id: str = "") -> dict:
     """
     ws = workspace()
     model = _model()
-    available = _periods_of_store(ws, store_id) if store_id else ws.overview()
+    available = (ws._states(store_id=store_id or None,period=period) if period and isinstance(ws,Workspace)
+                 else _periods_of_store(ws, store_id) if store_id else ws.overview())
     states = [st for st in available
               if (not period or st.period == period)
               and (not store_id or st.store_id == store_id)]

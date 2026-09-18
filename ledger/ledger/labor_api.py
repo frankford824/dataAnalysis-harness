@@ -90,7 +90,8 @@ def install(app, workspace, model, model_root, invalidate, actor):
     def read(period: str):
         check_period(period);m=model();ws=workspace()
         config=next((x for x in m.overheads if x.period==period),None)
-        states=[x for x in ws.overview() if x.period==period]
+        states=(ws.overview_summaries(period=period) if hasattr(ws,'overview_summaries')
+                else [x for x in ws.overview() if x.period==period])
         revenue=next((n.id for n in m.statement if n.headline=='revenue'),'')
         def basis(st):
             row=next((n for n in (st.result or {}).get('statement',[]) if n.get('id')==revenue),None)

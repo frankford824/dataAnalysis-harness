@@ -78,7 +78,7 @@ def test_report_pages_keep_whole_scope_total_and_export(view,key,tmp_path):
     paged=client.post('/api/commission-v2/reports/query',json={**scope,'view':view,'offset':1,'limit':1}).json()
     assert paged['items']==full[key][1:2] and paged['count']==len(full[key])
     assert paged['total']==31 and paged['fingerprint']==full['fingerprint']
-    assert all(k not in paged for k in ['rows','people','stores','coverage'])
+    assert all(k not in paged for k in ['rows','people','stores','coverage','store_people'])
     export=client.post('/api/commission-v2/export/reports/'+view,json={**scope,'run_ids':paged['run_ids'],'fingerprint':paged['fingerprint']})
     assert export.status_code==200
     assert len(list(csv.DictReader(io.StringIO(export.text.lstrip('\ufeff')))))==len(full[key])
@@ -86,7 +86,8 @@ def test_report_pages_keep_whole_scope_total_and_export(view,key,tmp_path):
     assert '人员ID' not in business and '计算记录' not in business and '试算' not in business
     exported=list(csv.DictReader(io.StringIO(business.lstrip('\ufeff'))))
     from decimal import Decimal
-    assert sum((Decimal(r['提成金额']) for r in exported if r['提成金额']),Decimal(0))==31
+    amount_column = '参考提成金额' if view in ('people','breakdown') else '提成金额'
+    assert sum((Decimal(r[amount_column]) for r in exported if r[amount_column]),Decimal(0))==31
 
 
 def test_detail_drawer_stays_on_the_parent_calculation_after_new_run(tmp_path):

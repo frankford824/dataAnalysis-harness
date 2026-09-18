@@ -105,7 +105,7 @@ def _unique_rates(values):
     return out
 
 
-def _product_rows(parts):
+def _product_rows(parts, include_orders=True):
     if parts.is_empty() or 'product_id' not in parts.columns:
         return []
     aggs = [
@@ -126,7 +126,7 @@ def _product_rows(parts):
         pl.col('share').cast(pl.Float64).unique().alias('rates'),
     ]
     grouped = parts.group_by('product_id').agg(aggs)
-    orders = _order_rows(parts)
+    orders = _order_rows(parts) if include_orders else {}
     products = []
     for row in grouped.iter_rows(named=True):
         rates = _unique_rates(row.get('rates'))
@@ -184,7 +184,7 @@ def _sum_profit(products, pred):
     ), Decimal(0)))
 
 
-def compose(registry, store_id, period, person_id, run_id, *, store_name='', duties=None):
+def compose(registry, store_id, period, person_id, run_id, *, store_name='', duties=None, include_orders=True, product_id=''):
     """Group one person's allocated output by product for a single store month."""
     if not person_id:
         raise RegistryError('请选择人员')
@@ -194,6 +194,8 @@ def compose(registry, store_id, period, person_id, run_id, *, store_name='', dut
     details = production_weights(details.filter(pl.col('status') == 'distribute'))
     roster = {row['id']: row for row in registry.people()}
     person_details = _person_rows(details, store_id, person_id, set(roster))
+    if product_id:
+        person_details = person_details.filter(pl.col('product_id') == product_id)
     assigned = (person_details.filter(pl.col('status') == 'distribute')
                 if 'status' in person_details.columns and not person_details.is_empty()
                 else person_details.head(0))
@@ -209,7 +211,7 @@ def compose(registry, store_id, period, person_id, run_id, *, store_name='', dut
             solo_products = set(solo['product_id'].to_list())
             assigned = assigned.filter(pl.col('product_id').is_in(solo_products))
     parts = _allocated_parts(assigned)
-    products = _product_rows(parts)
+    products = _product_rows(parts, include_orders=include_orders)
     person_name = next((row.get('person') for row in assigned.iter_rows(named=True)
                         if row.get('person')), '') or roster.get(person_id, {}).get('name') or person_id
     split = allocated_outputs(assigned, production=True)

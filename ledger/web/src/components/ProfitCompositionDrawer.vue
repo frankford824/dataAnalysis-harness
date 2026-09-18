@@ -8,12 +8,17 @@ import { excludedProductIds, liveProfitTotals, matchesProduct, profitComposition
 const props = defineProps({target:{type:Object,default:null}})
 const emit = defineEmits(['close', 'saved'])
 const request = useLatest()
+const orderRequest = useLatest(), orderLines=ref([]), ordersLoading=ref(false), ordersError=ref('')
 const data = ref(null), loading = ref(false), saving = ref(false), error = ref('')
 const search = ref(''), note = ref(''), included = ref([]), opened = ref(''), exporting = ref(false)
 let serial = 0
+let orderSerial = 0
 const money = value => value == null ? '—' : Number(value).toLocaleString('zh-CN',{minimumFractionDigits:2,maximumFractionDigits:2})
 const products = computed(() => data.value?.products || [])
 const visible = computed(() => products.value.filter(row => matchesProduct(row, search.value)))
+const productPage=ref(1)
+const pageProducts=computed(()=>visible.value.slice((productPage.value-1)*50,productPage.value*50))
+watch(search,()=>{productPage.value=1})
 const totals = computed(() => liveProfitTotals(products.value, included.value))
 const savedExcluded = computed(() => data.value?.saved?.excluded_product_ids || [])
 const dirty = computed(() => !sameIds(excludedProductIds(products.value, included.value), savedExcluded.value))
@@ -22,16 +27,29 @@ function rateText(row) {
   return rateLabel(row) || '—'
 }
 function mergeChecked(keys) {
-  const shown = new Set(visible.value.map(row => row.product_id))
+  const shown = new Set(pageProducts.value.map(row => row.product_id))
   included.value = [...new Set([
     ...included.value.filter(id => !shown.has(id)),
     ...keys,
   ])]
 }
-function includeVisible() { mergeChecked(visible.value.map(row => row.product_id)) }
-function excludeVisible() { mergeChecked([]) }
-function openOrders(row) { opened.value = opened.value === row.product_id ? '' : row.product_id }
-const openedOrders = computed(() => products.value.find(row => row.product_id === opened.value)?.lines || [])
+function includeVisible() { included.value=[...new Set([...included.value,...visible.value.map(row=>row.product_id)])] }
+function excludeVisible() { const ids=new Set(visible.value.map(row=>row.product_id));included.value=included.value.filter(id=>!ids.has(id)) }
+async function openOrders(row) {
+  const ticket=++orderSerial
+  orderRequest.cancel();orderLines.value=[];ordersError.value='';ordersLoading.value=false
+  opened.value = opened.value === row.product_id ? '' : row.product_id
+  if(!opened.value)return
+  if(row.lines?.length){orderLines.value=row.lines;return}
+  ordersLoading.value=true
+  try{
+    const context=data.value, product=opened.value
+    const params=new URLSearchParams({store_id:context.store_id,period:context.period,person_id:context.person_id,run_id:String(context.run_id),product_id:product,include_orders:'true'})
+    const result=await orderRequest.run(signal=>commissionRequest(`/profit-composition?${params}`,{signal}))
+    if(result&&opened.value===product)orderLines.value=result.value.products.find(p=>p.product_id===product)?.lines||[]
+  }catch(e){if(ticket===orderSerial)ordersError.value=e.message}finally{if(ticket===orderSerial)ordersLoading.value=false}
+}
+const openedOrders = computed(() => orderLines.value)
 const columns = computed(() => [
   {type:'selection', width:36, mobileWidth:32},
   {title:'商品', key:'product', minWidth:220, mobileWidth:150, render:row => h('button', {
@@ -71,6 +89,7 @@ async function load() {
     const params = new URLSearchParams({
       store_id: props.target.store_id, period: props.target.period,
       person_id: props.target.person_id, run_id: String(props.target.run_id),
+      include_orders: 'false',
     })
     const result = await request.run(signal => commissionRequest(`/profit-composition?${params}`, {signal}))
     if (!result || attempt !== serial) return
@@ -92,8 +111,10 @@ watch(() => props.target, value => {
   data.value = null
   included.value = []
   search.value = ''
+  productPage.value=1
   note.value = ''
   opened.value = ''
+  orderSerial++;orderRequest.cancel();orderLines.value=[];ordersError.value='';ordersLoading.value=false
   error.value = ''
   if (value) load()
 })
@@ -167,9 +188,10 @@ function exportTable() {
           <span class="profit-hint">勾选计入阶梯</span>
         </div>
         <p v-if="search.trim()" class="profit-filter">正在看 {{ visible.length }} / {{ products.length }} 个商品，顶栏合计仍是全部。</p>
-        <LedgerTable :rows="visible" :columns="columns" :row-key="row => row.product_id" :checked-keys="included"
+        <LedgerTable :rows="pageProducts" :columns="columns" :row-key="row => row.product_id" :checked-keys="included"
           :loading="loading" :max-height="420" empty="这个人在本店本月没有已分配的商品利润"
           @update:checked-keys="mergeChecked" />
+        <div v-if="visible.length>50" class="commission-paging"><span>共 {{visible.length}} 个商品，每页 50 个；上方合计仍为全部</span><n-button :disabled="productPage<=1" @click="productPage--">上一页</n-button><span>{{productPage}} / {{Math.ceil(visible.length/50)}}</span><n-button :disabled="productPage*50>=visible.length" @click="productPage++">下一页</n-button></div>
         <div v-if="opened" class="profit-orders-panel">
           <div class="spread"><strong>{{ products.find(row => row.product_id === opened)?.product_name || '商品' }} 的订单</strong>
             <button type="button" class="text-button" @click="opened=''">收起</button></div>
@@ -177,7 +199,9 @@ function exportTable() {
             <span>{{ line.order_id }}</span>
             <span class="num">未扣兼职利润 ¥{{ money(line.profit) }}</span>
           </div>
-          <p v-if="!openedOrders.length" class="muted">没有可展开的订单。</p>
+          <p v-if="ordersLoading" class="muted">正在加载订单…</p>
+          <p v-else-if="ordersError" role="alert">{{ ordersError }}</p>
+          <p v-else-if="!openedOrders.length" class="muted">没有可展开的订单。</p>
         </div>
         <p v-if="target?.labor_cost != null" class="profit-labor">本店本月兼职 ¥{{ money(target.labor_cost) }} 是店级分摊，只作对照：<b>没有从上面任何一行利润里扣除</b>，也不进阶梯加减。</p>
         <p class="profit-foot">计入阶梯的未扣兼职利润 <strong>¥{{ money(totals.included) }}</strong>。请按公司规则套在这个数上；系统不自动改本月已算提成。</p>

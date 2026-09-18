@@ -347,6 +347,8 @@ class Workspace:
             conn.execute("pragma busy_timeout=30000")
             conn.executescript(_SCHEMA)
             _migrate(conn)
+            from .workspace_read_version import install as install_read_versions
+            install_read_versions(conn)
             conn.commit()
         finally:
             conn.close()
@@ -755,11 +757,11 @@ class Workspace:
         """所有店 × 所有账期。总览矩阵的数据源。"""
         return self._states()
 
-    def overview_summaries(self) -> list[PeriodState]:
+    def overview_summaries(self, *, store_id=None, period=None) -> list[PeriodState]:
         """Overview-only projection; detail/close callers still receive full data."""
         from .commission_reports import _fill_report_slices
-        _fill_report_slices(self, '', '9999-99')
-        return self._states(summary=True)
+        _fill_report_slices(self, period or '', period or '9999-99', store_id=store_id)
+        return self._states(summary=True, store_id=store_id, period=period)
 
     def periods_of_store(self, store_id: str) -> list[PeriodState]:
         """一家店的全部账期，不扫描其他店。"""
@@ -836,6 +838,10 @@ class Workspace:
             "select generation from workspace_meta where id=1"
         ).fetchone()
         return int(row["generation"] if row else 0)
+
+    def read_generation(self, **scope):
+        from .workspace_read_version import clock
+        return clock(self.conn, **scope)
 
     def _states(
         self,
