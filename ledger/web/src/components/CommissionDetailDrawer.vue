@@ -15,8 +15,11 @@ const columns=computed(()=>[
   {title:'月份',key:'period',width:90,mobileWidth:75},
   ...(current.value?.kind==='store_people'?[{title:'本人参与基数',key:'base',width:110,mobileWidth:95,align:'right',render:row=>money(row.base)}]:[]),
   {title:'系统应发',key:'trial_amount',width:105,mobileWidth:90,align:'right',render:row=>h('span',{style:'color:#64748b'},money(row.trial_amount))},
-  {title:'实发提成',key:'amount',width:115,mobileWidth:95,align:'right',render:row=>h('span',{class:['table-money',row.amount<0?'negative':'']},money(row.amount))},
+  {title:'参考提成金额',key:'amount',width:115,mobileWidth:95,align:'right',render:row=>money(row.amount)},
+  {title:'已核定实发',key:'confirmed_amount',width:115,mobileWidth:95,align:'right',render:row=>money(row.confirmed_amount)},
+  {title:'核定状态',key:'confirmation_state',width:95,render:row=>({pending:'待核定',partial:'部分核定',confirmed:'已核定实发'}[row.confirmation_state]||'历史记录')},
   {title:'调整差额',key:'diff_amount',width:100,mobileWidth:85,align:'right',render:row=>{
+    if(!row.confirmed_count)return '—'
     if(!row.diff_amount || Math.abs(row.diff_amount)<0.001)return h('span',{style:'color:#94a3b8'},'0.00')
     const pos = row.diff_amount > 0
     return h('span',{style:{color:pos?'#16a34a':'#d97706',fontWeight:600}},`${pos?'+':''}${money(row.diff_amount)}`)

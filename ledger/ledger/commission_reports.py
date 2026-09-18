@@ -14,7 +14,7 @@ import polars as pl
 
 from . import commission_slice, overhead
 from .commission_engine import allocated_outputs
-from .commission_registry import RegistryError, json_text
+from .commission_registry import RegistryError, json_text, member_active_at
 from .labor_api import frozen_shares
 from .money import money_float
 
@@ -398,17 +398,20 @@ def _visible_run_sql(run_ids):
     return source, payload_kind, payload, manual_join
 
 
-def _fill_report_slices(workspace, start, end, run_ids=None):
-    source, payload_kind, payload, manual_join = _visible_run_sql(run_ids)
+def _fill_report_slices(workspace, start, end, run_ids=None, store_id=None, visible_only=False):
+    source, payload_kind, payload, manual_join = _visible_run_sql(None if visible_only else run_ids)
     where = ['r.period>=?', 'r.period<=?']
     args = [start, end]
+    if store_id:
+        where.append('r.store_id=?')
+        args.append(store_id)
     if run_ids is not None:
         where.append('r.id IN (' + ','.join('?' for _ in run_ids) + ')' if run_ids else '0')
         args.extend(run_ids)
     missing = [row['id'] for row in workspace.conn.execute(
         f"SELECT r.id {source}{manual_join} LEFT JOIN run_report_slice s "
         f"ON s.run_id=r.id AND s.payload_kind={payload_kind} "
-        f"WHERE {' AND '.join(where)} AND (s.run_id IS NULL OR s.payload_bytes!=length({payload}))",
+        f"WHERE {' AND '.join(where)} AND (s.run_id IS NULL OR s.overview_json IS NULL)",
         args)]
     if not missing:
         return 0
@@ -422,15 +425,16 @@ def _fill_report_slices(workspace, start, end, run_ids=None):
             f"{commission_slice.compact_statement_sql(payload)} statement_json,"
             f"json_extract({payload},'$.store') store_name,"
             f"json_extract({payload},'$.manual_cost') manual_cost_json "
+            f",json_remove({payload},'$.commission.products') overview_json "
             f"{source}{manual_join} WHERE r.id IN ({marks})", missing):
             conn.execute(
                 "INSERT OR REPLACE INTO run_report_slice("
                 "run_id,payload_kind,payload_bytes,commission_json,products_slim_json,"
-                "statement_json,store_name,manual_cost_json) VALUES (?,?,?,?,?,?,?,?)",
+                "statement_json,store_name,manual_cost_json,overview_json) VALUES (?,?,?,?,?,?,?,?,?)",
                 (row['id'], row['payload_kind'], row['payload_bytes'],
                  row['commission_json'] or '{}', row['products_slim_json'],
                  row['statement_json'] or '[]', row['store_name'] or '',
-                 row['manual_cost_json']))
+                 row['manual_cost_json'], row['overview_json']))
             filled += 1
     return filled
 
@@ -514,10 +518,14 @@ def build(workspace, registry, model, start, end, store_ids=None, person_ids=Non
         for row in workspace.conn.execute(sha_sql, confirmed_ids):
             full_commission[row['id']] = json.loads(row['commission_json'] or '{}')
     _duties_cache = {}
+    duties_by_store = {}
+    for duty_row in registry.store_members_for_stores(sorted({r['store_id'] for r in records})):
+        duties_by_store.setdefault(duty_row['store_id'], []).append(duty_row)
     def _get_duties(sid, period=''):
         key = (sid, period)
         if key not in _duties_cache:
-            found = store_member_duties(registry, sid, period)
+            stamp = f'{period}-01T00:00:00' if period else ''
+            found = {r['person_id']: r for r in duties_by_store.get(sid, []) if member_active_at(r, stamp)}
             _duties_cache[key] = found or None
         return _duties_cache[key]
     scopes={}; lines=[]; store_person_rows=[]; available={}; people_totals={}; store_totals={}; store_people={}
@@ -614,6 +622,9 @@ def build(workspace, registry, model, start, end, store_ids=None, person_ids=Non
                 notes.append('人员销售、毛利、利润按提成点数拆分；总点数唯一时，提成按人员利润额乘该点数计算')
             scope['notes']='；'.join(notes)
         member_rows=[]
+        original_people = {}
+        for original_person in source_c.get('people', []):
+            original_people.setdefault(original_person.get('person_id'), original_person)
         for person in c.get('people',[]):
             name=person.get('person') or '未命名人员'
             pid=person.get('person_id')
@@ -641,7 +652,7 @@ def build(workspace, registry, model, start, end, store_ids=None, person_ids=Non
                                         'amount':None,'store_amount':None,
                                         'status':status,'finance_run':record['id']})
                 continue
-            orig_person = next((p for p in source_c.get('people', []) if p.get('person_id') == pid), None)
+            orig_person = original_people.get(pid)
             orig_profit_rate = profit_rates.get(pid)
             if (orig_profit_rate is not None and pid in person_profit
                     and orig_person and orig_person.get('amount') is not None):
@@ -794,7 +805,7 @@ def build(workspace, registry, model, start, end, store_ids=None, person_ids=Non
         if ptot['amount'] is not None:
             t['amount'] += ptot['amount']
             t['actual_amount'] += ptot['amount']
-            t['trial_amount'] += ptot.get('trial_amount') or ptot['amount']
+            t['trial_amount'] += ptot['trial_amount'] if ptot.get('trial_amount') is not None else ptot['amount']
             t['diff_amount'] += ptot.get('diff_amount') or Decimal(0)
         t['members'].add(pid)
         t['stores'].update(ptot['stores'])
@@ -835,6 +846,32 @@ def build(workspace, registry, model, start, end, store_ids=None, person_ids=Non
     coverage=[{**r,'selected_amount':money_float(r['selected_amount']) if r['has_result'] else None} for r in scopes.values()]
     configured_total=set().union(*(configured.get(sid,set()) for sid in covered_stores))
     if selected_people:configured_total &= selected_people
+    # Keep the reference amount for historical calculations/exports; expose
+    # confirmed money separately instead of presenting trial money as actual.
+    by_person = {}
+    by_scope = {}
+    for line in lines:
+        by_person.setdefault(line['person_id'], []).append(line)
+        by_scope.setdefault((line['person_id'], line['store_id'], line['period']), []).append(line)
+    def payout_summary(parts):
+        confirmed_parts = [p for p in parts if p['is_confirmed']]
+        count, done = len(parts), len(confirmed_parts)
+        amount = money_float(sum((decimal(p['amount']) for p in confirmed_parts), Decimal(0))) if done else None
+        return {'confirmation_count': count, 'confirmed_count': done,
+                'confirmation_state': 'confirmed' if count and done == count else 'partial' if done else 'pending',
+                'is_confirmed': bool(count and done == count),
+                'confirmed_amount': amount, 'actual_amount': amount}
+    for row in person_rows:
+        row.update(payout_summary(by_person.get(row['person_id'], [])))
+    for row in team_rows:
+        row.update(payout_summary([p for member in row['members'] for p in by_person.get(member['person_id'], [])]))
+        for member in row['members']:
+            member.update(payout_summary(by_person.get(member['person_id'], [])))
+    for row in store_person_rows:
+        if row.get('kind') == 'person':
+            row.update(payout_summary(by_scope.get((row['person_id'], row['store_id'], row['period']), [])))
+    for line in lines:
+        line.update(payout_summary([line]))
     return {'teams':team_rows,'people':sorted(person_rows,key=lambda x:x['person']),'stores':store_rows,'rows':lines,
             'store_people':store_person_rows,'coverage':coverage,
             'configured_people_count':len(configured_total),'available_people':list(available.values()),'run_ids':[r['id'] for r in records],
@@ -882,9 +919,15 @@ def business_export(report, kind):
         'breakdown': [('人员','person'),('所属团队','team'),('工号','employee_no'),('店铺','store'),('月份','period'),('系统应发','trial_amount'),('提成金额','amount'),('调整差额','diff_amount'),('状态','status')],
         'coverage': [('店铺','store'),('月份','period'),('提成金额','selected_amount'),('状态','status'),('未分配人员订单数','unassigned_orders')],
     }[kind]
+    if kind in {'teams', 'people', 'store_people', 'breakdown'}:
+        columns = [('参考提成金额' if key == 'amount' else label, key) for label, key in columns]
+        columns += [('已核定实发','confirmed_amount'), ('核定状态','confirmation_state'),
+                    ('已核定项数','confirmed_count'), ('待核定及已核定项数','confirmation_count')]
     def rows():
         for row in report['rows' if kind == 'breakdown' else kind]:
             item = {label:row.get(key) for label,key in columns}
+            if '核定状态' in item:
+                item['核定状态'] = {'pending':'待核定','partial':'部分核定','confirmed':'已核定实发'}.get(item['核定状态'], '')
             if kind=='stores' and not row.get('periods'):item['已出金额人数']=None
             for original, replacement in [('未计算提成','未出金额'),('未计算','未出金额'),('试算','待核对'),('历史口径','历史提成'),('已计算','待结账'),('无对应提成记录','暂无提成'),('合计待核对','金额待核对')]:
                 item['状态'] = item['状态'].replace(original, replacement)

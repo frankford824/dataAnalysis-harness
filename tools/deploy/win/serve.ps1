@@ -73,6 +73,9 @@ while ($true) {
 
   # 交给 cmd 做追加重定向：PowerShell 5.1 把子进程的 stderr 当错误记录收，
   # uvicorn 恰好把日志全写 stderr，直接接过来会被当成一片报错。
+  # lifespan starts NAS/feed/recompute/storage workers in each process.
+  # Keep one API worker until background ownership and failover are separated.
+  # Report reads already run in the thread pool; workers=1 is not serial HTTP.
   $cmd = '"' + $Python + '" -m uvicorn ledger.api:app --host 0.0.0.0 --port ' + $Port +
          ' --workers 1 --timeout-keep-alive 75 >> "' + $log + '" 2>&1'
   & cmd.exe /c $cmd

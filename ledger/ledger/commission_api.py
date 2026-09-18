@@ -756,7 +756,7 @@ def install(app, workspace, model, model_root: Path | None = None):
     def report_cache_key(selection: ReportSelection):
         return (str(workspace().root.resolve()), selection.start, selection.end,
                 tuple(selection.store_ids or []), tuple(selection.person_ids or []),
-                tuple(selection.run_ids or []), report_watermark())
+                tuple(selection.run_ids or []), workspace().generation(), reg().revision())
 
     def clear_report_cache():
         with report_cache_lock:

@@ -41,6 +41,49 @@ def record(ws, people, store, period, amounts, *, complete=True, legacy=False):
                        'amount_complete': complete, 'base_name': '利润', 'unassigned_orders': 0 if complete else 2}}, [])
 
 
+def test_payout_partial_zero_and_org_cache_invalidation(tmp_path):
+    ws, registry, people, client = fixture(tmp_path)
+    record(ws, people, 's1', '2026-06', [0])
+    record(ws, people, 's2', '2026-06', [10])
+    selection = {'start': '2026-06', 'end': '2026-06', 'person_ids': [people[0]['id']]}
+    def report():
+        return client.post('/api/commission-v2/reports/query', json=selection).json()
+    pending = report()['people'][0]
+    assert pending['confirmation_state'] == 'pending'
+    assert pending['actual_amount'] is None
+    for store, amount, expected in [('s1', '5.00', 'partial'), ('s2', '10.00', 'confirmed')]:
+        context = client.get('/api/commission-v2/payout-confirmations/context', params={
+            'store_id': store, 'period': '2026-06', 'run_id': ws.latest_run(store, '2026-06')['id']}).json()
+        response = client.post('/api/commission-v2/payout-confirmations', json={
+            'store_id': store, 'period': '2026-06', 'run_id': context['run_id'],
+            'source_sha': context['source_sha'], 'reason': 'test',
+            'payouts': [{'person_id': people[0]['id'], 'amount': amount}]})
+        assert response.status_code == 200, response.text
+        current = report()
+        person = current['people'][0]
+        assert person['confirmation_state'] == expected
+        assert person['is_confirmed'] == (expected == 'confirmed')
+        assert person['confirmed_count'] == (1 if expected == 'partial' else 2)
+        assert person['confirmed_amount'] == (5 if expected == 'partial' else 15)
+        assert current['teams'][0]['trial_amount'] == 10
+    registry.org_move([people[0]['id']], people[1]['id'], 'test', 'move')
+    assert report()['people'][0]['team'] == people[1]['name']
+
+
+def test_zero_trial_is_not_replaced_by_actual_in_team(tmp_path):
+    ws, _, people, client = fixture(tmp_path)
+    run = record(ws, people, 's1', '2026-06', [0])
+    context = client.get('/api/commission-v2/payout-confirmations/context', params={'store_id':'s1','period':'2026-06','run_id':run}).json()
+    response = client.post('/api/commission-v2/payout-confirmations', json={
+        'store_id':'s1','period':'2026-06','run_id':context['run_id'],'source_sha':context['source_sha'],
+        'reason':'zero adjustment','payouts':[{'person_id':people[0]['id'],'amount':'5.00'}]})
+    assert response.status_code == 200
+    report = client.post('/api/commission-v2/reports/query', json={'start':'2026-06','end':'2026-06'}).json()
+    assert report['teams'][0]['trial_amount'] == 0
+    assert report['teams'][0]['actual_amount'] == 5
+    assert report['teams'][0]['diff_amount'] == 5
+
+
 @pytest.mark.parametrize('stores,indices,expected', [
     ([], [0], 13.32), ([], [0, 1], 36.65), (['s1'], [], 33.32),
     (['s1', 's2'], [], 36.65), (['s2'], [0], 3.33), (['s2'], [1], 0),
@@ -329,7 +372,8 @@ def test_store_person_composition_shows_store_amounts_once_and_filters_people(tm
     assert export.status_code == 200, export.text
     export_rows = list(csv.DictReader(io.StringIO(export.text.lstrip('\ufeff'))))
     assert [r['销售额/参与销售额'] for r in export_rows] == ['1000', '700.0', '300.0']
-    assert [r['提成额'] for r in export_rows] == ['', '12.34', '3.21']
+    assert [r['参考提成金额'] for r in export_rows] == ['', '12.34', '3.21']
+    assert [r['已核定实发'] for r in export_rows] == ['', '', '']
 
 
 def test_store_person_profit_after_labor_keeps_full_participation_and_export(tmp_path):
@@ -1211,4 +1255,3 @@ def test_cut_only_person_still_has_zero_sales(tmp_path):
     by_name = {row['person']: row for row in rows if row['kind'] == 'person'}
     assert by_name[cutter['name']]['sales'] == 0
     assert by_name[producer['name']]['sales'] == 1000
-

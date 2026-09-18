@@ -14,6 +14,7 @@ import {
   X,
 } from '@lucide/vue'
 import { useApp } from '../store'
+import { useCommission } from '../commissionStore'
 import { useMessage } from 'naive-ui'
 import { DUTY_OPTIONS, dutyLabel, loadStoreMembers, saveStoreMembers } from '../storeMembers'
 
@@ -28,6 +29,7 @@ const props = defineProps({
 const emit = defineEmits(['select', 'save-person', 'save-stores', 'move', 'add-child', 'create-team'])
 
 const app = useApp()
+const shared = useCommission()
 const message = useMessage()
 const storeDuties = ref([])
 const dutyFrom = ref('')
@@ -228,6 +230,7 @@ async function saveDuties() {
       await saveStoreMembers([row.store_id], [{ person_id: form.value.id, duty: row.duty }], '组织架构设置店铺默认身份', { valid_from: dutyFrom.value })
     }
     await loadDuties()
+    shared.refresh({force:true})
     message.success('店铺默认身份已保存')
   } catch (e) {
     dutyError.value = e.message
@@ -239,7 +242,6 @@ async function saveDuties() {
 
 function removeStore(sid) {
   formStoreIds.value = formStoreIds.value.filter(id => id !== sid)
-  submitStores()
 }
 
 const initials = computed(() => (activePerson.value?.name || '?').slice(0, 1))
@@ -584,7 +586,7 @@ const initials = computed(() => (activePerson.value?.name || '?').slice(0, 1))
               </h4>
             </div>
             <p class="org-section-desc">
-              挂在此人名下的店铺，下级成员共同负责。改动后请点击保存。
+              仅维护组织负责范围，不会自动分配商品或修改提成点数。增加或移除后请点击「保存店铺」。商品分配需到提成设置另行保存。
             </p>
 
             <div class="org-store-tags-box">
@@ -629,7 +631,7 @@ const initials = computed(() => (activePerson.value?.name || '?').slice(0, 1))
               <span>店铺默认身份</span>
             </h4>
             <p class="org-section-desc">
-              做货 = 归属销售/毛利/利润；抽点 = 只计提成。商品未单独标注身份时按此生效，可按时间节点分段。
+              做货归属产出，抽点只计提成。商品已有身份优先；默认身份按下方生效时间分段。它不新增商品分配，已结账记录保持冻结。
             </p>
             <div class="org-field" style="max-width:240px;margin-bottom:10px">
               <label>本次生效时间（可空，空则立即生效）</label>
@@ -651,10 +653,12 @@ const initials = computed(() => (activePerson.value?.name || '?').slice(0, 1))
           <div class="org-form-group">
             <h4 class="org-section-title">
               <Package :size="14" />
-              <span>当前生效提成商品 ({{ products.length }})</span>
+              <span>商品提成设置预览（前 {{ products.length }} 条，最多 40 条）</span>
             </h4>
             <p class="org-section-desc">
-              该人员在各个商品中的做货或抽成设置。点数修改请前往「提成设置」页面。
+              默认上级抽成不会自动改写已有商品；在提成设置中点击「按组织补上级抽成」并保存后，按商品规则生效时间重新核算未结账月份。
+              <router-link :to="{name:'commission',query:{shops:'',people:activePerson.id}}">查看此人全部商品设置 →</router-link>
+              <router-link :to="{name:'commission-reports',query:{shops:'',people:activePerson.id,view:'people'}}">查看此人金额汇总 →</router-link>
             </p>
 
             <div v-if="products.length" class="org-product-table-wrap">

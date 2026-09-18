@@ -400,6 +400,9 @@ class TestTrend:
 
 
 class _FakeWorkspace:
+    def overview_summaries(self):
+        return self.overview()
+
     def __init__(self, states):
         self._states = states
         self.root = Path("/fake-workspace")

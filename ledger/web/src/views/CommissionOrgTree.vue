@@ -77,6 +77,11 @@ async function load() {
   }
 }
 
+async function changed() {
+  await load()
+  shared.refresh({force:true})
+}
+
 function select(node) {
   selectedId.value = node.id
   adding.value = null
@@ -104,7 +109,7 @@ async function createPerson() {
     adding.value = null
     newName.value = ''
     selectedId.value = person.id
-    await load()
+    await changed()
     message.success('已添加人员')
   } catch (e) {
     message.error(e.message)
@@ -120,7 +125,7 @@ async function savePerson(form) {
       method: 'POST',
       body: JSON.stringify({ person: form, expected_revision: form.revision, reason: '更新组织人员' }),
     })
-    await load()
+    await changed()
     message.success('人员信息已保存')
   } catch (e) {
     message.error(e.message)
@@ -136,7 +141,7 @@ async function saveStores({ person_id, store_ids }) {
       method: 'POST',
       body: JSON.stringify({ person_id, store_ids, reason: '调整负责店铺' }),
     })
-    await load()
+    await changed()
     message.success('店铺归属已保存')
   } catch (e) {
     message.error(e.message)
@@ -153,7 +158,7 @@ async function drop({ personId, parentId }) {
       method: 'POST',
       body: JSON.stringify({ person_ids: [personId], parent_id: parentId || '', reason: '调整上下级关系' }),
     })
-    await load()
+    await changed()
     message.success(parentId ? '已调整至新的上级' : '已升级为独立团队长')
   } catch (e) {
     message.error(e.message)
@@ -204,7 +209,7 @@ async function applySmartOrganize() {
     })
     message.success(`已一键理顺 ${res.applied || chosen.length} 位人员的组织架构！`)
     showSmartModal.value = false
-    await load()
+    await changed()
   } catch (e) {
     message.error('应用归属失败: ' + e.message)
   } finally {
@@ -212,13 +217,14 @@ async function applySmartOrganize() {
   }
 }
 
-watch(selectedId, async id => {
+watch([selectedId, () => shared.refreshTick], async ([id]) => {
   products.value = []
   if (!id) return
   try {
     const query = new URLSearchParams({ limit: '40', include_total: 'false' })
     query.append('person_ids', id)
-    products.value = (await call('/settings?' + query.toString())).rows || []
+    const result = await call('/settings?' + query.toString())
+    if (id === selectedId.value) products.value = result.rows || []
   } catch {
     products.value = []
   }

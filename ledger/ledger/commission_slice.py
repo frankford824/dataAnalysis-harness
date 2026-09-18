@@ -40,6 +40,7 @@ def from_result(result):
     products = slim_products(commission.pop('products', None))
     manual = result.get('manual_cost')
     return {
+        'overview_json': json.dumps({**result, 'commission': commission}, ensure_ascii=False),
         'commission_json': json.dumps(commission, ensure_ascii=False),
         'products_slim_json': json.dumps(products, ensure_ascii=False) if products else None,
         'statement_json': json.dumps(compact_statement(result.get('statement')), ensure_ascii=False),
@@ -65,9 +66,9 @@ def save(conn, run_id, result, *, kind='run', payload_text=None):
     conn.execute(
         "INSERT OR REPLACE INTO run_report_slice("
         "run_id,payload_kind,payload_bytes,commission_json,products_slim_json,"
-        "statement_json,store_name,manual_cost_json) VALUES (?,?,?,?,?,?,?,?)",
+        "statement_json,store_name,manual_cost_json,overview_json) VALUES (?,?,?,?,?,?,?,?,?)",
         (run_id, kind, len(text), row['commission_json'], row['products_slim_json'],
-         row['statement_json'], row['store_name'], row['manual_cost_json']),
+         row['statement_json'], row['store_name'], row['manual_cost_json'], row['overview_json']),
     )
 
 

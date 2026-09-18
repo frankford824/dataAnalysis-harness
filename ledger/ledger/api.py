@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import re
 import json
+import logging
 import os
 import ntpath
 import threading
@@ -246,20 +247,16 @@ def workspace() -> Workspace:
 
 
 def _warm_commission_report_slices() -> None:
-    """Fill slim report rows for recent months so the amount list is not cold."""
+    """Warm all visible historical months; superseded audit runs stay lazy."""
     try:
         from . import commission_reports
-        today = date.today()
-        end = f"{today.year:04d}-{today.month:02d}"
-        month = today.month - 5
-        year = today.year
-        if month <= 0:
-            month += 12
-            year -= 1
-        start = f"{year:04d}-{month:02d}"
-        commission_reports.ensure_report_slices(workspace(), start, end)
+        ws = workspace()
+        source, _, _, _ = commission_reports._visible_run_sql(None)
+        ids = [r[0] for r in ws.conn.execute('SELECT r.id ' + source + ' ORDER BY r.period DESC,r.id')]
+        for offset in range(0, len(ids), 16):
+            commission_reports._fill_report_slices(ws, '', '9999-99', run_ids=ids[offset:offset+16], visible_only=True)
     except Exception:
-        return
+        logging.getLogger(__name__).exception('Historical report slice warm failed; reads will retry missing slices')
 
 
 _commission_actor = commission_api.install(app, lambda: workspace(), lambda: _model(), DEFAULT_MODEL)
@@ -617,7 +614,7 @@ def _build_overview(
     cells = []
     # 同一家店按账期排，让每个账期都能和它前一个比——「上个月有、这个月成了 0」
     # 只能这样看出来。
-    states = sorted(ws.overview(), key=lambda st: (st.store_id, st.period))
+    states = sorted(ws.overview_summaries(), key=lambda st: (st.store_id, st.period))
     file_counts = ws.file_counts()
     latest = ws.navigation_states()
     before: dict[str, PeriodState] = {}

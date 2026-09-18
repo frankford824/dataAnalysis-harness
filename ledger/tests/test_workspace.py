@@ -26,6 +26,43 @@ def _blob(text: str) -> io.BytesIO:
     return io.BytesIO(text.encode("utf-8"))
 
 
+def test_summary_slices_preserve_overview_and_invalidate_equal_length_update(ws):
+    import json
+    result = {'can_close': True, 'cost_review': {'requires_human': True},
+              'statement': [{'id':'profit','value':12,'available':True}],
+              'findings': [], 'commission': {'people':[], 'products':[{'name':'x' * 10000}]}}
+    run = ws.record('s1', '2020-01', result, [])
+    full = ws.overview()[0].result
+    summary = ws.overview_summaries()[0].result
+    assert summary['statement'] == full['statement']
+    assert summary['cost_review'] == full['cost_review']
+    assert 'products' not in summary['commission']
+    assert ws.period_headers('s1')[0]['cost_decision_required'] is True
+    original = ws.conn.execute('SELECT result FROM run WHERE id=?', (run,)).fetchone()[0]
+    changed = original.replace('12', '34')
+    assert len(original) == len(changed)
+    with ws.conn:
+        ws.conn.execute('UPDATE run SET result=? WHERE id=?', (changed, run))
+    assert ws.conn.execute('SELECT count(*) FROM run_report_slice WHERE run_id=?', (run,)).fetchone()[0] == 0
+    assert ws.overview_summaries()[0].result['statement'][0]['value'] == 34
+    statements = []
+    ws.conn.set_trace_callback(statements.append)
+    ws.period_headers('s1')
+    ws.overview_summaries()
+    ws.conn.set_trace_callback(None)
+    assert not any('length(' in s.lower() or 'json_each(' in s.lower() for s in statements)
+
+
+def test_startup_warm_includes_old_months_but_not_superseded_runs(ws, monkeypatch):
+    from ledger import api
+    ids = [ws.record('s1', '2020-01', {'can_close': True, 'statement': []}, []) for _ in range(20)]
+    with ws.conn:
+        ws.conn.execute('DELETE FROM run_report_slice')
+    monkeypatch.setattr(api, 'workspace', lambda: ws)
+    api._warm_commission_report_slices()
+    assert {r[0] for r in ws.conn.execute('SELECT run_id FROM run_report_slice')} == {ids[-1]}
+
+
 # --------------------------------------------------------------------------- #
 # 留档
 # --------------------------------------------------------------------------- #

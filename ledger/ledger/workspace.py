@@ -194,6 +194,15 @@ create table if not exists run_report_slice (
   manual_cost_json text,
   primary key (run_id, payload_kind)
 );
+create trigger if not exists invalidate_report_run after update of result on run begin
+  delete from run_report_slice where run_id=new.id and payload_kind='run';
+end;
+create trigger if not exists invalidate_report_manual after update of result_json on manual_finance begin
+  delete from run_report_slice where run_id=new.run_id and payload_kind='manual';
+end;
+create trigger if not exists invalidate_report_manual_insert after insert on manual_finance begin
+  delete from run_report_slice where run_id=new.run_id and payload_kind='manual';
+end;
 
 create trigger if not exists bump_file_insert after insert on file begin
   update workspace_meta set generation=generation+1 where id=1;
@@ -228,6 +237,12 @@ end;
 create trigger if not exists bump_manual_finance_insert after insert on manual_finance begin
   update workspace_meta set generation=generation+1 where id=1;
 end;
+create trigger if not exists bump_manual_finance_update after update on manual_finance begin
+  update workspace_meta set generation=generation+1 where id=1;
+end;
+create trigger if not exists bump_manual_finance_delete after delete on manual_finance begin
+  update workspace_meta set generation=generation+1 where id=1;
+end;
 create trigger if not exists bump_cost_line_insert after insert on cost_line_log begin
   update workspace_meta set generation=generation+1 where id=1;
 end;
@@ -235,6 +250,7 @@ end;
 
 #: 后加的列。老工作区打开时补上，不用导数据。
 _COLUMNS = {
+    "run_report_slice": {"overview_json": "text"},
     "period": {"at_version": "integer not null default 0"},
     # Old runs have no trustworthy proof that their Parquet archive completed.
     # They intentionally migrate to not-ready and must be recomputed before close.
@@ -360,6 +376,10 @@ class Workspace:
             # 已经落盘了——文件在、账没记，这种半截状态最难查。等一会儿再说没写上，
             # 比立刻报错诚实得多。写事务本身只是插几行运行记录，等不到 30 秒。
             conn.execute("pragma busy_timeout=30000")
+            # Per-thread connection budget: keep configurable on small hosts.
+            conn.execute(f"pragma cache_size=-{max(1024, int(os.getenv('LEDGER_SQLITE_CACHE_KIB', '16384')))}")
+            conn.execute(f"pragma mmap_size={max(0, int(os.getenv('LEDGER_SQLITE_MMAP_BYTES', '268435456')))}")
+            conn.execute("pragma temp_store=MEMORY")
             self._local.conn = conn
         return conn
 
@@ -731,17 +751,25 @@ class Workspace:
         """所有店 × 所有账期。总览矩阵的数据源。"""
         return self._states()
 
+    def overview_summaries(self) -> list[PeriodState]:
+        """Overview-only projection; detail/close callers still receive full data."""
+        from .commission_reports import _fill_report_slices
+        _fill_report_slices(self, '', '9999-99')
+        return self._states(summary=True)
+
     def periods_of_store(self, store_id: str) -> list[PeriodState]:
         """一家店的全部账期，不扫描其他店。"""
         return self._states(store_id=store_id)
 
     def period_headers(self, store_id: str) -> list[dict[str, Any]]:
         """店铺页账期条只需状态和两个结账标记，不要整份 result。"""
+        from .commission_reports import _fill_report_slices
+        _fill_report_slices(self, '', '9999-99', store_id=store_id)
         rows = self.conn.execute(
             "select p.period, p.state, p.changed_at, p.by, p.note, "
             "r.id as shown_id, r.at as shown_at, "
-            "json_extract(coalesce(mf.result_json,r.result),'$.can_close') as can_close, "
-            "json_extract(coalesce(mf.result_json,r.result),'$.cost_review.requires_human') as cost_human, "
+            "json_extract(s.overview_json,'$.can_close') as can_close, "
+            "json_extract(s.overview_json,'$.cost_review.requires_human') as cost_human, "
             "case when p.state=? and exists (select 1 from version nv "
             "where nv.store_id in (p.store_id, ?) and nv.id>p.at_version) then 1 else 0 end as stale "
             "from period p left join run r on r.id = case "
@@ -749,6 +777,7 @@ class Workspace:
             "(select lr.id from run lr where lr.store_id=p.store_id and lr.period=p.period "
             "order by lr.id desc limit 1) end "
             "left join manual_finance mf on mf.run_id=r.id and p.state='closed' "
+            "left join run_report_slice s on s.run_id=r.id and s.payload_kind=case when mf.run_id is not null then 'manual' else 'run' end "
             "where p.store_id=? order by p.period desc",
             (CLOSED, SHARED_STORE_ID, CLOSED, store_id),
         ).fetchall()
@@ -811,6 +840,7 @@ class Workspace:
         period: str | None = None,
         before: str | None = None,
         limit: int | None = None,
+        summary: bool = False,
     ) -> list[PeriodState]:
         where: list[str] = []
         args: list[Any] = []
@@ -842,6 +872,12 @@ class Workspace:
             + " order by p.period desc, p.store_id"
         )
         values: list[Any] = [CLOSED, SHARED_STORE_ID, CLOSED, *args]
+        if summary:
+            sql = sql.replace('coalesce(mf.result_json,r.result) as shown_result', 'rs.overview_json as shown_result')
+            sql = sql.replace("left join manual_finance mf on mf.run_id=r.id and p.state='closed'",
+                              "left join manual_finance mf on mf.run_id=r.id and p.state='closed' "
+                              "left join run_report_slice rs on rs.run_id=r.id and rs.payload_kind="
+                              "case when mf.run_id is not null then 'manual' else 'run' end")
         if limit is not None:
             sql += " limit ?"
             values.append(limit)
