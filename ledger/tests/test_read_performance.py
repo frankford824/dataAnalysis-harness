@@ -77,3 +77,16 @@ def test_derived_cache_rejects_corrupted_payload(tmp_path):
     with reg.connect() as conn:
         conn.execute("UPDATE derived_read_cache SET value='{}' WHERE key='test'")
     assert get(reg,'test') is None
+
+
+def test_read_warm_uses_asgi_router_without_background_workers(tmp_path):
+    import asyncio
+    from fastapi import FastAPI
+    from ledger.commission_api import install
+    from ledger.warm_reads import request
+    from test_commission import _model
+    ws=Workspace(tmp_path);model=_model()
+    app=FastAPI();install(app,lambda:ws,lambda:model)
+    asyncio.run(request(app,'/api/commission-v2/people/summary'))
+    asyncio.run(request(app,'/api/commission-v2/reports/query',{'start':'2026-06','end':'2026-06','view':'people','limit':50}))
+    assert ws.conn.execute('SELECT count(*) FROM run').fetchone()[0]==0
