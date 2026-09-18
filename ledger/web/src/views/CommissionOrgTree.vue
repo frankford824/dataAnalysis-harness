@@ -1,9 +1,9 @@
 <script setup>
 import { computed, onActivated, ref, watch } from 'vue'
 import { useMessage } from 'naive-ui'
-import { Search, Plus, Users, Building2, AlertTriangle } from '@lucide/vue'
+import { Search, Plus, Users, AlertTriangle } from '@lucide/vue'
 import { useCommission } from '../commissionStore'
-import OrgTreeNode from '../components/OrgTreeNode.vue'
+import OrgCanvas from '../components/OrgCanvas.vue'
 import OrgEditPanel from '../components/OrgEditPanel.vue'
 
 const shared = useCommission()
@@ -16,11 +16,11 @@ const loading = ref(false)
 const saving = ref(false)
 const search = ref('')
 const selectedId = ref('')
-const expanded = ref({})
-const draggingId = ref('')
+const collapsed = ref({})
 const adding = ref(null)
 const newName = ref('')
 const products = ref([])
+const board = ref(null)
 
 async function call(path, options = {}) {
   const response = await fetch('/api/commission-v2' + path, {
@@ -51,26 +51,15 @@ const matches = computed(() => {
   }
   return found
 })
-const visibleTree = computed(() => {
-  const q = search.value.trim()
-  if (!q) return tree.value
-  const keep = new Set(Object.keys(matches.value))
-  const walk = nodes => nodes
-    .map(node => {
-      const children = walk(node.children || [])
-      if (keep.has(node.id) || children.length) return { ...node, children }
-      return null
-    })
-    .filter(Boolean)
-  return walk(tree.value)
-})
 
 const stats = computed(() => {
   const all = flatten(tree.value)
-  const leaders = all.filter(n => n.role === '团队长').length
-  const managers = all.filter(n => n.role === '组长').length
-  const members = all.filter(n => n.role === '成员').length
-  return { total: all.length, leaders, managers, members }
+  return {
+    total: all.length,
+    leaders: all.filter(n => n.role === '团队长').length,
+    managers: all.filter(n => n.role === '组长').length,
+    members: all.filter(n => n.role === '成员').length,
+  }
 })
 
 async function load() {
@@ -87,19 +76,14 @@ async function load() {
   finally { loading.value = false }
 }
 
-function toggle(id) { expanded.value = { ...expanded.value, [id]: expanded.value[id] === false } }
 function select(node) { selectedId.value = node.id; adding.value = null }
-function startAdd(parent) { adding.value = parent || { id: '', name: '根节点' }; newName.value = ''; selectedId.value = parent?.id || '' }
-
-function expandAll() {
-  const all = {}
-  for (const node of flatten(tree.value)) all[node.id] = true
-  expanded.value = all
-}
+function startAdd(parent) { adding.value = parent || { id: '', name: '根节点' }; newName.value = ''; if (parent?.id) selectedId.value = parent.id }
+function toggle(id) { collapsed.value = { ...collapsed.value, [id]: !collapsed.value[id] } }
+function expandAll() { collapsed.value = {} }
 function collapseAll() {
   const all = {}
-  for (const node of flatten(tree.value)) all[node.id] = false
-  expanded.value = all
+  for (const node of flatten(tree.value)) if (node.children?.length) all[node.id] = true
+  collapsed.value = all
 }
 
 async function createPerson() {
@@ -129,11 +113,7 @@ async function savePerson(form) {
   try {
     await call('/org/person', {
       method: 'POST',
-      body: JSON.stringify({
-        person: form,
-        expected_revision: form.revision,
-        reason: '更新组织人员',
-      }),
+      body: JSON.stringify({ person: form, expected_revision: form.revision, reason: '更新组织人员' }),
     })
     await load()
     message.success('人员已保存')
@@ -163,15 +143,9 @@ async function drop({ personId, parentId }) {
       body: JSON.stringify({ person_ids: [personId], parent_id: parentId || '', reason: '拖拽调整上下级' }),
     })
     await load()
-    message.success('上下级已调整')
+    message.success(parentId ? '已挂到新的上级下面' : '已成为独立团队长')
   } catch (e) { message.error(e.message) }
-  finally { saving.value = false; draggingId.value = '' }
-}
-
-function dropRoot(event) {
-  event.preventDefault()
-  const id = event.dataTransfer.getData('text/plain') || draggingId.value
-  drop({ personId: id, parentId: '' })
+  finally { saving.value = false }
 }
 
 watch(selectedId, async id => {
@@ -180,8 +154,7 @@ watch(selectedId, async id => {
   try {
     const query = new URLSearchParams({ limit: '40' })
     query.append('person_ids', id)
-    const data = await call('/settings?' + query.toString())
-    products.value = data.rows || []
+    products.value = (await call('/settings?' + query.toString())).rows || []
   } catch { products.value = [] }
 })
 onActivated(load)
@@ -203,51 +176,31 @@ defineExpose({ reload: load })
         </n-input>
         <n-button text :disabled="loading" @click="expandAll">全部展开</n-button>
         <n-button text :disabled="loading" @click="collapseAll">全部收起</n-button>
+        <n-button text :disabled="loading" @click="board?.fit()">适应画布</n-button>
         <n-button text :disabled="loading" @click="load">刷新</n-button>
         <n-button type="primary" size="small" @click="startAdd(null)"><Plus :size="14" style="margin-right:4px" />新建团队</n-button>
       </div>
     </div>
     <p class="org-lead">
-      拖一个人到另一个人上面 → 变成他的下级。拖到顶部虚框 → 独立成团队长。
-      <strong>组长即成员</strong>，店铺跟组织走。
+      滚轮缩放，拖空白处平移。把人拖到另一张卡片上变成下级；拖到空白处变成团队长。双击卡片添加下级。
     </p>
     <div v-if="error" class="commission-error" role="alert">{{ error }} <button class="text-button" @click="load">重试</button></div>
+    <div v-if="unassigned.length && !search" class="org-unassigned">
+      <AlertTriangle :size="14" style="flex:none" />
+      <span>{{ unassigned.length }} 个店铺尚未挂到组织：{{ unassigned.slice(0, 8).map(s => s.name).join('、') }}{{ unassigned.length > 8 ? '…' : '' }}</span>
+    </div>
     <div class="org-layout" :class="{ loading }">
-      <div class="org-tree-wrap" @dragend="draggingId=''">
-        <div
-          class="org-root-drop"
-          :class="{ active: !!draggingId }"
-          @dragover.prevent
-          @drop="dropRoot"
-        >
-          <Building2 :size="16" />
-          拖到这里成为独立团队长
-        </div>
-        <ul class="org-tree-root">
-          <OrgTreeNode
-            v-for="(node, idx) in visibleTree"
-            :key="node.id"
-            :node="node"
-            :selected-id="selectedId"
-            :matches="matches"
-            :expanded="expanded"
-            :dragging-id="draggingId"
-            :is-last="idx === visibleTree.length - 1"
-            @select="select"
-            @toggle="toggle"
-            @add="startAdd"
-            @drag-start="draggingId=$event"
-            @drop="drop"
-          />
-        </ul>
-        <div v-if="!loading && !visibleTree.length" class="org-empty">
-          {{ search ? '没有匹配的人员' : '还没有组织层级。先建一位团队长，再把其他人拖到他下面。' }}
-        </div>
-        <div v-if="unassigned.length && !search" class="org-unassigned">
-          <AlertTriangle :size="14" style="flex:none" />
-          <span>{{ unassigned.length }} 个店铺尚未挂到组织：{{ unassigned.slice(0, 8).map(s => s.name).join('、') }}{{ unassigned.length > 8 ? '…' : '' }}</span>
-        </div>
-      </div>
+      <OrgCanvas
+        ref="board"
+        :tree="tree"
+        :selected-id="selectedId"
+        :matches="matches"
+        :collapsed="collapsed"
+        @select="select"
+        @drop="drop"
+        @add="startAdd"
+        @toggle="toggle"
+      />
       <OrgEditPanel
         :person="selected"
         :people="people"
