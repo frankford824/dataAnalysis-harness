@@ -29,7 +29,8 @@ def allocations(conn, segment):
     result = {}
     names = {r[0]:r[1] for r in conn.execute('SELECT id,name FROM person')}
     for a in segment.get('allocations',[]):
-        pid=a['person_id']; entry=result.setdefault(pid, {'person_id':pid,'name':names.get(pid,pid),'rate':Decimal(0)})
+        pid=a['person_id']; entry=result.setdefault(pid, {'person_id':pid,'name':names.get(pid,pid),'rate':Decimal(0),
+            **{k:a[k] for k in ('duty','source','role') if k in a}})
         entry['rate']+=Decimal(a['rate'])
     return [{**r,'rate':str(r['rate'])} for r in result.values()]
 
@@ -90,7 +91,7 @@ def preview(registry, model, request, actor):
                 before=allocations(conn,segment)
                 requested=data.get('allocations',[])
                 if operation!='replace' and data.get('mode','distribute')=='distribute':
-                    by_id={r['person_id']:{'person_id':r['person_id'],'rate':r['rate']} for r in before}
+                    by_id={r['person_id']:{k:v for k,v in r.items() if k!='name'} for r in before}
                     extra=[]
                     removed=False
                     for person in requested:
@@ -103,7 +104,7 @@ def preview(registry, model, request, actor):
                             if pid and pid in by_id:
                                 by_id.pop(pid)
                                 removed=True
-                        elif pid:by_id[pid]={'person_id':pid,'rate':person.get('rate')}
+                        elif pid:by_id[pid]={**by_id.get(pid,{}),**{k:v for k,v in person.items() if k!='name'},'person_id':pid,'rate':person.get('rate')}
                         else:extra.append(person)
                     if operation=='remove' and not removed:continue
                     data['allocations']=list(by_id.values())+extra

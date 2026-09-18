@@ -553,7 +553,11 @@ class Workspace:
         )
         args: tuple[Any, ...] = ()
         if store_id:
-            sql += " where s.store_id in (?,?)"
+            # Probe the (store_id,name) index for only this shop's slots. The
+            # previous aggregate scanned every shop's version history first.
+            sql = ("select s.store_id,s.name,s.sha,s.updated_at,s.by,f.size, "
+                   "(select count(*) from version v where v.store_id=s.store_id and v.name=s.name) as versions "
+                   "from slot s join file f on f.sha=s.sha where s.store_id in (?,?)")
             args = (store_id, SHARED_STORE_ID)
         sql += " order by s.store_id, s.name"
         out = [dict(r) for r in self.conn.execute(sql, args).fetchall()]

@@ -26,6 +26,21 @@ def _blob(text: str) -> io.BytesIO:
     return io.BytesIO(text.encode("utf-8"))
 
 
+def test_scoped_submissions_match_global_counts_without_global_aggregation(ws):
+    from ledger.workspace import SHARED_STORE_ID
+    for sid in ('s1','s2',SHARED_STORE_ID):
+        for version in range(3):
+            ws.keep('input.csv', _blob(f'{sid}-{version}'), sid)
+    expected=[r for r in ws.submissions() if r['store_id'] in ('s1',SHARED_STORE_ID)]
+    statements=[]
+    ws.conn.set_trace_callback(statements.append)
+    actual=ws.submissions('s1')
+    ws.conn.set_trace_callback(None)
+    assert actual==expected
+    assert all(r['versions']==3 for r in actual)
+    assert not any('group by' in sql.lower() for sql in statements)
+
+
 def test_summary_slices_preserve_overview_and_invalidate_equal_length_update(ws):
     import json
     result = {'can_close': True, 'cost_review': {'requires_human': True},
@@ -61,6 +76,23 @@ def test_startup_warm_includes_old_months_but_not_superseded_runs(ws, monkeypatc
     monkeypatch.setattr(api, 'workspace', lambda: ws)
     api._warm_commission_report_slices()
     assert {r[0] for r in ws.conn.execute('SELECT run_id FROM run_report_slice')} == {ids[-1]}
+
+
+def test_overview_upgrade_reuses_existing_commission_projection(ws, monkeypatch):
+    from ledger import commission_slice
+    from ledger.commission_reports import _fill_report_slices
+    run=ws.record('s1','2026-06',{'commission':{'people':[],'products':[{'total_rate':'.01','people':[]}]},
+        'statement':[{'id':'margin','value':0.4354885279398327,'available':True}]},[])
+    original=tuple(ws.conn.execute('SELECT commission_json,products_slim_json,statement_json FROM run_report_slice WHERE run_id=?',(run,)).fetchone())
+    with ws.conn:
+        ws.conn.execute('UPDATE run_report_slice SET overview_json=NULL WHERE run_id=?',(run,))
+    def fail():
+        raise AssertionError('Existing product/statement projection must not be rebuilt')
+    ws.conn.create_function('forbidden_projection',0,fail)
+    monkeypatch.setattr(commission_slice,'slim_products_sql',lambda payload:'forbidden_projection()')
+    monkeypatch.setattr(commission_slice,'compact_statement_sql',lambda payload:'forbidden_projection()')
+    assert _fill_report_slices(ws,'2026-06','2026-06')==1
+    assert tuple(ws.conn.execute('SELECT commission_json,products_slim_json,statement_json FROM run_report_slice WHERE run_id=?',(run,)).fetchone())==original
 
 
 def test_slice_warm_and_foreground_queries_share_bounded_write_transactions(ws):

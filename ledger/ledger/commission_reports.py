@@ -426,12 +426,12 @@ def _fill_report_slices(workspace, start, end, run_ids=None, store_id=None, visi
         if not conn.in_transaction:
             conn.execute('BEGIN IMMEDIATE')
         for row in conn.execute(
-            f"SELECT r.id,{payload_kind} payload_kind,length({payload}) payload_bytes,"
-            f"json_remove(json_extract({payload},'$.commission'),'$.products') commission_json,"
-            f"{commission_slice.slim_products_sql(payload)} products_slim_json,"
-            f"{commission_slice.compact_statement_sql(payload)} statement_json,"
-            f"json_extract({payload},'$.store') store_name,"
-            f"json_extract({payload},'$.manual_cost') manual_cost_json "
+            f"SELECT r.id,{payload_kind} payload_kind,coalesce(existing.payload_bytes,length({payload})) payload_bytes,"
+            f"CASE WHEN existing.run_id IS NOT NULL THEN existing.commission_json ELSE json_remove(json_extract({payload},'$.commission'),'$.products') END commission_json,"
+            f"CASE WHEN existing.run_id IS NOT NULL THEN existing.products_slim_json ELSE {commission_slice.slim_products_sql(payload)} END products_slim_json,"
+            f"CASE WHEN existing.run_id IS NOT NULL THEN existing.statement_json ELSE {commission_slice.compact_statement_sql(payload)} END statement_json,"
+            f"CASE WHEN existing.run_id IS NOT NULL THEN existing.store_name ELSE json_extract({payload},'$.store') END store_name,"
+            f"CASE WHEN existing.run_id IS NOT NULL THEN existing.manual_cost_json ELSE json_extract({payload},'$.manual_cost') END manual_cost_json "
             f",json_remove({payload},'$.commission.products') overview_json "
             f"{source}{manual_join} LEFT JOIN run_report_slice existing "
             f"ON existing.run_id=r.id AND existing.payload_kind={payload_kind} "

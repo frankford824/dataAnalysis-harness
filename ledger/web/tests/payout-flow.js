@@ -20,7 +20,7 @@ window.fetch=async (url,options={})=>{
   if(path.includes('/payout-confirmations/context')){
     if(!path.includes('run_id=101'))throw new Error('Incorrect selected run')
     contextRequests++
-    return reply({store_id:'s1',store:'测试店一',period:'2026-06',run_id:101,source_sha:'fixture',people:[{person_id:'p2',person:'测试乙',suggested:5},{person_id:'p1',person:'测试甲',suggested:10}],history:[]})
+    return reply({store_id:'s1',store:'测试店一',period:'2026-06',run_id:101,source_sha:'fixture',people:[{person_id:'p2',person:'测试乙',suggested:5},{person_id:'p1',person:'测试甲',suggested:10},...Array.from({length:10},(_,i)=>({person_id:`p${i+3}`,person:`测试成员${i+3}`,suggested:i+1}))],history:[]})
   }
   if(path.endsWith('/payout-confirmations')){saved=JSON.parse(options.body);return reply({id:'saved'})}
   if(path.includes('/settlements'))return reply({settlements:[]})
@@ -40,10 +40,17 @@ try{
   await wait(()=>buttons().some(b=>b.textContent==='测试甲'))
   buttons().find(b=>b.textContent==='测试甲').click()
   await wait(()=>document.querySelector('.payout-targets button'))
-  assert(document.querySelector('.payout-targets').textContent.includes('选择并编辑'),'Missing entry label')
+  assert(document.querySelector('.payout-targets').textContent.includes('编辑 →'),'Missing entry label')
   assert(document.body.textContent.includes('全部提成人员'),'Missing whole-store scope before selection')
   ;[...document.querySelectorAll('.payout-targets button')].find(b=>b.textContent.includes('测试店一')).click()
   await wait(()=>document.querySelector('.payout-focused input'))
+  await new Promise(r=>setTimeout(r,350))
+  const modal=document.querySelector('.payout-editor')
+  const box=modal.getBoundingClientRect(),footer=modal.querySelector('.n-card__footer').getBoundingClientRect()
+  assert(box.top>=0&&box.bottom<=innerHeight+1,'Editor overflows viewport')
+  assert(footer.bottom<=innerHeight+1,'Save footer is outside viewport')
+  const body=modal.querySelector('.n-card-content')
+  assert(body.scrollHeight>body.clientHeight,'Twelve-person form must scroll inside modal')
   assert(contextRequests===1,'Editor must load selected context once')
   assert(document.querySelector('.payout-people label').classList.contains('payout-focused'),'Selected person must be first')
   assert(document.querySelector('.payout-focused').textContent.includes('测试甲'),'Wrong person highlighted')
@@ -60,7 +67,7 @@ try{
   save().click()
   await wait(()=>saved)
   assert(saved.run_id===101 && saved.store_id==='s1','Wrong save scope')
-  assert(saved.payouts.length===2,'Must retain the other store member')
+  assert(saved.payouts.length===12,'Must retain all other store members')
   assert(saved.payouts.find(p=>p.person_id==='p1').amount==='12.50','Changed value lost')
   assert(saved.payouts.find(p=>p.person_id==='p2').amount==='5.00','Other person changed')
   document.querySelector('#test-result').textContent='PASS: 点击人员 → 选择店铺月份 → 打开并突出人员 → 核对整店范围 → 保存全部人员（仅测试数据）'

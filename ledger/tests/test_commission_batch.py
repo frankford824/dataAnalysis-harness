@@ -45,6 +45,22 @@ def test_cross_store_preview_no_changes_apply_once_and_keep_others(tmp_path):
     assert r.active('s1')[1][0]['body']['segments'][0]['valid_to']=='2001-01-01T00:00:00'
 
 
+def test_merge_retains_existing_duty_and_hierarchy_source(tmp_path):
+    r,m,a,b=setup(tmp_path)
+    r.save_setting({'store_id':'s1','product_id':'123456789001','expected_revision':1,'valid_from':'2000-06-01',
+                    'allocations':[{'person_id':a['id'],'rate':'.03','duty':'produce'},
+                                   {'person_id':b['id'],'rate':'.02','duty':'cut','source':'hierarchy'}]},'test')
+    body={'targets':[{'store_id':'s1','product_id':'123456789001','revision':2}],
+          'template':{'valid_from':'2001-01-01','mode':'distribute','allocations':[{'person_id':a['id'],'rate':'.04','duty':'produce'}]},'operation':'merge'}
+    plan=preview(r,m,body,'test')
+    other=next(p for p in plan['rows'][0]['after'] if p['person_id']==b['id'])
+    assert other['duty']=='cut' and other['source']=='hierarchy'
+    apply(r,m,plan['id'],'test')
+    actual=r.active('s1')[1][0]['body']['segments'][-1]['allocations']
+    other=next(p for p in actual if p['person_id']==b['id'])
+    assert other['duty']=='cut' and other['source']=='hierarchy'
+
+
 def test_conflict_rolls_back_every_target_and_new_person(tmp_path):
     r,m,a,b=setup(tmp_path);plan=preview(r,m,request(),'test')
     r.save_setting({'store_id':'s2','product_id':'123456789001','expected_revision':1,'valid_from':'2000-06-01',

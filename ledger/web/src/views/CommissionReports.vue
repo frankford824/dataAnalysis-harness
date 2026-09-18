@@ -311,9 +311,9 @@ const tableColumns=computed(()=>{
           title:canEdit?'点击核定或修改实发金额':'系统应发由核算自动得出；有核算记录后可在此核定实发',
           onClick:()=>canEdit&&choosePayout(row),
         },[
-          h('strong',money(row.confirmed_amount)),
-          h(NTag,{size:'tiny',type:payoutState==='confirmed'?'success':'warning',bordered:false},()=>payoutState==='confirmed'?'已核定实发':payoutState==='partial'?'部分核定':'待核定'),
-          canEdit?h('span',{class:'actual-payout-hint'},payoutState==='pending'?'填写实发':`已核定 ${row.confirmed_count||0}/${row.confirmation_count||0} 项 · 修改`):null
+          row.confirmed_amount!=null?h('strong',money(row.confirmed_amount)):null,
+          h('span',{class:['payout-state',`is-${payoutState}`]},payoutState==='confirmed'?'已核定':payoutState==='partial'?'部分核定':'待核定'),
+          canEdit?h('span',{class:'actual-payout-hint'},payoutState==='pending'?'填写实发 →':`${row.confirmed_count||0}/${row.confirmation_count||0} 项 · 修改 →`):null
         ])
       }
       if(key==='person' && row.person_id)return h('button',{type:'button',class:'text-button',disabled:locked.value||!targetsFor(row).length,onClick:()=>choosePayout(row)},row.person)
@@ -394,17 +394,17 @@ defineExpose({reload:load})
     </section>
     <CommissionDetailDrawer :target="detail" @close="detail=null" />
     <ProfitCompositionDrawer :target="profit" @close="profit=null" @saved="onProfitSaved" />
-    <n-modal v-model:show="payoutTargetsOpen" preset="card" :title="`${payoutTargetTitle}：选择要确认的店铺月份`" style="width:min(620px,calc(100vw - 32px))">
+    <n-modal v-model:show="payoutTargetsOpen" preset="card" class="commission-modal" :title="`${payoutTargetTitle} · 选择店铺月份`" style="width:min(680px,calc(100vw - 32px))">
       <p class="settlement-help">{{ payoutFocus?.person || payoutTargetTitle }} · {{ state.start }} 至 {{ state.end }}。请选择店铺月份进入编辑；保存时会核定所选店铺该月全部提成人员的金额。</p>
       <div class="payout-targets">
         <button v-for="target in payoutTargets" :key="`${target.store_id}:${target.period}:${target.run_id}`" type="button" @click="pickPayout(target)">
           <span><strong>{{ target.store }}</strong><small>{{ target.period }} · {{ status(target.status) }}</small></span>
-          <span class="num">当前参考 ¥{{ money(target.amount) }} · 选择并编辑 →</span>
+          <span class="payout-target-amount"><small>当前参考</small><strong class="num">¥{{ money(target.amount) }}</strong></span><span class="payout-target-next">编辑 →</span>
         </button>
       </div>
       <template #footer><div class="settlement-footer"><n-button @click="payoutTargetsOpen=false">取消</n-button></div></template>
     </n-modal>
-    <n-modal v-model:show="payoutOpen" preset="card" title="核定实发提成（人工调整与归档）" style="width:min(560px,calc(100vw - 32px))">
+    <n-modal v-model:show="payoutOpen" preset="card" class="commission-modal payout-editor" title="核定实发提成" :mask-closable="!payoutSaving" :closable="!payoutSaving" :close-on-esc="!payoutSaving" style="width:min(680px,calc(100vw - 32px))">
       <n-spin :show="payoutLoading">
         <template v-if="payoutContext">
           <p class="settlement-help">{{ payoutContext.store }} · {{ payoutContext.period }}<template v-if="payoutFocus"> · 当前查看：{{ payoutFocus.person }}</template>。修改下方实发金额并填写依据。</p>
@@ -444,7 +444,7 @@ defineExpose({reload:load})
       </n-spin>
       <template #footer><div class="settlement-footer"><n-button @click="payoutOpen=false">取消</n-button><n-button type="primary" :loading="payoutSaving" :disabled="!payoutReady" @click="savePayout">保存实发并归档</n-button></div></template>
     </n-modal>
-    <n-modal v-model:show="settlementOpen" preset="card" title="确认员工结算" style="width:min(520px,calc(100vw - 32px))">
+    <n-modal v-model:show="settlementOpen" preset="card" class="commission-modal" title="确认员工结算" style="width:min(520px,calc(100vw - 32px))">
       <p class="settlement-help">确认后保存当前计算记录和金额。以后补到账单时，旧记录保持不变，页面会显示差额。</p>
       <n-alert v-if="warnings" type="warning">还有未出金额或待核对账期，暂不能结算。</n-alert>
       <n-input v-model:value="settlementNote" type="textarea" :rows="3" maxlength="2000" show-count placeholder="填写结算说明，例如：已于8月15日与员工核对并发放" />
@@ -454,6 +454,9 @@ defineExpose({reload:load})
 </template>
 <style scoped>
 .mobile-context{display:none}
+.payout-people label>span,.payout-targets button>span:first-child{min-width:0;overflow-wrap:anywhere}
+.actual-payout-cell.actual-payout-cell.is-editable{box-sizing:border-box;min-width:0;width:100%;max-width:132px}
+.actual-payout-cell.actual-payout-cell{display:inline-flex;flex-direction:column;align-items:flex-end;gap:5px;min-width:96px;padding:8px 10px;border:1px solid #dce5f3;border-radius:9px;background:#fff;line-height:1.4}.actual-payout-cell .payout-state{font-size:11px;font-weight:500;color:#778397}.actual-payout-cell .payout-state.is-partial{color:#a36a17}.actual-payout-cell .payout-state.is-confirmed{color:#26805a}.actual-payout-cell .actual-payout-hint{white-space:nowrap;font-size:12px;margin:0}.payout-targets.payout-targets button{display:grid;grid-template-columns:minmax(0,1fr) auto auto;gap:18px;padding:14px 16px}.payout-target-amount{text-align:right}.payout-target-next{font-size:12px;color:#3468f0;white-space:nowrap}.payout-people.payout-people label{padding:12px;border:1px solid #e5eaf1;border-radius:10px;grid-template-columns:minmax(0,1fr) 156px}.payout-people.payout-people label.payout-focused{border-color:#91adf8;background:#f0f5ff}.payout-people{margin-bottom:16px}@media(max-width:480px){.payout-targets.payout-targets button{grid-template-columns:minmax(0,1fr) auto;gap:8px}.payout-target-next{grid-column:2;text-align:right}.payout-people.payout-people label{grid-template-columns:minmax(0,1fr) 112px;padding:10px}}
 .payout-focused{background:#eef4ff;border:1px solid #91adf8;border-radius:8px;padding:10px}.actual-payout-cell strong{display:block;margin-bottom:4px}
 .report-tabs button{border-radius:0;box-shadow:none}.month-label{white-space:nowrap}
 

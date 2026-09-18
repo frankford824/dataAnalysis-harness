@@ -929,13 +929,15 @@ async def period_detail(
 
 
 def _period_detail_cached(ws, model, revision, generation, store_id, period):
-    st = ws.state(store_id, period)
-    if st is None or st.result is None:
-        raise HTTPException(404, f"{period} 还没算过账")
     key = ("period", str(ws.root.resolve()), revision, generation, store_id, period)
+    def build_detail():
+        st = ws.state(store_id, period)
+        if st is None or st.result is None:
+            raise HTTPException(404, f"{period} 还没算过账")
+        return _build_period_detail(ws, model, store_id, period, st)
     return _bounded_parallel_cache(
         _payload_cache, key,
-        lambda: _build_period_detail(ws, model, store_id, period, st),
+        build_detail,
         _READ_CACHE_MAX,
     )
 

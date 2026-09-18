@@ -201,4 +201,8 @@
 @media(prefers-reduced-motion:reduce){.commission-loading-line:after{animation:none;transform:none}}
 .commission-filters .clear-filters:disabled{display:none}
 @media(max-width:600px){.commission-area .settings-table{min-width:0}.commission-area .settings-table th:nth-child(3),.commission-area .settings-table td:nth-child(3),.commission-area .settings-table th:nth-child(5),.commission-area .settings-table td:nth-child(5){display:none}.commission-area .settings-table th:nth-child(2){width:44%!important}.commission-area .settings-table th:nth-child(4){width:32%!important}.commission-area .settings-table .check{width:26px;padding-left:8px;padding-right:4px}.commission-area .settings-table .sticky-action{width:48px}.commission-area .settings-table td{padding:11px 7px;font-size:12px}.commission-area .settings-table th{padding:9px 7px;font-size:11px}.commission-area .settings-table .setting-person{gap:6px}.commission-area .settings-table .sub{font-size:10px}}
-
+.commission-modal.n-card{max-height:calc(100dvh - 32px);display:flex;flex-direction:column;margin:16px auto!important;border-radius:14px;box-shadow:0 20px 70px #14233b26;overflow:hidden}
+.commission-modal.n-card>.n-card-header{flex:none;padding:20px 24px 16px;border-bottom:1px solid #edf0f5}
+.commission-modal.n-card>.n-card-content{min-height:0;flex:1 1 auto;overflow-y:auto;overflow-x:hidden;overscroll-behavior:contain;padding:18px 24px}
+.commission-modal.n-card>.n-card__footer{flex:none;padding:14px 24px;border-top:1px solid #edf0f5;background:#fafbfd}
+@media(max-width:600px){.commission-modal.n-card{max-height:calc(100dvh - 16px);margin:8px auto!important}.commission-modal.n-card>.n-card-header{padding:16px}.commission-modal.n-card>.n-card-content{padding:14px 16px}.commission-modal.n-card>.n-card__footer{padding:12px 16px}.commission-modal .n-card-header__main{font-size:17px}.commission-modal .settlement-footer{flex-wrap:wrap}}
