@@ -3,6 +3,9 @@ from __future__ import annotations
 
 import json
 import re
+import threading
+from collections import OrderedDict
+
 import polars as pl
 
 from datetime import datetime, timezone, timedelta
@@ -148,6 +151,37 @@ def _store_condition(stores):
     return 'store_id IN (' + ','.join('?' for _ in stores) + ')', list(stores)
 
 
+_settings_lock = threading.Lock()
+_page_cache: OrderedDict[tuple, dict] = OrderedDict()
+_count_cache: OrderedDict[tuple, int] = OrderedDict()
+_PAGE_CACHE_LIMIT = 48
+_COUNT_CACHE_LIMIT = 24
+
+
+def _settings_scope(registry: Registry, *, store_id="", search="", state="", at=None,
+                    person_id="", store_ids=None, person_ids=None):
+    return (str(registry.root.resolve()), registry.revision(), store_id, search, state,
+            at or '', person_id, tuple(sorted(store_ids or [])), tuple(sorted(person_ids or [])))
+
+
+def cached_count(registry: Registry, *, store_id="", search="", state="", at=None,
+                 person_id="", store_ids=None, person_ids=None) -> int:
+    key = _settings_scope(registry, store_id=store_id, search=search, state=state, at=at,
+                          person_id=person_id, store_ids=store_ids, person_ids=person_ids)
+    with _settings_lock:
+        hit = _count_cache.get(key)
+        if hit is not None:
+            _count_cache.move_to_end(key)
+            return hit
+    total = count_settings(registry, store_id=store_id, search=search, state=state, at=at,
+                           person_id=person_id, store_ids=store_ids, person_ids=person_ids)
+    with _settings_lock:
+        _count_cache[key] = total
+        while len(_count_cache) > _COUNT_CACHE_LIMIT:
+            _count_cache.popitem(last=False)
+    return total
+
+
 def count_settings(registry: Registry, *, store_id="", search="", state="", at=None, person_id="", store_ids=None, person_ids=None) -> int:
     """Count without decoding every scheme JSON when the filter does not need it."""
     stores = sorted(set(store_ids or ([store_id] if store_id else [])))
@@ -256,11 +290,19 @@ def iter_settings(registry: Registry, *, store_id="", search="", state="", after
 
 
 def settings(registry: Registry, *, store_id="", search="", state="", after="", limit=60, at=None, person_id="", store_ids=None, person_ids=None, include_total=True) -> dict:
+    page_key = (*_settings_scope(registry, store_id=store_id, search=search, state=state, at=at,
+                                 person_id=person_id, store_ids=store_ids, person_ids=person_ids),
+                after, limit, include_total)
+    with _settings_lock:
+        hit = _page_cache.get(page_key)
+        if hit is not None:
+            _page_cache.move_to_end(page_key)
+            return hit
     rows = list(iter_settings(registry, store_id=store_id, search=search, state=state, after=after, limit=limit+1, at=at, person_id=person_id, store_ids=store_ids, person_ids=person_ids))
     more = len(rows)>limit
     rows = rows[:limit]
-    total = (count_settings(registry, store_id=store_id, search=search, state=state, at=at,
-                            person_id=person_id, store_ids=store_ids, person_ids=person_ids)
+    total = (cached_count(registry, store_id=store_id, search=search, state=state, at=at,
+                          person_id=person_id, store_ids=store_ids, person_ids=person_ids)
              if include_total else len(rows) + (1 if more else 0))
     segments = {}
     for r in registry.store_members_for_stores({row['store_id'] for row in rows}):
@@ -280,4 +322,10 @@ def settings(registry: Registry, *, store_id="", search="", state="", after="", 
                 current = next((seg for seg in segments.get((row['store_id'], person['person_id']), [])
                                 if member_active_at(seg, lookup_at)), None)
                 person['duty'] = current['duty'] if current else None
-    return {'total':total,'total_pages':(total+limit-1)//limit,'page_size':limit,'rows':rows,'has_more':more,'next_after':rows[-1]['store_id']+'\x1f'+rows[-1]['product_id'] if rows and more else ''}
+    result = {'total':total,'total_pages':(total+limit-1)//limit,'page_size':limit,'rows':rows,'has_more':more,
+              'next_after':rows[-1]['store_id']+'\x1f'+rows[-1]['product_id'] if rows and more else ''}
+    with _settings_lock:
+        _page_cache[page_key] = result
+        while len(_page_cache) > _PAGE_CACHE_LIMIT:
+            _page_cache.popitem(last=False)
+    return result

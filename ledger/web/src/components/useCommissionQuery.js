@@ -2,20 +2,29 @@ import { computed, onActivated, onDeactivated, onUnmounted, ref, watch } from 'v
 import { useCommission } from '../commissionStore'
 import { latestRequest } from './commissionRequest'
 
-export function useCommissionQuery(section, getKey, fetcher, mayRefresh = () => true, { followTick = true, delay = 180 } = {}) {
+export function useCommissionQuery(section, getKey, fetcher, mayRefresh = () => true, { followTick = true, delay = 180, remember = false } = {}) {
   const state = useCommission(), data = ref(null), error = ref(''), loading = ref(false), loadedKey = ref('')
   const key = computed(getKey), request = latestRequest()
+  const remembered = new Map()
   let active = false, timer, generation = 0
   const stale = computed(() => !!data.value && key.value !== loadedKey.value)
   async function load() {
     if (!active || !state.ready || !mayRefresh()) { loading.value = false; return }
     const current = generation
     const wanted = key.value
-    loading.value = true; error.value = ''
+    if (remember && remembered.has(wanted)) {
+      data.value = remembered.get(wanted)
+      loadedKey.value = wanted
+      loading.value = false
+    } else {
+      loading.value = true
+    }
+    error.value = ''
     try {
       const result = await request.run(signal => fetcher(signal))
       if (result && wanted === key.value) {
         data.value = result.value; loadedKey.value = wanted
+        if (remember) remembered.set(wanted, result.value)
         state.updated[section] = Date.now()
       }
     } catch (e) { if(current === generation) error.value = e.message }
@@ -24,17 +33,22 @@ export function useCommissionQuery(section, getKey, fetcher, mayRefresh = () => 
   function schedule(wait = delay) {
     generation++; clearTimeout(timer); request.cancel()
     if (!active) return
-    loading.value = true
+    if (!(remember && remembered.has(key.value))) loading.value = true
     timer = setTimeout(load, wait)
   }
+  function prefetch(nextKey, nextFetcher) {
+    if (!remember || !nextKey || remembered.has(nextKey)) return
+    nextFetcher().then(value => { if (value) remembered.set(nextKey, value) }).catch(() => {})
+  }
+  function forget() { remembered.clear() }
   watch(key, () => schedule())
   watch(() => state.ready, () => schedule(0))
   if (followTick) {
-    watch(() => state.refreshTick, () => { if (!loading.value && mayRefresh()) schedule(0) })
+    watch(() => state.refreshTick, () => { if (!loading.value && mayRefresh()) { forget(); schedule(0) } })
   }
   watch(loading, value => { state.loading[section] = value })
   onActivated(() => { active = true; schedule(0) })
   function stop() { active = false; generation++; clearTimeout(timer); request.cancel(); loading.value = false }
   onDeactivated(stop); onUnmounted(stop)
-  return { data, error, loading, stale, load: () => schedule(0) }
+  return { data, error, loading, stale, load: () => schedule(0), prefetch, forget }
 }

@@ -854,7 +854,7 @@ def _trend_ratio(
 
 
 @app.get("/api/stores/{store_id}")
-def store_detail(store_id: str, request: Request, response: Response) -> Any:
+async def store_detail(store_id: str, request: Request, response: Response) -> Any:
     """一家店的全部：账期清单 + 交了哪些表。"""
     snapshot = _snapshot()
     model = snapshot.model
@@ -867,16 +867,16 @@ def store_detail(store_id: str, request: Request, response: Response) -> Any:
     if not_modified is not None:
         return not_modified
     key = ("store", str(ws.root.resolve()), snapshot.revision, generation, store_id)
-    return _bounded_cache(
-        _payload_cache,
-        key,
-        lambda: _build_store_detail(ws, store),
-        _READ_CACHE_MAX,
+    return await anyio.to_thread.run_sync(
+        lambda: _bounded_parallel_cache(
+            _payload_cache, key, lambda: _build_store_detail(ws, store), _READ_CACHE_MAX,
+        )
     )
 
 
 def _build_store_detail(ws: Workspace, store: Store) -> dict:
-    periods = [
+    headers = getattr(ws, "period_headers", None)
+    periods = headers(store.id) if callable(headers) else [
         {
             "period": st.period, "state": st.state, "stale": st.stale,
             "at": st.at, "run_id": st.run_id, "by": st.by, "note": st.note,
@@ -893,7 +893,7 @@ def _build_store_detail(ws: Workspace, store: Store) -> dict:
 
 
 @app.get("/api/stores/{store_id}/periods/{period}")
-def period_detail(
+async def period_detail(
     store_id: str, period: str, request: Request, response: Response,
 ) -> Any:
     """一个账期的完整快照。单店页面渲染这个。"""
@@ -907,16 +907,18 @@ def period_detail(
     not_modified = _conditional_headers(request, response, tag, data_revision)
     if not_modified is not None:
         return not_modified
+    return await anyio.to_thread.run_sync(
+        _period_detail_cached, ws, model, snapshot.revision, generation, store_id, period,
+    )
+
+
+def _period_detail_cached(ws, model, revision, generation, store_id, period):
     st = ws.state(store_id, period)
     if st is None or st.result is None:
         raise HTTPException(404, f"{period} 还没算过账")
-    key = (
-        "period", str(ws.root.resolve()), snapshot.revision,
-        generation, store_id, period,
-    )
-    return _bounded_cache(
-        _payload_cache,
-        key,
+    key = ("period", str(ws.root.resolve()), revision, generation, store_id, period)
+    return _bounded_parallel_cache(
+        _payload_cache, key,
         lambda: _build_period_detail(ws, model, store_id, period, st),
         _READ_CACHE_MAX,
     )
@@ -950,6 +952,9 @@ def _build_period_detail(
                 review['line_error'] = str(exc)
         payload['cost_review'] = review
     _annotate_commission_after_labor(payload, ws, model, store_id, period, st)
+    commission = payload.get("commission")
+    if isinstance(commission, dict) and "products" in commission:
+        payload["commission"] = {key: value for key, value in commission.items() if key != "products"}
     return payload
 
 
@@ -1003,7 +1008,11 @@ def _previous(store_id: str, period: str) -> dict | None:
     取的是「比它早的里最近的一个」，不是「上一个自然月」：中间断月的时候，
     拿不存在的那个月去比等于这条永远不响。
     """
-    st = workspace().previous_state(store_id, period)
+    ws = workspace()
+    slim = getattr(ws, "previous_gap_basis", None)
+    if callable(slim):
+        return slim(store_id, period)
+    st = ws.previous_state(store_id, period)
     return st.result if st else None
 
 

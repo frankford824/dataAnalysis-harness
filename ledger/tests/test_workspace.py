@@ -410,6 +410,26 @@ def test_overview_reads_all_states_in_one_select(ws):
     assert len(selects) == 1, selects
 
 
+def test_period_headers_skip_the_full_result_blob(ws):
+    ws.record("s1", "2025-05", _result(can_close=True, cost_review={"requires_human": True},
+                                      commission={"products": [{"id": i} for i in range(50)]}), ["a"])
+    sql: list[str] = []
+    ws.conn.set_trace_callback(sql.append)
+    try:
+        headers = ws.period_headers("s1")
+    finally:
+        ws.conn.set_trace_callback(None)
+    assert headers[0]["can_close"] is True
+    assert headers[0]["cost_decision_required"] is True
+    assert all("shown_result" not in statement for statement in sql)
+
+
+def test_previous_gap_basis_only_returns_statement(ws):
+    ws.record("s1", "2025-05", _result(statement=[{"id": "fee", "value": 200, "available": True}]), ["a"])
+    ws.record("s1", "2025-06", _result(), ["a"])
+    assert ws.previous_gap_basis("s1", "2025-06")["statement"][0]["id"] == "fee"
+
+
 def test_scoped_state_helpers_do_not_change_semantics(ws):
     run_id = ws.record("s1", "2025-05", _result(profit=1), ["a"])
     ws.record("s1", "2025-06", _result(profit=2), ["a"])

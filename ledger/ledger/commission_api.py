@@ -509,6 +509,15 @@ def install(app, workspace, model, model_root: Path | None = None):
             after=after, limit=limit, person_id=person_id, store_ids=store_ids,
             person_ids=person_ids, include_total=include_total)
 
+    @router.get("/settings/count")
+    async def settings_count(store_id: str = "", search: str = "", state: str = "",
+                             person_id: str = "", store_ids: list[str] = Query(default=[]),
+                             person_ids: list[str] = Query(default=[])):
+        total = await run_in_threadpool(
+            commission_catalog.cached_count, reg(), store_id=store_id, search=search, state=state,
+            person_id=person_id, store_ids=store_ids, person_ids=person_ids)
+        return {"total": total}
+
     @router.post("/settings/preview")
     async def settings_preview(request: Request):
         acting = actor(request)
@@ -749,9 +758,9 @@ def install(app, workspace, model, model_root: Path | None = None):
         return effective in ('', 'store_people')
 
     def report_cache_key(selection: ReportSelection, need_product_rates: bool):
-        return (selection.start, selection.end, tuple(selection.store_ids or []),
-                tuple(selection.person_ids or []), tuple(selection.run_ids or []),
-                report_watermark(), need_product_rates)
+        return (str(workspace().root.resolve()), selection.start, selection.end,
+                tuple(selection.store_ids or []), tuple(selection.person_ids or []),
+                tuple(selection.run_ids or []), report_watermark(), need_product_rates)
 
     def clear_report_cache():
         with report_cache_lock:

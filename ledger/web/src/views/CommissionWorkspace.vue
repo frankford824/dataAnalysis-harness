@@ -64,7 +64,7 @@ function togglePage(value) { for(const row of rows.value.filter(r=>!r.store_id.s
 function clearSelection(){checked.value={};allScope.value=null}
 function selectAll(){checked.value={};allScope.value={...shared.scope,search:search.value,state:state.value}}
 function bulk(){batchDialog.value.open(allScope.value?{scope:{...allScope.value}}:{targets:chosen.value})}
-async function saved(){clearSelection();await shared.changed();load()}
+async function saved(){clearSelection();totals.clear();forget();await shared.changed();load()}
 function importFile(event){const file=event.target.files?.[0];event.target.value='';batchDialog.value.importFile(file)}
 const form = ref({ allocations: [] })
 const states = { enabled:'提成中', disabled:'不提成', pending:'未设置', scheduled:'待生效', expired:'已到期' }
@@ -79,13 +79,35 @@ const params = computed(() => {
   for(const id of shared.personIds) query.append('person_ids',id)
   return query.toString()
 })
-const {data,error,loading,stale,load} = useCommissionQuery('settings', () => `${params.value}&after=${encodeURIComponent(after.value)}`,
-  signal => commissionRequest(`/settings?${params.value}&after=${encodeURIComponent(after.value)}`,{signal}),
+const totals = new Map()
+const {data,error,loading,stale,load,prefetch,forget} = useCommissionQuery('settings', () => `${params.value}&after=${encodeURIComponent(after.value)}`,
+  async signal => {
+    const page = await commissionRequest(`/settings?${params.value}&after=${encodeURIComponent(after.value)}&include_total=false`,{signal})
+    const cached = totals.get(params.value)
+    if (cached) return { ...page, total: cached.total, total_pages: cached.total_pages }
+    return { ...page, total: undefined, total_pages: undefined }
+  },
   () => !busy.value && !showEditor.value && !batchDialog.value?.shown,
-  { followTick: false, delay: 420 })
+  { followTick: false, delay: 120, remember: true })
+watch(params, key => {
+  if (totals.has(key)) return
+  commissionRequest(`/settings/count?${key}`).then(result => {
+    const pageSize = data.value?.page_size || 60
+    totals.set(key, { total: result.total, total_pages: Math.max(1, Math.ceil(result.total / pageSize)) })
+    if (params.value === key && data.value) data.value = { ...data.value, ...totals.get(key) }
+  }).catch(() => {})
+}, { immediate: true })
+watch(() => data.value?.next_after, cursor => {
+  if (!cursor) return
+  const key = `${params.value}&after=${encodeURIComponent(cursor)}`
+  prefetch(key, () => commissionRequest(`/settings?${key}&include_total=false`).then(page => {
+    const cached = totals.get(params.value)
+    return cached ? { ...page, total: cached.total, total_pages: cached.total_pages } : page
+  }))
+})
 const rows = computed(() => data.value?.rows || [])
 const next = computed(() => data.value?.next_after || '')
-const locked = computed(() => loading.value || stale.value || busy.value)
+const locked = computed(() => (loading.value && !rows.length) || stale.value || busy.value)
 const menuOptions = [
   {label:'批量新增',key:'new'},
   {label:'销售组织架构',key:'org'},
@@ -244,8 +266,8 @@ defineExpose({edit,menu,busy,reload:load})
     </n-alert>
     <n-alert v-else-if="issueError" type="info" :bordered="false" class="commission-unassigned">暂时无法读取本月未归属订单：{{ issueError }}</n-alert>
     <div v-if="loading" class="commission-loading-line" />
-    <LedgerTable :rows="rows" :columns="tableColumns" :row-key="keyOf" :loading="loading" :checked-keys="visibleChecked" :max-height="520" empty="没有找到商品，可调整筛选条件" @update:checked-keys="checkTableRows" />
-    <div class="commission-paging"><span class="row-count">共 {{ data?.total ?? "—" }} 件商品 · 本页 {{ rows.length }} 件</span><n-button size="small" :disabled="!pages.length || locked" @click="previousPage">上一页</n-button><span>第 {{ data?.total_pages ? pages.length+1 : 0 }} / {{ data?.total_pages ?? "—" }} 页</span><n-button size="small" :disabled="!next || locked" @click="nextPage">下一页</n-button></div>
+    <LedgerTable :rows="rows" :columns="tableColumns" :row-key="keyOf" :loading="loading && !rows.length" :checked-keys="visibleChecked" :max-height="520" empty="没有找到商品，可调整筛选条件" @update:checked-keys="checkTableRows" />
+    <div class="commission-paging"><span class="row-count">共 {{ data?.total ?? "—" }} 件商品 · 本页 {{ rows.length }} 件</span><n-button size="small" :disabled="!pages.length || locked" @click="previousPage">上一页</n-button><span>第 {{ data ? pages.length+1 : 0 }} / {{ data?.total_pages ?? "—" }} 页</span><n-button size="small" :disabled="!next || locked" @click="nextPage">下一页</n-button></div>
 
     <CommissionBatchDialog ref="batchDialog" :stores="app.stores" :people="people" @saved="saved" />
     <n-drawer v-model:show="issueShow" :width="'min(620px,100vw)'">

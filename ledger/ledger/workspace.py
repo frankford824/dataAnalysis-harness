@@ -716,6 +716,47 @@ class Workspace:
         """一家店的全部账期，不扫描其他店。"""
         return self._states(store_id=store_id)
 
+    def period_headers(self, store_id: str) -> list[dict[str, Any]]:
+        """店铺页账期条只需状态和两个结账标记，不要整份 result。"""
+        rows = self.conn.execute(
+            "select p.period, p.state, p.changed_at, p.by, p.note, "
+            "r.id as shown_id, r.at as shown_at, "
+            "json_extract(coalesce(mf.result_json,r.result),'$.can_close') as can_close, "
+            "json_extract(coalesce(mf.result_json,r.result),'$.cost_review.requires_human') as cost_human, "
+            "case when p.state=? and exists (select 1 from version nv "
+            "where nv.store_id in (p.store_id, ?) and nv.id>p.at_version) then 1 else 0 end as stale "
+            "from period p left join run r on r.id = case "
+            "when p.state=? and p.run_id is not null then p.run_id else "
+            "(select lr.id from run lr where lr.store_id=p.store_id and lr.period=p.period "
+            "order by lr.id desc limit 1) end "
+            "left join manual_finance mf on mf.run_id=r.id and p.state='closed' "
+            "where p.store_id=? order by p.period desc",
+            (CLOSED, SHARED_STORE_ID, CLOSED, store_id),
+        ).fetchall()
+        return [{
+            "period": row["period"], "state": row["state"], "stale": bool(row["stale"]),
+            "at": row["shown_at"] or "", "run_id": int(row["shown_id"]) if row["shown_id"] else None,
+            "by": row["by"] or "", "note": row["note"] or "",
+            "can_close": bool(row["can_close"]),
+            "cost_decision_required": bool(row["cost_human"]),
+        } for row in rows]
+
+    def previous_gap_basis(self, store_id: str, period: str) -> dict[str, Any] | None:
+        """缺口比对只需要上一期报表行，不要整份核算。"""
+        row = self.conn.execute(
+            "select json_extract(coalesce(mf.result_json,r.result),'$.statement') as statement "
+            "from period p left join run r on r.id = case "
+            "when p.state=? and p.run_id is not null then p.run_id else "
+            "(select lr.id from run lr where lr.store_id=p.store_id and lr.period=p.period "
+            "order by lr.id desc limit 1) end "
+            "left join manual_finance mf on mf.run_id=r.id and p.state='closed' "
+            "where p.store_id=? and p.period<? order by p.period desc limit 1",
+            (CLOSED, store_id, period),
+        ).fetchone()
+        if not row or not row["statement"]:
+            return None
+        return {"statement": json.loads(row["statement"])}
+
     def previous_state(self, store_id: str, period: str) -> PeriodState | None:
         """指定账期之前最近的一期。"""
         rows = self._states(store_id=store_id, before=period, limit=1)

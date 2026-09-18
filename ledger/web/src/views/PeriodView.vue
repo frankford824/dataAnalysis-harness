@@ -62,20 +62,37 @@ const platformName = computed(() => {
 const closed = computed(() => snap.value?.state === 'closed')
 
 const periodRequest=useLatest()
+const snapCache=new Map()
 let loadSerial=0
 async function load(force=false, quiet=false) {
   const serial=++loadSerial, id=props.id, requested=period.value
-  if(!quiet){loading.value=true;failed.value=''}
+  const cachedKey=requested?`${id}:${requested}`:''
+  if(!force && cachedKey && snapCache.has(cachedKey)){
+    snap.value=snapCache.get(cachedKey)
+    if(!quiet)loading.value=false
+  }
+  const firstPaint=!info.value && !snap.value
+  if(!quiet && firstPaint){loading.value=true;failed.value=''}
   try {
     const result=await periodRequest.run(async signal=>{
-      const detail=!force&&info.value?.store?.id===id?info.value:await api.store(id,{signal})
-      const wanted=requested||detail.periods?.[0]?.period
-      const snapshot=wanted?await api.period(id,wanted,{signal}):null
-      return {detail,snapshot,wanted}
+      const wanted=requested
+      const storePromise=(!force && info.value?.store?.id===id)?Promise.resolve(info.value):api.store(id,{signal})
+      const periodPromise=wanted?api.period(id,wanted,{signal}):Promise.resolve(null)
+      const [detail, firstSnap] = await Promise.all([storePromise, periodPromise])
+      const next=wanted||detail.periods?.[0]?.period
+      const snapshot=firstSnap || (next && next!==wanted ? await api.period(id,next,{signal}) : firstSnap)
+      return {detail,snapshot,wanted:next}
     })
     if(!result)return
     info.value=result.value.detail
     if(!quiet||JSON.stringify(snap.value)!==JSON.stringify(result.value.snapshot))snap.value=result.value.snapshot
+    if(result.value.wanted && result.value.snapshot)snapCache.set(`${id}:${result.value.wanted}`, result.value.snapshot)
+    const months=result.value.detail?.periods || []
+    const at=months.findIndex(item=>item.period===result.value.wanted)
+    for(const neighbor of [months[at-1], months[at+1]].filter(Boolean)){
+      const key=`${id}:${neighbor.period}`
+      if(!snapCache.has(key)) api.period(id, neighbor.period).then(s=>snapCache.set(key,s)).catch(()=>{})
+    }
     refreshFailed.value=false
     if(result.value.wanted)app.pick({store:id,platform:result.value.detail.store?.platform,period:result.value.wanted})
   }catch(e){if(serial===loadSerial){if(quiet)refreshFailed.value=true;else failed.value=e.message}}
@@ -373,7 +390,7 @@ watch(
 </script>
 
 <template>
-  <n-spin :show="loading">
+  <n-spin :show="loading && !info">
     <n-alert v-if="failed" type="error" :bordered="false">{{ failed }}</n-alert>
 
     <template v-else-if="info">

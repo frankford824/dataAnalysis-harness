@@ -104,3 +104,27 @@ def test_detail_drawer_stays_on_the_parent_calculation_after_new_run(tmp_path):
     assert detail['total']==7.89
     assert detail['total']==next(row['amount'] for row in parent['items'] if row['store_id']=='s2')
     assert ws.state('s1','2026-06').run_id==closed
+
+
+def test_settings_count_and_page_cache_share_the_same_total(tmp_path):
+    registry, model, a, b = setup(tmp_path)
+    first = settings(registry, store_ids=['s2'], limit=1)
+    again = settings(registry, store_ids=['s2'], limit=1)
+    counted = __import__('ledger.commission_catalog', fromlist=['cached_count']).cached_count(
+        registry, store_ids=['s2'])
+    assert first['total'] == again['total'] == counted
+    assert first['rows'][0]['product_id'] == again['rows'][0]['product_id']
+
+
+def test_period_snapshot_drops_commission_products(tmp_path):
+    from ledger.api import _build_period_detail
+    from ledger.workspace import Workspace
+    from test_commission import _model
+    ws = Workspace(tmp_path)
+    model = _model()
+    ws.record('s1', '2026-06', {
+        'can_close': True, 'findings': [], 'missing_sources': [], 'statement': [],
+        'commission': {'people': [], 'products': [{'product_id': '1', 'orders': list(range(20))}]},
+    }, [])
+    payload = _build_period_detail(ws, model, 's1', '2026-06', ws.state('s1', '2026-06'))
+    assert 'products' not in (payload.get('commission') or {})
