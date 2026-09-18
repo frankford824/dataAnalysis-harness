@@ -21,7 +21,7 @@ _WANTED = (
     'status', 'person_id', 'person', 'product_id', 'product_name',
     'share', 'total_rate', 'original_base', 'amount',
     'participation_sales', 'participation_gross', 'participation_profit',
-    'spine_row', 'order_id', 'duty',
+    'spine_row', 'order_id', 'duty', 'managed', 'managed_team_id', 'sales_unassigned',
 )
 
 
@@ -77,7 +77,9 @@ def _allocated_parts(assigned):
           for name, source in fields.items()],
     ).filter(pl.col('__rate').is_not_null() & (pl.col('__rate') > 0))
     return ready.with_columns(*[
-        (pl.col('__' + name) * pl.col('__share') / pl.col('__rate')).alias(name)
+        (pl.col('__' + name) * pl.col('__share') / pl.col('__rate')
+         * (pl.when(pl.col('managed').fill_null(False) | (pl.col('sales_unassigned').fill_null(False) if 'sales_unassigned' in ready.columns else pl.lit(False))).then(0).otherwise(1)
+            if name == 'participation_sales' and 'managed' in ready.columns else 1)).alias(name)
         for name in fields
     ])
 
@@ -109,6 +111,7 @@ def _product_rows(parts, include_orders=True):
     if parts.is_empty() or 'product_id' not in parts.columns:
         return []
     aggs = [
+        pl.col('managed').fill_null(False).any().alias('managed') if 'managed' in parts.columns else pl.lit(False).alias('managed'),
         pl.col('product_name').drop_nulls().first().alias('product_name')
         if 'product_name' in parts.columns else pl.lit('').alias('product_name'),
         pl.col('spine_row').n_unique().alias('orders')
@@ -131,6 +134,7 @@ def _product_rows(parts, include_orders=True):
     for row in grouped.iter_rows(named=True):
         rates = _unique_rates(row.get('rates'))
         products.append({
+            'managed':bool(row.get('managed')),
             'product_id': row['product_id'] or '',
             'product_name': row.get('product_name') or '',
             'orders': int(row['orders'] or 0),

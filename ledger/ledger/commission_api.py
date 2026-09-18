@@ -52,6 +52,8 @@ class PayoutConfirmationChange(BaseModel):
 
 
 class SettingChange(BaseModel):
+    managed: bool | None = None
+    managed_team_id: str | None = None
     store_id: str
     product_id: str
     product_name: str = ""
@@ -1043,6 +1045,7 @@ def install(app, workspace, model, model_root: Path | None = None):
                         store_ids: list[str] = Query(default=[]), person_ids: list[str] = Query(default=[])):
         names = {s.id:s.name for s in model().stores}
         labels = {"enabled":"提成中","disabled":"不提成","pending":"未设置","scheduled":"待生效","expired":"已到期"}
+        teams = {p['id']:p.get('alias') or p['name'] for p in reg().people()}
         def rows():
             for row in commission_catalog.iter_settings(reg(), store_id=store_id, search=search, state=state, person_id=person_id, store_ids=store_ids, person_ids=person_ids):
                 current = row["setting"] or {}
@@ -1050,8 +1053,12 @@ def install(app, workspace, model, model_root: Path | None = None):
                     yield {"店铺":names.get(row["store_id"], row["store_id"]),"宝贝ID":row["product_id"],
                            "商品名称":row["product_name"],"状态":labels[row["state"]],"人员":person.get("name", ""),
                            "提成比例":format(Decimal(person["rate"])*100,'f')+'%' if person else "",
+                           "身份":{"produce":"做货","cut":"抽点"}.get(person.get('allocation_duty') or person.get('duty'),'未指定'),
+                           "商品归类":"托管商品" if current.get('managed') else "非托管商品",
+                           "托管团队":teams.get(current.get('managed_team_id'),current.get('managed_team_id','')),
+                           "托管团队ID":current.get('managed_team_id',''),
                            "生效时间":current.get("valid_from", ""),"结束时间":current.get("valid_to", "")}
-        return csv_response("commission-settings.csv", ["店铺","宝贝ID","商品名称","状态","人员","提成比例","生效时间","结束时间"], rows())
+        return csv_response("commission-settings.csv", ["店铺","宝贝ID","商品名称","状态","人员","身份","提成比例","商品归类","托管团队","托管团队ID","生效时间","结束时间"], rows())
 
     @router.get("/export/history")
     def export_history():

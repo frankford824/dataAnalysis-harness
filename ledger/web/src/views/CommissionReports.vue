@@ -56,15 +56,16 @@ function explanation(row) {
   return row.status==='已结账'?'本月已结账':''
 }
 const columns = computed(() => ({
-  teams:[['team','团队 / 团队长'],['trial_amount','系统应发'],['amount','实发提成'],['diff_amount','调整差额'],['members_count','团队人数'],['stores','负责店铺'],['periods','月份'],['status','状态']],
+  teams:[['team','团队 / 团队长'],['sales','团队销售额'],['managed_sales','托管类销售额'],['trial_amount','系统应发'],['amount','实发提成'],['diff_amount','调整差额'],['members_count','团队人数'],['stores','涉及店铺'],['periods','月份'],['status','状态']],
   people:[['person','人员'],['team','所属团队'],['employee_no','工号'],['trial_amount','系统应发'],['amount','实发提成'],['diff_amount','调整差额'],['stores','店铺'],['periods','月份'],['status','状态']],
-  store_people:[['store','店铺'],['person','分配人'],['team','所属团队'],['period','月份'],['sales','销售额'],['gross','毛利额'],['profit_after_labor','利润额'],
+  store_people:[['store','店铺'],['person','分配人'],['team','所属团队'],['period','月份'],['sales','销售额'],['managed_sales','托管类销售额'],['gross','毛利额'],['profit_after_labor','利润额'],
     ['labor_cost','兼职额'],['trial_amount','系统应发'],['amount','实发提成'],['diff_amount','调整差额'],['status','状态']],
-  stores:[['store','店铺'],['amount','提成金额'],['labor_cost','兼职分摊'],['configured_people','提成设置人数'],['people','已出金额人数'],['periods','已有金额'],['missing','未出金额'],['status','状态']],
+  stores:[['store','店铺'],['managed_sales','托管类销售额'],['amount','提成金额'],['labor_cost','兼职分摊'],['configured_people','提成设置人数'],['people','已出金额人数'],['periods','已有金额'],['missing','未出金额'],['status','状态']],
   breakdown:[['person','人员'],['team','所属团队'],['store','店铺'],['period','月份'],['trial_amount','系统应发'],['amount','实发提成'],['diff_amount','调整差额'],['status','状态']],
   coverage:[['store','店铺'],['period','月份'],['selected_amount','提成金额'],['status','状态'],['explanation','待办']],
 }[state.reportView]))
 function cell(row,key) {
+  if(key==='managed_sales')return money(row[key] ?? (row.kind==='person'?0:null))
   if(['amount','selected_amount','labor_cost','sales','gross','profit_after_labor','base','store_amount','trial_amount','actual_amount','diff_amount'].includes(key))return money(row[key])
   if(key==='status')return status(row.status)
   if(key==='explanation')return explanation(row)
@@ -300,6 +301,7 @@ const tableColumns=computed(()=>{
         return h('span',{style:{color:isPos?'#16a34a':'#d97706',fontWeight:600,fontSize:'12.5px'}},`${isPos?'+':''}${money(row.diff_amount)}`)
       }
       if(key==='amount'){
+        if(row.kind==='managed'||row.kind==='unassigned')return '—'
         if(row.kind==='store')return h('strong',money(row.store_amount))
         const canEdit=targetsFor(row).length>0
         if(state.reportView==='stores')return h('button',{type:'button',class:'actual-payout-cell',disabled:locked.value||!canEdit,onClick:()=>choosePayout(row)},[h('strong',money(row.amount)),h('small','选择月份核定')])
@@ -317,6 +319,7 @@ const tableColumns=computed(()=>{
         ])
       }
       if(key==='person' && row.person_id)return h('button',{type:'button',class:'text-button',disabled:locked.value||!targetsFor(row).length,onClick:()=>choosePayout(row)},row.person)
+      if(key==='managed_sales')return h('div',{class:'table-money',title:'包含在销售额中，不另行相加；指定人员筛选不包含团队托管池'},cell(row,key))
       return h('div',{class:['amount','selected_amount','labor_cost','sales','gross','profit_after_labor','base','store_amount'].includes(key)?['table-money',row[key]<0?'negative':'']:undefined,
                title:state.reportView==='store_people'&&row.kind==='person'&&['sales','gross'].includes(key)?'产出按商品做货身份归属，抽点不参与分摊':
                  state.reportView==='store_people'&&key==='profit_after_labor'?row.kind==='person'?'商品利润按做货身份归属；兼职及未归属净亏损按归属销售额分摊':'店铺经营账利润减本店兼职额':
@@ -327,6 +330,7 @@ const tableColumns=computed(()=>{
           cell(row,key))
     }
   }))
+  for(const column of list)if(column.key==='managed_sales')Object.assign(column,{width:135,mobileWidth:115,mobile:true,align:'right'})
   if(['teams','people','stores','store_people','breakdown','coverage'].includes(state.reportView))list.push({
     title:'操作',key:'action',width:292,minWidth:220,mobileWidth:176,mobile:true,fixed:'right',
     render:row=>renderRowActions(row),
@@ -334,6 +338,7 @@ const tableColumns=computed(()=>{
   return list
 })
 function renderRowActions(row) {
+  if(row.kind==='managed')return null
   const actions = reportRowActions(row, {
     profit: canOpenProfit(row),
     payout: targetsFor(row).length > 0,
@@ -381,7 +386,8 @@ defineExpose({reload:load})
       <template v-else>当前金额与该次结算一致。</template>
     </n-alert>
     <p v-if="state.reportView==='stores'" style="color:#64748b;margin:0 0 12px">提成设置人数按所选月份的有效设置统计；已出金额人数只统计已有结算金额的人员。</p>
-    <p class="report-grain-note">系统应发来自核算；实发列只显示人工核定金额，部分核定时仅合计已核定部分，尚未核定显示「—」。核定不代表已付款。点击人员或「核定实发」选择店铺月份；保存范围为该店该月全部提成人员。团队按当前组织归属展示。</p>
+    <p class="report-grain-note">系统应发来自核算；实发列只显示人工核定金额，部分核定时仅合计已核定部分，尚未核定显示「—」。核定不代表已付款。点击人员或「核定实发」选择店铺月份；保存范围为该店该月全部提成人员。人员按当前组织归属展示；托管销售按商品规则生效时指定的团队归属，不随调组改变。</p>
+    <p class="report-grain-note">托管类销售额已包含在团队/店铺销售额中，不要重复相加；不计个人销售额，不改变个人毛利、利润、提成及原成本分摊基数。指定人员筛选不包含团队托管池。</p>
     <div class="report-tabs-row"><LedgerTabs v-model="state.reportView" :options="kinds" label="汇总方式" @update:model-value="detail=null" /><div class="report-actions"><n-button type="primary" :disabled="!report || locked || !(report.confirmation_scopes||[]).length" @click="openToolbarPayout">核定实发</n-button><n-button :disabled="!canSettle" @click="openSettlement">确认员工结算</n-button><n-button :disabled="!report || locked" :loading="downloading" @click="download">导出表格</n-button></div></div>
     <p v-if="state.reportView==='store_people'" class="report-grain-note"><template v-if="state.personIds.length">当前仅显示所选人员；请清空人员筛选后再核对店铺合计。 </template>销售额、毛利和利润按每笔订单的商品做货身份归属：一位做货人员归全额，多位做货人员按他们之间的点数比例分摊，抽点不分走产出。同一人在不同商品可有不同身份。兼职及未归属净亏损按归属销售额分摊；未归属净利润留在店铺。提成金额沿用原核算规则及已核定记录，不能直接用展示利润乘链接总点数。历史明细缺少身份时沿用原分摊口径。</p>
 

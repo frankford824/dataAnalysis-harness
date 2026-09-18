@@ -27,6 +27,13 @@ const pages = ref([])
 const busy = ref(false)
 const showEditor = ref(false)
 const selected = ref(null)
+const dutyOptions = DUTY_OPTIONS.map(option => ({...option, label:dutyLabel(option.value)}))
+const managedTeamOptions = computed(() => people.value.filter(p => (!p.archived && !p.parent_id) || p.id===form.value.managed_team_id).map(p => ({value:p.id,label:p.alias || p.name})))
+function managedLabel(segment) {
+  if (!segment.managed) return '非托管商品'
+  const team = people.value.find(p => p.id === segment.managed_team_id)
+  return `托管商品 · ${team?.alias || team?.name || segment.managed_team_id}`
+}
 const checked = ref({})
 const allScope = ref(null)
 const batchDialog = ref(null)
@@ -165,7 +172,7 @@ async function edit(row = {}) {
     if(ticket!==editorSerial)return
     const allocations=selected.value?[...grouped].map(([person,rate])=>({person,percent:Number((rate*100).toFixed(8)),duty:allocDuty[person]||storeDuties[person]||'produce',source:allocSource[person]||''})):(row.people||[]).map(p=>({person:p.person_id,percent:Number((Number(p.rate)*100).toFixed(8)),duty:p.duty||allocDuty[p.person_id]||storeDuties[p.person_id]||'produce',source:p.source||allocSource[p.person_id]||''}))
     form.value={store_id:row.store_id||(shared.storeIds.length===1?shared.storeIds[0]:''),product_id:row.product_id||'',product_name:selected.value?.product_name||row.product_name||'',
-      mode:current.mode||'distribute',valid_from:row.issue_valid_from||(current.valid_from>stamp?current.valid_from:stamp),valid_to:current.valid_to>stamp?current.valid_to:'',allocations}
+      mode:current.mode||'distribute',managed:current.managed||false,managed_team_id:current.managed_team_id||null,valid_from:row.issue_valid_from||(current.valid_from>stamp?current.valid_from:stamp),valid_to:current.valid_to>stamp?current.valid_to:'',allocations}
     if(!form.value.allocations.length)form.value.allocations.push({person:null,percent:null,duty:'produce',source:''})
     editorOriginal.value=JSON.stringify(form.value)
   }catch(e){if(ticket===editorSerial&&e.name!=='AbortError')editorError.value=e.message}
@@ -186,6 +193,7 @@ async function save() {
   busy.value = true
   try {
     if (!form.value.store_id || !form.value.product_id.trim()) throw new Error('请填写店铺和宝贝ID')
+    if (form.value.managed && !form.value.managed_team_id) throw new Error('请选择托管团队')
     if (form.value.mode === 'distribute' && (!form.value.allocations.length || form.value.allocations.some(p => !p.person || p.percent == null || !Number.isFinite(Number(p.percent)) || Number(p.percent) <= 0))) throw new Error('请为每位人员填写大于0的提成比例；不提成请选择“不提成”')
     if (form.value.mode === 'distribute' && total.value > 100) throw new Error('提成比例合计不能超过100%')
     const allocations = form.value.mode === 'distribute' ? form.value.allocations.map(p => ({
@@ -242,7 +250,7 @@ function checkTableRows(keys){const selected=new Set(keys);for(const row of rows
 const tableColumns=computed(()=>[
   {type:'selection',width:42,mobileWidth:32,disabled:row=>locked.value||row.store_id.startsWith('unmapped:')},
   {title:'商品',key:'product',minWidth:230,mobileWidth:140,render:row=>h('div',[
-    h('div',{class:'table-product'},row.product_name||'未填写商品名称'),h('div',{class:'table-secondary'},row.product_id==='*'?'店铺通用':row.product_id),h('div',{class:'table-secondary table-mobile-only'},`${storeName(row.store_id)} · ${states[row.state]}`)])},
+    h('div',{class:'table-product'},row.product_name||'未填写商品名称'),h('div',{class:'table-secondary'},row.product_id==='*'?'店铺通用':row.product_id),h(NTag,{size:'small',bordered:false,type:row.setting?.managed?'info':'default'},()=>managedLabel(row.setting||{})),h('div',{class:'table-secondary table-mobile-only'},`${storeName(row.store_id)} · ${states[row.state]}`)])},
   {title:'店铺',key:'store',width:210,mobile:false,render:row=>storeName(row.store_id)},
   {title:'人员 / 身份 / 比例',key:'people',width:250,mobileWidth:140,render:row=>row.people.length?row.people.map(p=>h('div',{class:'table-assignee'},[
     h('span',p.name),
@@ -303,26 +311,35 @@ defineExpose({edit,menu,busy,reload:load})
       <label v-if="!selected">商品名称<input v-model="form.product_name" aria-label="商品名称" /></label>
       <details v-else class="editor-product-details"><summary>商品信息</summary><label>商品名称<input v-model="form.product_name" aria-label="商品名称"/></label></details>
       <label>状态<select v-model="form.mode" aria-label="提成状态"><option value="distribute">提成中</option><option value="exclude">不提成</option><option value="hold">暂不设置</option></select></label>
+      <section class="managed-setting">
+        <n-checkbox v-model:checked="form.managed">托管商品</n-checkbox>
+        <span class="managed-state">{{form.managed ? '销售额计入指定团队' : '非托管商品（默认）'}}</span>
+        <template v-if="form.managed"><label>托管团队</label><n-select v-model:value="form.managed_team_id" :options="managedTeamOptions" filterable placeholder="请选择托管团队" aria-label="托管团队" /></template>
+        <p class="duty-hint">托管商品不计个人销售额，仅计入指定团队的托管类销售额。个人毛利、利润及提成不变；归属按下方生效时间记录，人员调组不会自动改变托管团队。</p>
+      </section>
       <template v-if="form.mode === 'distribute'">
         <div class="allocation-head"><span>所属人员</span><span>身份</span><span>提成比率</span></div>
         <div v-for="(p,i) in form.allocations" :key="i" class="allocation-row">
-          <n-select v-model:value="p.person" :options="personOptions" filterable tag placeholder="选择或输入姓名" :aria-label="`所属人员${i+1}`" />
-          <n-select v-model:value="p.duty" :options="DUTY_OPTIONS" size="small" :aria-label="`身份${i+1}`" />
+          <n-select v-model:value="p.person" :options="personOptions" filterable placeholder="选择组织人员" :aria-label="`所属人员${i+1}`" />
+          <n-select v-model:value="p.duty" :options="dutyOptions" size="small" :aria-label="`身份${i+1}`" />
           <label class="percentage"><input v-model="p.percent" type="number" min="0" max="100" step="0.01" :aria-label="`提成比率${i+1}`" /><span>%</span></label>
           <n-button text @click="form.allocations.splice(i,1)">移除</n-button>
           <span v-if="p.source==='hierarchy'" class="hierarchy-tag">组织抽成</span>
         </div>
         <div class="allocation-footer"><n-button text type="primary" @click="form.allocations.push({person:null,percent:null,duty:'produce',source:''})">＋ 添加人员</n-button><n-button text @click="fillHierarchy">按组织补上级抽成</n-button><span>合计 {{ Number(total.toFixed(6)) }}%</span></div>
-        <p class="duty-hint">身份跟着商品走：做货/抽点只影响本商品。上级抽成可按组织一键补入，单条仍可改。</p>
+        <p class="duty-hint">做货：归属产出；抽点：只计提成。身份及比例只影响本商品；组织默认抽成需点击上方按钮补入，不自动覆盖已存设置。</p>
       </template>
       <details class="dates"><summary>生效时间 <span>{{ form.valid_from?.replace('T',' ') }}起{{ form.valid_to ? '，至'+form.valid_to.replace('T',' ') : '' }}</span></summary><div class="fields"><label>开始时间<input v-model="form.valid_from" type="datetime-local" step="1" aria-label="开始时间" /></label><label>结束时间（可留空）<input v-model="form.valid_to" type="datetime-local" step="1" aria-label="结束时间" /></label></div><small>北京时间；此前设置会保留。</small></details>
-      <details v-if="selected?.versions?.length" class="history"><summary>查看修改记录</summary><div v-for="v in selected.versions" :key="v.id" class="history-item"><small><b :class="v.id===selected.active_version?'current-version':'old-version'">{{v.id===selected.active_version?'当前版本':'历史版本'}}</b> · {{ new Date(v.recorded_at).toLocaleString('zh-CN',{timeZone:'Asia/Shanghai'}) }}</small><p v-for="s in v.body.segments" :key="s.valid_from">{{ s.valid_from.replace('T',' ') }}起：{{ s.mode==='distribute' ? historicalPeople(s) : s.mode==='exclude' ? '不提成' : '暂不设置' }}{{ s.valid_to ? '（至'+s.valid_to.replace('T',' ')+ '）' : '' }}</p></div></details>
+      <details v-if="selected?.versions?.length" class="history"><summary>查看修改记录</summary><div v-for="v in selected.versions" :key="v.id" class="history-item"><small><b :class="v.id===selected.active_version?'current-version':'old-version'">{{v.id===selected.active_version?'当前版本':'历史版本'}}</b> · {{ new Date(v.recorded_at).toLocaleString('zh-CN',{timeZone:'Asia/Shanghai'}) }} · {{v.actor}} · {{v.reason}}</small><p v-for="s in v.body.segments" :key="s.valid_from">{{ s.valid_from.replace('T',' ') }}起：{{ managedLabel(s) }}；{{ s.mode==='distribute' ? historicalPeople(s) : s.mode==='exclude' ? '不提成' : '暂不设置' }}{{ s.valid_to ? '（至'+s.valid_to.replace('T',' ')+ '）' : '' }}</p></div></details>
       </template><template #footer><n-space justify="end"><n-button :disabled="busy&&!editorLoading" @click="closeEditor(false)">取消</n-button><n-button type="primary" :disabled="editorLoading||!!editorError" :loading="busy&&!editorLoading" @click="save">保存</n-button></n-space></template>
     </n-drawer-content></n-drawer>
   </div>
 </template>
 
 <style scoped>
+.managed-setting{margin-top:18px;padding:14px;border:1px solid #e3e8f0;border-radius:8px;background:#f8faff}.managed-state{font-size:12px;color:#63718a;margin-left:12px}
+.allocation-row>*{min-width:0}
+@media(max-width:600px){.allocation-head{display:none!important}.allocation-row{grid-template-columns:minmax(0,1fr) 100px!important;gap:10px!important;padding:12px 0;border-bottom:1px solid #e8edf4}.allocation-footer{flex-wrap:wrap;gap:12px}.fields{grid-template-columns:minmax(0,1fr)!important}}
 .hierarchy-tag{grid-column:1/-1;font-size:12px;color:#16734b;margin-top:-4px}
 .commission-edit-context{padding:0 0 18px;border-bottom:1px solid #e8edf4;margin-bottom:18px}.commission-edit-context strong{font-size:15px;line-height:1.7}.commission-edit-context p{font-size:12px;color:#8290a3;margin-top:7px}.editor-product-details{font-size:12px;color:#7e8b9c;margin-bottom:16px}.editor-product-details summary{cursor:pointer}
 

@@ -69,8 +69,14 @@ def preview(registry, model, request, actor):
         try:
             fingerprint=people_hash(conn)
             original_people={r[0] for r in conn.execute("SELECT id FROM person")}
+            team_names={r[0]:r[1] or r[2] for r in conn.execute('SELECT id,alias,name FROM person')}
             for index,entry in enumerate(entries,1):
                 data=dict(entry)
+                if data.get('managed') and not data.get('managed_team_id') and data.get('managed_team_name'):
+                    candidates=conn.execute("SELECT id FROM person WHERE archived=0 AND parent_id='' AND (name=? OR alias=?)", (data['managed_team_name'],data['managed_team_name'])).fetchall()
+                    if len(candidates)!=1:
+                        raise RegistryError('托管团队名称不存在或不唯一，请填写托管团队ID')
+                    data['managed_team_id']=candidates[0][0]
                 validate_key(model,data,conn)
                 data['valid_from']=local_time(data.get('valid_from',''))
                 key=(data['store_id'],data['product_id'],data['valid_from'])
@@ -126,6 +132,8 @@ def preview(registry, model, request, actor):
                 display.append({'store_id':data['store_id'],'store':names[data['store_id']],'product_id':data['product_id'],
                                 'product_name':data['product_name'],'before':before,'after':allocations(conn,after),
                                 'mode':after['mode'],'valid_from':after['valid_from'],'valid_to':after['valid_to'],
+                                'managed':after.get('managed',False),'managed_team_id':after.get('managed_team_id',''),
+                                'managed_team':team_names.get(after.get('managed_team_id'),'原登记团队'),
                                 'future_overwritten':len(future_segments) if data.get('replace_future') else 0,
                                 'new':not old,'source_rows':data.get('source_rows',[]),'catalog_missing':not catalog})
         finally:
@@ -173,6 +181,7 @@ def parse_excel(raw, filename, model):
     headers={'店铺':'store_id','店铺ID':'store_id','店铺（名称或ID）':'store_id','宝贝ID':'product_id','商品名称':'product_name',
              '人员':'person','姓名':'person','所属人员':'person','提成比例':'rate','提成比率':'rate','状态':'mode',
              '生效时间':'valid_from','生效日期':'valid_from','结束时间':'valid_to','失效日期':'valid_to'}
+    headers.update({'身份':'duty','商品归类':'classification','托管团队':'managed_team_name','托管团队ID':'managed_team_id'})
     def text(value):return str(value if value is not None else '').strip().lstrip("'")
     def stamp(value):
         if isinstance(value,(datetime,date)):return value.isoformat()
@@ -220,11 +229,23 @@ def parse_excel(raw, filename, model):
                             share=number/100
                         if not share.is_finite() or not 0<share<=1:raise ValueError('提成比例必须大于0且不超过100%')
                     key=(next(iter(shop)),pid,start,end)
+                    extra={}
+                    category=text(value('classification'))
+                    if category:
+                        if category not in {'托管商品','非托管商品'}:raise ValueError('商品归类请填写托管商品或非托管商品')
+                        extra={'managed':category=='托管商品','managed_team_id':text(value('managed_team_id')),
+                               'managed_team_name':text(value('managed_team_name'))}
+                        if extra['managed'] and not (extra['managed_team_id'] or extra['managed_team_name']):raise ValueError('托管商品必须填写托管团队或团队ID')
+                    elif text(value('managed_team_id')) or text(value('managed_team_name')):
+                        raise ValueError('填写托管团队时必须明确商品归类')
+                    duty=text(value('duty'))
+                    if duty and duty not in {'做货','抽点','produce','cut','未指定'}:raise ValueError('身份请填写做货或抽点')
                     entry=groups.setdefault(key,{'store_id':key[0],'product_id':pid,'product_name':text(value('product_name')),
-                        'valid_from':start,'valid_to':end,'mode':mode,'allocations':[],'source_rows':[]})
+                        'valid_from':start,'valid_to':end,'mode':mode,'allocations':[],'source_rows':[],**extra})
+                    if any(entry.get(k)!=extra.get(k) for k in ('managed','managed_team_id','managed_team_name')):raise ValueError('同一商品的托管分类或团队冲突')
                     if mode!=entry['mode'] or (text(value('product_name')) and entry['product_name'] and text(value('product_name'))!=entry['product_name']):raise ValueError('同一店铺宝贝的名称或状态冲突')
                     if name and any(a['name']==name for a in entry['allocations']):raise ValueError('同一商品人员重复，请合并点数后保留一行')
-                    if mode=='distribute':entry['allocations'].append({'name':name,'rate':str(share)})
+                    if mode=='distribute':entry['allocations'].append({'name':name,'rate':str(share),**({'duty':{'做货':'produce','抽点':'cut'}.get(duty,duty)} if duty and duty!='未指定' else {})})
                     entry['source_rows'].append(where)
                 except (ValueError,RegistryError,InvalidOperation) as exc:errors.append({'row':where,'error':str(exc)})
         if errors: return {'errors':errors,'rows':effective}

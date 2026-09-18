@@ -43,6 +43,9 @@ def _frames(versions, people, wages="pending"):
             rules.append({"rule_key": key, "product_id": version["product_id"],
                           "valid_from": segment["valid_from"], "valid_to": segment.get("valid_to") or None,
                           "mode": segment.get("mode", "distribute"),
+                          "managed": segment.get("managed", False),
+                          "managed_team_id": segment.get("managed_team_id", ""),
+                          "sales_unassigned": False,
                           "amount_hold": "" if wages == "skip_preview" else segment.get("amount_hold", ""),
                           "wage_preview": wages == "skip_preview" and segment.get("amount_hold") == "wage_pending",
                           "total_rate": segment["total_rate"], "rule_version": version["id"],
@@ -55,7 +58,7 @@ def _frames(versions, people, wages="pending"):
                                     "role": line["role"], "share": line["rate"],
                                     "duty": line.get("duty", "")})
     schema = {k: pl.Utf8 for k in ["rule_key", "product_id", "valid_from", "valid_to", "mode",
-                                  "total_rate", "rule_version", "rule_name", "amount_hold"]} | {"priority": pl.Int64, "wage_preview": pl.Boolean}
+                                  "total_rate", "rule_version", "rule_name", "amount_hold", "managed_team_id"]} | {"priority": pl.Int64, "wage_preview": pl.Boolean, "managed": pl.Boolean, "sales_unassigned": pl.Boolean}
     rf = pl.DataFrame(rules, schema=schema).with_columns(
         pl.col("valid_from").str.to_datetime("%Y-%m-%dT%H:%M:%S").alias("from_at"),
         pl.col("valid_to").str.to_datetime("%Y-%m-%dT%H:%M:%S", strict=False).alias("to_at"),
@@ -140,7 +143,12 @@ def _uniform_distribution_rule(rules, allocations, period):
         signatures.setdefault((total, shares), rule)
         if len(signatures) > 1:
             return None
-    return next(iter(signatures.values()))
+    result = dict(next(iter(signatures.values())))
+    destinations = {(r.get('managed', False), r.get('managed_team_id', '')) for r in candidates.iter_rows(named=True)}
+    if len(destinations) > 1:
+        # Preserve the established payout fallback, but do not guess sales ownership.
+        result.update(managed=False, managed_team_id='', sales_unassigned=True)
+    return result
 
 
 def _attribute_uniform_unknowns(matched, rules, allocations, period):
@@ -159,7 +167,7 @@ def _attribute_uniform_unknowns(matched, rules, allocations, period):
     columns = [
         "rule_key", "valid_from", "valid_to", "mode", "total_rate",
         "rule_version", "rule_name", "amount_hold", "priority", "wage_preview",
-        "from_at", "to_at",
+        "from_at", "to_at", "managed", "managed_team_id", "sales_unassigned",
     ]
     matched = matched.with_columns(*[
         pl.when(unknown).then(pl.lit(rule[name], dtype=matched.schema[name]))
@@ -271,13 +279,35 @@ def allocated_outputs(details: pl.DataFrame, *, net_profit_basis: bool = False, 
                        | pl.any_horizontal(*[pl.col('__'+name).is_null() for name in fields])).height:
         return None
     totals = (assigned.with_columns(*[
-        (pl.col('__'+name) * pl.col('__share') / pl.col('__rate')).alias('__part_'+name)
+        (pl.col('__'+name) * pl.col('__share') / pl.col('__rate')
+         * (pl.when(pl.col('managed').fill_null(False) | (pl.col('sales_unassigned').fill_null(False) if 'sales_unassigned' in assigned.columns else pl.lit(False))).then(0).otherwise(1)
+            if production and name == 'participation_sales' and 'managed' in assigned.columns else 1)).alias('__part_'+name)
         for name in fields
-    ]).group_by('person_id').agg(*[
+    ], (pl.col('__participation_sales') * pl.col('__share') / pl.col('__rate')).alias('__sales_basis')
+        if 'participation_sales' in fields else pl.lit(0).alias('__sales_basis')).group_by('person_id').agg(*[
         pl.col('__part_'+name).sum() for name in fields
-    ]).iter_rows(named=True))
-    return {row['person_id']:{name.replace('participation_',''):money_float(row['__part_'+name])
-                              for name in fields} for row in totals}
+    ], pl.col('__sales_basis').sum()).iter_rows(named=True))
+    return {row['person_id']:{**{name.replace('participation_',''):money_float(row['__part_'+name])
+                              for name in fields},
+                              **({'sales_basis':money_float(row['__sales_basis'])} if production and 'managed' in assigned.columns else {})} for row in totals}
+
+
+def managed_sales(details: pl.DataFrame) -> dict[str, float]:
+    """One source sales fact per order, never per commission recipient.
+
+    Team IDs come from the effective immutable rule, not today's organization.
+    Expired/unmatched rules must never divert sales into a former team.
+    """
+    required = {'managed', 'managed_team_id', 'spine_row', 'product_id', 'participation_sales', 'status'}
+    if not required <= set(details.columns):
+        return {}
+    rows = details.filter(pl.col('managed').fill_null(False)
+                          & pl.col('managed_team_id').is_not_null()
+                          & (pl.col('managed_team_id') != '')
+                          & pl.col('status').is_in(['distribute', 'exclude', 'hold', 'wage_pending']))
+    rows = rows.unique(subset=['spine_row', 'product_id', 'managed_team_id'])
+    return {r['managed_team_id']: money_float(r['sales']) for r in rows.group_by('managed_team_id').agg(
+        pl.col('participation_sales').cast(pl.Decimal(28, 10)).sum().alias('sales')).iter_rows(named=True)}
 
 
 def allocated_profit(details: pl.DataFrame, *, net_profit_basis: bool = False) -> dict[str, float] | None:
@@ -377,14 +407,11 @@ def calculate(result, model, store_id: str, period: str, registry: Registry,
         pl.col("participation_gross").fill_null(0.0),
         pl.col("participation_profit").fill_null(0.0),
     )
-    unpaid = matched.filter(pl.col("status") != "distribute").with_columns(
+    unpaid = matched.filter(pl.col("status") != "distribute").join(output_facts, on="spine_row", how="left", nulls_equal=True).with_columns(
         pl.lit("", dtype=pl.Utf8).alias("person_id"), pl.lit("", dtype=pl.Utf8).alias("person"),
         pl.lit("", dtype=pl.Utf8).alias("role"), pl.lit(Decimal(0), dtype=pl.Decimal(16, 8)).alias("share"),
         pl.when(pl.col("status") == "exclude").then(pl.lit(Decimal(0), dtype=paid.schema["amount"]))
         .otherwise(pl.lit(None, dtype=paid.schema["amount"])).alias("amount"),
-        pl.lit(None, dtype=pl.Float64).alias("participation_sales"),
-        pl.lit(None, dtype=pl.Float64).alias("participation_gross"),
-        pl.lit(None, dtype=pl.Float64).alias("participation_profit"),
     )
     details = pl.concat([paid, unpaid], how="diagonal_relaxed").with_columns(
         pl.lit(store_id).alias("store_id"), pl.lit(period).alias("period"),
@@ -454,6 +481,8 @@ def calculate(result, model, store_id: str, period: str, registry: Registry,
         "store": store_id, "period": period, "base_node": node.id, "base_name": node.name,
         "base_total": money_float(orders["original_base"].sum()),
         "total": money_float(paid["amount"].sum()), "people": person_rows,
+        "managed_sales": managed_sales(details),
+        "production_outputs": allocated_outputs(paid, production=True),
         "products": sorted(products, key=lambda r: -r["base"]), "configured": bool(person_rows),
         "unassigned_base": money_float(missing["base"].sum()),
         "fallback_base": money_float(matched.filter(pl.col("fallback"))["base"].sum()),

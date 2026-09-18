@@ -227,6 +227,12 @@ def validate_timeline(body: dict, person_ids: set[str]) -> dict:
         if item["amount_hold"] not in {"", "wage_pending"}:
             raise RegistryError("未知的金额待确认状态")
         item["total_rate"] = rate(item.get("total_rate", "0"))
+        if not isinstance(item.get("managed", False), bool):
+            raise RegistryError("托管标记必须为是或否")
+        item["managed"] = item.get("managed", False)
+        item["managed_team_id"] = str(item.get("managed_team_id") or "") if item["managed"] else ""
+        if item["managed"] and item["managed_team_id"] not in person_ids:
+            raise RegistryError("请选择已登记的托管团队")
         allocations = []
         seen = set()
         for source_line in item.get("allocations", []):
@@ -234,6 +240,8 @@ def validate_timeline(body: dict, person_ids: set[str]) -> dict:
                     "role": str(source_line.get("role") or "运营").strip(),
                     "rate": rate(source_line.get("rate", "0"))}
             line_duty = str(source_line.get("duty") or "")
+            if line_duty and line_duty not in ("produce", "cut"):
+                raise RegistryError("身份必须为做货或抽点")
             if line_duty in ("produce", "cut"):
                 line["duty"] = line_duty
             if str(source_line.get("source") or "") == "hierarchy":
@@ -923,6 +931,14 @@ class Registry:
         elif before["active_version"]:
             previous = conn.execute("SELECT body FROM scheme_version WHERE id=?", (before["active_version"],)).fetchone()
             before["active_body"] = json.loads(previous[0])
+        historical_teams = {s.get('managed_team_id') for s in (before or {}).get('active_body', {}).get('segments', []) if s.get('managed')}
+        for segment in body['segments']:
+            if not segment.get('managed'):
+                continue
+            team_id = segment['managed_team_id']
+            team = conn.execute('SELECT archived,parent_id FROM person WHERE id=?', (team_id,)).fetchone()
+            if team_id not in historical_teams and (not team or team['archived'] or team['parent_id']):
+                raise RegistryError("托管团队必须选择未归档的组织顶层团队")
         version = str(uuid.uuid4())
         body = {**body, "store_id": store_id, "product_id": product_id}
         revision += 1
@@ -972,6 +988,14 @@ class Registry:
             raise RegistryError("结束时间不能越过已有的后续设置：" + future.replace("T", " "))
         end = end or future
         current = next((x for x in old if x["valid_from"] <= start and (not x.get("valid_to") or start < x["valid_to"])), {})
+        managed = data.get("managed")
+        managed = current.get("managed", False) if managed is None else managed
+        team_id = str(data.get("managed_team_id") or current.get("managed_team_id") or "") if managed else ""
+        if managed:
+            team = conn.execute("SELECT * FROM person WHERE id=?", (team_id,)).fetchone()
+            preserving_team = current.get('managed') and team_id == current.get('managed_team_id')
+            if not team or (not preserving_team and (team["archived"] or team["parent_id"])):
+                raise RegistryError("托管团队必须选择未归档的组织顶层团队")
         allocations = []
         seen = set()
         for item in data.get("allocations", []) if mode == "distribute" else []:
@@ -997,7 +1021,7 @@ class Registry:
             parts = [a for a in current.get("allocations", []) if a["person_id"] == pid]
             duty = str(item.get("duty") or "")
             if duty and duty not in ("produce", "cut"):
-                duty = ""
+                raise RegistryError("身份必须为做货或抽点")
             source = str(item.get("source") or "")
             if source != "hierarchy":
                 source = ""
@@ -1012,6 +1036,7 @@ class Registry:
                     entry["source"] = source
                 allocations.append(entry)
         segment = {"valid_from":start,"valid_to":end,"mode":mode,"allocations":allocations,
+                   "managed":managed,"managed_team_id":team_id,
                    "total_rate":str(sum((Decimal(a["rate"]) for a in allocations), Decimal(0))),
                    "amount_hold":current.get("amount_hold", "")}
         segments = []
@@ -1021,6 +1046,21 @@ class Registry:
             elif end and x["valid_from"] >= end:
                 segments.append(x)
         segments.append(segment)
+        if replace_future and not end and data.get('managed') is None:
+            # Bulk replacement owns rates/duties, not independently scheduled
+            # classification changes that were not part of the request.
+            boundaries = sorted({start} | {point for s in old for point in (s['valid_from'], s.get('valid_to')) if point and point > start})
+            segments = [s for s in segments if s['valid_from'] < start]
+            for index, point in enumerate(boundaries):
+                classification = next((s for s in old if s['valid_from'] <= point and (not s.get('valid_to') or point < s['valid_to'])), {})
+                next_segment = {**segment, 'valid_from':point,
+                    'valid_to':boundaries[index+1] if index+1 < len(boundaries) else '',
+                    'managed':classification.get('managed',False),
+                    'managed_team_id':classification.get('managed_team_id','')}
+                if segments and segments[-1]['valid_from'] >= start and all(segments[-1].get(k) == next_segment.get(k) for k in ('managed','managed_team_id')):
+                    segments[-1]['valid_to'] = next_segment['valid_to']
+                else:
+                    segments.append(next_segment)
         return self.save_scheme(data["store_id"], data["product_id"],
                                 {**body,"product_name":data.get("product_name", ""),"segments":segments, **({"source":data["source"]} if data.get("source") else {})},
                                 actor, data.get("reason", "调整提成设置"), expected=data.get("expected_revision",0), publish=True, conn=conn)
@@ -1041,11 +1081,13 @@ class Registry:
         if not active:
             raise RegistryError("该关系尚未启用")
         moment = local_time(at)
+        current = next((s for s in active['body']['segments'] if s['valid_from'] <= moment and (not s.get('valid_to') or moment < s['valid_to'])), {})
         segments = []
         for segment in active["body"]["segments"]:
             if segment["valid_from"] < moment:
                 segments.append({**segment, "valid_to": min(segment["valid_to"] or moment, moment)})
         segments.append({"valid_from": moment, "valid_to": "", "mode": mode,
+                         "managed":current.get('managed',False),"managed_team_id":current.get('managed_team_id',''),
                          "allocations": [], "total_rate": "0"})
         return self.save_scheme(item["store_id"], item["product_id"],
                                 {**active["body"], "segments": segments}, actor, reason,

@@ -54,7 +54,7 @@ const columns = computed(() => [
   {type:'selection', width:36, mobileWidth:32},
   {title:'商品', key:'product', minWidth:220, mobileWidth:150, render:row => h('button', {
     type:'button', class:'profit-product', onClick:() => openOrders(row),
-  }, [h('strong', row.product_name || '未填写名称'), h('small', row.product_id || '无宝贝ID')])},
+  }, [h('strong', row.product_name || '未填写名称'), h('small', row.product_id || '无宝贝ID'), row.managed ? h('small', '含托管销售额 · 不计个人销售额') : null])},
   {title:'订单', key:'orders', width:72, mobileWidth:56, align:'right', render:row => h('button', {
     type:'button', class:'profit-orders', onClick:() => openOrders(row),
   }, `${row.orders} 笔`)},
@@ -169,6 +169,7 @@ function exportTable() {
         <b>商品销售收入</b>是该宝贝本月财务销售收入全额，用来对利润看板。
         <b>本人销售额 / 本人毛利 / 本人创造利润</b>按每笔订单的商品做货身份归属。只有一位做货人员时归属全额；多位做货人员按他们之间的点数比例分摊。
         <b>组长抽点不分走做货人员的产出</b>，提成仍按各自规则计算。历史明细未记录身份时沿用原分摊口径。
+        托管商品的销售额仅计入指定团队；个人毛利、利润、提成及原成本分摊基数不变。
         负数为这个商品分到本人的亏损，尚未扣店级兼职。
         <b>本人点数</b>是此人在这个宝贝上的份额，不是链接合计。
       </n-alert>
