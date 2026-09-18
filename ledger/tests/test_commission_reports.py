@@ -1013,3 +1013,67 @@ def test_corrected_human_payout_keeps_the_previous_decision(tmp_path):
     live = client.post('/api/commission-v2/reports/query', json={
         'start': '2026-06', 'end': '2026-06', 'store_ids': ['s1']}).json()
     assert live['total'] == 12 and live['trial_periods'] == 0
+
+
+def test_teams_view_and_payable_actual_amounts(tmp_path):
+    ws, registry, people, client = fixture(tmp_path)
+    # Set 甲 as leader, 乙 as child of 甲
+    registry.person_save({'id': people[1]['id'], 'name': '乙', 'parent_id': people[0]['id']}, 'test', '组织调整', expected=people[1]['revision'])
+    run = record(ws, people, 's1', '2026-06', [100.0, 50.0], complete=False)
+
+    # 1. Query teams view
+    res = client.post('/api/commission-v2/reports/query', json={
+        'start': '2026-06', 'end': '2026-06', 'store_ids': ['s1'], 'view': 'teams'}).json()
+    assert res['view'] == 'teams'
+    assert len(res['items']) == 1
+    team = res['items'][0]
+    assert team['team'] == '甲'
+    assert team['amount'] == 150.0
+    assert team['members_count'] == 2
+
+    # 2. Confirm payout for 乙 (change from 50 to 60)
+    context = client.get('/api/commission-v2/payout-confirmations/context',
+                         params={'store_id': 's1', 'period': '2026-06', 'run_id': run}).json()
+    confirmed = client.post('/api/commission-v2/payout-confirmations', json={
+        'store_id': 's1', 'period': '2026-06', 'run_id': run,
+        'source_sha': context['source_sha'], 'reason': '调整实发',
+        'payouts': [
+            {'person_id': people[0]['id'], 'amount': '100.00'},
+            {'person_id': people[1]['id'], 'amount': '60.00'}
+        ]
+    })
+    assert confirmed.status_code == 200
+
+    # 3. Query teams view after confirmation
+    res_team = client.post('/api/commission-v2/reports/query', json={
+        'start': '2026-06', 'end': '2026-06', 'store_ids': ['s1'], 'view': 'teams'}).json()
+    t = res_team['items'][0]
+    assert t['trial_amount'] == 150.0
+    assert t['actual_amount'] == 160.0
+    assert t['diff_amount'] == 10.0
+
+    # 4. Query people view
+    res_people = client.post('/api/commission-v2/reports/query', json={
+        'start': '2026-06', 'end': '2026-06', 'store_ids': ['s1'], 'view': 'people'}).json()
+    p_map = {p['person']: p for p in res_people['items']}
+    assert p_map['乙']['team'] == '甲'
+    assert p_map['乙']['trial_amount'] == 50.0
+    assert p_map['乙']['actual_amount'] == 60.0
+    assert p_map['乙']['diff_amount'] == 10.0
+    assert p_map['乙']['is_confirmed'] is True
+
+    # 5. Query store_people view
+    res_sp = client.post('/api/commission-v2/reports/query', json={
+        'start': '2026-06', 'end': '2026-06', 'store_ids': ['s1'], 'view': 'store_people'}).json()
+    sp_person = next(p for p in res_sp['items'] if p.get('person') == '乙')
+    assert sp_person['team'] == '甲'
+    assert sp_person['trial_amount'] == 50.0
+    assert sp_person['actual_amount'] == 60.0
+    assert sp_person['diff_amount'] == 10.0
+
+    # 6. Test export teams
+    export = client.post('/api/commission-v2/export/reports/teams', json={
+        'start': '2026-06', 'end': '2026-06', 'store_ids': ['s1']})
+    assert export.status_code == 200
+    assert '团队/团队长' in export.text
+

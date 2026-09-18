@@ -187,10 +187,11 @@
   commission_on_loss: deduct
   note: 2026-08-26 从 finance 上同步回来的：界面上登记的店，仓库里没有，不写进来下一次部署会把它盖掉。字段照线上 /api/stores 原样抄，id 和 name 不动。
 - id: taobao_mt9sjmls
-  name: 谷本文-luckyglow旗舰店
+  name: 刘露-李素林-luckyglow旗舰店
   platform: taobao
+  aliases: [谷本文-luckyglow旗舰店]
   commission_on_loss: deduct
-  note: 2026-08-26 从 finance 上同步回来的：界面上登记的店，仓库里没有，不写进来下一次部署会把它盖掉。字段照线上 /api/stores 原样抄，id 和 name 不动。
+  note: 2026-09 按聚水潭最新店名与实际运营归属更新为「刘露-李素林-luckyglow旗舰店」，原名保留为别名保证历史账单匹配。
 - id: taobao_mt9sjzvc
   name: 谷本文-淘宝喜气洋洋家居用品
   platform: taobao

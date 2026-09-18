@@ -22,7 +22,7 @@ const payoutNotice = ref('')
 const payoutTargetsOpen = ref(false), payoutTargets = ref([]), payoutTargetTitle = ref('')
 const profit = ref(null)
 let payoutRequest = 0
-const kinds = [{key:'store_people',label:'店铺与分配人'},{key:'people',label:'按人员'},{key:'stores',label:'按店铺'},{key:'breakdown',label:'按月明细'},{key:'coverage',label:'月份进度'}]
+const kinds = [{key:'teams',label:'按团队汇总'},{key:'people',label:'按人员汇总'},{key:'store_people',label:'店铺与分配人'},{key:'stores',label:'按店铺汇总'},{key:'breakdown',label:'按月明细'},{key:'coverage',label:'月份进度'}]
 const scope = computed(() => ({start:state.start,end:state.end,...state.scope}))
 const monthError = computed(() => state.start && state.end && state.start > state.end ? '结束月份不能早于开始月份' : '')
 const queryKey = computed(() => JSON.stringify({...scope.value,view:state.reportView,offset:(page.value-1)*50}))
@@ -41,7 +41,7 @@ const payoutReady = computed(() => !!payoutContext.value && !!payoutReason.value
     ? payoutPeople.value.every(person => validMoney(person.amount)) : payoutNoPeople.value))
 const payoutTotal = computed(() => payoutPeople.value.length && payoutPeople.value.every(p => validMoney(p.amount))
   ? money(payoutPeople.value.reduce((sum, person) => sum + Number(person.amount), 0)) : '—')
-const labels = {store_people:'店铺人员构成',people:'人员汇总',stores:'店铺汇总',breakdown:'按月明细',coverage:'月份进度'}
+const labels = {teams:'团队汇总',store_people:'店铺人员构成',people:'人员汇总',stores:'店铺汇总',breakdown:'按月明细',coverage:'月份进度'}
 function status(value='') { return value.replaceAll('未计算提成','未出金额').replaceAll('未计算','未出金额').replaceAll('试算','待核对').replaceAll('历史口径','历史提成').replaceAll('已计算','待结账').replaceAll('无对应提成记录','暂无提成').replaceAll('合计待核对','金额待核对') }
 function explanation(row) {
   if(!row.has_result)return '本月还没有提成金额'
@@ -53,19 +53,21 @@ function explanation(row) {
   return row.status==='已结账'?'本月已结账':''
 }
 const columns = computed(() => ({
-  store_people:[['store','店铺'],['person','分配人'],['period','月份'],['sales','销售额'],['gross','毛利额'],['profit_after_labor','利润额'],
-    ['labor_cost','兼职额'],['amount','提成额'],['status','状态']],
-  people:[['person','人员'],['employee_no','工号'],['amount','提成金额'],['stores','店铺'],['periods','月份'],['status','状态']],
+  teams:[['team','团队 / 团队长'],['trial_amount','系统应发'],['amount','实发提成'],['diff_amount','调整差额'],['members_count','团队人数'],['stores','负责店铺'],['periods','月份'],['status','状态']],
+  people:[['person','人员'],['team','所属团队'],['employee_no','工号'],['trial_amount','系统应发'],['amount','实发提成'],['diff_amount','调整差额'],['stores','店铺'],['periods','月份'],['status','状态']],
+  store_people:[['store','店铺'],['person','分配人'],['team','所属团队'],['period','月份'],['sales','销售额'],['gross','毛利额'],['profit_after_labor','利润额'],
+    ['labor_cost','兼职额'],['trial_amount','系统应发'],['amount','实发提成'],['diff_amount','调整差额'],['status','状态']],
   stores:[['store','店铺'],['amount','提成金额'],['labor_cost','兼职分摊'],['configured_people','提成设置人数'],['people','已出金额人数'],['periods','已有金额'],['missing','未出金额'],['status','状态']],
-  breakdown:[['person','人员'],['store','店铺'],['period','月份'],['amount','提成金额'],['status','状态']],
+  breakdown:[['person','人员'],['team','所属团队'],['store','店铺'],['period','月份'],['trial_amount','系统应发'],['amount','实发提成'],['diff_amount','调整差额'],['status','状态']],
   coverage:[['store','店铺'],['period','月份'],['selected_amount','提成金额'],['status','状态'],['explanation','待办']],
 }[state.reportView]))
 function cell(row,key) {
-  if(['amount','selected_amount','labor_cost','sales','gross','profit_after_labor','base','store_amount'].includes(key))return money(row[key])
+  if(['amount','selected_amount','labor_cost','sales','gross','profit_after_labor','base','store_amount','trial_amount','actual_amount','diff_amount'].includes(key))return money(row[key])
   if(key==='status')return status(row.status)
   if(key==='explanation')return explanation(row)
   if(key==='stores')return `${row[key]} 家`
   if(key==='configured_people')return `${row[key] ?? 0} 人`
+  if(key==='members_count')return `${row[key] ?? 0} 人`
   if(key==='people')return row.periods ? `${row[key]} 人` : '未出金额'
   if(key==='periods'||key==='missing')return `${row[key]} 个月`
   return row[key] || '—'
@@ -81,6 +83,9 @@ function drill(row) {
   const selection={...report.value.selection}
   let runIds=report.value.run_ids
   if(state.reportView==='people')selection.person_ids=[row.person_id]
+  else if(state.reportView==='teams'){
+    selection.person_ids=(row.members||[]).map(m=>m.person_id).filter(Boolean)
+  }
   else if(state.reportView==='store_people'){
     selection.store_ids=[row.store_id]
     selection.person_ids=[row.person_id]
@@ -90,7 +95,7 @@ function drill(row) {
     selection.store_ids=[row.store_id]
     runIds=(report.value.run_scopes||[]).filter(run=>run.store_id===row.store_id).map(run=>run.run_id)
   }
-  detail.value={kind:state.reportView,name:row.person||row.store,expected:row.amount,selection,run_ids:runIds}
+  detail.value={kind:state.reportView,name:row.person||row.team||row.store,expected:row.amount,selection,run_ids:runIds}
 }
 async function openPayout(row) {
   if(locked.value || !row.finance_run)return
@@ -249,25 +254,44 @@ async function viewSettlement(item){
   finally{settlementLoading.value=false}
 }
 
-const rowKey=row=>[row.kind||'',row.person_id||'',row.store_id,row.period].filter(Boolean).join(':')
+const rowKey=row=>[row.kind||'',row.team_id||'',row.person_id||'',row.store_id,row.period].filter(Boolean).join(':')
 const tableColumns=computed(()=>{
   const composition=state.reportView==='store_people'
   const list=columns.value.map(([key,title],index)=>({title,key,
-    width:composition?(key==='store'?180:key==='person'?128:key==='period'?86:key==='status'?92:112):
-      ['amount','selected_amount','labor_cost','sales','gross','profit_after_labor','base','store_amount'].includes(key)?145:key==='employee_no'?90:key==='period'?100:index===0?undefined:key==='store'?240:125,
-    minWidth:index===0?180:undefined,mobileWidth:['amount','selected_amount','labor_cost','sales','gross','profit_after_labor','base','store_amount'].includes(key)?115:key==='period'?84:index===0?135:undefined,
-    mobile:index===0||['amount','selected_amount','sales','gross','profit_after_labor','labor_cost','period','person'].includes(key),align:['amount','selected_amount','labor_cost','sales','gross','profit_after_labor','base','store_amount'].includes(key)?'right':'left',
-    render:row=>key==='status'?h(NTag,{bordered:false,size:'small',type:row.status?.includes('试算')?'warning':'default'},()=>status(row.status)):
-      h('div',{class:['amount','selected_amount','labor_cost','sales','gross','profit_after_labor','base','store_amount'].includes(key)?['table-money',row[key]<0?'negative':'']:undefined,
+    width:composition?(key==='store'?170:key==='person'?120:key==='team'?100:key==='period'?82:key==='status'?90:['trial_amount','amount','diff_amount'].includes(key)?115:105):
+      ['amount','selected_amount','labor_cost','sales','gross','profit_after_labor','base','store_amount','trial_amount','diff_amount'].includes(key)?135:key==='team'?120:key==='employee_no'?90:key==='period'?95:index===0?undefined:key==='store'?220:120,
+    minWidth:index===0?170:undefined,mobileWidth:['amount','selected_amount','labor_cost','sales','gross','profit_after_labor','base','store_amount','trial_amount','diff_amount'].includes(key)?115:key==='period'?84:index===0?135:undefined,
+    mobile:index===0||['amount','selected_amount','trial_amount','diff_amount','sales','gross','profit_after_labor','labor_cost','period','person','team'].includes(key),align:['amount','selected_amount','labor_cost','sales','gross','profit_after_labor','base','store_amount','trial_amount','diff_amount'].includes(key)?'right':'left',
+    render:row=>{
+      if(key==='status')return h(NTag,{bordered:false,size:'small',type:row.status?.includes('试算')?'warning':row.is_confirmed||row.status?.includes('已人工确认')?'success':'default'},()=>status(row.status))
+      if(key==='team')return h('span',{class:'report-team-tag',style:'color:#475569;font-size:12.5px'},row.team||'—')
+      if(key==='trial_amount'){
+        if(row.kind==='store')return '—'
+        return h('div',{class:['table-money','trial-amount-cell'],style:'color:#64748b;font-size:13px'},cell(row,key))
+      }
+      if(key==='diff_amount'){
+        if(row.kind==='store'||row.diff_amount==null||Math.abs(row.diff_amount)<0.001)return h('span',{style:'color:#94a3b8;font-size:12px'},'0.00')
+        const isPos=row.diff_amount>0
+        return h('span',{style:{color:isPos?'#16a34a':'#d97706',fontWeight:600,fontSize:'12.5px'}},`${isPos?'+':''}${money(row.diff_amount)}`)
+      }
+      if(key==='amount'){
+        if(row.kind==='store')return h('strong',money(row.store_amount))
+        return h('div',{class:['table-money',row[key]<0?'negative':'']},[
+          h('strong',cell(row,key)),
+          row.is_confirmed?h(NTag,{size:'tiny',type:'success',bordered:false,style:'margin-left:4px'},()=>'实发'):null
+        ])
+      }
+      return h('div',{class:['amount','selected_amount','labor_cost','sales','gross','profit_after_labor','base','store_amount'].includes(key)?['table-money',row[key]<0?'negative':'']:undefined,
                title:state.reportView==='store_people'&&row.kind==='person'&&['sales','gross'].includes(key)?'共享订单按提成点数占比分拆，可与其他成员相加':
                  state.reportView==='store_people'&&key==='profit_after_labor'?row.kind==='person'?'共享订单利润按提成点数拆分；兼职和未归属净亏损按成员参与销售额分摊，可与其他成员相加':'店铺经营账利润减本店兼职额':
                  state.reportView==='store_people'&&row.kind==='person'&&key==='labor_cost'?'兼职额按店铺分摊':undefined},
         index===0?[h('span',{class:row.kind==='store'?'store-total-name':''},cell(row,key)),h('div',{class:'table-secondary table-mobile-only'},status(row.status))]:
           key==='person'&&row.kind==='store'?h('strong','店铺合计'):
           key==='person'&&row.kind==='person'?h('div',{class:'report-person'},[h('span',cell(row,key)),row.duty?h(NTag,{size:'tiny',bordered:false,type:dutyTagType(row.duty)},()=>dutyLabel(row.duty)):null]):
-          key==='amount'&&row.kind==='store'?h('strong',money(row.store_amount)):cell(row,key))
+          cell(row,key))
+    }
   }))
-  if(['people','stores','store_people','breakdown','coverage'].includes(state.reportView))list.push({
+  if(['teams','people','stores','store_people','breakdown','coverage'].includes(state.reportView))list.push({
     title:'操作',key:'action',width:292,minWidth:220,mobileWidth:176,mobile:true,fixed:'right',
     render:row=>renderRowActions(row),
   })
@@ -278,6 +302,8 @@ function renderRowActions(row) {
     profit: canOpenProfit(row),
     payout: targetsFor(row).length > 0,
     detail: row.amount != null,
+    payoutLabelConfirmed: '修改实发',
+    payoutLabelUnconfirmed: '核定实发',
   })
   if (!actions.length) return h('span', {class:'report-row-actions-empty'}, '—')
   const clicks = {
@@ -324,7 +350,7 @@ defineExpose({reload:load})
 
     <div v-if="loading" class="commission-loading-line"/>
     <LedgerTable :rows="rows" :columns="tableColumns" :row-key="rowKey" :loading="loading" :max-height="440" empty="没有找到提成记录，可调整店铺、人员或月份" />
-    <div class="commission-paging"><span class="row-count">共 {{report?.count || 0}} {{state.reportView==='people'?'人':state.reportView==='stores'?'家店铺':'条'}}</span><n-button size="small" :disabled="page<=1||locked" @click="page--">上一页</n-button><span>{{page}} / {{Math.max(1,Math.ceil((report?.count||0)/50))}}</span><n-button size="small" :disabled="page*50>=(report?.count||0)||locked" @click="page++">下一页</n-button></div>
+    <div class="commission-paging"><span class="row-count">共 {{report?.count || 0}} {{state.reportView==='people'?'人':state.reportView==='stores'?'家店铺':state.reportView==='teams'?'个团队':'条'}}</span><n-button size="small" :disabled="page<=1||locked" @click="page--">上一页</n-button><span>{{page}} / {{Math.max(1,Math.ceil((report?.count||0)/50))}}</span><n-button size="small" :disabled="page*50>=(report?.count||0)||locked" @click="page++">下一页</n-button></div>
     <section v-if="settlementLoading || matchingSettlements.length" class="settlement-history">
       <div class="spread"><div><h3>员工结算记录</h3><p>记录确认时所见金额；后续到账只显示差额，不改旧记录。</p></div></div>
       <n-spin :show="settlementLoading"><n-table v-if="matchingSettlements.length" size="small" :bordered="false"><thead><tr><th>确认时间</th><th>说明</th><th class="right">结算金额</th><th>操作</th></tr></thead><tbody><tr v-for="item in matchingSettlements" :key="item.id"><td>{{displayTime(item.at)}}</td><td>{{item.note}}</td><td class="right num">¥{{money(item.total)}}</td><td><n-button text type="primary" @click="viewSettlement(item)">查看当时明细</n-button></td></tr></tbody></n-table></n-spin>
@@ -341,25 +367,33 @@ defineExpose({reload:load})
       </div>
       <template #footer><div class="settlement-footer"><n-button @click="payoutTargetsOpen=false">取消</n-button></div></template>
     </n-modal>
-    <n-modal v-model:show="payoutOpen" preset="card" title="人工确认提成" style="width:min(520px,calc(100vw - 32px))">
+    <n-modal v-model:show="payoutOpen" preset="card" title="核定实发提成（人工调整与归档）" style="width:min(560px,calc(100vw - 32px))">
       <n-spin :show="payoutLoading">
         <template v-if="payoutContext">
-          <p class="settlement-help">{{ payoutContext.store }} · {{ payoutContext.period }}。填本期最终提成，已含兼职费用；自动试算和原始订单会保留，店铺经营账不会因此结账。</p>
+          <p class="settlement-help">{{ payoutContext.store }} · {{ payoutContext.period }}。系统根据订单与利润规则计算得出【系统应发】，您可在此直接编辑【实发金额】；保存后将作为本期正式发放与成本归档依据。</p>
           <n-alert v-if="payoutContext.unassigned_orders" type="info" :bordered="false" style="margin-bottom:12px">还有 {{ payoutContext.unassigned_orders }} 笔订单没有提成归属，可由人工直接确认最终金额。</n-alert>
           <div v-if="payoutPeople.length" class="payout-people">
             <label v-for="person in payoutPeople" :key="person.person_id">
-              <span>{{ person.person }}<small>系统试算 {{ money(person.suggested) }}</small>
+              <span>
+                <strong>{{ person.person }}</strong>
+                <small>系统应发 ¥{{ money(person.suggested) }}</small>
                 <small v-if="person.included_profit!=null">计入阶梯 ¥{{ money(person.included_profit) }}<template v-if="person.excluded_count"> · 已剔除 {{ person.excluded_count }} 个商品</template></small>
+                <small v-if="person.amount && person.suggested!=null && Math.abs(Number(person.amount) - Number(person.suggested)) > 0.001" :style="{color: Number(person.amount) > Number(person.suggested) ? '#16a34a' : '#d97706', fontWeight: 600}">
+                  {{ Number(person.amount) > Number(person.suggested) ? '调整增加 +' : '调整减少 -' }}¥{{ money(Math.abs(Number(person.amount) - Number(person.suggested))) }}
+                </small>
                 <button type="button" class="report-inline-action" @click="openProfitFromPayout(person)">查看利润构成</button>
               </span>
-              <n-input v-model:value="person.amount" inputmode="decimal" :aria-label="`${person.person}确认提成`" placeholder="确认金额" />
+              <div style="display:flex;flex-direction:column;align-items:flex-end">
+                <n-input v-model:value="person.amount" inputmode="decimal" :aria-label="`${person.person}确认提成`" placeholder="实发金额" />
+                <span style="font-size:11px;color:#94a3b8;margin-top:2px">实发金额 (元)</span>
+              </div>
             </label>
-            <p class="payout-sum">确认合计 <strong>¥{{ payoutTotal }}</strong></p>
+            <p class="payout-sum">实发合计 <strong>¥{{ payoutTotal }}</strong></p>
           </div>
           <n-checkbox v-else v-model:checked="payoutNoPeople">确认本期无需发放提成</n-checkbox>
-          <n-input v-model:value="payoutReason" type="textarea" :rows="2" maxlength="500" show-count placeholder="填写确认依据，例如：已与运营核对本期提成" style="margin-top:12px" />
+          <n-input v-model:value="payoutReason" type="textarea" :rows="2" maxlength="500" show-count placeholder="填写实发确认依据，例如：已与运营核对本期提成、扣除上月预发等" style="margin-top:12px" />
           <details v-if="payoutContext.history?.length" class="payout-history">
-            <summary>查看之前确认的提成（{{ payoutContext.history.length }}）</summary>
+            <summary>查看之前确认的实发记录（{{ payoutContext.history.length }}）</summary>
             <div v-for="item in payoutContext.history" :key="item.id">
               <span>{{ displayTime(item.at) }} · ¥{{ money(item.confirmed_total) }}<small v-if="item.finance_run !== payoutContext.run_id">后来有新核算</small></span>
               <small>{{ item.reason }}</small>
@@ -369,7 +403,7 @@ defineExpose({reload:load})
         </template>
         <n-alert v-if="payoutError" type="error" :bordered="false" style="margin-top:12px">{{ payoutError }}</n-alert>
       </n-spin>
-      <template #footer><div class="settlement-footer"><n-button @click="payoutOpen=false">取消</n-button><n-button type="primary" :loading="payoutSaving" :disabled="!payoutReady" @click="savePayout">保存确认金额</n-button></div></template>
+      <template #footer><div class="settlement-footer"><n-button @click="payoutOpen=false">取消</n-button><n-button type="primary" :loading="payoutSaving" :disabled="!payoutReady" @click="savePayout">保存实发并归档</n-button></div></template>
     </n-modal>
     <n-modal v-model:show="settlementOpen" preset="card" title="确认员工结算" style="width:min(520px,calc(100vw - 32px))">
       <p class="settlement-help">确认后保存当前计算记录和金额。以后补到账单时，旧记录保持不变，页面会显示差额。</p>

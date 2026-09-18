@@ -9,11 +9,19 @@ const request=useLatest(),current=ref(null),data=ref(null),loading=ref(false),er
 let serial=0
 const money=value=>value==null?'—':Number(value).toLocaleString('zh-CN',{minimumFractionDigits:2,maximumFractionDigits:2})
 const mismatch=computed(()=>data.value && current.value?.expected!=null && data.value.total!==current.value.expected)
-const columns=computed(()=>[...(current.value?.kind==='stores'?[{title:'人员',key:'person',minWidth:120,mobileWidth:100}]:[]),
-  {title:'店铺',key:'store',minWidth:190,mobileWidth:140},
-  {title:'月份',key:'period',width:95,mobileWidth:80},
-  ...(current.value?.kind==='store_people'?[{title:'本人参与基数',key:'base',width:125,mobileWidth:115,align:'right',render:row=>money(row.base)}]:[]),
-  {title:'提成金额',key:'amount',width:125,mobileWidth:110,align:'right',render:row=>h('span',{class:['table-money',row.amount<0?'negative':'']},money(row.amount))}])
+const columns=computed(()=>[
+  ...(['stores', 'teams'].includes(current.value?.kind)?[{title:'人员',key:'person',minWidth:120,mobileWidth:100}]:[]),
+  {title:'店铺',key:'store',minWidth:180,mobileWidth:130},
+  {title:'月份',key:'period',width:90,mobileWidth:75},
+  ...(current.value?.kind==='store_people'?[{title:'本人参与基数',key:'base',width:110,mobileWidth:95,align:'right',render:row=>money(row.base)}]:[]),
+  {title:'系统应发',key:'trial_amount',width:105,mobileWidth:90,align:'right',render:row=>h('span',{style:'color:#64748b'},money(row.trial_amount))},
+  {title:'实发提成',key:'amount',width:115,mobileWidth:95,align:'right',render:row=>h('span',{class:['table-money',row.amount<0?'negative':'']},money(row.amount))},
+  {title:'调整差额',key:'diff_amount',width:100,mobileWidth:85,align:'right',render:row=>{
+    if(!row.diff_amount || Math.abs(row.diff_amount)<0.001)return h('span',{style:'color:#94a3b8'},'0.00')
+    const pos = row.diff_amount > 0
+    return h('span',{style:{color:pos?'#16a34a':'#d97706',fontWeight:600}},`${pos?'+':''}${money(row.diff_amount)}`)
+  }}
+])
 async function load(){
   if(!props.target)return
   const attempt=++serial;loading.value=true;error.value=''

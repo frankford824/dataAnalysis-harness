@@ -1,7 +1,7 @@
 <script setup>
 import { computed, h, ref, watch, onDeactivated } from 'vue'
 import { storeToRefs } from 'pinia'
-import { onBeforeRouteLeave } from 'vue-router'
+import { onBeforeRouteLeave, useRouter } from 'vue-router'
 import { useMessage, useDialog, NButton, NTag } from 'naive-ui'
 import { ChevronDown } from '@lucide/vue'
 import LedgerTabs from '../components/ui/LedgerTabs.vue'
@@ -13,6 +13,8 @@ import { commissionRequest } from '../components/commissionRequest'
 import CommissionBatchDialog from '../components/CommissionBatchDialog.vue'
 import CommissionPeople from '../components/CommissionPeople.vue'
 import { DUTY_OPTIONS, dutyLabel, dutyTagType, loadStoreMembers, saveStoreMembers } from '../storeMembers'
+
+const router = useRouter()
 
 const app = useApp()
 const shared = useCommission()
@@ -87,11 +89,19 @@ const {data,error,loading,stale,load} = useCommissionQuery('settings', () => `${
 const rows = computed(() => data.value?.rows || [])
 const next = computed(() => data.value?.next_after || '')
 const locked = computed(() => loading.value || stale.value || busy.value)
-const menuOptions = [{label:'批量新增',key:'new'},{label:'人员名单',key:'people'},{label:'店铺默认身份',key:'identity'},{type:'divider',key:'line'},
-  {label:'下载模板',key:'template'},{label:'导出设置',key:'export'}]
+const menuOptions = [
+  {label:'批量新增',key:'new'},
+  {label:'销售组织架构',key:'org'},
+  {label:'人员名单',key:'people'},
+  {label:'店铺默认身份',key:'identity'},
+  {type:'divider',key:'line'},
+  {label:'下载模板',key:'template'},
+  {label:'导出设置',key:'export'}
+]
 const otherStates = [{label:'待生效',key:'scheduled'},{label:'已到期',key:'expired'}]
 function menu(key) {
   if(key==='new')batchDialog.value.open({kind:'new',store_id:shared.storeIds.length===1?shared.storeIds[0]:''})
+  if(key==='org')router.push({name:'commission-org'})
   if(key==='people')peopleDialog.value.open('people')
   if(key==='identity')peopleDialog.value.open('identity')
   if(key==='import')fileInput.value.click()

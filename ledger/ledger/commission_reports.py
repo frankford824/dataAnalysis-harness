@@ -27,6 +27,23 @@ def store_member_duties(registry, store_id, at=None):
     return {r['person_id']: r for r in registry.store_members_at(store_id, stamp)}
 
 
+def find_team_info(pid, roster):
+    """Trace a person's hierarchy up to the top team leader."""
+    cur = roster.get(pid)
+    if not cur:
+        return {'team_id': '', 'team_name': '未分配', 'leader_name': ''}
+    visited = set()
+    while cur and cur.get('parent_id') and cur['parent_id'] in roster and cur['parent_id'] not in visited:
+        visited.add(cur['id'])
+        cur = roster[cur['parent_id']]
+    team_name = cur.get('alias') or cur.get('name') or '未分配'
+    return {
+        'team_id': cur.get('id', ''),
+        'team_name': team_name,
+        'leader_name': cur.get('name', ''),
+    }
+
+
 def months(start, end):
     if not re.fullmatch(r"\d{4}-\d{2}", start or '') or not re.fullmatch(r"\d{4}-\d{2}", end or ''):
         raise RegistryError('请选择起止账期')
@@ -490,6 +507,16 @@ def build(workspace, registry, model, start, end, store_ids=None, person_ids=Non
                                         'amount':None,'store_amount':None,
                                         'status':status,'finance_run':record['id']})
                 continue
+            orig_person = next((p for p in source_c.get('people', []) if p.get('person_id') == pid), None)
+            orig_profit_rate = profit_rates.get(pid)
+            if (orig_profit_rate is not None and pid in person_profit
+                    and orig_person and orig_person.get('amount') is not None):
+                system_trial = decimal(money_float(decimal(person_profit[pid]) * orig_profit_rate))
+            elif orig_person and orig_person.get('amount') is not None:
+                system_trial = decimal(money_float(decimal(orig_person['amount']) * keep))
+            else:
+                system_trial = None
+
             profit_rate=(profit_rates.get(person.get('person_id'))
                          if not decision else None)
             if (profit_rate is not None and person.get('person_id') in person_profit
@@ -497,14 +524,26 @@ def build(workspace, registry, model, start, end, store_ids=None, person_ids=Non
                 amount=decimal(money_float(decimal(person_profit[person['person_id']])*profit_rate))
             else:
                 amount=decimal(money_float(decimal(person['amount'])*keep))
+
+            if system_trial is None:
+                system_trial = amount
+            trial_val = system_trial if decision else amount
+            diff_val = (amount - system_trial) if decision else Decimal(0)
+            is_confirmed = bool(decision)
+
             scope['selected_amount']+=amount
             store_people.setdefault(sid,set()).add(pid)
-            lines.append({'person_id':pid,'person':name,'employee_no':roster.get(pid,{}).get('employee_no',''),
+            tinfo = find_team_info(pid, roster)
+            team_name = tinfo['team_name']
+
+            lines.append({'person_id':pid,'person':name,'team':team_name,'employee_no':roster.get(pid,{}).get('employee_no',''),
                           'store_id':sid,'store':names[sid],'period':period,'amount':money_float(amount),
+                          'trial_amount':money_float(trial_val),'actual_amount':money_float(amount),
+                          'diff_amount':money_float(diff_val),'is_confirmed':is_confirmed,
                           'base':person.get('base'),'base_name':scope['base_name'],
                           'sales':person.get('sales'),'gross':person.get('gross'),'status':status,
                           'calculated_at':record['at'],'finance_run':record['id'],'notes':scope['notes']})
-            member_rows.append({'kind':'person','person_id':pid,'person':name,
+            member_rows.append({'kind':'person','person_id':pid,'person':name,'team':team_name,
                                 'employee_no':roster.get(pid,{}).get('employee_no',''),
                                 'duty':duty,
                                 'store_id':sid,'store':names[sid],'period':period,
@@ -513,11 +552,17 @@ def build(workspace, registry, model, start, end, store_ids=None, person_ids=Non
                                 'profit_after_labor':person_profit.get(person.get('person_id')),
                                 'labor_cost':None,
                                 'base':person.get('base'),'base_name':scope['base_name'],
-                                'amount':money_float(amount),'store_amount':None,
+                                'amount':money_float(amount),
+                                'trial_amount':money_float(trial_val),'actual_amount':money_float(amount),
+                                'diff_amount':money_float(diff_val),'is_confirmed':is_confirmed,
+                                'store_amount':None,
                                 'status':status,'finance_run':record['id']})
-            total=people_totals.setdefault(pid,{'person_id':pid,'person':label,'employee_no':roster.get(pid,{}).get('employee_no',''),
-                                               'amount':Decimal(0),'stores':set(),'periods':set(),'statuses':set()})
-            total['amount']+=amount;total['stores'].add(sid);total['periods'].add(period);total['statuses'].add(status)
+            total=people_totals.setdefault(pid,{'person_id':pid,'person':label,'team':team_name,'employee_no':roster.get(pid,{}).get('employee_no',''),
+                                               'amount':Decimal(0),'trial_amount':Decimal(0),'actual_amount':Decimal(0),'diff_amount':Decimal(0),
+                                               'stores':set(),'periods':set(),'statuses':set(),'confirmed_count':0})
+            total['amount']+=amount;total['actual_amount']+=amount;total['trial_amount']+=trial_val;total['diff_amount']+=diff_val
+            if is_confirmed:total['confirmed_count']+=1
+            total['stores'].add(sid);total['periods'].add(period);total['statuses'].add(status)
         if not selected_people and source_c.get('people'):
             store_profit = profit_after_labor(operating, visible_labor)
             residual_sales = _output_residual(sales, person_output, 'sales')
@@ -576,18 +621,87 @@ def build(workspace, registry, model, start, end, store_ids=None, person_ids=Non
         store_totals[sid]=total
     for pid in selected_people-set(people_totals):
         p=roster.get(pid,{})
-        people_totals[pid]={'person_id':pid,'person':p.get('name') or available[pid]['name'],'employee_no':p.get('employee_no',''),
-                            'amount':None,'stores':set(),'periods':set(),'statuses':{'无对应提成记录'}}
-    person_rows=[{**r,'amount':money_float(r['amount']) if r['amount'] is not None else None,'stores':len(r['stores']),
-                  'periods':len(r['periods']),'status':'、'.join(sorted(r['statuses']))} for r in people_totals.values()]
-    for r in person_rows:r.pop('statuses')
+        tinfo=find_team_info(pid,roster)
+        people_totals[pid]={'person_id':pid,'person':p.get('name') or available[pid]['name'],'team':tinfo['team_name'],'employee_no':p.get('employee_no',''),
+                            'amount':None,'trial_amount':None,'actual_amount':None,'diff_amount':None,'is_confirmed':False,
+                            'stores':set(),'periods':set(),'statuses':{'无对应提成记录'},'confirmed_count':0}
+    person_rows=[{**r,'amount':money_float(r['amount']) if r['amount'] is not None else None,
+                  'trial_amount':money_float(r['trial_amount']) if r['amount'] is not None else None,
+                  'actual_amount':money_float(r['actual_amount']) if r['amount'] is not None else None,
+                  'diff_amount':money_float(r['diff_amount']) if r['amount'] is not None else None,
+                  'is_confirmed':r.get('confirmed_count',0)>0,
+                  'stores':len(r['stores']),'periods':len(r['periods']),'status':'、'.join(sorted(r['statuses']))} for r in people_totals.values()]
+    for r in person_rows:
+        r.pop('statuses',None)
+        r.pop('confirmed_count',None)
+
+    teams_totals = {}
+    for pid, ptot in people_totals.items():
+        if ptot['amount'] is None and not ptot['stores']:
+            continue
+        tinfo = find_team_info(pid, roster)
+        tid = tinfo['team_id'] or pid
+        tname = tinfo['team_name'] or ptot['person']
+        leader = tinfo['leader_name'] or ptot['person']
+        t = teams_totals.setdefault(tid, {
+            'team_id': tid,
+            'team': tname,
+            'leader': leader,
+            'amount': Decimal(0),
+            'trial_amount': Decimal(0),
+            'actual_amount': Decimal(0),
+            'diff_amount': Decimal(0),
+            'members': set(),
+            'member_details': [],
+            'stores': set(),
+            'periods': set(),
+            'statuses': set(),
+        })
+        if ptot['amount'] is not None:
+            t['amount'] += ptot['amount']
+            t['actual_amount'] += ptot['amount']
+            t['trial_amount'] += ptot.get('trial_amount') or ptot['amount']
+            t['diff_amount'] += ptot.get('diff_amount') or Decimal(0)
+        t['members'].add(pid)
+        t['stores'].update(ptot['stores'])
+        t['periods'].update(ptot['periods'])
+        t['statuses'].update(ptot['statuses'])
+        t['member_details'].append({
+            'person_id': pid,
+            'person': ptot['person'],
+            'employee_no': ptot['employee_no'],
+            'amount': money_float(ptot['amount']) if ptot['amount'] is not None else None,
+            'trial_amount': money_float(ptot['trial_amount']) if ptot['amount'] is not None else None,
+            'actual_amount': money_float(ptot['actual_amount']) if ptot['amount'] is not None else None,
+            'diff_amount': money_float(ptot['diff_amount']) if ptot['amount'] is not None else None,
+            'stores': len(ptot['stores']),
+            'periods': len(ptot['periods']),
+        })
+    team_rows = []
+    for t in teams_totals.values():
+        team_rows.append({
+            'team_id': t['team_id'],
+            'team': t['team'],
+            'leader': t['leader'],
+            'amount': money_float(t['amount']),
+            'trial_amount': money_float(t['trial_amount']),
+            'actual_amount': money_float(t['actual_amount']),
+            'diff_amount': money_float(t['diff_amount']),
+            'members_count': len(t['members']),
+            'members': sorted(t['member_details'], key=lambda m: -(m['amount'] or 0)),
+            'stores': len(t['stores']),
+            'periods': len(t['periods']),
+            'status': '、'.join(sorted(t['statuses'])) if t['statuses'] else '暂无数据',
+        })
+    team_rows.sort(key=lambda x: -(x['amount'] or 0))
+
     store_rows=[{**r,'configured_people':len(configured.get(r['store_id'],set()) & selected_people if selected_people else configured.get(r['store_id'],set())),'amount':money_float(r['amount']) if r['periods'] else None,'labor_cost':money_float(r['labor_cost']) if r['periods'] else None,'people':len(r['people']),
                  'status':'、'.join(sorted(r['statuses']))} for r in store_totals.values()]
     for r in store_rows:r.pop('statuses')
     coverage=[{**r,'selected_amount':money_float(r['selected_amount']) if r['has_result'] else None} for r in scopes.values()]
     configured_total=set().union(*(configured.get(sid,set()) for sid in covered_stores))
     if selected_people:configured_total &= selected_people
-    return {'people':sorted(person_rows,key=lambda x:x['person']),'stores':store_rows,'rows':lines,
+    return {'teams':team_rows,'people':sorted(person_rows,key=lambda x:x['person']),'stores':store_rows,'rows':lines,
             'store_people':store_person_rows,'coverage':coverage,
             'configured_people_count':len(configured_total),'available_people':list(available.values()),'run_ids':[r['id'] for r in records],
             'total':money_float(sum((decimal(x['amount']) for x in lines),Decimal(0))) if any(r['has_result'] for r in coverage) else None,
@@ -597,6 +711,7 @@ def build(workspace, registry, model, start, end, store_ids=None, person_ids=Non
 
 
 COLUMNS={
+ 'teams':['团队/团队长','系统应发','实发提成','调整差额','团队人数','店铺数','账期数','计算状态'],
  'people':['人员','工号','提成金额','店铺数','账期数','计算状态','人员ID'],
  'stores':['店铺','提成金额','兼职分摊','提成设置人数','已出金额人数','已计算账期数','未计算账期数','计算状态'],
  'store_people':['店铺','分配人','月份','销售额/参与销售额','毛利额/参与毛利额','利润额','兼职额','本人参与基数','基数名称','提成额','店铺提成合计','状态'],
@@ -605,7 +720,9 @@ COLUMNS={
 
 
 def export_rows(report, kind):
-    if kind=='people':
+    if kind=='teams':
+        for r in report.get('teams',[]):yield dict(zip(COLUMNS[kind],[r['team'],r.get('trial_amount'),r['amount'],r.get('diff_amount'),r['members_count'],r['stores'],r['periods'],r['status']]))
+    elif kind=='people':
         for r in report['people']:yield dict(zip(COLUMNS[kind],[r['person'],r['employee_no'],r['amount'],r['stores'],r['periods'],r['status'],r['person_id']]))
     elif kind=='stores':
         for r in report['stores']:yield dict(zip(COLUMNS[kind],[r['store'],r['amount'],r['labor_cost'],r['configured_people'],r['people'] if r['periods'] else None,r['periods'],r['missing'],r['status']]))
@@ -622,12 +739,13 @@ def export_rows(report, kind):
 
 def business_export(report, kind):
     columns = {
-        'people': [('人员','person'),('工号','employee_no'),('提成金额','amount'),('店铺数','stores'),('月份数','periods'),('状态','status')],
+        'teams': [('团队/团队长','team'),('系统应发','trial_amount'),('实发提成','amount'),('调整差额','diff_amount'),('团队人数','members_count'),('负责店铺数','stores'),('月份数','periods'),('状态','status')],
+        'people': [('人员','person'),('所属团队','team'),('工号','employee_no'),('系统应发','trial_amount'),('提成金额','amount'),('调整差额','diff_amount'),('店铺数','stores'),('月份数','periods'),('状态','status')],
         'stores': [('店铺','store'),('提成金额','amount'),('兼职分摊','labor_cost'),('提成设置人数','configured_people'),('已出金额人数','people'),('已有金额月份','periods'),('未出金额月份','missing'),('状态','status')],
-        'store_people': [('店铺','store'),('分配人','person'),('月份','period'),('销售额/参与销售额','sales'),('毛利额/参与毛利额','gross'),
-                         ('利润额','profit_after_labor'),('兼职额','labor_cost'),('本人参与提成基数','base'),('提成额','amount'),
+        'store_people': [('店铺','store'),('分配人','person'),('所属团队','team'),('月份','period'),('销售额/参与销售额','sales'),('毛利额/参与毛利额','gross'),
+                         ('利润额','profit_after_labor'),('兼职额','labor_cost'),('本人参与提成基数','base'),('系统应发','trial_amount'),('提成额','amount'),('调整差额','diff_amount'),
                          ('店铺提成合计','store_amount'),('状态','status')],
-        'breakdown': [('人员','person'),('工号','employee_no'),('店铺','store'),('月份','period'),('提成金额','amount'),('状态','status')],
+        'breakdown': [('人员','person'),('所属团队','team'),('工号','employee_no'),('店铺','store'),('月份','period'),('系统应发','trial_amount'),('提成金额','amount'),('调整差额','diff_amount'),('状态','status')],
         'coverage': [('店铺','store'),('月份','period'),('提成金额','selected_amount'),('状态','status'),('未分配人员订单数','unassigned_orders')],
     }[kind]
     def rows():

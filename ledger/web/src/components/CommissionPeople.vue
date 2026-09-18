@@ -1,10 +1,12 @@
 <script setup>
 import { ref, computed, watch } from 'vue'
+import { useRouter } from 'vue-router'
 import { storeToRefs } from 'pinia'
 import { useMessage } from 'naive-ui'
 import { useCommission } from '../commissionStore'
 import { DUTY_OPTIONS, dutyLabel, loadStoreMembers, saveStoreMembers } from '../storeMembers'
 const emit=defineEmits(['changed','assignments'])
+const router=useRouter()
 const shared=useCommission()
 const { storeOptions }=storeToRefs(shared)
 const message=useMessage(),shown=ref(false),busy=ref(false),rows=ref([]),name=ref(''),employee=ref(''),error=ref('')
@@ -89,12 +91,21 @@ async function saveAll(){
   finally{batchSaving.value=false}
 }
 
+function goToOrg(){
+  shown.value=false
+  router.push({name:'commission-org'})
+}
+
 defineExpose({open,shown})
 </script>
 <template><n-modal v-model:show="shown" preset="card" title="人员名单与分配" style="width:min(860px,95vw)">
   <div class="tab-bar">
     <button :class="['tab-item',{active:tab==='people'}]" @click="tab='people'">人员名单</button>
     <button :class="['tab-item',{active:tab==='identity'}]" @click="tab='identity'">店铺默认身份</button>
+  </div>
+  <div class="org-nav-banner" style="background:#f0f7ff;border:1px solid #d0e2ff;border-radius:6px;padding:8px 12px;margin:10px 0 14px;display:flex;align-items:center;justify-content:space-between">
+    <span style="font-size:12.5px;color:#1e40af">💡 销售组织架构：可统一维护团队、组长与组员层级、各人负责店铺与上级抽点规则</span>
+    <n-button size="small" type="primary" secondary @click="goToOrg">前往组织架构 →</n-button>
   </div>
 
   <!-- 人员名单 -->

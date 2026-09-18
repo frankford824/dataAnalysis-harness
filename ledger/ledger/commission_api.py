@@ -750,7 +750,7 @@ def install(app, workspace, model, model_root: Path | None = None):
         rows = report['rows' if selection.view == 'breakdown' else selection.view]
         visible_stores = (len({row['store_id'] for row in rows if row['kind'] == 'store'})
                           if selection.view == 'store_people' else len(report['stores']))
-        return {k:v for k,v in report.items() if k not in {'people','stores','rows','coverage'}} | {
+        return {k:v for k,v in report.items() if k not in {'people','stores','rows','coverage','teams'}} | {
             'items': rows[selection.offset:selection.offset+selection.limit], 'count': len(rows),
             'people_count':len(report['people']), 'store_count':visible_stores,
             'view':selection.view, 'offset':selection.offset,
