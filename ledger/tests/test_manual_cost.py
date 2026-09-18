@@ -292,6 +292,35 @@ def test_period_snapshot_exposes_after_labor_trial_for_manual_close(tmp_path, mo
     ws.close()
 
 
+def test_period_snapshot_survives_month_without_labor_overhead(tmp_path):
+    from ledger import api
+    from ledger.model.repository import ModelRepository
+
+    m = ModelRepository(Path(__file__).resolve().parents[2] / 'models' / 'cn-ecommerce').get().model
+    assert m.overhead('2026-06') is None
+    ws = Workspace(tmp_path)
+    registry = Registry(tmp_path)
+    person = registry.person_save({'name': '甲'}, 'test', '登记')
+    raw = result(m, person)
+    raw['statement'] = [
+        {'id': 'n_receipt', 'value': 1000, 'available': True},
+        {'id': 'net_profit', 'value': 500, 'available': True},
+    ]
+    raw.update(can_close=True, findings=[], missing_sources=[],
+               cost_coverage={'coverage': 1, 'threshold': .95, 'passed': True,
+                              'covered': 10, 'expected': 10, 'uncovered': 0})
+    raw['commission'].update(engine='commission-v2', total=25, base_total=500)
+    raw['commission']['people'][0]['amount'] = 25
+    ws.record(raw['store_id'], raw['period'], raw, [],
+              model_revision=hashlib.sha256(m.model_dump_json().encode()).hexdigest())
+    snap = api._build_period_detail(ws, m, raw['store_id'], raw['period'],
+                                    ws.state(raw['store_id'], raw['period']))
+    assert 'pending_labor_cut' not in snap
+    assert snap['commission']['people'][0]['amount'] == 25
+    assert 'amount_after_labor' not in snap['commission']['people'][0]
+    ws.close()
+
+
 def test_accepting_keep_scaled_payouts_uses_unique_rate_after_cost_confirm(tmp_path):
     from decimal import Decimal
     from ledger.commission_reports import labor_keep, money_float

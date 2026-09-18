@@ -963,6 +963,8 @@ def _annotate_commission_after_labor(
             labor = labor_api.share_at_close(ws, model, period, store_id)
         except WorkspaceError:
             return
+        if labor is None:
+            return
         payload['pending_labor_cut'] = money_float(labor)
     profit_node = next((node.id for node in model.statement
                         if node.headline == 'profit' and node.is_total), '')
