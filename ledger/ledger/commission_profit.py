@@ -203,7 +203,7 @@ def _sum_profit(products, pred):
     ), Decimal(0)))
 
 
-def compose(registry, store_id, period, person_id, run_id, *, store_name='', duties=None, include_orders=True, product_id=''):
+def compose(registry, store_id, period, person_id, run_id, *, store_name='', duties=None, include_orders=True, product_id=None):
     """Group one person's allocated output by product for a single store month."""
     if not person_id:
         raise RegistryError('请选择人员')
@@ -215,8 +215,8 @@ def compose(registry, store_id, period, person_id, run_id, *, store_name='', dut
     details = attach(registry,store_id,period,details)
     roster = {row['id']: row for row in registry.people()}
     person_details = _person_rows(details, store_id, person_id, set(roster))
-    if product_id:
-        person_details = person_details.filter(pl.col('product_id') == product_id)
+    if product_id is not None:
+        person_details = person_details.filter(pl.col('product_id').fill_null('') == product_id)
     assigned = (person_details.filter(pl.col('status') == 'distribute')
                 if 'status' in person_details.columns and not person_details.is_empty()
                 else person_details.head(0))

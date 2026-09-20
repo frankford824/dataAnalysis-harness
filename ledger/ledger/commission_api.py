@@ -807,8 +807,8 @@ def install(app, workspace, model, model_root: Path | None = None):
             for scope in report.get('sales_pending_scopes',[]):
                 for product in scope['sales_pending_products']:
                     yield {'店铺':scope['store'],'月份':scope['period'],'人员':scope['person'],
-                           '宝贝ID':product,'核算记录':scope['finance_run'],
-                           '原因':'；'.join({'pending_identity':'缺少覆盖订单时间的明确身份','pending_roster_refresh':'现规则人员名单与原核算不一致','pending_managed_refresh':'托管归属待刷新'}[s] for s in scope.get('sales_sources',[]) if s.startswith('pending') and s in {'pending_identity','pending_roster_refresh','pending_managed_refresh'}),
+                           '宝贝ID':product or '（原订单缺少宝贝ID）','核算记录':scope['finance_run'],
+                           '原因':'原订单缺少宝贝ID，无法匹配商品身份' if not product else '；'.join({'pending_identity':'缺少覆盖订单时间的明确身份','pending_roster_refresh':'现规则人员名单与原核算不一致','pending_managed_refresh':'托管归属待刷新','pending_input':'缺少商品ID或下单时间，无法确认归属'}[s] for s in scope.get('sales_sources',[]) if s.startswith('pending') and s in {'pending_identity','pending_roster_refresh','pending_managed_refresh','pending_input'}),
                            '处理':'请核对商品生效身份；如人员或托管归属发生变化，请更新未结账核算。不要凭组织角色猜测身份。'}
         return csv_response('sales-attribution-pending.csv',['店铺','月份','人员','宝贝ID','核算记录','原因','处理'],rows())
 
@@ -860,7 +860,7 @@ def install(app, workspace, model, model_root: Path | None = None):
         return model().store(store_id).name
 
     @router.get('/profit-composition')
-    def profit_composition(store_id: str, period: str, person_id: str, run_id: int, include_orders: bool = True, product_id: str = ''):
+    def profit_composition(store_id: str, period: str, person_id: str, run_id: int, include_orders: bool = True, product_id: str | None = None):
         store_name = profit_scope(store_id, period, person_id, run_id)
         duties = commission_reports.store_member_duties(reg(), store_id, period)
         return commission_profit.compose(reg(), store_id, period, person_id, run_id,

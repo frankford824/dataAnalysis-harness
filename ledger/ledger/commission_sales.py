@@ -90,12 +90,13 @@ def attach(registry, store_id, period, details, snapshot=None):
             duties, source = archive, 'archived_duty'
         else:
             duties, source = {}, 'pending_identity'
-        known = bool(duties) and not managed_pending and not roster_pending and not conflicted
+        missing_input = (not product or ('order_at' in columns and not stamp)) and source!='archived_managed'
+        known = bool(duties) and not managed_pending and not roster_pending and not conflicted and not missing_input
         denominator = sum((Decimal(str(rows[i]['share'])) for i in indexes if duties.get(rows[i]['person_id'])=='produce'), Decimal(0))
         for i in indexes:
             row = rows[i]
             pending[i] = not known
-            sources[i] = 'pending_identity' if conflicted else 'pending_roster_refresh' if roster_pending else source if not managed_pending else 'pending_managed_refresh'
+            sources[i] = 'pending_input' if missing_input else 'pending_identity' if conflicted else 'pending_roster_refresh' if roster_pending else source if not managed_pending else 'pending_managed_refresh'
             versions[i] = (current or {}).get('_version_id','') if source=='effective_product_rule' else ''
             shares[i] = str(row['share']) if duties.get(row['person_id'])=='produce' else '0'
             rates[i] = str(denominator or 1)

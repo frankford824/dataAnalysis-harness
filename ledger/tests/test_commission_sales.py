@@ -61,6 +61,24 @@ def test_managed_archive_never_credits_person_sales_even_with_missing_duty():
     assert all(v['sales']==0 and not v['sales_pending_products'] for v in result.values())
 
 
+@pytest.mark.parametrize('field',['product_id','order_at'])
+def test_missing_match_inputs_cannot_confirm_an_inferred_role(field):
+    original=frame(['produce','cut']).with_columns(pl.lit('').alias(field))
+    resolved=attach(None,'s','2026-06',original,snapshot=snapshot())
+    assert resolved['__sales_pending'].all()
+    assert resolved['__sales_source'].unique().to_list()==['pending_input']
+
+
+def test_explicit_empty_product_filter_returns_only_unknown_product(tmp_path):
+    registry=Registry(tmp_path)
+    a=registry.person_save({'name':'甲'},'test','登记')
+    data=frame(['produce','produce']).with_columns(pl.lit(a['id']).alias('person_id'),
+        pl.Series('product_id',['','known']),pl.Series('spine_row',[1,2]))
+    _persist(registry,a['id'],rows=data.to_dict(as_series=False))
+    result=compose(registry,'s1','2026-06',a['id'],11,product_id='')
+    assert [p['product_id'] for p in result['products']]==['']
+
+
 def test_default_rule_fallback_does_not_resurrect_expired_product_rule():
     rules=snapshot()[1][0]
     rules['*']=rules.pop('p')
