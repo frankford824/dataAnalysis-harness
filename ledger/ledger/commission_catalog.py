@@ -311,19 +311,38 @@ def iter_settings(registry: Registry, *, store_id="", search="", state="", after
             row['setting'] = json.loads(row['setting']) if row['setting'] else None
             if row['state']=='scheduled':
                 row['setting'] = next(s for s in body['segments'] if s['valid_from']>moment)
-            grouped = {}
-            from decimal import Decimal
-            for a in (row['setting'] or {}).get('allocations', []):
-                pid = a['person_id']
-                person = grouped.setdefault(pid, {'person_id':pid,'name':people.get(pid,pid),'rate':Decimal(0),'allocation_duty':'','source':''})
-                person['rate'] += Decimal(a['rate'])
-                if a.get('duty'):
-                    person['allocation_duty'] = a['duty']
-                if a.get('source') == 'hierarchy':
-                    person['source'] = 'hierarchy'
-            row['people'] = [{**a,'rate':str(a['rate'])} for a in grouped.values()]
+            row['people'] = setting_people(row['setting'], people)
             row['product_name'] = row['product_name'] or body.get('product_name','')
             yield row
+
+
+def setting_people(setting, people):
+    from decimal import Decimal
+    grouped = {}
+    for allocation in (setting or {}).get('allocations', []):
+        pid = allocation['person_id']
+        person = grouped.setdefault(pid, {'person_id':pid,'name':people.get(pid,pid),
+            'rate':Decimal(0),'allocation_duty':'','source':''})
+        person['rate'] += Decimal(allocation['rate'])
+        if allocation.get('duty'):
+            person['allocation_duty'] = allocation['duty']
+        if allocation.get('source') == 'hierarchy':
+            person['source'] = 'hierarchy'
+    return [{**person,'rate':str(person['rate'])} for person in grouped.values()]
+
+
+def scheme_editor_context(registry, scheme):
+    """Resolve the selected immutable version using the list/export contract."""
+    version = next((v for v in scheme['versions'] if v['id']==scheme['active_version']), {})
+    segments = version.get('body', {}).get('segments', [])
+    stamp = datetime.now(timezone(timedelta(hours=8))).replace(tzinfo=None).isoformat(timespec='seconds')
+    setting = next((s for s in segments if s['valid_from'] <= stamp and (not s.get('valid_to') or stamp < s['valid_to'])), None)
+    if setting is None:
+        setting = next((s for s in segments if s['valid_from'] > stamp), None)
+    people = {p['id']:p['name'] for p in registry.people()}
+    row = {'store_id':scheme['store_id'],'setting':setting,'people':setting_people(setting,people)}
+    resolve_setting_duties(registry, [row])
+    return row
 
 
 def resolve_setting_duties(registry, rows):

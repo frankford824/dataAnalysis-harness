@@ -29,12 +29,28 @@ def test_settings_export_and_list_resolve_the_same_duty(tmp_path,explicit,defaul
     listed=client.get('/api/commission-v2/settings',params=params).json()['rows'][0]
     person=next(p for p in listed['people'] if p['person_id']==a['id'])
     assert {'produce':'做货','cut':'抽点'}.get(person['duty'],'未指定')==expected
+    editor=client.get('/api/commission-v2/schemes/'+listed['scheme_id']).json()['editor_context']
+    editor_person=next(p for p in editor['people'] if p['person_id']==a['id'])
+    assert editor_person['duty']==person['duty'] and editor_person['duty_source']==person['duty_source']
     revision=registry.revision()
     response=client.get('/api/commission-v2/export/settings',params=params)
     assert response.status_code==200,response.text
     row=next(r for r in csv.DictReader(io.StringIO(response.text.lstrip('\ufeff'))) if r['人员']=='甲')
     assert row['身份']==expected and row['身份来源']==source
     assert registry.revision()==revision
+
+
+def test_unconfirmed_leader_suggestion_is_not_an_identity(tmp_path):
+    registry,model,a,b=setup(tmp_path)
+    registry.save_setting({'store_id':'s1','product_id':'123456789001','valid_from':'2000-01-01',
+        'expected_revision':1,'allocations':[{'person_id':a['id'],'rate':'.05','role':'高级组长'}]},'test')
+    ws=Workspace(tmp_path);app=FastAPI();install(app,lambda:ws,lambda:model);client=TestClient(app)
+    members=client.get('/api/commission-v2/store-members',params={'store_id':'s1','at':'2000-01-01'}).json()['members']
+    member=next(p for p in members if p['person_id']==a['id'])
+    assert member['suggested_duty']=='cut' and member['confirmed'] is False and member['duty'] is None
+    listed=client.get('/api/commission-v2/settings',params={'store_id':'s1'}).json()['rows'][0]
+    editor=client.get('/api/commission-v2/schemes/'+listed['scheme_id']).json()['editor_context']
+    assert listed['people'][0]['duty'] is None and editor['people'][0]['duty'] is None
 
 
 def test_multiselect_settings_export_and_bulk_use_the_same_scope(tmp_path):

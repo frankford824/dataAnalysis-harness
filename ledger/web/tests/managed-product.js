@@ -10,12 +10,12 @@ import '../src/commission.css'
 const unspecified=new URLSearchParams(location.search).has('unspecified')
 const people=[{id:'leader',name:'测试组长',alias:'运营一组',parent_id:'',archived:0},{id:'member',name:'测试成员',employee_no:'582',parent_id:'leader',archived:0}]
 const row={scheme_id:'s',revision:1,store_id:'s1',product_id:'1000161277346',product_name:'测试商品',people:[{person_id:'member',name:'测试成员',rate:'.05',duty:null}],state:'enabled'}
-let saved=null
+let saved=null, storeMemberReads=0
 window.fetch=async(url,options={})=>{
   const path=String(url),reply=data=>new Response(JSON.stringify(data),{status:200,headers:{'Content-Type':'application/json'}})
-  if(path.endsWith('/schemes/s'))return reply({id:'s',revision:1,active_version:'v',product_name:row.product_name,versions:[{id:'v',recorded_at:'2026-05-01',actor:'test',reason:'登记',body:{segments:[{valid_from:'2026-05-01T00:00:00',valid_to:'',mode:'distribute',allocations:[{person_id:'member',rate:'.05',duty:unspecified?undefined:'cut'}]}]}}]})
+  if(path.endsWith('/schemes/s'))return reply({editor_context:{setting:{valid_from:'2026-05-01T00:00:00',valid_to:'',mode:'distribute'},people:[{person_id:'member',name:'测试成员',rate:'.05',duty:unspecified?null:'cut',duty_source:unspecified?'unspecified':'product'}]},id:'s',revision:1,active_version:'v',product_name:row.product_name,versions:[{id:'v',recorded_at:'2026-05-01',actor:'test',reason:'登记',body:{segments:[{valid_from:'2026-05-01T00:00:00',valid_to:'',mode:'distribute',allocations:[{person_id:'member',rate:'.05',duty:unspecified?undefined:'cut'}]}]}}]})
   if(path.endsWith('/settings')&&options.method==='POST'){saved=JSON.parse(options.body);row.setting={managed:saved.managed,managed_team_id:saved.managed_team_id};return reply({revision:2})}
-  if(path.includes('/store-members'))return reply({members:[]})
+  if(path.includes('/store-members')){storeMemberReads++;return reply({members:[{person_id:'member',duty:'cut',suggested_duty:'cut',confirmed:false}]})}
   if(path.endsWith('/people'))return reply({people})
   if(path.includes('/settings/count'))return reply({total:1})
   if(path.includes('/settings'))return reply({rows:[row],count:1,total:1,has_more:false})
@@ -38,6 +38,7 @@ try{
     ;[...document.querySelectorAll('button')].find(e=>e.textContent==='保存').click()
     await wait(()=>saved)
     assert(!Object.hasOwn(saved.allocations[0],'duty'),'Saving silently assigned a duty')
+    assert(storeMemberReads===0,'Editor must not read inferred member duties')
     await wait(()=>document.querySelector('.table-assignee'))
     assert(document.querySelector('.table-assignee').textContent.includes('未指定'),'List fabricated produce')
     document.querySelector('#test-result').textContent='PASS: 无身份显示未指定；打开并保存不补做货；列表未指定'

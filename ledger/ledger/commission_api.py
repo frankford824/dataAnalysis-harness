@@ -380,7 +380,7 @@ def install(app, workspace, model, model_root: Path | None = None):
                 'store_id': store_id,
                 'person_id': pid,
                 'person_name': roster.get(pid, {}).get('name', ''),
-                'duty': s['duty'] if s else suggestions.get(pid, 'produce'),
+                'duty': s['duty'] if s else None,
                 'leader_id': s.get('leader_id', '') if s else '',
                 'leader_name': roster.get(s.get('leader_id', '') if s else '', {}).get('name', ''),
                 'revision': s['revision'] if s else 0,
@@ -641,7 +641,9 @@ def install(app, workspace, model, model_root: Path | None = None):
 
     @router.get("/schemes/{scheme_id}")
     def scheme_get(scheme_id: str):
-        return reg().scheme(scheme_id)
+        registry = reg()
+        scheme = registry.scheme(scheme_id)
+        return {**scheme, 'editor_context':commission_catalog.scheme_editor_context(registry,scheme)}
 
     @router.post("/schemes")
     def scheme_save(change: SchemeChange, request: Request):

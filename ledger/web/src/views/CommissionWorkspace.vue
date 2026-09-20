@@ -11,7 +11,7 @@ import { useCommission } from '../commissionStore'
 import { useCommissionQuery } from '../components/useCommissionQuery'
 import { commissionRequest } from '../components/commissionRequest'
 import CommissionBatchDialog from '../components/CommissionBatchDialog.vue'
-import { DUTY_OPTIONS, dutyLabel, dutyTagType, loadStoreMembers, saveStoreMembers } from '../storeMembers'
+import { DUTY_OPTIONS, dutyLabel, dutyTagType } from '../storeMembers'
 
 const router = useRouter()
 
@@ -159,18 +159,23 @@ async function edit(row = {}) {
     const fetched=row.scheme_id?await call(`/schemes/${row.scheme_id}`,{signal:editorController.signal}):null
     if(ticket!==editorSerial)return
     selected.value=fetched
+    if(fetched?.editor_context){
+      // Refresh the clicked row from the same authoritative version as the editor.
+      // A long-open list must not keep showing an obsolete/default duty behind it.
+      row.people=fetched.editor_context.people
+      row.setting=fetched.editor_context.setting
+      row.revision=fetched.revision
+    }
     const version=selected.value?.versions?.find(v=>v.id===selected.value.active_version)
     const segments=version?.body?.segments||[]
     const stamp=now()
-    const current=segments.find(p=>p.valid_from<=stamp&&(!p.valid_to||stamp<p.valid_to))||segments.find(p=>p.valid_from>stamp)||row.setting||{}
+    const current=selected.value?.editor_context?.setting||segments.find(p=>p.valid_from<=stamp&&(!p.valid_to||stamp<p.valid_to))||segments.find(p=>p.valid_from>stamp)||row.setting||{}
     const grouped=new Map()
     const allocDuty={},allocSource={}
     for(const p of current.allocations||[]){grouped.set(p.person_id,(grouped.get(p.person_id)||0)+Number(p.rate));if(p.duty)allocDuty[p.person_id]=p.duty;if(p.source)allocSource[p.person_id]=p.source}
-    const storeId=row.store_id||(shared.storeIds.length===1?shared.storeIds[0]:'')
-    let storeDuties={}
-    if(storeId)storeDuties=Object.fromEntries((await loadStoreMembers([storeId], current.valid_from||'')).map(m=>[m.person_id,m.duty||null]))
+    const resolvedPeople=selected.value?.editor_context?.people||[...grouped].map(([person_id,rate])=>({person_id,rate,duty:allocDuty[person_id]||null,source:allocSource[person_id]||''}))
     if(ticket!==editorSerial)return
-    const allocations=selected.value?[...grouped].map(([person,rate])=>({person,percent:Number((rate*100).toFixed(8)),duty:allocDuty[person]||storeDuties[person]||null,source:allocSource[person]||''})):(row.people||[]).map(p=>({person:p.person_id,percent:Number((Number(p.rate)*100).toFixed(8)),duty:p.duty||allocDuty[p.person_id]||storeDuties[p.person_id]||null,source:p.source||allocSource[p.person_id]||''}))
+    const allocations=(selected.value?resolvedPeople:row.people||[]).map(p=>({person:p.person_id,percent:Number((Number(p.rate)*100).toFixed(8)),duty:p.duty||null,source:p.source||'',duty_source:p.duty_source||''}))
     form.value={store_id:row.store_id||(shared.storeIds.length===1?shared.storeIds[0]:''),product_id:row.product_id||'',product_name:selected.value?.product_name||row.product_name||'',
       mode:current.mode||'distribute',managed:current.managed||false,managed_team_id:current.managed_team_id||null,valid_from:row.issue_valid_from||(current.valid_from>stamp?current.valid_from:stamp),valid_to:current.valid_to>stamp?current.valid_to:'',allocations}
     if(!form.value.allocations.length)form.value.allocations.push({person:null,percent:null,duty:'produce',source:''})
@@ -326,6 +331,7 @@ defineExpose({edit,menu,busy,reload:load})
           <label class="percentage"><input v-model="p.percent" type="number" min="0" max="100" step="0.01" :aria-label="`提成比率${i+1}`" /><span>%</span></label>
           <n-button text @click="form.allocations.splice(i,1)">移除</n-button>
           <span v-if="p.source==='hierarchy'" class="hierarchy-tag">组织抽成</span>
+          <span v-if="p.duty_source==='store'" class="hierarchy-tag">打开时采用店铺默认身份；保存后写入本商品</span>
         </div>
         <div class="allocation-footer"><n-button text type="primary" @click="form.allocations.push({person:null,percent:null,duty:'produce',source:''})">＋ 添加人员</n-button><n-button text @click="fillHierarchy">按组织补上级抽成</n-button><span>合计 {{ Number(total.toFixed(6)) }}%</span></div>
         <p class="duty-hint">做货：归属产出；抽点：只计提成。身份及比例只影响本商品；组织默认抽成需点击上方按钮补入，不自动覆盖已存设置。</p>
