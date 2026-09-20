@@ -7,12 +7,13 @@ import Workspace from '../src/views/CommissionWorkspace.vue'
 import {useCommission} from '../src/commissionStore'
 import {useApp} from '../src/store'
 import '../src/commission.css'
+const unspecified=new URLSearchParams(location.search).has('unspecified')
 const people=[{id:'leader',name:'测试组长',alias:'运营一组',parent_id:'',archived:0},{id:'member',name:'测试成员',employee_no:'582',parent_id:'leader',archived:0}]
-const row={scheme_id:'s',revision:1,store_id:'s1',product_id:'1000161277346',product_name:'测试商品',people:[],state:'enabled'}
+const row={scheme_id:'s',revision:1,store_id:'s1',product_id:'1000161277346',product_name:'测试商品',people:[{person_id:'member',name:'测试成员',rate:'.05',duty:null}],state:'enabled'}
 let saved=null
 window.fetch=async(url,options={})=>{
   const path=String(url),reply=data=>new Response(JSON.stringify(data),{status:200,headers:{'Content-Type':'application/json'}})
-  if(path.endsWith('/schemes/s'))return reply({id:'s',revision:1,active_version:'v',product_name:row.product_name,versions:[{id:'v',recorded_at:'2026-05-01',actor:'test',reason:'登记',body:{segments:[{valid_from:'2026-05-01T00:00:00',valid_to:'',mode:'distribute',allocations:[{person_id:'member',rate:'.05',duty:'cut'}]}]}}]})
+  if(path.endsWith('/schemes/s'))return reply({id:'s',revision:1,active_version:'v',product_name:row.product_name,versions:[{id:'v',recorded_at:'2026-05-01',actor:'test',reason:'登记',body:{segments:[{valid_from:'2026-05-01T00:00:00',valid_to:'',mode:'distribute',allocations:[{person_id:'member',rate:'.05',duty:unspecified?undefined:'cut'}]}]}}]})
   if(path.endsWith('/settings')&&options.method==='POST'){saved=JSON.parse(options.body);row.setting={managed:saved.managed,managed_team_id:saved.managed_team_id};return reply({revision:2})}
   if(path.includes('/store-members'))return reply({members:[]})
   if(path.endsWith('/people'))return reply({people})
@@ -32,6 +33,15 @@ const wait=async fn=>{for(let i=0;i<150;i++){if(fn())return;await new Promise(r=
 const assert=(v,m)=>{if(!v)throw new Error(m)}
 try{
   await wait(()=>document.querySelector('[aria-label="身份1"] .n-base-selection'))
+  if(unspecified){
+    assert(document.querySelector('[aria-label="身份1"]').textContent.includes('未指定'),'Missing duty falsely displayed as produce')
+    ;[...document.querySelectorAll('button')].find(e=>e.textContent==='保存').click()
+    await wait(()=>saved)
+    assert(!Object.hasOwn(saved.allocations[0],'duty'),'Saving silently assigned a duty')
+    await wait(()=>document.querySelector('.table-assignee'))
+    assert(document.querySelector('.table-assignee').textContent.includes('未指定'),'List fabricated produce')
+    document.querySelector('#test-result').textContent='PASS: 无身份显示未指定；打开并保存不补做货；列表未指定'
+  }else{
   const duty=document.querySelector('[aria-label="身份1"]')
   assert(duty.textContent.includes('抽点')&&!duty.textContent.includes('（'),'Duty label still truncated')
   duty.querySelector('.n-base-selection').click()
@@ -55,4 +65,5 @@ try{
   assert(saved.allocations[0].duty==='produce'&&saved.allocations[0].rate==='0.05000000','Duty/rate lost')
   assert(saved.expected_revision===1&&saved.valid_from,'Missing optimistic lock or effective date')
   document.querySelector('#test-result').textContent='PASS: 完整身份 → 托管勾选 → 团队选择 → 生效时间/版本/比例保存；布局不溢出'
+  }
 }catch(e){document.querySelector('#test-result').textContent='FAIL: '+e.message;console.error(e)}

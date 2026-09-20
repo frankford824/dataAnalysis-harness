@@ -168,9 +168,9 @@ async function edit(row = {}) {
     for(const p of current.allocations||[]){grouped.set(p.person_id,(grouped.get(p.person_id)||0)+Number(p.rate));if(p.duty)allocDuty[p.person_id]=p.duty;if(p.source)allocSource[p.person_id]=p.source}
     const storeId=row.store_id||(shared.storeIds.length===1?shared.storeIds[0]:'')
     let storeDuties={}
-    if(storeId){try{storeDuties=Object.fromEntries((await loadStoreMembers([storeId], current.valid_from||'')).map(m=>[m.person_id,m.duty||m.suggested_duty||'produce']))}catch{}}
+    if(storeId)storeDuties=Object.fromEntries((await loadStoreMembers([storeId], current.valid_from||'')).map(m=>[m.person_id,m.duty||null]))
     if(ticket!==editorSerial)return
-    const allocations=selected.value?[...grouped].map(([person,rate])=>({person,percent:Number((rate*100).toFixed(8)),duty:allocDuty[person]||storeDuties[person]||'produce',source:allocSource[person]||''})):(row.people||[]).map(p=>({person:p.person_id,percent:Number((Number(p.rate)*100).toFixed(8)),duty:p.duty||allocDuty[p.person_id]||storeDuties[p.person_id]||'produce',source:p.source||allocSource[p.person_id]||''}))
+    const allocations=selected.value?[...grouped].map(([person,rate])=>({person,percent:Number((rate*100).toFixed(8)),duty:allocDuty[person]||storeDuties[person]||null,source:allocSource[person]||''})):(row.people||[]).map(p=>({person:p.person_id,percent:Number((Number(p.rate)*100).toFixed(8)),duty:p.duty||allocDuty[p.person_id]||storeDuties[p.person_id]||null,source:p.source||allocSource[p.person_id]||''}))
     form.value={store_id:row.store_id||(shared.storeIds.length===1?shared.storeIds[0]:''),product_id:row.product_id||'',product_name:selected.value?.product_name||row.product_name||'',
       mode:current.mode||'distribute',managed:current.managed||false,managed_team_id:current.managed_team_id||null,valid_from:row.issue_valid_from||(current.valid_from>stamp?current.valid_from:stamp),valid_to:current.valid_to>stamp?current.valid_to:'',allocations}
     if(!form.value.allocations.length)form.value.allocations.push({person:null,percent:null,duty:'produce',source:''})
@@ -199,7 +199,7 @@ async function save() {
     const allocations = form.value.mode === 'distribute' ? form.value.allocations.map(p => ({
       ...(people.value.some(x => x.id === p.person) ? {person_id:p.person} : {name:p.person}),
       rate:(Number(p.percent)/100).toFixed(8),
-      duty: p.duty || 'produce',
+      ...(p.duty ? {duty:p.duty} : {}),
       ...(p.source === 'hierarchy' ? {source:'hierarchy'} : {}),
     })) : []
     await call('/settings', {method:'POST', body:JSON.stringify({...form.value, allocations, expected_revision:selected.value?.revision || 0})})
@@ -254,7 +254,8 @@ const tableColumns=computed(()=>[
   {title:'店铺',key:'store',width:210,mobile:false,render:row=>storeName(row.store_id)},
   {title:'人员 / 身份 / 比例',key:'people',width:250,mobileWidth:140,render:row=>row.people.length?row.people.map(p=>h('div',{class:'table-assignee'},[
     h('span',p.name),
-    h(NTag,{size:'tiny',bordered:false,type:dutyTagType(p.duty||'produce'),style:'margin:0 4px'},()=>p.source==='hierarchy'?'组织抽成':dutyLabel(p.duty||'produce')),
+    h(NTag,{size:'tiny',bordered:false,type:dutyTagType(p.duty),style:'margin:0 4px',title:p.duty_source==='store'?'来自生效的店铺默认身份':p.duty_source==='product'?'商品明确设置的身份':'未保存身份；不能视为已确认做货'},()=>dutyLabel(p.duty)||'未指定'),
+    p.duty_source==='store'?h('small',{class:'table-secondary'},'店铺默认'):null,
     h('strong',rateText(p.rate))])):h('span',{class:'table-secondary'},'未分配')},
   {title:'状态',key:'state',width:100,mobile:false,render:row=>h(NTag,{size:'small',bordered:false,type:row.state==='enabled'?'success':row.state==='pending'?'warning':'default'},()=>states[row.state])},
   {title:'操作',key:'action',width:74,mobileWidth:56,fixed:'right',render:row=>h(NButton,{text:true,type:'primary',size:'small',disabled:locked.value||row.store_id.startsWith('unmapped:'),onClick:()=>edit(row)},()=> '修改')},
@@ -321,13 +322,14 @@ defineExpose({edit,menu,busy,reload:load})
         <div class="allocation-head"><span>所属人员</span><span>身份</span><span>提成比率</span></div>
         <div v-for="(p,i) in form.allocations" :key="i" class="allocation-row">
           <n-select v-model:value="p.person" :options="personOptions" filterable placeholder="选择组织人员" :aria-label="`所属人员${i+1}`" />
-          <n-select v-model:value="p.duty" :options="dutyOptions" size="small" :aria-label="`身份${i+1}`" />
+          <n-select v-model:value="p.duty" :options="dutyOptions" placeholder="未指定" size="small" :aria-label="`身份${i+1}`" />
           <label class="percentage"><input v-model="p.percent" type="number" min="0" max="100" step="0.01" :aria-label="`提成比率${i+1}`" /><span>%</span></label>
           <n-button text @click="form.allocations.splice(i,1)">移除</n-button>
           <span v-if="p.source==='hierarchy'" class="hierarchy-tag">组织抽成</span>
         </div>
         <div class="allocation-footer"><n-button text type="primary" @click="form.allocations.push({person:null,percent:null,duty:'produce',source:''})">＋ 添加人员</n-button><n-button text @click="fillHierarchy">按组织补上级抽成</n-button><span>合计 {{ Number(total.toFixed(6)) }}%</span></div>
         <p class="duty-hint">做货：归属产出；抽点：只计提成。身份及比例只影响本商品；组织默认抽成需点击上方按钮补入，不自动覆盖已存设置。</p>
+        <p v-if="form.allocations.some(p=>!p.duty)" class="duty-hint">存在未指定身份：没有商品身份或生效的店铺默认身份。保持未指定保存不会自动设为做货，历史核算口径不因此改变。</p>
       </template>
       <details class="dates"><summary>生效时间 <span>{{ form.valid_from?.replace('T',' ') }}起{{ form.valid_to ? '，至'+form.valid_to.replace('T',' ') : '' }}</span></summary><div class="fields"><label>开始时间<input v-model="form.valid_from" type="datetime-local" step="1" aria-label="开始时间" /></label><label>结束时间（可留空）<input v-model="form.valid_to" type="datetime-local" step="1" aria-label="结束时间" /></label></div><small>北京时间；此前设置会保留。</small></details>
       <details v-if="selected?.versions?.length" class="history"><summary>查看修改记录</summary><div v-for="v in selected.versions" :key="v.id" class="history-item"><small><b :class="v.id===selected.active_version?'current-version':'old-version'">{{v.id===selected.active_version?'当前版本':'历史版本'}}</b> · {{ new Date(v.recorded_at).toLocaleString('zh-CN',{timeZone:'Asia/Shanghai'}) }} · {{v.actor}} · {{v.reason}}</small><p v-for="s in v.body.segments" :key="s.valid_from">{{ s.valid_from.replace('T',' ') }}起：{{ managedLabel(s) }}；{{ s.mode==='distribute' ? historicalPeople(s) : s.mode==='exclude' ? '不提成' : '暂不设置' }}{{ s.valid_to ? '（至'+s.valid_to.replace('T',' ')+ '）' : '' }}</p></div></details>

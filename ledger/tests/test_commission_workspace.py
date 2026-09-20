@@ -11,6 +11,32 @@ from test_commission_batch import setup
 from test_commission_reports import fixture, record
 
 
+@pytest.mark.parametrize('explicit,default,expected,source',[
+    (None,None,'未指定','未指定'),
+    (None,'cut','抽点','店铺默认'),
+    ('produce','cut','做货','商品设置'),
+    ('cut','produce','抽点','商品设置'),
+])
+def test_settings_export_and_list_resolve_the_same_duty(tmp_path,explicit,default,expected,source):
+    registry,model,a,b=setup(tmp_path)
+    if default:
+        registry.save_store_member('s1',a['id'],default,'','test','店铺默认',valid_from='1970-01-01')
+    if explicit:
+        registry.save_setting({'store_id':'s1','product_id':'123456789001','valid_from':'2000-01-01',
+            'expected_revision':1,'allocations':[{'person_id':a['id'],'rate':'.05','duty':explicit}]},'test')
+    ws=Workspace(tmp_path);app=FastAPI();install(app,lambda:ws,lambda:model);client=TestClient(app)
+    params={'store_id':'s1','person_id':a['id']}
+    listed=client.get('/api/commission-v2/settings',params=params).json()['rows'][0]
+    person=next(p for p in listed['people'] if p['person_id']==a['id'])
+    assert {'produce':'做货','cut':'抽点'}.get(person['duty'],'未指定')==expected
+    revision=registry.revision()
+    response=client.get('/api/commission-v2/export/settings',params=params)
+    assert response.status_code==200,response.text
+    row=next(r for r in csv.DictReader(io.StringIO(response.text.lstrip('\ufeff'))) if r['人员']=='甲')
+    assert row['身份']==expected and row['身份来源']==source
+    assert registry.revision()==revision
+
+
 def test_multiselect_settings_export_and_bulk_use_the_same_scope(tmp_path):
     registry, model, a, b = setup(tmp_path)
     c = registry.person_save({'name':'丙'},'test','登记')
