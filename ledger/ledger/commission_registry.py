@@ -978,10 +978,10 @@ class Registry:
         previous = conn.execute("SELECT body FROM scheme_version WHERE id=?", (row["active_version"],)).fetchone() if row else None
         body = json.loads(previous[0]) if previous else {}
         old = body.get("segments", [])
-        # A bulk "replace" with no end date means one uniform rule from the
-        # chosen time onward. Keeping an older scheduled segment would silently
-        # undo part of that batch later. Single-item edits and merge/remove still
-        # preserve scheduled changes unless the caller explicitly requests this.
+        # Open-ended bulk edits continue indefinitely. A pre-existing later
+        # version must not silently become their expiry. The caller previews
+        # schedule overrides before apply; ordinary single-item edits retain
+        # their existing scheduled-change protection.
         replace_future = bool(data.get("replace_future"))
         future = "" if replace_future else min((x["valid_from"] for x in old if x["valid_from"] > start), default="")
         if future and end and end > future:
@@ -1065,6 +1065,16 @@ class Registry:
                     segments[-1]['valid_to'] = next_segment['valid_to']
                 else:
                     segments.append(next_segment)
+        if data.get('classification_forever') and not end:
+            # Change ownership only; retain financial rules at every old boundary.
+            boundaries = sorted({start} | {point for s in old for point in (s['valid_from'],s.get('valid_to')) if point and point > start})
+            segments = [{**s,'valid_to':min(s.get('valid_to') or start,start)} for s in old if s['valid_from'] < start]
+            for index, point in enumerate(boundaries):
+                original = next((s for s in old if s['valid_from'] <= point and (not s.get('valid_to') or point < s['valid_to'])), None)
+                original = original or {'mode':'hold','allocations':[],'total_rate':'0','amount_hold':''}
+                segments.append({**original,'valid_from':point,
+                    'valid_to':boundaries[index+1] if index+1<len(boundaries) else '',
+                    'managed':managed,'managed_team_id':team_id})
         return self.save_scheme(data["store_id"], data["product_id"],
                                 {**body,"product_name":data.get("product_name", ""),"segments":segments, **({"source":data["source"]} if data.get("source") else {})},
                                 actor, data.get("reason", "调整提成设置"), expected=data.get("expected_revision",0), publish=True, conn=conn)

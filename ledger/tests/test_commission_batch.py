@@ -159,6 +159,56 @@ def test_remove_unassigned_person_does_not_create_empty_settings(tmp_path):
     assert r.revision()==revision and len(settings(r)['rows'])==2
 
 
+@pytest.mark.parametrize('operation',['merge','remove'])
+def test_open_ended_batch_does_not_inherit_old_september_boundary(tmp_path,operation):
+    r,m,a,b=setup(tmp_path)
+    r.save_setting({'store_id':'s1','product_id':'123456789001','expected_revision':1,
+        'valid_from':'2026-09-11T19:52:40','allocations':[{'person_id':a['id'],'rate':'.05'}]},'test')
+    before_revision=r.revision()
+    plan=preview(r,m,{'targets':[{'store_id':'s1','product_id':'123456789001','revision':2}],
+        'operation':operation,'template':{'valid_from':'2026-06-01','valid_to':'',
+        'allocations':[{'person_id':a['id'],'rate':'.05','duty':'produce'}]}},'test')
+    assert r.revision()==before_revision
+    assert plan['rows'][0]['valid_to']=='' and plan['future_overwritten_count']==1
+    apply(r,m,plan['id'],'test')
+    segments=r.active('s1')[1][0]['body']['segments']
+    assert segments[-1]['valid_to']=='' and segments[-1]['valid_from']=='2026-06-01T00:00:00'
+    crew=segments[-1]['allocations']
+    assert any(x['person_id']==b['id'] for x in crew)
+    assert any(x['person_id']==a['id'] for x in crew)==(operation=='merge')
+    # A later manual change remains able to end the former unlimited interval.
+    r.save_setting({'store_id':'s1','product_id':'123456789001','expected_revision':3,
+        'valid_from':'2027-01-01','allocations':[{'person_id':b['id'],'rate':'.04'}]},'test')
+    segments=r.active('s1')[1][0]['body']['segments']
+    assert segments[-2]['valid_to']=='2027-01-01T00:00:00' and segments[-1]['valid_to']==''
+
+
+def test_explicit_end_date_is_not_changed(tmp_path):
+    r,m,a,b=setup(tmp_path)
+    plan=preview(r,m,{'targets':[{'store_id':'s1','product_id':'123456789001','revision':1}],
+        'operation':'merge','template':{'valid_from':'2026-06-01','valid_to':'2026-08-20',
+        'allocations':[{'person_id':a['id'],'rate':'.05'}]}},'test')
+    assert plan['rows'][0]['valid_to']=='2026-08-20T00:00:00'
+    apply(r,m,plan['id'],'test')
+    assert r.active('s1')[1][0]['body']['segments'][-1]['valid_to']=='2026-08-20T00:00:00'
+
+
+def test_open_ended_classification_keeps_future_people_and_rates(tmp_path):
+    r,m,a,b=setup(tmp_path)
+    r.save_setting({'store_id':'s1','product_id':'123456789001','expected_revision':1,
+        'valid_from':'2026-09-11','allocations':[{'person_id':b['id'],'rate':'.08','duty':'cut'}]},'test')
+    originals=r.active('s1')[1][0]['body']['segments']
+    plan=preview(r,m,{'targets':[{'store_id':'s1','product_id':'123456789001','revision':2}],
+        'operation':'classification','template':{'valid_from':'2026-06-01','managed':True,'managed_team_id':a['id']}},'test')
+    assert plan['rows'][0]['valid_to']=='' and plan['rows'][0]['classification_only']
+    apply(r,m,plan['id'],'test')
+    segments=r.active('s1')[1][0]['body']['segments']
+    assert segments[-1]['valid_to']==''
+    assert segments[-1]['allocations']==originals[-1]['allocations']
+    assert segments[-2]['allocations']==originals[0]['allocations']
+    assert all(x['managed'] and x['managed_team_id']==a['id'] for x in segments if x['valid_from']>='2026-06-01')
+
+
 def test_bulk_replace_without_end_overwrites_scheduled_future_but_single_edit_keeps_it(tmp_path):
     r,m,a,b=setup(tmp_path)
     r.save_setting({'store_id':'s1','product_id':'123456789001','expected_revision':1,

@@ -43,6 +43,7 @@ try{
   const allocations=preview.changes[0].allocations
   assert(allocations.some(p=>p.person_id==='leader'&&p.source==='hierarchy'&&p.duty==='cut'),'Hierarchy source lost')
   await wait(()=>button('确认保存1条设置'))
+  assert(document.body.textContent.includes('无限期有效（无结束时间）'),'Blank end must be explicitly shown as unlimited')
   button('确认保存1条设置').click()
   await wait(()=>applied)
   await new Promise(r=>setTimeout(r,50))

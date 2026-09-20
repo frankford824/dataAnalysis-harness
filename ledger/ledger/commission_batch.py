@@ -79,6 +79,7 @@ def preview(registry, model, request, actor):
                     data['managed_team_id']=candidates[0][0]
                 validate_key(model,data,conn)
                 data['valid_from']=local_time(data.get('valid_from',''))
+                data['valid_to']=local_time(data.get('valid_to',''),optional=True)
                 key=(data['store_id'],data['product_id'],data['valid_from'])
                 if key in seen:
                     raise RegistryError(f'第{index}条与前面的店铺、宝贝、生效时间重复')
@@ -92,8 +93,7 @@ def preview(registry, model, request, actor):
                 data['product_name']=data.get('product_name') or old.get('product_name') or (catalog[0] if catalog else '')
                 old_body=json.loads(old.get('body') or '{}') if old else {}
                 future_segments=[s for s in old_body.get('segments',[]) if s['valid_from']>data['valid_from']]
-                if operation=='replace' and not data.get('valid_to'):
-                    data['replace_future']=True
+                data['replace_future']=not bool(data.get('valid_to'))
                 before=allocations(conn,segment)
                 if operation=='classification':
                     if not isinstance(data.get('managed'),bool):
@@ -102,7 +102,7 @@ def preview(registry, model, request, actor):
                         raise RegistryError('该商品在所选生效时间没有有效设置，请先登记商品规则，或调整生效时间')
                     data['mode']=segment.get('mode','hold')
                     data['preserve_allocations']=True
-                    data['replace_future']=False
+                    data['classification_forever']=not bool(data.get('valid_to'))
                     data['allocations']=[{k:v for k,v in a.items() if k!='name'} for a in before]
                 requested=data.get('allocations',[])
                 if operation in {'merge','remove'} and data.get('mode','distribute')=='distribute':
@@ -118,6 +118,8 @@ def preview(registry, model, request, actor):
                         if operation=='remove':
                             if pid and pid in by_id:
                                 by_id.pop(pid)
+                                removed=True
+                            elif pid and data.get('replace_future') and any(a.get('person_id')==pid for s in future_segments for a in s.get('allocations',[])):
                                 removed=True
                         elif pid:by_id[pid]={**by_id.get(pid,{}),**{k:v for k,v in person.items() if k!='name'},'person_id':pid,'rate':person.get('rate')}
                         else:extra.append(person)
@@ -140,10 +142,11 @@ def preview(registry, model, request, actor):
                 changes.append(stored)
                 display.append({'store_id':data['store_id'],'store':names[data['store_id']],'product_id':data['product_id'],
                                 'product_name':data['product_name'],'before':before,'after':allocations(conn,after),
-                                'mode':after['mode'],'valid_from':after['valid_from'],'valid_to':after['valid_to'],
+                                'mode':after['mode'],'valid_from':after['valid_from'],'valid_to':data.get('valid_to') or '',
                                 'managed':after.get('managed',False),'managed_team_id':after.get('managed_team_id',''),
                                 'managed_team':team_names.get(after.get('managed_team_id'),'原登记团队'),
                                 'future_overwritten':len(future_segments) if data.get('replace_future') else 0,
+                                'classification_only':operation=='classification',
                                 'new':not old,'source_rows':data.get('source_rows',[]),'catalog_missing':not catalog})
         finally:
             conn.rollback()
