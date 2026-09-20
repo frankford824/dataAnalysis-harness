@@ -800,6 +800,18 @@ def install(app, workspace, model, model_root: Path | None = None):
             raise RevisionConflict("计算状态或人员信息已变化，请重新查询后导出")
         return {**report, "fingerprint": fingerprint}
 
+    @router.get('/sales-attribution/audit')
+    def sales_attribution_audit(start: str, end: str, store_ids: list[str] = Query(default=[]), person_ids: list[str] = Query(default=[])):
+        report = report_result(ReportSelection(start=start,end=end,store_ids=store_ids,person_ids=person_ids))
+        def rows():
+            for scope in report.get('sales_pending_scopes',[]):
+                for product in scope['sales_pending_products']:
+                    yield {'店铺':scope['store'],'月份':scope['period'],'人员':scope['person'],
+                           '宝贝ID':product,'核算记录':scope['finance_run'],
+                           '原因':'；'.join({'pending_identity':'缺少覆盖订单时间的明确身份','pending_roster_refresh':'现规则人员名单与原核算不一致','pending_managed_refresh':'托管归属待刷新'}[s] for s in scope.get('sales_sources',[]) if s.startswith('pending') and s in {'pending_identity','pending_roster_refresh','pending_managed_refresh'}),
+                           '处理':'请核对商品生效身份；如人员或托管归属发生变化，请更新未结账核算。不要凭组织角色猜测身份。'}
+        return csv_response('sales-attribution-pending.csv',['店铺','月份','人员','宝贝ID','核算记录','原因','处理'],rows())
+
     def report_payload(selection: ReportSelection):
         report = report_result(selection)
         if not selection.view:

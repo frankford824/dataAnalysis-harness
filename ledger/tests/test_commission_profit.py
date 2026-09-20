@@ -18,6 +18,7 @@ from test_commission import _model
 def _persist(registry, person_id, person='甲', rows=None, run_id=11, store_id='s1', period='2026-06'):
     frame = pl.DataFrame(rows or {
         'status': ['distribute', 'distribute', 'distribute', 'exclude'],
+        'duty': ['produce', 'produce', 'produce', 'cut'],
         'person_id': [person_id, person_id, person_id, person_id],
         'person': [person, person, person, person],
         'product_id': ['111', '111', '222', '333'],
@@ -87,9 +88,11 @@ def test_shared_link_only_keeps_this_persons_share(tmp_path):
     other = compose(registry, 's1', '2026-06', b['id'], 11)
     assert mine['products'][0]['profit'] == 60
     assert mine['products'][0]['product_sales'] == 200
-    assert mine['products'][0]['sales'] == 120
+    assert mine['products'][0]['sales'] is None
+    assert mine['sales_pending_products'] == ['111']
     assert other['products'][0]['profit'] == 40
-    assert other['products'][0]['sales'] == 80
+    assert other['products'][0]['sales'] is None
+    assert other['sales_pending_products'] == ['111']
     assert mine['products'][0]['rate'] == 0.03
     assert other['products'][0]['rate'] == 0.02
     assert mine['included_profit'] == 60

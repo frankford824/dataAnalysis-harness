@@ -63,14 +63,14 @@ const columns = computed(() => [
     render:row => h('span', {title:'该宝贝本月订单的财务销售收入全额，未按人头拆，用来对利润看板'}, money(row.product_sales))},
   {title:() => h('div', {class:'profit-col-title'}, [h('span', '本人销售额'), h('small', '按做货归属')]),
     key:'sales', width:112, mobile:false, align:'right',
-    render:row => h('span', {title:'单人做货归属全额；多人做货只在做货人员间分摊，组长抽点不分走销售额'}, money(row.sales))},
-  {title:() => h('div', {class:'profit-col-title'}, [h('span', '本人成本'), h('small', '按做货归属')]),
+    render:row => h('span', {title:'仅使用明确生效的商品身份或归档身份；缺少依据时不猜测'}, row.sales_pending?'归属待确认':money(row.sales))},
+  {title:() => h('div', {class:'profit-col-title'}, [h('span', '本人成本'), h('small', '原核算口径')]),
     key:'cost', width:112, mobile:false, align:'right', render:row =>
-    row.sales != null && row.gross != null ? money(Number(row.sales) - Number(row.gross)) : '—'},
-  {title:() => h('div', {class:'profit-col-title'}, [h('span', '本人毛利'), h('small', '按做货归属')]),
+    row.cost != null ? money(row.cost) : row.sales != null && row.gross != null ? money(Number(row.sales) - Number(row.gross)) : '—'},
+  {title:() => h('div', {class:'profit-col-title'}, [h('span', '本人毛利'), h('small', '原核算口径')]),
     key:'gross', width:112, mobile:false, align:'right',
-    render:row => h('span', {title:'与销售额使用相同的做货归属比例；抽点人员不参与分摊'}, money(row.gross))},
-  {title:() => h('div', {class:'profit-col-title'}, [h('span', '本人创造利润'), h('small', '按做货归属，未扣兼职')]),
+    render:row => h('span', {title:'保留原核算毛利，不因销售归属修正而改变'}, money(row.gross))},
+  {title:() => h('div', {class:'profit-col-title'}, [h('span', '本人创造利润'), h('small', '原口径，未扣兼职')]),
     key:'profit', width:132, mobileWidth:118, align:'right',
     render:row => h('span', {class:['table-money', row.profit < 0 ? 'negative' : ''],
       title: row.profit < 0 ? '该商品归属本人的经营利润为亏，尚未扣店级兼职' : '经营利润按做货人员归属，尚未扣店级兼职'},
@@ -167,15 +167,16 @@ function exportTable() {
       <p class="profit-scope">{{ target?.store }} · {{ target?.period }}。勾掉不进阶梯的商品，上面合计马上变。本月已算提成不会改。</p>
       <n-alert type="info" :bordered="false" class="profit-basis">
         <b>商品销售收入</b>是该宝贝本月财务销售收入全额，用来对利润看板。
-        <b>本人销售额 / 本人毛利 / 本人创造利润</b>按每笔订单的商品做货身份归属。只有一位做货人员时归属全额；多位做货人员按他们之间的点数比例分摊。
-        <b>组长抽点不分走做货人员的产出</b>，提成仍按各自规则计算。历史明细未记录身份时沿用原分摊口径。
+        <b>本人销售额</b>按明确生效的商品身份归属：单人做货归全额，多人仅在做货人员间分摊，组长抽点不分走销售额。身份依据不足时显示“归属待确认”。
+        <b>成本、毛利、利润和提成保留原核算口径</b>，不因销售额归属纠正而重算；旧归档的销售额与毛利可能采用不同归属口径，不能直接相减作为成本。
         托管商品的销售额仅计入指定团队；个人毛利、利润、提成及原成本分摊基数不变。
         负数为这个商品分到本人的亏损，尚未扣店级兼职。
         <b>本人点数</b>是此人在这个宝贝上的份额，不是链接合计。
       </n-alert>
+      <n-alert v-if="data?.sales_pending_products?.length" type="warning" :bordered="false">本店本月有 {{data.sales_pending_products.length}} 个商品的销售归属待确认，请在提成设置中明确生效身份后刷新；当前不计为已确认个人业绩。</n-alert>
       <n-spin :show="loading">
         <div class="profit-kpis">
-          <div><span>本人全部商品利润<small>按做货归属，未扣兼职</small></span><strong>¥{{ money(totals.all) }}</strong></div>
+          <div><span>本人全部商品利润<small>原核算口径，未扣兼职</small></span><strong>¥{{ money(totals.all) }}</strong></div>
           <div class="cut"><span>已剔除 {{ totals.excludedCount }} 个<small>未扣兼职</small></span><strong>¥{{ money(totals.excluded) }}</strong></div>
           <div class="keep"><span>计入阶梯<small>未扣兼职</small></span><strong>¥{{ money(totals.included) }}</strong></div>
           <div><span>当前提成试算<small>订单试算，未扣兼职</small></span><strong>¥{{ money(data?.commission_trial) }}</strong></div>

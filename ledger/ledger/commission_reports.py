@@ -130,8 +130,11 @@ _PROFIT_CACHE_LIMIT = 512  # Small person totals only, never full Parquet frames
 _OUTPUT_CODE = None
 
 
-def _archived_allocated_outputs(registry, commission, *, production=False):
+def _archived_allocated_outputs(registry, commission, *, production=False, sales=False):
     global _OUTPUT_CODE
+    if sales:
+        from .commission_sales import archived
+        return archived(registry,commission,_archived_allocated_outputs(registry,commission,production=True))
     if production and commission.get('production_outputs') is not None:
         return commission['production_outputs']
     calculation = commission.get('calculation_id')
@@ -166,13 +169,15 @@ def _archived_allocated_outputs(registry, commission, *, production=False):
             return None
         from io import BytesIO
         schema = pl.read_parquet_schema(BytesIO(payload))
-        cols = [name for name in ('status', 'person_id', 'share', 'total_rate', 'duty', 'spine_row', 'product_id', 'managed', 'sales_unassigned',
+        cols = [name for name in ('status', 'person_id', 'share', 'total_rate', 'duty', 'spine_row', 'order_at', 'product_id', 'managed', 'sales_unassigned',
                                   'participation_sales','participation_gross',
                                   'participation_profit', 'original_base')
                 if name in schema]
         details = pl.read_parquet(BytesIO(payload), columns=cols)
         basis = commission.get('base_node') == 'net_profit' and commission.get('on_loss') == 'deduct'
         results = {mode: allocated_outputs(details, production=mode, net_profit_basis=basis) for mode in (False, True)}
+        from .commission_sales import archived
+        archived(registry,commission,results[True],frame=details)
         derived_read_cache.put(registry,persistent_key,{'legacy':results[False],'production':results[True]})
     except (OSError, ValueError, pl.exceptions.PolarsError):
         results = {False: None, True: None}
@@ -287,7 +292,7 @@ def attributed_outputs(commission, store_sales, store_gross, registry, *, duties
     ids=[p.get('person_id') for p in people]
     if not people or any(not pid for pid in ids) or len(ids)!=len(set(ids)):
         return {}
-    production_split = _archived_allocated_outputs(registry, commission, production=True) if production else None
+    production_split = _archived_allocated_outputs(registry, commission, production=True, sales=True) if production else None
     if len(people)==1 and production_split is None:
         return {ids[0]:{'sales':store_sales,'gross':store_gross}}
     # duty-based: producers get all sales/gross; cut-only members get 0
@@ -303,7 +308,7 @@ def attributed_outputs(commission, store_sales, store_gross, registry, *, duties
            for p in people if p.get('person_id') and
            p.get('allocated_sales') is not None and p.get('allocated_gross') is not None}
     if production_split is not None:
-        split={pid:{'sales':value.get('sales'),'gross':value.get('gross')} for pid,value in production_split.items()}
+        split={pid:{'sales':value.get('sales') if value.get('sales') is not None else value.get('reference_sales'),'gross':value.get('gross')} for pid,value in production_split.items()}
     elif len(split)!=len(people):
         archived=_archived_allocated_outputs(registry,commission)
         if archived is None:return {}
@@ -315,6 +320,11 @@ def attributed_outputs(commission, store_sales, store_gross, registry, *, duties
     values={pid:{'sales':decimal(split[pid]['sales']),
                  'gross':decimal(split[pid]['gross'])} for pid in ids}
     weights={pid:max(decimal((production_split or {}).get(pid,{}).get('sales_basis', values[pid]['sales'])),Decimal(0)) for pid in ids}
+    reference_sales = {pid:decimal((production_split or {}).get(pid,{}).get('reference_sales',values[pid]['sales'])) for pid in ids}
+    if store_sales is not None:
+        reference_cuts = _split_cents(max(sum(reference_sales.values(),Decimal(0))-decimal(store_sales),Decimal(0)),weights)
+        if reference_cuts is not None:
+            reference_sales = {pid:value-reference_cuts[pid] for pid,value in reference_sales.items()}
     for name,store_value in (('sales',store_sales),('gross',store_gross)):
         if store_value is None:continue
         excess=max(sum((value[name] for value in values.values()),Decimal(0))
@@ -322,8 +332,15 @@ def attributed_outputs(commission, store_sales, store_gross, registry, *, duties
         cuts=_split_cents(excess,weights)
         if cuts is None:return {}
         for pid in ids:values[pid][name]-=cuts[pid]
-    return {pid:{name:money_float(amount) for name,amount in value.items()}
-            for pid,value in values.items()}
+    result = {pid:{name:money_float(amount) for name,amount in value.items()} for pid,value in values.items()}
+    for pid, value in (production_split or {}).items():
+        if pid in result:
+            result[pid]['sales_pending_products'] = value.get('sales_pending_products',[])
+            result[pid]['sales_sources'] = value.get('sales_sources',[])
+            result[pid]['reference_sales'] = money_float(reference_sales[pid])
+            if value.get('sales_pending_products'):
+                result[pid]['sales'] = None
+    return result
 
 
 def confirmed_profit_rate(commission, person_id, store_id=''):
@@ -686,6 +703,8 @@ def build(workspace, registry, model, start, end, store_ids=None, person_ids=Non
                                         'duty':duty,
                                         'store_id':sid,'store':names[sid],'period':period,
                                         'sales':person_output.get(person.get('person_id'),{}).get('sales'),
+                                        'sales_pending_products':person_output.get(person.get('person_id'),{}).get('sales_pending_products',[]),
+                                        'sales_sources':person_output.get(person.get('person_id'),{}).get('sales_sources',[]),
                                         'gross':person_output.get(person.get('person_id'),{}).get('gross'),
                                         'profit_after_labor':person_profit.get(person.get('person_id')),
                                         'labor_cost':None,'base':None,'base_name':'',
@@ -733,6 +752,8 @@ def build(workspace, registry, model, start, end, store_ids=None, person_ids=Non
                                 'duty':duty,
                                 'store_id':sid,'store':names[sid],'period':period,
                                 'sales':person_output.get(person.get('person_id'),{}).get('sales'),
+                                'sales_pending_products':person_output.get(person.get('person_id'),{}).get('sales_pending_products',[]),
+                                'sales_sources':person_output.get(person.get('person_id'),{}).get('sales_sources',[]),
                                 'gross':person_output.get(person.get('person_id'),{}).get('gross'),
                                 'profit_after_labor':person_profit.get(person.get('person_id')),
                                 'labor_cost':None,
@@ -751,6 +772,8 @@ def build(workspace, registry, model, start, end, store_ids=None, person_ids=Non
         if not selected_people and source_c.get('people'):
             store_profit = profit_after_labor(operating, visible_labor)
             residual_sales = _output_residual(sales, person_output, 'sales')
+            if any(value.get('sales_pending_products') for value in person_output.values()):
+                residual_sales = None
             if residual_sales is not None:
                 residual_sales = money_float(decimal(residual_sales) - decimal(managed_total))
             residual_gross = _output_residual(gross, person_output, 'gross')
@@ -759,7 +782,12 @@ def build(workspace, registry, model, start, end, store_ids=None, person_ids=Non
                 {pid: {'profit': value} for pid, value in person_profit.items()},
                 'profit',
             )
-            residuals = (residual_sales, residual_gross, residual_profit)
+            # Preserve the financial residual row even when sales ownership is
+            # pending; do not make a cost/profit row disappear due to this fix.
+            reference_residual = _output_residual(sales, {pid:{'sales':value.get('reference_sales',value.get('sales'))} for pid,value in person_output.items()}, 'sales')
+            if reference_residual is not None:
+                reference_residual = money_float(decimal(reference_residual)-decimal(managed_total))
+            residuals = (residual_sales, reference_residual, residual_gross, residual_profit)
             if any(value is not None and abs(value) > .01 for value in residuals):
                 missing_count = int(source_c.get('unassigned_orders') or 0)
                 label = (f'未分配（{missing_count}笔订单信息不完整）'
@@ -899,6 +927,12 @@ def build(workspace, registry, model, start, end, store_ids=None, person_ids=Non
     for row in person_rows:
         row['sales'] = money_float(person_sales[row['person_id']]) if row['person_id'] in person_sales else None
         row['managed_sales'] = 0
+    sales_pending = [r for r in store_person_rows if r.get('sales_pending_products')]
+    pending_people = {r['person_id'] for r in sales_pending}
+    for row in person_rows:
+        if row['person_id'] in pending_people:
+            row['sales'] = None
+            row['sales_pending'] = True
     team_rows = []
     for t in teams_totals.values():
         team_rows.append({
@@ -918,6 +952,11 @@ def build(workspace, registry, model, start, end, store_ids=None, person_ids=Non
             'status': '、'.join(sorted(t['statuses'])) if t['statuses'] else '暂无数据',
         })
     team_rows.sort(key=lambda x: -(x['amount'] or 0))
+    pending_teams = {find_team_info(pid,roster)['team_id'] or pid for pid in pending_people}
+    for row in team_rows:
+        if row['team_id'] in pending_teams:
+            row['sales'] = None
+            row['sales_pending'] = True
 
     store_rows=[{**r,'configured_people':len(configured.get(r['store_id'],set()) & selected_people if selected_people else configured.get(r['store_id'],set())),'amount':money_float(r['amount']) if r['periods'] else None,'labor_cost':money_float(r['labor_cost']) if r['periods'] else None,'people':len(r['people']),
                  'status':'、'.join(sorted(r['statuses']))} for r in store_totals.values()]
@@ -954,6 +993,7 @@ def build(workspace, registry, model, start, end, store_ids=None, person_ids=Non
     for line in lines:
         line.update(payout_summary([line]))
     return {'teams':team_rows,'people':sorted(person_rows,key=lambda x:x['person']),'stores':store_rows,'rows':lines,
+            'sales_pending_scopes':[{k:r.get(k) for k in ('store_id','store','period','person_id','person','finance_run','sales_pending_products','sales_sources')} for r in sales_pending],
             'store_people':store_person_rows,'coverage':coverage,
             'configured_people_count':len(configured_total),'available_people':list(available.values()),'run_ids':[r['id'] for r in records],
             'total':money_float(sum((decimal(x['amount']) for x in lines),Decimal(0))) if any(r['has_result'] for r in coverage) else None,
@@ -1008,9 +1048,16 @@ def business_export(report, kind):
         columns += [('销售额','sales')]
     if kind in {'teams', 'people', 'store_people', 'stores'}:
         columns += [('托管类销售额','managed_sales')]
+    if kind in {'teams','people','store_people'}:
+        columns += [('销售归属状态','sales_attribution_state')]
     def rows():
         for row in report['rows' if kind == 'breakdown' else kind]:
             item = {label:row.get(key) for label,key in columns}
+            if '销售归属状态' in item:
+                item['销售归属状态'] = ('店铺财务口径' if row.get('kind')=='store' else
+                    '托管团队归属' if row.get('kind')=='managed' else
+                    '待确认' if row.get('sales_pending') or row.get('sales_pending_products') else
+                    '未取得销售额' if row.get('sales') is None else '已解析')
             if '核定状态' in item:
                 item['核定状态'] = {'pending':'待核定','partial':'部分核定','confirmed':'已核定实发'}.get(item['核定状态'], '')
             if kind=='stores' and not row.get('periods'):item['已出金额人数']=None

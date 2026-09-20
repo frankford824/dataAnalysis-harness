@@ -21,7 +21,7 @@ _WANTED = (
     'status', 'person_id', 'person', 'product_id', 'product_name',
     'share', 'total_rate', 'original_base', 'amount',
     'participation_sales', 'participation_gross', 'participation_profit',
-    'spine_row', 'order_id', 'duty', 'managed', 'managed_team_id', 'sales_unassigned',
+    'spine_row', 'order_id', 'order_at', 'duty', 'managed', 'managed_team_id', 'sales_unassigned',
 )
 
 
@@ -76,12 +76,21 @@ def _allocated_parts(assigned):
         *[pl.col(source).cast(pl.Decimal(28, 10), strict=False).alias('__' + name)
           for name, source in fields.items()],
     ).filter(pl.col('__rate').is_not_null() & (pl.col('__rate') > 0))
-    return ready.with_columns(*[
+    parts = ready.with_columns(*[
         (pl.col('__' + name) * pl.col('__share') / pl.col('__rate')
          * (pl.when(pl.col('managed').fill_null(False) | (pl.col('sales_unassigned').fill_null(False) if 'sales_unassigned' in ready.columns else pl.lit(False))).then(0).otherwise(1)
             if name == 'participation_sales' and 'managed' in ready.columns else 1)).alias(name)
         for name in fields
     ])
+    if '__sales_share' in parts.columns and 'participation_sales' in parts.columns:
+        # Preserve the historical cost basis before correcting sales ownership.
+        parts = parts.with_columns((pl.col('__participation_sales') * pl.col('__share') / pl.col('__rate')).alias('__reference_person_sales'))
+        parts = parts.with_columns(
+            pl.when(pl.col('__sales_pending')).then(None).otherwise(
+                pl.col('__participation_sales') * pl.col('__sales_share') / pl.col('__sales_rate')
+                * (pl.when(pl.col('managed').fill_null(False)).then(0).otherwise(1) if 'managed' in parts.columns else 1)
+            ).alias('participation_sales'))
+    return parts
 
 
 def _money_or_none(value):
@@ -111,6 +120,9 @@ def _product_rows(parts, include_orders=True):
     if parts.is_empty() or 'product_id' not in parts.columns:
         return []
     aggs = [
+        pl.col('__sales_versions').filter(pl.col('__sales_versions')!='').unique().sort().alias('sales_rule_versions') if '__sales_versions' in parts.columns else pl.lit(None).alias('sales_rule_versions'),
+        pl.col('__sales_pending').any().alias('sales_pending') if '__sales_pending' in parts.columns else pl.lit(False).alias('sales_pending'),
+        (pl.col('__reference_person_sales') - pl.col('participation_gross')).sum().alias('cost') if '__reference_person_sales' in parts.columns and 'participation_gross' in parts.columns else pl.lit(None).alias('cost'),
         pl.col('managed').fill_null(False).any().alias('managed') if 'managed' in parts.columns else pl.lit(False).alias('managed'),
         pl.col('product_name').drop_nulls().first().alias('product_name')
         if 'product_name' in parts.columns else pl.lit('').alias('product_name'),
@@ -139,7 +151,10 @@ def _product_rows(parts, include_orders=True):
             'product_name': row.get('product_name') or '',
             'orders': int(row['orders'] or 0),
             'product_sales': _money_or_none(row.get('product_sales')),
-            'sales': _money_or_none(row.get('sales')),
+            'sales': None if row.get('sales_pending') else _money_or_none(row.get('sales')),
+            'sales_pending':bool(row.get('sales_pending')),
+            'sales_rule_versions':row.get('sales_rule_versions') or [],
+            'cost':_money_or_none(row.get('cost')),
             'product_gross': _money_or_none(row.get('product_gross')),
             'gross': _money_or_none(row.get('gross')),
             'profit': _money_or_none(row.get('profit')),
@@ -196,6 +211,8 @@ def compose(registry, store_id, period, person_id, run_id, *, store_name='', dut
     available = set(pl.scan_parquet(path).collect_schema().names())
     details = pl.read_parquet(path, columns=[name for name in _WANTED if name in available])
     details = production_weights(details.filter(pl.col('status') == 'distribute'))
+    from .commission_sales import attach
+    details = attach(registry,store_id,period,details)
     roster = {row['id']: row for row in registry.people()}
     person_details = _person_rows(details, store_id, person_id, set(roster))
     if product_id:
@@ -203,17 +220,8 @@ def compose(registry, store_id, period, person_id, run_id, *, store_name='', dut
     assigned = (person_details.filter(pl.col('status') == 'distribute')
                 if 'status' in person_details.columns and not person_details.is_empty()
                 else person_details.head(0))
-    # When duties exist and this person is 'cut', only include products
-    # where this person is the sole person on the link.
-    if 'duty' not in available and duties and duties.get(person_id, {}).get('duty') == 'cut' and not assigned.is_empty():
-        if 'product_id' in details.columns and 'person_id' in details.columns:
-            base = (details.filter(pl.col('status') == 'distribute')
-                    if 'status' in details.columns else details)
-            solo = (base.group_by('product_id')
-                    .agg(pl.col('person_id').n_unique().alias('n'))
-                    .filter(pl.col('n') == 1))
-            solo_products = set(solo['product_id'].to_list())
-            assigned = assigned.filter(pl.col('product_id').is_in(solo_products))
+    # Cut recipients still own their archived commission/financial evidence.
+    # Only the independent sales projection becomes zero, not the entire row.
     parts = _allocated_parts(assigned)
     products = _product_rows(parts, include_orders=include_orders)
     person_name = next((row.get('person') for row in assigned.iter_rows(named=True)
@@ -236,6 +244,7 @@ def compose(registry, store_id, period, person_id, run_id, *, store_name='', dut
         'allocated_profit': None if split is None or engine_pid not in split
         else split[engine_pid].get('profit'),
         'products': products,
+        'sales_pending_products':[p['product_id'] for p in products if p.get('sales_pending')],
         'excluded_product_ids': excluded_ids,
         'included_profit': _sum_profit(products, lambda row: row['product_id'] not in cut) if products else None,
         'excluded_profit': _sum_profit(products, lambda row: row['product_id'] in cut) if products else None,

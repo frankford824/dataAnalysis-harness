@@ -39,7 +39,7 @@ export function sameIds(left = [], right = []) {
 }
 
 export const PROFIT_BEFORE_LABOR = '本人创造利润（未扣兼职）'
-export const PROFIT_BASIS_NOTE = '销售额/毛利/利润按商品做货归属：单人做货归全额，多人仅按做货人员点数分摊，抽点不参与；历史缺身份记录沿用原分摊；未扣店级兼职；负数为归属本人的亏损'
+export const PROFIT_BASIS_NOTE = '销售额按明确生效的商品身份或归档身份归属：单人做货归全额，多人仅按做货人员点数分摊，抽点不参与；依据不足时待确认。成本、毛利、利润与提成保持原核算口径，未扣店级兼职'
 
 function csvCell(value) {
   if (value == null || value === '') return ''
@@ -72,7 +72,9 @@ export function profitCompositionExportRows(data, includedIds = []) {
     订单数: row.orders ?? '',
     '商品销售收入（全额）': row.product_sales,
     本人销售额: row.sales,
-    本人成本: row.sales != null && row.gross != null
+    销售归属状态: row.sales_pending ? '待确认身份' : '已解析',
+    销售身份规则版本: (row.sales_rule_versions || []).join(';'),
+    本人成本: row.cost != null ? row.cost : row.sales != null && row.gross != null
       ? Math.round((Number(row.sales) - Number(row.gross)) * 100) / 100 : null,
     本人毛利: row.gross,
     [PROFIT_BEFORE_LABOR]: row.profit,
@@ -84,7 +86,7 @@ export function profitCompositionExportRows(data, includedIds = []) {
 
 export function profitCompositionCsv(data, includedIds = []) {
   const headers = ['人员', '店铺', '月份', '商品', '宝贝ID', '订单数',
-    '商品销售收入（全额）', '本人销售额', '本人成本', '本人毛利',
+    '商品销售收入（全额）', '本人销售额', '销售归属状态', '销售身份规则版本', '本人成本', '本人毛利',
     PROFIT_BEFORE_LABOR, '本人点数', '是否计入阶梯', '利润口径']
   const rows = profitCompositionExportRows(data, includedIds)
   const lines = [headers.map(csvCell).join(','),

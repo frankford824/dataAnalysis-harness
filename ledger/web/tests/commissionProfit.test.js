@@ -8,6 +8,17 @@ const products = [
   {product_id:'c', product_name:'赠品C', profit:-5.2},
 ]
 
+test('sales correction does not redefine archived cost and exposes pending ownership', () => {
+  const data={products:[{product_id:'a',product_sales:16736.38,sales:16736.38,gross:4095.12,cost:2599.43,profit:2423.67,sales_rule_versions:['version-1']},
+    {product_id:'b',sales:null,sales_pending:true,cost:0,gross:12,profit:10}]}
+  const rows=profitCompositionExportRows(data,[])
+  assert.equal(rows[0].本人成本,2599.43)
+  assert.equal(rows[0].销售身份规则版本,'version-1')
+  assert.equal(rows[1].本人销售额,null)
+  assert.equal(rows[1].销售归属状态,'待确认身份')
+  assert.equal(rows[1].本人成本,0)
+})
+
 test('live totals follow included products and ignore search', () => {
   const totals = liveProfitTotals(products, ['a', 'c'])
   assert.equal(totals.all, 135.15)

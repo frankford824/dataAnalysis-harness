@@ -16,7 +16,7 @@ let contextRequests=0, saved=null
 window.fetch=async (url,options={})=>{
   const path=String(url)
   const reply=body=>new Response(JSON.stringify(body),{status:200,headers:{'Content-Type':'application/json'}})
-  if(path.includes('/reports/query'))return reply({view:'people',items:[{person_id:'p1',person:'测试甲',amount:30,trial_amount:30,confirmed_amount:null,confirmation_state:'pending',stores:2,periods:1,status:'试算'}],count:1,total:30,run_ids:[101,102],selection:{start:'2026-06',end:'2026-06'},confirmation_scopes:targets,person_confirmation_scopes:targets,available_people:[]})
+  if(path.includes('/reports/query'))return reply({sales_pending_scopes:[{store_id:'s1',period:'2026-06',person_id:'p1',sales_pending_products:['test-product']}],view:'people',items:[{person_id:'p1',person:'测试甲',amount:30,trial_amount:30,confirmed_amount:null,confirmation_state:'pending',stores:2,periods:1,status:'试算'}],count:1,total:30,run_ids:[101,102],selection:{start:'2026-06',end:'2026-06'},confirmation_scopes:targets,person_confirmation_scopes:targets,available_people:[]})
   if(path.includes('/payout-confirmations/context')){
     if(!path.includes('run_id=101'))throw new Error('Incorrect selected run')
     contextRequests++
@@ -38,6 +38,7 @@ const buttons=()=>[...document.querySelectorAll('button')]
 const assert=(value,message)=>{if(!value)throw new Error(message)}
 try{
   await wait(()=>buttons().some(b=>b.textContent==='测试甲'))
+  assert(document.querySelector('a[href*="sales-attribution/audit"]'),'Missing global sales attribution audit export')
   buttons().find(b=>b.textContent==='测试甲').click()
   await wait(()=>document.querySelector('.payout-targets button'))
   assert(document.querySelector('.payout-targets').textContent.includes('编辑 →'),'Missing entry label')

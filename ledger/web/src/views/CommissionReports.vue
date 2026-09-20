@@ -25,6 +25,12 @@ const profit = ref(null)
 let payoutRequest = 0
 const kinds = [{key:'teams',label:'按团队汇总'},{key:'people',label:'按人员汇总'},{key:'store_people',label:'店铺与分配人'},{key:'stores',label:'按店铺汇总'},{key:'breakdown',label:'按月明细'},{key:'coverage',label:'月份进度'}]
 const scope = computed(() => ({start:state.start,end:state.end,...state.scope}))
+const salesAuditUrl = computed(()=>{
+  const query=new URLSearchParams({start:state.start,end:state.end})
+  for(const id of state.storeIds)query.append('store_ids',id)
+  for(const id of state.personIds)query.append('person_ids',id)
+  return '/api/commission-v2/sales-attribution/audit?'+query
+})
 const monthError = computed(() => state.start && state.end && state.start > state.end ? '结束月份不能早于开始月份' : '')
 const queryKey = computed(() => JSON.stringify({...scope.value,view:state.reportView,offset:(page.value-1)*50}))
 const {data:report,error,loading,stale,load,prefetch} = useCommissionQuery('reports', () => queryKey.value,
@@ -288,6 +294,7 @@ const tableColumns=computed(()=>{
     minWidth:index===0?170:undefined,mobileWidth:['amount','selected_amount','labor_cost','sales','gross','profit_after_labor','base','store_amount','trial_amount','diff_amount'].includes(key)?115:key==='period'?84:index===0?135:undefined,
     mobile:index===0||['amount','selected_amount','trial_amount','diff_amount','sales','gross','profit_after_labor','labor_cost','period','person','team'].includes(key),align:['amount','selected_amount','labor_cost','sales','gross','profit_after_labor','base','store_amount','trial_amount','diff_amount'].includes(key)?'right':'left',
     render:row=>{
+      if(key==='sales'&&(row.sales_pending||row.sales_pending_products?.length))return h('span',{style:'color:#a16207'},'归属待确认')
       if(key==='status')return h(NTag,{bordered:false,size:'small',type:row.status?.includes('试算')?'warning':row.is_confirmed||row.status?.includes('已人工确认')?'success':'default'},()=>status(row.status))
       if(key==='team')return h('span',{class:'report-team-tag',style:'color:#475569;font-size:12.5px'},row.team||'—')
       if(key==='trial_amount'){
@@ -389,7 +396,8 @@ defineExpose({reload:load})
     <p class="report-grain-note">系统应发来自核算；实发列只显示人工核定金额，部分核定时仅合计已核定部分，尚未核定显示「—」。核定不代表已付款。点击人员或「核定实发」选择店铺月份；保存范围为该店该月全部提成人员。人员按当前组织归属展示；托管销售按商品规则生效时指定的团队归属，不随调组改变。</p>
     <p class="report-grain-note">托管类销售额已包含在团队/店铺销售额中，不要重复相加；不计个人销售额，不改变个人毛利、利润、提成及原成本分摊基数。指定人员筛选不包含团队托管池。</p>
     <div class="report-tabs-row"><LedgerTabs v-model="state.reportView" :options="kinds" label="汇总方式" @update:model-value="detail=null" /><div class="report-actions"><n-button type="primary" :disabled="!report || locked || !(report.confirmation_scopes||[]).length" @click="openToolbarPayout">核定实发</n-button><n-button :disabled="!canSettle" @click="openSettlement">确认员工结算</n-button><n-button :disabled="!report || locked" :loading="downloading" @click="download">导出表格</n-button></div></div>
-    <p v-if="state.reportView==='store_people'" class="report-grain-note"><template v-if="state.personIds.length">当前仅显示所选人员；请清空人员筛选后再核对店铺合计。 </template>销售额、毛利和利润按每笔订单的商品做货身份归属：一位做货人员归全额，多位做货人员按他们之间的点数比例分摊，抽点不分走产出。同一人在不同商品可有不同身份。兼职及未归属净亏损按归属销售额分摊；未归属净利润留在店铺。提成金额沿用原核算规则及已核定记录，不能直接用展示利润乘链接总点数。历史明细缺少身份时沿用原分摊口径。</p>
+    <n-alert v-if="report?.sales_pending_scopes?.length" type="warning" :bordered="false">当前有 {{report.sales_pending_scopes.length}} 项人员店铺月份的销售归属待确认，不计为已确认业绩。<a :href="salesAuditUrl" download>导出全部待确认商品清单</a></n-alert>
+    <p v-if="state.reportView==='store_people'" class="report-grain-note"><template v-if="state.personIds.length">当前仅显示所选人员；请清空人员筛选后再核对店铺合计。 </template>销售额按明确生效的商品身份或归档身份归属：一位做货人员归全额，多位做货人员按原档案中做货人员点数分摊，抽点不分走销售额。身份依据不足时明确待确认。成本、毛利、利润、兼职分摊及提成保持原核算口径；本次销售归属纠正不替换已结账数据。</p>
 
     <div v-if="loading" class="commission-loading-line"/>
     <LedgerTable :rows="rows" :columns="tableColumns" :row-key="rowKey" :loading="loading" :max-height="440" empty="没有找到提成记录，可调整店铺、人员或月份" />
