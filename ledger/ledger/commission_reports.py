@@ -169,7 +169,7 @@ def _archived_allocated_outputs(registry, commission, *, production=False, sales
             return None
         from io import BytesIO
         schema = pl.read_parquet_schema(BytesIO(payload))
-        cols = [name for name in ('status', 'person_id', 'share', 'total_rate', 'duty', 'spine_row', 'order_at', 'product_id', 'managed', 'sales_unassigned',
+        cols = [name for name in ('status', 'person_id', 'share', 'total_rate', 'duty', 'spine_row', 'order_at', 'fallback_reason', 'product_id', 'managed', 'sales_unassigned',
                                   'participation_sales','participation_gross',
                                   'participation_profit', 'original_base')
                 if name in schema]

@@ -21,7 +21,7 @@ _WANTED = (
     'status', 'person_id', 'person', 'product_id', 'product_name',
     'share', 'total_rate', 'original_base', 'amount',
     'participation_sales', 'participation_gross', 'participation_profit',
-    'spine_row', 'order_id', 'order_at', 'duty', 'managed', 'managed_team_id', 'sales_unassigned',
+    'spine_row', 'order_id', 'order_at', 'fallback_reason', 'duty', 'managed', 'managed_team_id', 'sales_unassigned',
 )
 
 

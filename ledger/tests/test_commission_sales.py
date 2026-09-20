@@ -79,6 +79,25 @@ def test_explicit_empty_product_filter_returns_only_unknown_product(tmp_path):
     assert [p['product_id'] for p in result['products']]==['']
 
 
+@pytest.mark.parametrize('field',['product_id','order_at'])
+def test_uniform_fallback_requires_confirmed_identity_and_full_month(field):
+    original=frame(['produce','cut']).with_columns(pl.lit('').alias(field),pl.lit('store_uniform_distribution').alias('fallback_reason'))
+    resolved=attach(None,'s','2026-06',original,snapshot=snapshot())
+    result=totals(resolved,allocated_outputs(original,production=True))
+    assert result['member']['sales']==16736.38 and result['leader']['sales']==0
+    assert resolved['__sales_source'].unique().to_list()==['effective_period_rule']
+    incomplete=attach(None,'s','2026-06',original,snapshot=snapshot(start='2026-06-15T00:00:00'))
+    assert incomplete['__sales_pending'].all()
+
+
+def test_uniform_money_is_not_proof_of_uniform_duty():
+    original=frame(['produce','cut']).with_columns(pl.lit('').alias('product_id'),pl.lit('store_uniform_distribution').alias('fallback_reason'))
+    configured=snapshot()[1][0]
+    configured['other']=snapshot(('cut','produce'))[1][0]['p']
+    resolved=attach(None,'s','2026-06',original,snapshot=(1,(configured,[])))
+    assert resolved['__sales_pending'].all()
+
+
 def test_default_rule_fallback_does_not_resurrect_expired_product_rule():
     rules=snapshot()[1][0]
     rules['*']=rules.pop('p')

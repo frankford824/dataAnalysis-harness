@@ -38,13 +38,49 @@ def rules(registry, store_id):
     return revision, (grouped, members)
 
 
+def period_consensus(configured, members, product, period, pids):
+    """Prove the existing uniform-fallback case, including duties and coverage."""
+    from .commission_registry import member_active_at
+    try:
+        year, month = map(int, period.split('-'))
+        start = datetime(year,month,1).isoformat()
+        end = datetime(year+(month==12),month%12+1,1).isoformat()
+    except (ValueError, TypeError):
+        return None
+    groups = [configured[product]] if product and product in configured else [configured['*']] if product and '*' in configured else list(configured.values())
+    signature = None; chosen = None; versions = set()
+    for segments in groups:
+        active = [s for s in segments if s['valid_from'] < end and (not s.get('valid_to') or s['valid_to'] > start)]
+        if not active:
+            continue
+        cursor = start
+        for segment in active:
+            if segment['valid_from'] > cursor or segment.get('mode','distribute')!='distribute':
+                return None
+            defaults = {m['person_id']:m['duty'] for m in members if member_active_at(m,segment['valid_from'])}
+            allocations = [{**a,'duty':a.get('duty') if a.get('duty') in ('produce','cut') else defaults.get(a['person_id'])} for a in segment.get('allocations',[])]
+            if {a['person_id'] for a in allocations}!=pids or any(a.get('duty') not in ('produce','cut') for a in allocations):
+                return None
+            current = (tuple(sorted((a['person_id'],a['duty'],Decimal(str(a['rate']))) for a in allocations)),bool(segment.get('managed')),segment.get('managed_team_id',''))
+            if signature is not None and signature!=current:
+                return None
+            signature=current;chosen={**segment,'allocations':allocations}
+            versions.add(segment.get('_version_id',''))
+            cursor=max(cursor,min(segment.get('valid_to') or end,end))
+        if cursor < end:
+            return None
+    if chosen is not None:
+        chosen['_version_id'] = next(iter(versions)) if len(versions)==1 else 'period-consensus:'+hashlib.sha256(json.dumps(sorted(versions)).encode()).hexdigest()
+    return chosen
+
+
 def attach(registry, store_id, period, details, snapshot=None):
     """Resolve complete participant groups before filtering to any one person."""
     required = {'product_id','person_id','share','total_rate','spine_row'}
     if not required <= set(details.columns) or details.is_empty():
         return details
     revision, (configured, members) = snapshot if snapshot is not None else rules(registry, store_id)
-    columns = [x for x in (*required, 'order_at','duty','managed') if x in details.columns]
+    columns = [x for x in (*required, 'order_at','duty','managed','fallback_reason') if x in details.columns]
     rows = details.select(columns).to_dicts()
     groups = defaultdict(list)
     for index, row in enumerate(rows):
@@ -52,6 +88,7 @@ def attach(registry, store_id, period, details, snapshot=None):
     shares = ['0'] * len(rows); rates = ['1'] * len(rows)
     pending = [False] * len(rows); sources = [''] * len(rows)
     versions = [''] * len(rows)
+    consensus_cache = {}
     for (product, _), indexes in groups.items():
         first = rows[indexes[0]]
         stamp = first.get('order_at')
@@ -66,6 +103,14 @@ def attach(registry, store_id, period, details, snapshot=None):
         latest = prior[-1] if prior else None
         current = latest if latest and (not latest.get('valid_to') or stamp < latest['valid_to']) else None
         pids = {rows[i]['person_id'] for i in indexes}
+        from_consensus = False
+        if (not product or not stamp) and first.get('fallback_reason')=='store_uniform_distribution':
+            key = (product,tuple(sorted(pids)))
+            if key not in consensus_cache:
+                consensus_cache[key] = period_consensus(configured,members,product,period,pids)
+            if consensus_cache[key] is not None:
+                current = consensus_cache[key]
+                from_consensus = True
         archive = {rows[i]['person_id']:rows[i].get('duty') for i in indexes}
         explicit = {a['person_id']:a.get('duty') for a in (current or {}).get('allocations', [])}
         declared = defaultdict(set)
@@ -85,19 +130,19 @@ def attach(registry, store_id, period, details, snapshot=None):
             duties, source = {pid:'cut' for pid in pids}, 'archived_managed'
             roster_pending = False
         elif current and set(explicit)==pids and all(d in ('produce','cut') for d in explicit.values()):
-            duties, source = explicit, 'effective_product_rule'
+            duties, source = explicit, 'effective_period_rule' if from_consensus else 'effective_product_rule'
         elif all(d in ('produce','cut') for d in archive.values()):
             duties, source = archive, 'archived_duty'
         else:
             duties, source = {}, 'pending_identity'
-        missing_input = (not product or ('order_at' in columns and not stamp)) and source!='archived_managed'
+        missing_input = (not product or ('order_at' in columns and not stamp)) and source!='archived_managed' and not from_consensus
         known = bool(duties) and not managed_pending and not roster_pending and not conflicted and not missing_input
         denominator = sum((Decimal(str(rows[i]['share'])) for i in indexes if duties.get(rows[i]['person_id'])=='produce'), Decimal(0))
         for i in indexes:
             row = rows[i]
             pending[i] = not known
             sources[i] = 'pending_input' if missing_input else 'pending_identity' if conflicted else 'pending_roster_refresh' if roster_pending else source if not managed_pending else 'pending_managed_refresh'
-            versions[i] = (current or {}).get('_version_id','') if source=='effective_product_rule' else ''
+            versions[i] = (current or {}).get('_version_id','') if source.startswith('effective_') else ''
             shares[i] = str(row['share']) if duties.get(row['person_id'])=='produce' else '0'
             rates[i] = str(denominator or 1)
     return details.with_columns(
@@ -174,7 +219,7 @@ def archived(registry, commission, outputs, frame=None):
                 from .commission_registry import RegistryError
                 raise RegistryError('销售归属证据校验失败，请核对原始提成档案')
             schema = pl.read_parquet_schema(BytesIO(data))
-            cols = [c for c in ('product_id','person_id','status','spine_row','order_at','share','total_rate','duty','managed','participation_sales') if c in schema]
+            cols = [c for c in ('product_id','person_id','status','spine_row','order_at','fallback_reason','share','total_rate','duty','managed','participation_sales') if c in schema]
             loaded = pl.read_parquet(BytesIO(data),columns=cols)
         else:
             loaded = frame
