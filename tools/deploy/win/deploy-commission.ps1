@@ -52,15 +52,16 @@ try {
 
 function Stop-LedgerOnly {
   Stop-ScheduledTask -TaskName 'LedgerHarness'
-  for ($Attempt=0; $Attempt -lt 20; $Attempt++) {
+  for ($Attempt=0; $Attempt -lt 120; $Attempt++) {
     $Listener = Get-NetTCPConnection -State Listen -LocalPort 8000 -ErrorAction SilentlyContinue | Select-Object -First 1
     if (-not $Listener) { return }
     $Process = Get-CimInstance Win32_Process -Filter ("ProcessId=" + $Listener.OwningProcess)
-    if (-not $Process) { continue }
+    if (-not $Process) { Start-Sleep -Milliseconds 250; continue }
     if ($Process.CommandLine -notmatch 'ledger\.api:app') { throw 'Port 8000 belongs to another application' }
     Stop-Process -Id $Listener.OwningProcess -Force
     Start-Sleep -Milliseconds 250
   }
+  if (-not (Get-NetTCPConnection -State Listen -LocalPort 8000 -ErrorAction SilentlyContinue)) { return }
   throw 'Ledger did not stop'
 }
 function Start-AndCheck {
@@ -74,7 +75,15 @@ function Start-AndCheck {
   }
   throw 'New commission API did not become ready'
 }
-Stop-LedgerOnly
+try {
+  Stop-LedgerOnly
+} catch {
+  # A late socket teardown must not leave the old, untouched release offline.
+  if (-not (Get-NetTCPConnection -State Listen -LocalPort 8000 -ErrorAction SilentlyContinue)) {
+    Start-ScheduledTask -TaskName 'LedgerHarness'
+  }
+  throw
+}
 $ModelHashes = @{}
 Get-ChildItem -LiteralPath (Join-Path $AppRoot 'models\cn-ecommerce') -File | ForEach-Object {
   $ModelHashes[$_.Name] = (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash
