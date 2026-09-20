@@ -150,3 +150,45 @@ def test_excel_classification_and_duty_are_not_silently_lost(tmp_path):
     segment=r.active('s1')[1][0]['body']['segments'][-1]
     assert segment['managed'] and segment['managed_team_id']==b['id']
     assert segment['allocations'][0]['duty']=='cut'
+
+
+@pytest.mark.parametrize('managed',[True,False])
+def test_classification_only_preserves_exact_rules_and_future(tmp_path,managed):
+    from test_commission_batch import setup
+    r,model,a,b=setup(tmp_path)
+    original=r.active('s1')[1][0]['body']['segments'][0]['allocations']
+    before_revision=r.revision()
+    body={'targets':[{'store_id':'s1','product_id':'123456789001','revision':1}],
+          'operation':'classification','template':{'valid_from':'2026-06-01',
+          'managed':managed,'managed_team_id':b['id'], 'mode':'exclude',
+          'allocations':[{'name':'不得新增的人','rate':'.9'}]}}
+    plan=preview(r,model,body,'test')
+    assert r.revision()==before_revision and len(r.people())==2
+    assert plan['rows'][0]['mode']=='distribute'
+    apply(r,model,plan['id'],'test')
+    after=r.active('s1')[1][0]['body']['segments'][-1]
+    assert after['managed'] is managed
+    assert after['allocations']==original and after['mode']=='distribute'
+    assert after['managed_team_id']==(b['id'] if managed else '')
+
+
+def test_classification_only_rejects_missing_effective_rule(tmp_path):
+    from test_commission_batch import setup
+    r,model,a,b=setup(tmp_path)
+    with pytest.raises(RegistryError,match='没有有效设置'):
+        preview(r,model,{'changes':[{'store_id':'s1','product_id':'123456789002',
+            'valid_from':'2026-06-01','managed':False}], 'operation':'classification'},'test')
+
+
+def test_classification_window_restores_original_rule_after_end(tmp_path):
+    from test_commission_batch import setup
+    r,model,a,b=setup(tmp_path)
+    original=r.active('s1')[1][0]['body']['segments'][0]['allocations']
+    plan=preview(r,model,{'targets':[{'store_id':'s1','product_id':'123456789001','revision':1}],
+        'operation':'classification','template':{'managed':True,'managed_team_id':b['id'],
+        'valid_from':'2026-06-01','valid_to':'2026-07-01'}},'test')
+    apply(r,model,plan['id'],'test')
+    segments=r.active('s1')[1][0]['body']['segments']
+    assert [s['managed'] for s in segments]==[False,True,False]
+    assert all(s['allocations']==original for s in segments)
+    assert segments[-1]['valid_from']=='2026-07-01T00:00:00' and segments[-1]['valid_to']==''

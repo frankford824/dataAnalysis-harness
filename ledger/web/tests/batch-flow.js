@@ -11,12 +11,13 @@ window.fetch=async(url,options={})=>{
   if(path.endsWith('/org/fill-hierarchy'))return reply({added:[{person_id:'leader',rate:'.01',source:'hierarchy',duty:'cut'}]})
   if(path.endsWith('/settings/preview')){
     preview=body
+    if(body.operation==='classification')return reply({id:'fixture',count:1,stores:1,new_count:0,rows:[{store_id:'s1',store:'测试店铺',product_id:'123456789001',valid_from:'2026-06-01T00:00:00',valid_to:'',mode:'distribute',before:[],after:[],managed:body.template.managed,managed_team:'运营一组'}]})
     return reply({id:'fixture',count:1,stores:1,new_count:1,rows:[{store_id:'s1',store:'测试店铺',product_id:'123456789001',valid_from:'2026-06-01T00:00:00',valid_to:'',mode:'distribute',before:[],after:body.changes[0].allocations.map(p=>({...p,name:people.find(x=>x.id===p.person_id).name}))}]})
   }
   if(path.endsWith('/settings/apply/fixture')){applied=true;return reply({count:1,stores:1})}
   unexpected.push(path);throw new Error(`Unexpected write ${path}`)
 }
-const Wrapper={setup(){const batch=ref();const open=()=>batch.value.open({kind:'new',store_id:'s1'});onMounted(open);return()=>h('div',[h('button',{onClick:open},'打开批量新增测试'),h(Batch,{ref:batch,stores:[{id:'s1',name:'测试店铺'}],people})])}}
+const Wrapper={setup(){const batch=ref();const open=()=>batch.value.open({kind:'new',store_id:'s1'});onMounted(open);return()=>h('div',[h('button',{onClick:open},'打开批量新增测试'),h('button',{onClick:()=>batch.value.open({targets:[{store_id:'s1',product_id:'123456789001',revision:1}]})},'打开批量分类测试'),h(Batch,{ref:batch,stores:[{id:'s1',name:'测试店铺'}],people})])}}
 const app=createApp({render:()=>h(NConfigProvider,null,{default:()=>h(NMessageProvider,null,{default:()=>h(Wrapper)})})})
 app.use(createRouter({history:createMemoryHistory(),routes:[{path:'/',component:Wrapper},{name:'commission-org',path:'/org',component:{render:()=>null}}]}));app.mount('#app')
 const wait=async(fn)=>{for(let i=0;i<150;i++){if(fn())return;await new Promise(r=>setTimeout(r,40))}throw new Error('Timed out')}
@@ -46,5 +47,32 @@ try{
   await wait(()=>applied)
   await new Promise(r=>setTimeout(r,50))
   assert(unexpected.length===0,'Unrequested organization/default-duty write')
-  document.querySelector('#test-result').textContent='PASS: 按组织选人 → 补上级抽成 → 预览保留身份和来源 → 仅保存商品规则；底部操作在屏内'
+  assert(!Object.hasOwn(preview.changes[0],'managed'),'Default must preserve classification')
+  for(const category of ['managed','unmanaged']){
+    preview=null;applied=false
+    button('打开批量分类测试').click()
+    await wait(()=>document.querySelector('.classification-settings [role="checkbox"]'))
+    document.querySelector('.classification-settings [role="checkbox"]').click()
+    const choice=document.querySelector('[aria-label="批量托管分类"]')
+    choice.value=category;choice.dispatchEvent(new Event('change',{bubbles:true}))
+    if(category==='managed'){
+      button('预览修改').click()
+      await wait(()=>document.querySelector('[role="alert"]')?.textContent.includes('托管团队'))
+      assert(preview===null,'Missing team must not submit')
+      document.querySelector('[aria-label="批量托管团队"] .n-base-selection').click()
+      await wait(()=>[...document.querySelectorAll('.n-base-select-option')].some(e=>e.textContent==='运营一组'))
+      ;[...document.querySelectorAll('.n-base-select-option')].find(e=>e.textContent==='运营一组').click()
+    }
+    await new Promise(r=>setTimeout(r,0))
+    assert(!document.querySelector('[aria-label="批量人员1"]'),'Classification-only must not require people')
+    button('预览修改').click();await wait(()=>preview)
+    assert(preview.operation==='classification','Wrong operation')
+    assert(preview.template.managed===(category==='managed'),'Classification lost')
+    assert(preview.template.managed_team_id===(category==='managed'?'leader':''),'Team lost or stale')
+    await wait(()=>button('确认保存1条设置'))
+    assert(document.body.textContent.includes(category==='managed'?'托管商品 · 运营一组':'非托管商品'),'Preview classification missing')
+    button('确认保存1条设置').click();await wait(()=>applied)
+    await new Promise(r=>setTimeout(r,350))
+  }
+  document.querySelector('#test-result').textContent='PASS: 默认保持分类；仅修改分类 → 缺团队拦截 → 设为托管/非托管 → 预览 → 保存；不重填人员'
 }catch(e){document.querySelector('#test-result').textContent='FAIL: '+e.message;console.error(e)}

@@ -60,7 +60,7 @@ def preview(registry, model, request, actor):
     if len(entries)>100000:
         raise RegistryError('单次最多处理10万条设置，请分次导入')
     operation=request.get('operation','replace')
-    if operation not in {'replace','merge','remove'}:
+    if operation not in {'replace','merge','remove','classification'}:
         raise RegistryError('请选择批量处理方式')
     changes=[]; display=[]; seen=set()
     names={s.id:s.name for s in model.stores}
@@ -95,8 +95,17 @@ def preview(registry, model, request, actor):
                 if operation=='replace' and not data.get('valid_to'):
                     data['replace_future']=True
                 before=allocations(conn,segment)
+                if operation=='classification':
+                    if not isinstance(data.get('managed'),bool):
+                        raise RegistryError('仅修改托管分类时，请选择托管或非托管')
+                    if not segment:
+                        raise RegistryError('该商品在所选生效时间没有有效设置，请先登记商品规则，或调整生效时间')
+                    data['mode']=segment.get('mode','hold')
+                    data['preserve_allocations']=True
+                    data['replace_future']=False
+                    data['allocations']=[{k:v for k,v in a.items() if k!='name'} for a in before]
                 requested=data.get('allocations',[])
-                if operation!='replace' and data.get('mode','distribute')=='distribute':
+                if operation in {'merge','remove'} and data.get('mode','distribute')=='distribute':
                     by_id={r['person_id']:{k:v for k,v in r.items() if k!='name'} for r in before}
                     extra=[]
                     removed=False

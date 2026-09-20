@@ -1035,12 +1035,16 @@ class Registry:
                 if source:
                     entry["source"] = source
                 allocations.append(entry)
+        if data.get('preserve_allocations'):
+            allocations = current.get('allocations', [])
         segment = {"valid_from":start,"valid_to":end,"mode":mode,"allocations":allocations,
                    "managed":managed,"managed_team_id":team_id,
                    "total_rate":str(sum((Decimal(a["rate"]) for a in allocations), Decimal(0))),
                    "amount_hold":current.get("amount_hold", "")}
         segments = []
         for x in old:
+            if data.get('preserve_allocations') and end and x['valid_from'] <= start and (not x.get('valid_to') or end < x['valid_to']):
+                segments.append({**x,'valid_from':end})
             if x["valid_from"] < start:
                 segments.append({**x,"valid_to":min(x.get("valid_to") or start, start)})
             elif end and x["valid_from"] >= end:
