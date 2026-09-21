@@ -356,9 +356,9 @@ def confirmed_profit_rate(commission, person_id, store_id=''):
     return rate if rate is not None and rate > 0 else None
 
 
-_configured_lock = threading.RLock()
 _configured_cache: OrderedDict[tuple, dict[str, frozenset[str]]] = OrderedDict()
 _CONFIGURED_CACHE_LIMIT = 64
+_configured_code = None
 
 
 def _scan_configured_rows(registry, start, end, store_ids=()):
@@ -389,23 +389,36 @@ def _scan_configured_people(registry, start, end, store_ids=()):
 
 
 def _configured_bundle(registry, start, end, store_ids=()):
-    """Amortize the 100k-scheme scan across reads; business audit revision invalidates it."""
+    """Only product publications change this index, not unrelated audit events."""
+    global _configured_code
+    import hashlib
+    from . import derived_read_cache
+    if _configured_code is None:
+        from . import commission_read_index
+        _configured_code=hashlib.sha256(Path(__file__).read_bytes()+Path(commission_read_index.__file__).read_bytes()).hexdigest()
     scope=tuple(sorted(store_ids))
-    key=(str(registry.root.resolve()), registry.revision(), start, end, scope)
-    with _configured_lock:
-        saved=_configured_cache.get(key)
-        if saved is None:
-            people, producers = _scan_configured_rows(registry, start, end, scope)
-            saved={
-                'people': {sid: frozenset(pids) for sid, pids in people.items()},
-                'producers': {sid: frozenset(pids) for sid, pids in producers.items()},
-            }
-            _configured_cache[key]=saved
-            if len(_configured_cache)>_CONFIGURED_CACHE_LIMIT:
-                _configured_cache.popitem(last=False)
-        else:
-            _configured_cache.move_to_end(key)
-    return saved
+    with registry.connect() as conn:
+        generation=conn.execute('SELECT generation FROM scheme_read_clock WHERE id=1').fetchone()[0]
+    key=(str(registry.root.resolve()), generation, start, end, scope, _configured_code)
+    persistent_key='configured:'+hashlib.sha256(json.dumps(key).encode()).hexdigest()
+    def build():
+        saved=derived_read_cache.get(registry,persistent_key)
+        if saved is not None:
+            return {kind:{sid:frozenset(pids) for sid,pids in stores.items()} for kind,stores in saved.items()}
+        people, producers = _scan_configured_rows(registry, start, end, scope)
+        with registry.connect() as conn:
+            current=conn.execute('SELECT generation FROM scheme_read_clock WHERE id=1').fetchone()[0]
+        if current!=generation:
+            from .commission_registry import RevisionConflict
+            raise RevisionConflict('商品规则正在更新，请稍后重新查询')
+        saved={
+            'people': {sid: frozenset(pids) for sid, pids in people.items()},
+            'producers': {sid: frozenset(pids) for sid, pids in producers.items()},
+        }
+        derived_read_cache.put(registry,persistent_key,{kind:{sid:sorted(pids) for sid,pids in stores.items()} for kind,stores in saved.items()})
+        return saved
+    from .read_cache import cached
+    return cached(_configured_cache,key,build,_CONFIGURED_CACHE_LIMIT)
 
 
 def configured_people(registry, start, end, store_ids=()):
@@ -501,7 +514,8 @@ def build(workspace, registry, model, start, end, store_ids=None, person_ids=Non
           model_root: Path | None = None, need_product_rates: bool = True):
     periods=months(start,end)
     selected_stores=set(store_ids or []); selected_people=set(person_ids or [])
-    names={s.id:s.name for s in model.stores}
+    from .store_display import names as display_names
+    names=display_names(workspace.root,model)
     roster={p['id']:p for p in registry.people()}
     configured=configured_people(registry,start,end,selected_stores)
     produce_by_store=configured_producers(registry,start,end,selected_stores)

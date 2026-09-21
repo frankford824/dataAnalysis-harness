@@ -4,6 +4,7 @@ SCHEMA = """
 CREATE TABLE IF NOT EXISTS scheme_read_meta(id INTEGER PRIMARY KEY, version INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS scheme_read_clock(id INTEGER PRIMARY KEY,generation INTEGER NOT NULL);
 INSERT OR IGNORE INTO scheme_read_clock VALUES(1,0);
+CREATE TABLE IF NOT EXISTS scheme_store_clock(store_id TEXT PRIMARY KEY,generation INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS derived_read_cache(key TEXT PRIMARY KEY,value TEXT NOT NULL,sha TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS catalog_read_meta(id INTEGER PRIMARY KEY, generation INTEGER NOT NULL);
 INSERT OR IGNORE INTO catalog_read_meta VALUES(1,0);
@@ -12,6 +13,7 @@ CREATE TABLE IF NOT EXISTS scheme_read_segment(
  product_id TEXT NOT NULL, valid_from TEXT NOT NULL, valid_to TEXT NOT NULL,
  mode TEXT NOT NULL, value TEXT NOT NULL, PRIMARY KEY(scheme_id,segment_no));
 CREATE INDEX IF NOT EXISTS scheme_read_from ON scheme_read_segment(valid_from);
+CREATE INDEX IF NOT EXISTS scheme_read_store ON scheme_read_segment(store_id,valid_from);
 CREATE INDEX IF NOT EXISTS scheme_read_to ON scheme_read_segment(valid_to);
 CREATE INDEX IF NOT EXISTS scheme_read_lookup ON scheme_read_segment(scheme_id,segment_no,valid_from,valid_to,mode,store_id,product_id);
 CREATE INDEX IF NOT EXISTS scheme_read_mode ON scheme_read_segment(mode,valid_from,valid_to,store_id,scheme_id);
@@ -50,6 +52,9 @@ def install(conn):
           UPDATE catalog_read_meta SET generation=generation+1 WHERE id=1; END;''')
     for action in ('INSERT', 'UPDATE OF active_version'):
         suffix = 'insert' if action == 'INSERT' else 'update'
+        conn.executescript(f'''CREATE TRIGGER IF NOT EXISTS scheme_store_clock_{suffix} AFTER {action} ON scheme BEGIN
+          INSERT INTO scheme_store_clock VALUES(NEW.store_id,1)
+          ON CONFLICT(store_id) DO UPDATE SET generation=generation+1; END;''')
         conn.executescript(f'CREATE TRIGGER IF NOT EXISTS scheme_clock_{suffix} AFTER {action} ON scheme BEGIN UPDATE scheme_read_clock SET generation=generation+1 WHERE id=1; END;')
         conn.executescript(f"""CREATE TRIGGER IF NOT EXISTS scheme_read_{suffix}
           AFTER {action} ON scheme BEGIN
@@ -63,6 +68,9 @@ def install(conn):
        DELETE FROM scheme_read_segment WHERE scheme_id=OLD.id;
        END;""")
     conn.executescript('CREATE TRIGGER IF NOT EXISTS scheme_clock_delete AFTER DELETE ON scheme BEGIN UPDATE scheme_read_clock SET generation=generation+1 WHERE id=1; END;')
+    conn.executescript('''CREATE TRIGGER IF NOT EXISTS scheme_store_clock_delete AFTER DELETE ON scheme BEGIN
+      INSERT INTO scheme_store_clock VALUES(OLD.store_id,1)
+      ON CONFLICT(store_id) DO UPDATE SET generation=generation+1; END;''')
     with conn:
         conn.execute('BEGIN IMMEDIATE')
         if not conn.execute('SELECT 1 FROM scheme_read_meta WHERE id=1 AND version=1').fetchone():

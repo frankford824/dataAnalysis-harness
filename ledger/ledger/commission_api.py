@@ -268,9 +268,10 @@ def install(app, workspace, model, model_root: Path | None = None):
                     feed = dict(row)
                     feed["caught_up"] = row["consumed_seq"] >= row["source_latest_seq"]
                     feed["unmapped_stores"] = conn.execute("SELECT count(*) FROM feed_store WHERE mapping_status<>'confirmed'").fetchone()[0]
+        names = display_names()
         return {"auth_mode": registry.auth_mode(), "actor": registry.actor(request.cookies.get("commission_session", "")),
                 "counts": counts, "jobs": jobs, "imports": imports, "pending": pending, "catalog_refreshed_at": refreshed,
-                "stores": [{"id": s.id, "name": s.name} for s in model().stores], "revision": registry.revision(), "feed": feed}
+                "stores": [{"id": s.id, "name": names.get(s.id,s.name), "aliases": [s.name,*s.aliases]} for s in model().stores], "revision": registry.revision(), "feed": feed}
 
     @router.post("/session")
     async def login(request: Request, response: Response):
@@ -433,7 +434,7 @@ def install(app, workspace, model, model_root: Path | None = None):
 
     @router.get("/org/tree")
     def org_tree():
-        names = {s.id: s.name for s in model().stores}
+        names = display_names()
         return reg().org_tree(names)
 
     @router.post("/org/person")
@@ -446,7 +447,7 @@ def install(app, workspace, model, model_root: Path | None = None):
 
     @router.get("/org/stores")
     def org_stores(person_id: str = "", include_descendants: bool = False):
-        names = {s.id: s.name for s in model().stores}
+        names = display_names()
         rows = reg().org_stores(person_id, include_descendants=include_descendants)
         stores = [{"person_id": row["person_id"], "store_id": row["store_id"],
                    "store_name": names.get(row["store_id"], row["store_id"])} for row in rows]
@@ -462,7 +463,7 @@ def install(app, workspace, model, model_root: Path | None = None):
 
     @router.get("/org/infer")
     def org_infer_preview():
-        names = {s.id: s.name for s in model().stores}
+        names = display_names()
         return reg().infer_org_hierarchy(names)
 
     @router.post("/org/infer/apply")
@@ -612,7 +613,7 @@ def install(app, workspace, model, model_root: Path | None = None):
                          for product in c.get('products') or []
                          if product.get('unassigned') and not
                          re.fullmatch(r'\d{9,20}', str(product.get('product_id') or '')))
-        return {'store_id': store_id, 'store': m.store(store_id).name,
+        return {'store_id': store_id, 'store': display_names()[store_id],
                 'period': period, 'run_id': state.run_id,
                 'orders': c.get('unassigned_orders') or 0,
                 'base': c.get('unassigned_base') or 0,
@@ -774,9 +775,15 @@ def install(app, workspace, model, model_root: Path | None = None):
         return int(row[0])
 
     def report_cache_key(selection: ReportSelection):
+        from .store_display import snapshot
+        from .workspace_read_version import clock
         return (str(workspace().root.resolve()), selection.start, selection.end,
                 tuple(selection.store_ids or []), tuple(selection.person_ids or []),
-                tuple(selection.run_ids or []), workspace().read_generation(start=selection.start,end=selection.end), reg().revision(), id(model()))
+                tuple(selection.run_ids or []), clock(workspace().conn,start=selection.start,end=selection.end,report=not selection.run_ids), reg().revision(), id(model()), snapshot(workspace().root)[0])
+
+    def display_names():
+        from .store_display import names
+        return names(workspace().root,model())
 
     def clear_report_cache():
         with report_cache_lock:
@@ -857,7 +864,7 @@ def install(app, workspace, model, model_root: Path | None = None):
             raise RegistryError('请选择人员')
         if run_id < 1:
             raise RegistryError('请选择本次核算')
-        return model().store(store_id).name
+        return display_names()[store_id]
 
     @router.get('/profit-composition')
     def profit_composition(store_id: str, period: str, person_id: str, run_id: int, include_orders: bool = True, product_id: str | None = None):
@@ -1057,7 +1064,7 @@ def install(app, workspace, model, model_root: Path | None = None):
     @router.get("/export/settings")
     def export_settings(store_id: str = "", search: str = "", state: str = "", person_id: str = "",
                         store_ids: list[str] = Query(default=[]), person_ids: list[str] = Query(default=[])):
-        names = {s.id:s.name for s in model().stores}
+        names = display_names()
         labels = {"enabled":"提成中","disabled":"不提成","pending":"未设置","scheduled":"待生效","expired":"已到期"}
         teams = {p['id']:p.get('alias') or p['name'] for p in reg().people()}
         def rows():

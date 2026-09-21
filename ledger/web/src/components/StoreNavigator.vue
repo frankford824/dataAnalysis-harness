@@ -39,7 +39,7 @@ const menuOptions = computed(() => {
     const platformMatches = platform.name.toLocaleLowerCase().includes(word)
     const stores = !word || platformMatches
       ? all
-      : all.filter((store) => store.name.toLocaleLowerCase().includes(word))
+      : all.filter((store) => [store.name,...(store.aliases || [])].join(' ').toLocaleLowerCase().includes(word))
     if (!stores.length) return []
     return [{
       key: platformKey(platform.id),

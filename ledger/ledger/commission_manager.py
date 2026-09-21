@@ -89,6 +89,17 @@ class Manager:
                     return
             store_id, revision = pending["store_id"], pending["revision"]
             self.current_pending = (store_id, revision)
+            if order_feed.enabled():
+                with closing(sqlite3.connect(f"file:{(ws.root / 'order-feed.db').as_posix()}?mode=ro", uri=True)) as source:
+                    mapped = source.execute("SELECT 1 FROM feed_store WHERE ledger_store_id=? AND mapping_status='confirmed' LIMIT 1", (store_id,)).fetchone()
+                if not mapped:
+                    # Missing mappings cannot be repaired by rereading all
+                    # source files. Retain the durable work with a clear cause.
+                    error = f"订单台没有 {self.model().store(store_id).name} 的已确认店铺映射；确认映射后自动重试"
+                    with registry.transaction() as conn:
+                        conn.execute("UPDATE pending SET next_attempt=?,error=? WHERE store_id=? AND revision=? AND source_seq=? AND source_fingerprint=?",
+                                     (int(time.time())+300,error,store_id,revision,pending['source_seq'],pending['source_fingerprint']))
+                    return
             ws.note_external_version(store_id, "__commission_rules__", f"commission:{revision}")
             note = "订单数据更新" if pending["source_seq"] else "提成设置更新"
             result = service.recompute(ws, self.model(), self.model().store(store_id), note=note)

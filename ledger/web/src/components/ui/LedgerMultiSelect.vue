@@ -7,7 +7,7 @@ const props=defineProps({modelValue:{type:Array,default:()=>[]},options:{type:Ar
 const emit=defineEmits(['update:modelValue'])
 const opened=ref(false),search=ref(''),draft=ref([]),showAll=ref(false)
 const noun=computed(()=>props.label.replace(/^[家位]/,''))
-const filtered=computed(()=>props.options.filter(o=>String(o.label).toLocaleLowerCase().includes(search.value.trim().toLocaleLowerCase())))
+const filtered=computed(()=>props.options.filter(o=>[o.label,o.keywords || ''].join(' ').toLocaleLowerCase().includes(search.value.trim().toLocaleLowerCase())))
 const selected=computed(()=>props.modelValue.map(value=>({value,label:props.options.find(o=>o.value===value)?.label||'未找到的选项'})))
 const chips=computed(()=>showAll.value?selected.value:selected.value.slice(0,6))
 const groups=computed(()=>{

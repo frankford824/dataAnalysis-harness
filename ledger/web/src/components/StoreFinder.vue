@@ -29,7 +29,7 @@ const results = computed(() => {
   const word = query.value.trim().toLocaleLowerCase()
   const list = props.stores.filter((store) => (
     word
-      ? store.name.toLocaleLowerCase().includes(word)
+      ? [store.name,...(store.aliases || [])].join(' ').toLocaleLowerCase().includes(word)
         || (props.platforms.find((item) => item.id === store.platform)?.name || '')
           .toLocaleLowerCase().includes(word)
       : !platform.value || store.platform === platform.value

@@ -16,6 +16,8 @@ def feed_db(root, consumed=10, latest=20):
     with sqlite3.connect(root / 'order-feed.db') as c:
         c.execute('CREATE TABLE feed_state(id INTEGER,snapshot_id TEXT,consumed_seq INTEGER,source_latest_seq INTEGER,last_success TEXT,last_error TEXT)')
         c.execute("INSERT INTO feed_state VALUES(1,'snapshot',?,?,'now','')", (consumed, latest))
+        c.execute('CREATE TABLE feed_store(ledger_store_id TEXT,mapping_status TEXT)')
+        c.execute("INSERT INTO feed_store VALUES('s1','confirmed')")
 
 
 def test_job_uses_captured_watermark_instead_of_moving_global_head(tmp_path, monkeypatch):

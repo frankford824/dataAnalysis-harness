@@ -37,7 +37,7 @@ from pydantic import BaseModel, Field, ValidationError
 
 from . import assist, cost_lines, fees as fees_mod, gaps, index_client, manual_cost, nas_ingest, nas_status, onboard, order_feed, overhead, ownership, progress, service, view
 from . import search as search_mod
-from . import commission_api, commission_manager, storage_maintenance
+from . import commission_api, commission_manager, storage_maintenance, store_display
 from .model import propose
 from .model.config import (
     COMMISSION_COLUMNS,
@@ -120,6 +120,9 @@ async def request_metrics(request: Request, call_next):
     elapsed = (perf_counter() - started) * 1000
     response.headers.setdefault("X-Request-ID", request_id)
     response.headers.setdefault("Server-Timing", f"app;dur={elapsed:.1f}")
+    if elapsed >= 1000 and request.url.path.startswith('/api/'):
+        logging.getLogger(__name__).warning('slow_api method=%s path=%s status=%s duration_ms=%.1f request_id=%s',
+                                           request.method, request.url.path, response.status_code, elapsed, request_id)
     if request.method == "GET" and request.url.path.startswith("/api/"):
         response.headers.setdefault("Cache-Control", "private,no-cache")
     return response
@@ -153,6 +156,8 @@ _GAP_CACHE_MAX = 1024
 
 
 def _etag(*parts: object) -> str:
+    from .store_display import snapshot
+    parts = (*parts, snapshot(workspace().root)[0])
     raw = "\0".join(str(part) for part in parts).encode("utf-8")
     return '"' + sha256(raw).hexdigest()[:24] + '"'
 
@@ -177,7 +182,14 @@ def _conditional_headers(
 
 def _bounded_cache(cache: OrderedDict, key: tuple, build, maximum: int):
     from .read_cache import cached
-    return cached(cache, key, build, maximum)
+    from .store_display import snapshot
+    return cached(cache, (*key,snapshot(workspace().root)[0]), build, maximum)
+
+
+def _display_store(store):
+    from .store_display import store_dict
+    root = getattr(workspace(),'root',None)
+    return store_dict(root,store) if root is not None else view.store_dict(store)
 
 
 def _bounded_parallel_cache(cache: OrderedDict, key: tuple, build, maximum: int):
@@ -389,7 +401,7 @@ def bootstrap(request: Request, response: Response) -> Any:
         _payload_cache,
         key,
         lambda: {
-            "stores": [view.store_dict(s) for s in model.stores],
+            "stores": [_display_store(s) for s in model.stores],
             "platforms": view.platform_options(model),
             "editable": list(EDITABLE),
             "statement": [
@@ -445,7 +457,7 @@ def _build_navigation(
     return {
         "model_revision": revision,
         "workspace_generation": generation,
-        "data_revision": f"{revision}:{generation}",
+        "data_revision": f"{revision}:{generation}:{store_display.snapshot(ws.root)[0]}",
         "ingest_mode": nas_status.ingest_mode(),
         "nas_upload_path": nas_status.upload_path(),
         "platforms": view.platform_options(model),
@@ -453,7 +465,7 @@ def _build_navigation(
         "default_period": default_period,
         "stores": [
             {
-                **view.store_dict(store),
+                **_display_store(store),
                 "file_count": counts.get(store.id, 0) + counts.get(SHARED_STORE_ID, 0),
                 "latest_period": latest.get(store.id, ("", ""))[0],
                 "latest_state": latest.get(store.id, ("", ""))[1],
@@ -619,7 +631,7 @@ def _build_overview(
             continue
         cells.append({
             "store_id": st.store_id,
-            "store": store.name if store else st.store_id,
+            "store": _display_store(store)['name'] if store else st.store_id,
             "platform": store.platform if store else "",
             "entity": store.entity if store else "",
             "period": st.period,
@@ -650,7 +662,7 @@ def _build_overview(
         "default_period": working_period(periods, cells),
         "stores": [
             {
-                **view.store_dict(s),
+                **_display_store(s),
                 "file_count": file_counts.get(s.id, 0) + file_counts.get(SHARED_STORE_ID, 0),
                 "latest_period": latest.get(s.id, ("", ""))[0],
                 "latest_state": latest.get(s.id, ("", ""))[1],
@@ -896,7 +908,7 @@ def _build_store_detail(ws: Workspace, store: Store) -> dict:
         for st in _periods_of_store(ws, store.id)
     ]
     return {
-        "store": view.store_dict(store),
+        "store": _display_store(store),
         "periods": periods,
         "files": ws.submissions(store.id),
     }
@@ -948,6 +960,8 @@ def _build_period_detail(
         "gaps": gaps.gaps(st.result, model, _previous(store_id, period)),
         **_period_payload(st.result, model),
     }
+    payload['accounting_store'] = payload.get('store')
+    payload['store'] = _display_store(model.store(store_id))['name']
     if st.run_id and st.result.get('cost_review'):
         review = dict(payload.get('cost_review') or {})
         if ws.coverage_gaps_path(st.run_id).exists():
@@ -1059,7 +1073,7 @@ def all_gaps(platform: str = "", store_id: str = "", period: str = "") -> dict:
         rows = gaps.gaps(st.result or {}, model, before)
         out.append({
             "store_id": st.store_id,
-            "store": store.name if store else st.store_id,
+            "store": _display_store(store)['name'] if store else st.store_id,
             "platform": store.platform if store else "",
             "period": st.period,
             "state": st.state,
@@ -1089,7 +1103,7 @@ def recompute(store_id: str) -> dict:
 @app.get("/api/recompute/progress")
 def recompute_progress() -> dict:
     model = _model()
-    names = {store.id: store.name for store in model.stores}
+    names = store_display.names(workspace().root,model)
     items = service.recompute_activities()
     pending = getattr(_commission_worker, "current_pending", None)
     if pending and pending[0] not in {item["store_id"] for item in items}:
@@ -1443,7 +1457,7 @@ def _index_search(q: str, store_id: str, period: str, platform: str, limit: int)
             "subject": hit.get("source") or "原始表格",
             "metric": hit.get("source") or "",
             "amount": None,
-            "store": store.name if store else hit.get("store_id") or "全公司共享",
+            "store": _display_store(store)['name'] if store else hit.get("store_id") or "全公司共享",
             "store_id": hit.get("store_id", ""),
             "platform": hit.get("platform", ""),
             "period": "",
@@ -1721,7 +1735,7 @@ def commission_summary(period: str = "") -> dict:
         keep = (after / base_total) if base_total else 1.0
         stores.append({
             "store_id": st.store_id,
-            "store": store.name if store else st.store_id,
+            "store": _display_store(store)['name'] if store else st.store_id,
             "platform": store.platform if store else "",
             "state": st.state,
             "stale": st.stale,
@@ -1761,7 +1775,7 @@ def commission_summary(period: str = "") -> dict:
             # 商品是逐店的，跨店直接相加不会重复计数。
             slot["products"] += int(p.get("products") or 0)
             slot["stores"].append({
-                "store": store.name if store else st.store_id,
+                "store": _display_store(store)['name'] if store else st.store_id,
                 "store_id": st.store_id,
                 "amount": p.get("amount") or 0.0,
             })
@@ -1823,7 +1837,7 @@ def commission_config(store_id: str = "") -> dict:
         "headers": dict(COMMISSION_HEADERS),
         "rules": view.commission_rules(model, store_id),
         "stores": [
-            {"id": s.id, "name": s.name, "platform": s.platform}
+            {"id": s.id, "name": _display_store(s)['name'], "platform": s.platform}
             for s in model.active_stores()
         ],
     }
@@ -1942,7 +1956,7 @@ def commission_product_list(period: str = "", store_id: str = "") -> dict:
             base = float(p.get("base") or 0.0)
             products.append({
                 "store_id": st.store_id,
-                "store": store.name if store else st.store_id,
+                "store": _display_store(store)['name'] if store else st.store_id,
                 "product_id": pid,
                 "product_name": p.get("product_name") or "",
                 "base": base,
@@ -1963,7 +1977,7 @@ def commission_product_list(period: str = "", store_id: str = "") -> dict:
             slot["base"] = money_float(slot["base"])
         stores.append({
             "store_id": st.store_id,
-            "store": store.name if store else st.store_id,
+            "store": _display_store(store)['name'] if store else st.store_id,
             "platform": store.platform if store else "",
             "products": len(items),
             "base_total": c.get("base_total", 0.0),
@@ -2339,7 +2353,7 @@ def fees_preview(body: FeeRulesBody) -> dict:
     slices = service.simulate(workspace(), patched, store)
     return {
         "store_id": store.id,
-        "store": store.name,
+        "store": _display_store(store)['name'],
         "periods": [
             {
                 "period": sl["period"],

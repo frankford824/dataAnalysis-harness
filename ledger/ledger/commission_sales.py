@@ -17,12 +17,30 @@ _cache = OrderedDict()
 _lock = threading.Lock()
 
 
-def rules(registry, store_id):
+def _revision(conn, store_id):
+    row = conn.execute('SELECT generation FROM scheme_store_clock WHERE store_id=?', (store_id,)).fetchone()
+    members = [dict(row) for row in conn.execute('SELECT * FROM store_member WHERE store_id=? ORDER BY person_id,valid_from,id', (store_id,))]
+    revision = str(row[0] if row else 0) + ':' + hashlib.sha256(json.dumps(members,sort_keys=True).encode()).hexdigest()
+    return revision, members
+
+
+def rule_revision(registry, store_id):
+    """Small transactional fingerprint; no product JSON decoding on cache hits."""
     with registry.connect() as conn:
         conn.execute('BEGIN')
-        generation = conn.execute('SELECT generation FROM scheme_read_clock WHERE id=1').fetchone()[0]
-        members = [dict(row) for row in conn.execute('SELECT * FROM store_member WHERE store_id=? ORDER BY person_id,valid_from,id', (store_id,))]
-        revision = str(generation) + ':' + hashlib.sha256(json.dumps(members,sort_keys=True).encode()).hexdigest()
+        return _revision(conn, store_id)[0]
+
+
+class _RulesChanged(Exception):
+    pass
+
+
+def rules(registry, store_id, *, expected=None):
+    with registry.connect() as conn:
+        conn.execute('BEGIN')
+        revision, members = _revision(conn, store_id)
+        if expected is not None and expected != revision:
+            raise _RulesChanged()
         key = (str(registry.root), store_id, revision)
         with _lock:
             if key in _cache:
@@ -197,13 +215,14 @@ def archived(registry, commission, outputs, frame=None):
     from .read_cache import cached
     from . import derived_read_cache
     if _code_sha is None:
-        _code_sha = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
+        from . import commission_registry, commission_read_index
+        _code_sha = hashlib.sha256(b''.join(Path(module.__file__).read_bytes()
+            for module in (commission_registry,commission_read_index)) + Path(__file__).read_bytes()).hexdigest()
     with registry.connect() as conn:
         meta = conn.execute('SELECT path,sha,store_id,period FROM calculation WHERE id=?', (commission['calculation_id'],)).fetchone()
     if not meta:
         return outputs
-    snapshot = rules(registry,meta['store_id'])
-    revision = snapshot[0]
+    revision = rule_revision(registry,meta['store_id'])
     path = registry.root / 'calculations' / Path(meta['path']).name
     stat = path.stat()
     base_sha = hashlib.sha256(json.dumps(outputs,sort_keys=True,separators=(',',':')).encode()).hexdigest()
@@ -213,6 +232,7 @@ def archived(registry, commission, outputs, frame=None):
         saved = derived_read_cache.get(registry,persistent_key)
         if saved is not None:
             return saved
+        snapshot = rules(registry,meta['store_id'],expected=revision)
         if frame is None:
             data = path.read_bytes()
             if hashlib.sha256(data).hexdigest()!=meta['sha']:
@@ -227,4 +247,10 @@ def archived(registry, commission, outputs, frame=None):
         value = totals(attach(registry,meta['store_id'],meta['period'],loaded,snapshot=snapshot),outputs)
         derived_read_cache.put(registry,persistent_key,value)
         return value
-    return cached(_archive_cache,key,build,256)
+    try:
+        return cached(_archive_cache,key,build,256)
+    except _RulesChanged:
+        # Do not persist a newer rule snapshot under an older cache key.
+        # The caller may retry after a concurrent batch publish completes.
+        from .commission_registry import RevisionConflict
+        raise RevisionConflict('商品规则正在更新，请稍后重新查询')

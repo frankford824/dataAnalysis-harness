@@ -11,7 +11,7 @@ export const useCommission = defineStore('commission', () => {
   const settingsSearch = ref(''), settingsState = ref(''), reportView = ref('teams')
   const updated = ref({}), loading = ref({}), initError = ref('')
   let bootstrap, rosterLoad
-  const storeOptions = computed(() => app.stores.map(s => ({ value: s.id, label: s.name, group:app.platforms.find(p=>p.id===s.platform)?.name || s.platform || '' })))
+  const storeOptions = computed(() => app.stores.map(s => ({ value: s.id, label: s.name, keywords: (s.aliases || []).join(' '), group:app.platforms.find(p=>p.id===s.platform)?.name || s.platform || '' })))
   const personOptions = computed(() => {
     const options = new Map(people.value.map(p => [p.id, { value:p.id, label:p.name + (p.employee_no ? `（${p.employee_no}）` : '') }]))
     for(const p of reportPeople.value)if(!options.has(p.id))options.set(p.id,{value:p.id,label:p.name})
@@ -55,6 +55,7 @@ export const useCommission = defineStore('commission', () => {
     lastRefresh = now
     refreshTick.value++
     loadPeople().catch(() => {})
+    app.loadNavigation(true).catch(() => {}) // Includes metadata-only shop renames.
   }
   async function changed() { await loadPeople(); refresh({ force: true }) }
   return { storeIds, personIds, people, reportPeople, start, end, ready, refreshTick, settingsSearch, settingsState,

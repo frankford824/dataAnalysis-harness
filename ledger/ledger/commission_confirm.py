@@ -109,7 +109,8 @@ def context(ws, registry, model, store_id, period, *, expected_run=None):
             person['excluded_count'] = extra['excluded_count']
     for item in history:
         item['payouts'] = json.loads(item.pop('payouts_json'))
-    return {'store_id': store_id, 'store': model.store(store_id).name,
+    from .store_display import names
+    return {'store_id': store_id, 'store': names(ws.root,model)[store_id],
             'period': period, 'run_id': run_id, 'store_closed': closed,
             'source_sha': hashlib.sha256(json_text(commission).encode()).hexdigest(),
             'people': people, 'latest': latest, 'history': history,
