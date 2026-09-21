@@ -576,6 +576,7 @@ def drill(facts: pl.DataFrame | str | Path, model: Model, node_id: str,
                     "metric_id", "link_key", "linked", "counted", "contribution",
                     "amount", "subject", "minor", "classify_via", "file_name",
                     "sheet", "row_no", "major", "file_sha", "order_id", "internal_order_id", "sku", "source_note",
+                    "record_type", "closing_run_id", "closing_at", "closing_by",
                 )
                 if column in columns
             ]
@@ -670,7 +671,7 @@ def drill(facts: pl.DataFrame | str | Path, model: Model, node_id: str,
         picked.select(
             *[c for c in (
                 "metric_id", "link_key", "linked", "counted", "contribution",
-                "amount", "subject", "minor", "classify_via",
+                "amount", "subject", "minor", "classify_via", "record_type", "closing_run_id", "closing_at", "closing_by",
                 "file_sha", "file_name", "sheet", "row_no", "order_id", "internal_order_id", "sku", "source_note",
             ) if c in picked.columns]
         )
@@ -959,24 +960,28 @@ def fees_csv(facts: Path | pl.DataFrame, model: Model, *, review_status: str = "
         c for c in (
             "link_key", "metric_id", "subject", "amount", "contribution",
             "counted", "linked", "file_name", "sheet", "row_no", "source_note",
-            "order_id", "internal_order_id", "sku",
+            "order_id", "internal_order_id", "sku", "record_type", "closing_run_id", "closing_at", "closing_by",
         )
         if c in facts.columns
     ]
     if not cols or facts.is_empty():
         return "订单号,科目,金额,进账,是否进账,文件,行号\n"
     with_notes = "source_note" in facts.columns and facts["source_note"].drop_nulls().len() > 0
+    frozen = 'record_type' in facts.columns
+    precision = 10 if frozen else 4
     frame = facts.select(cols)
     lines = ["订单号,科目,原始科目,金额,进账,是否进账,已挂钩,文件,工作表,行号,原订单号,商品编码,聚水潭订单号"]
     if with_notes:
         lines[0] += ",计算说明"
+    if frozen:
+        lines[0] += ',记录类型,结账核算记录,结账确认时间,结账确认人'
     for row in frame.iter_rows(named=True):
         lines.append(",".join((
             _excel_identifier_cell(row.get("link_key")),
             csv_cell(names.get(row.get("metric_id") or "", row.get("metric_id"))),
             csv_cell(row.get("subject")),
-            csv_cell(f"{float(row.get('amount') or 0):.4f}"),
-            csv_cell(f"{float(row.get('contribution') or 0):.4f}"),
+            csv_cell(f"{float(row.get('amount') or 0):.{precision}f}"),
+            csv_cell(f"{float(row.get('contribution') or 0):.{precision}f}"),
             csv_cell("是" if row.get("counted") else "否"),
             csv_cell("是" if row.get("linked") else "否"),
             csv_cell(row.get("file_name")),
@@ -985,7 +990,8 @@ def fees_csv(facts: Path | pl.DataFrame, model: Model, *, review_status: str = "
             _excel_identifier_cell(row.get("order_id")),
             _excel_identifier_cell(row.get("sku")),
             _excel_identifier_cell(row.get("internal_order_id")),
-        )) + (("," + csv_cell(row.get("source_note"))) if with_notes else ""))
+        )) + (("," + csv_cell(row.get("source_note"))) if with_notes else "")
+           + (','+','.join(csv_cell(row.get(k)) for k in ('record_type','closing_run_id','closing_at','closing_by')) if frozen else ''))
     if review_status:
         lines = [lines[0] + ",核对状态"] + [line + "," + csv_cell(review_status) for line in lines[1:]]
     return "\n".join(lines) + "\n"

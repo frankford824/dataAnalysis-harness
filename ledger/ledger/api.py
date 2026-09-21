@@ -1531,10 +1531,17 @@ def drill(run_id: int, node_id: str, limit: int = view.DRILL_LIMIT,
     if not facts.exists():
         raise HTTPException(404, "这次算账没留明细，重算一次就有了")
     try:
-        return view.drill(facts, _model(), node_id, limit=min(limit, 2000),
+        model=_model()
+        metrics=([node_id[len(view.METRIC_PREFIX):]] if node_id.startswith(view.METRIC_PREFIX) else view.node_metrics(model,node_id))
+        from . import frozen_costs
+        if frozen_costs.COST_METRICS.intersection(metrics):
+            facts=frozen_costs.for_run(workspace(),run_id,facts,model,metrics=metrics)
+        return view.drill(facts, model, node_id, limit=min(limit, 2000),
                           value=_node_value(run_id, node_id), offset=offset,
                           subject=subject or None, file=file or None,
                           q=q or None, order=order, only=only)
+    except WorkspaceError as exc:
+        raise HTTPException(409,str(exc)) from exc
     except Exception as exc:
         raise HTTPException(404, f"这次算账的明细读不了，重算一次就有了：{exc}") from exc
 
@@ -1579,12 +1586,17 @@ def fees_export(run_id: int) -> PlainTextResponse:
     import polars as pl
     gaps_path = workspace().pricing_gaps_path(run_id)
     gap_count = pl.scan_parquet(gaps_path).select(pl.len()).collect().item() if gaps_path.exists() else 0
-    state = workspace().state_by_run(run_id)
     manual = bool((state.result or {}).get("manual_cost")) if state else False
-    review_status = ("订单源行不含人工确认成本差额，请以结账快照为准" if manual
+    if manual:
+        from . import frozen_costs
+        try:
+            facts=frozen_costs.for_run(workspace(),run_id,facts,_model(),required=True)
+        except WorkspaceError as exc:
+            raise HTTPException(409,str(exc)) from exc
+    review_status = ("已含本次结账冻结的人工成本；按进账列核对，未进账行不计入看板；不包含后续补录修改" if manual
                      else f"{gap_count}条成本未覆盖，现有源行金额需人工确认" if gap_count else "")
     body = "\ufeff" + view.fees_csv(facts, _model(), review_status=review_status)
-    suffix = "源费项明细-人工成本确认" if manual else "费项明细-成本需确认" if gap_count else "费项明细"
+    suffix = "结账费项明细-含冻结人工成本" if manual else "费项明细-成本需确认" if gap_count else "费项明细"
     filename = f"{store}-{period}-{suffix}.csv"
     ascii_name = f"{store}-{period}-fees.csv"
     return PlainTextResponse(
