@@ -168,15 +168,16 @@ class TestRatioAllocation:
         assert got == [70.0, 30.0]
         assert sum(got) == 100.0
 
-    def test_null_ratio_counts_as_zero_and_is_reported(self):
-        """分配率为空按 0 计，但要说出来——这部分钱没进利润。"""
+    def test_partial_ratio_is_pending_not_silently_zero(self):
+        """部分比例缺失不能当零；保留店铺金额而不猜个人归属。"""
         spine = _spine([
             {"order_id": "A", "alloc_ratio": 1.0, "store": "s", "period": "p"},
             {"order_id": "A", "alloc_ratio": None, "store": "s", "period": "p"},
         ])
         metric = _metric(Allocation(mode="ratio", by="alloc_ratio"))
         proj = project(_facts([("A", 100.0)]), metric, spine)
-        assert any("为空" in n for n in proj.notes)
+        assert proj.allocation_pending[0]['reason']=='invalid_or_incomplete_ratio'
+        assert proj.facts['spine_row'].to_list()==[None]
 
     def test_out_of_range_ratio_is_reported(self):
         """分配率大于 1 意味着子订单分到的比主订单总额还多，必须报出来。
@@ -190,9 +191,10 @@ class TestRatioAllocation:
         ])
         metric = _metric(Allocation(mode="ratio", by="alloc_ratio"))
         proj = project(_facts([("A", 100.0)]), metric, spine)
-        assert any("大于 1" in n and "为负" in n for n in proj.notes)
+        assert proj.allocation_pending[0]['reason']=='invalid_or_incomplete_ratio'
+        assert proj.facts['amount'].sum()==100
 
-    def test_missing_ratio_column_falls_back_to_even_not_one(self):
+    def test_missing_ratio_column_keeps_unassigned_store_amount(self):
         """脊柱上没有分摊率列时按笔数均摊，合计守恒。
 
         绝不能默默按 1：主订单有几个子订单就把钱记几遍。天猫千牛导出经常
@@ -206,14 +208,15 @@ class TestRatioAllocation:
         metric = _metric(Allocation(mode="ratio", by="alloc_ratio"))
         proj = project(_facts([("A", 100.0)]), metric, spine)
         got = proj.facts.get_column("amount").to_list()
-        assert got == [50.0, 50.0]
-        assert any("笔数均摊" in n for n in proj.notes)
+        assert got == [100.0]
+        assert proj.facts['spine_row'].to_list()==[None]
+        assert proj.allocation_pending[0]['reason']=='missing_payment_basis'
 
     def test_missing_ratio_uses_buyer_paid_when_present(self):
         """能从买家实付推占比就推，比均摊更接近淘宝原来的收入分配率。"""
         spine = _spine([
-            {"order_id": "A", "buyer_paid": 70.0, "store": "s", "period": "p"},
-            {"order_id": "A", "buyer_paid": 30.0, "store": "s", "period": "p"},
+            {"order_id": "A", "buyer_paid": 70.0, "refund_amount":0., "store": "s", "period": "p"},
+            {"order_id": "A", "buyer_paid": 30.0, "refund_amount":0., "store": "s", "period": "p"},
         ])
         metric = _metric(Allocation(mode="ratio", by="alloc_ratio"))
         proj = project(_facts([("A", 100.0)]), metric, spine)
@@ -224,9 +227,9 @@ class TestRatioAllocation:
     def test_all_null_ratio_column_falls_back_like_missing(self):
         """列在、整单都空：订单台拼进千牛脊柱后就是这样。按 0 会让收入整项消失。"""
         spine = _spine([
-            {"order_id": "A", "alloc_ratio": None, "buyer_paid": 70.0,
+            {"order_id": "A", "alloc_ratio": None, "buyer_paid": 70.0, "refund_amount":0.,
              "store": "s", "period": "p"},
-            {"order_id": "A", "alloc_ratio": None, "buyer_paid": 30.0,
+            {"order_id": "A", "alloc_ratio": None, "buyer_paid": 30.0, "refund_amount":0.,
              "store": "s", "period": "p"},
         ])
         metric = _metric(Allocation(mode="ratio", by="alloc_ratio"))
@@ -284,9 +287,9 @@ class TestDerivedRatioFollowsTheManualDefinition:
         人工公式是 IFERROR 回买家实付金额，按空值当 0 减就是同一个结果。
         """
         spine = _spine([
-            {"order_id": "A", "buyer_paid": 70.0, "refund_amount": None,
+            {"order_id": "A", "buyer_paid": 70.0, "refund_amount": '无退款申请',
              "store": "s", "period": "p"},
-            {"order_id": "A", "buyer_paid": 30.0, "refund_amount": None,
+            {"order_id": "A", "buyer_paid": 30.0, "refund_amount": '无退款申请',
              "store": "s", "period": "p"},
         ])
         proj = project(_facts([("A", 100.0)]), self._metric(), spine)
@@ -327,7 +330,9 @@ class TestDerivedRatioFollowsTheManualDefinition:
         ])
         proj = project(_facts([("A", -5.45)]), self._metric(), spine)
         got = proj.facts.get_column("amount").to_list()
-        assert [round(x, 3) for x in got] == [-2.725, -2.725]
+        assert got == [-5.45]
+        assert proj.facts['spine_row'].to_list()==[None]
+        assert proj.allocation_pending[0]['reason']=='zero_net_payment'
         assert round(sum(got), 2) == -5.45
 
 

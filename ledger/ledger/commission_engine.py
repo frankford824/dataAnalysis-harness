@@ -94,7 +94,8 @@ def _match(orders, rules):
     # Expiry deliberately stops an old product rule; it does not resurrect a
     # previous owner or silently start paying the store default.
     return matched.with_columns(
-        pl.when(pl.col("order_at").is_null()).then(pl.lit("missing_order_time"))
+        pl.when(pl.col('allocation_pending').fill_null(False) if 'allocation_pending' in matched.columns else pl.lit(False)).then(pl.lit('allocation_pending'))
+        .when(pl.col("order_at").is_null()).then(pl.lit("missing_order_time"))
         .when(pl.col("product_id") == "").then(pl.lit("missing_product_id"))
         .when(pl.col("rule_key").is_null()).then(pl.lit("unassigned"))
         .when(pl.col("to_at").is_not_null() & (pl.col("order_at") >= pl.col("to_at"))).then(pl.lit("expired"))

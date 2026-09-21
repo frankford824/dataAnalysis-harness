@@ -631,6 +631,10 @@ def build(workspace, registry, model, start, end, store_ids=None, person_ids=Non
                 '历史口径' if legacy else
                 '已计算' if c.get('amount_complete') else '试算')
         notes=list(c.get('notes') or [])
+        correction=source_c.get('allocation_correction') or {}
+        if correction.get('pending_orders'):
+            status='试算（历史分配仍有待复核）'
+            notes.append(f"已更正 {correction.get('verified_orders',0)} 个有据主单；另有 {len(correction['pending_orders'])} 个主单保留历史分配待复核，不能把参考金额当作重新确认的最终应发")
         if closed and c.get('amount_complete') is False:notes.append('原结账结果保留了试算标记')
         has_result=c.get('total') is not None or any(p.get('amount') is not None for p in c.get('people',[]))
         if not has_result:status='未计算提成'
@@ -1094,9 +1098,12 @@ def business_export(report, kind):
         columns += [('托管类销售额','managed_sales')]
     if kind in {'teams','people','store_people'}:
         columns += [('销售归属状态','sales_attribution_state')]
+    if kind=='store_people':columns += [('销售口径','sales_scope')]
     def rows():
         for row in report['rows' if kind == 'breakdown' else kind]:
             item = {label:row.get(key) for label,key in columns}
+            if '销售口径' in item:
+                item['销售口径']={'person':'个人非托管销售额；托管部分另列','managed':'托管销售额；不计入个人非托管销售','store':'全店销售额（含托管）','unassigned':'尚未分配到人员'}.get(row.get('kind'),'')
             if '销售归属状态' in item:
                 item['销售归属状态'] = ('店铺财务口径' if row.get('kind')=='store' else
                     '托管团队归属' if row.get('kind')=='managed' else

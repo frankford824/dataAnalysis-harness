@@ -44,6 +44,7 @@ class Projection:
     #: 脊柱上有、但这个指标没覆盖到的行数。覆盖率就从这里来。
     uncovered_rows: int = 0
     notes: list[str] = field(default_factory=list)
+    allocation_pending: list[dict] = field(default_factory=list)
 
 
 def claims(metric: Metric) -> pl.Expr:
@@ -128,8 +129,29 @@ def project(
             keyed = from_file
     by_key = by_key.with_columns(norm_expr(pl.col("link_key")).alias("link_key"))
 
-    factor = _factor(keyed, metric)
-    if metric.posting_basis in {"transaction", "order_number"}:
+    pending=[]
+    pending_frame=_empty()
+    strict_ratio=metric.allocate is not None and metric.allocate.mode=='ratio'
+    if strict_ratio:
+        from .allocation import prepare
+        keyed=prepare(keyed,metric)
+        unresolved=keyed.filter(pl.col('__allocation_reason')!='').group_by('link_key').agg(
+            *[pl.col(c).first() for c in ('store','period') if c in keyed.columns],
+            pl.col('__allocation_reason').first()).join(by_key,on='link_key',how='inner')
+        for row in unresolved.iter_rows(named=True):
+            if row['__allocation_reason']=='cross_store_or_period':
+                raise ValueError(f"{metric.name} 分摊对象跨店或跨期，订单 {row['link_key']} 需要核对")
+            if row['amount']:
+                pending.append({'store':row.get('store'),'period':row.get('period'),'metric_id':metric.id,
+                    'order_id':row['link_key'],'amount':row['amount'],'reason':row['__allocation_reason']})
+        if not unresolved.is_empty():
+            pending_frame=unresolved.select(pl.lit(metric.id).alias('metric_id'),pl.lit(metric.source).alias('source_id'),
+                *[(pl.col(c) if c in unresolved.columns else pl.lit(None,dtype=pl.Utf8)).alias(c) for c in ('store','period')],
+                pl.col('link_key'),pl.col('amount'),pl.lit(1.).alias('factor'),pl.lit(None,dtype=pl.UInt32).alias('spine_row'))
+        factor=pl.col('__allocation_factor')
+    else:
+        factor = _factor(keyed, metric)
+    if not strict_ratio and metric.posting_basis in {"transaction", "order_number"}:
         # 退款金额已由流水确认。保留有效比例的相对关系，但不能因残留比例少计退款。
         keyed = keyed.with_columns(factor.fill_null(0.0).clip(lower_bound=0.0).alias("__factor"))
         total = pl.col("__factor").sum().over("link_key")
@@ -148,6 +170,17 @@ def project(
         factor.alias("factor"),
         pl.col("spine_row"),
     )
+    if strict_ratio and not facts.is_empty():
+        # Preserve each source total after six-decimal row rounding. Assign the
+        # residue deterministically to the largest allocated row, not a gift.
+        totals=facts.group_by('link_key').agg(pl.col('amount').sum().alias('__allocated'))
+        residue=by_key.join(totals,on='link_key').select('link_key',
+            (pl.col('amount').round(6)-pl.col('__allocated')).alias('__residue'))
+        facts=facts.join(residue,on='link_key',how='left',maintain_order='left').with_columns(
+            pl.when(pl.col('amount').abs()==pl.col('amount').abs().max().over('link_key'))
+            .then(pl.col('spine_row')).otherwise(None).min().over('link_key').alias('__recipient'))
+        facts=facts.with_columns(pl.when(pl.col('spine_row')==pl.col('__recipient'))
+            .then((pl.col('amount')+pl.col('__residue')).round(6)).otherwise(pl.col('amount')).alias('amount')).drop('__residue','__recipient')
 
     covered = int(joined.select(pl.col("amount").is_not_null().sum()).item())
     matched_keys = set(
@@ -184,6 +217,8 @@ def project(
     # 界面却说没进账，只能一单一单去查，查完发现是相抵的。
     zeroed = by_key.filter(pl.col("amount") == 0.0).get_column("link_key").to_list()
     out = facts.filter(pl.col("amount") != 0.0)
+    if not pending_frame.is_empty():
+        out=pl.concat([out,pending_frame],how='vertical_relaxed')
     if zeroed:
         out = pl.concat(
             [out, facts.filter((pl.col("amount") == 0.0)
@@ -217,11 +252,14 @@ def project(
 
     proj = Projection(
         facts=out,
-        notes=ratio_health(keyed, metric) + _ratio_fallback_notes(keyed, metric),
+        notes=([f'{metric.name}：{len(pending)} 个主订单缺少有效分配依据，金额保留在店铺待分配，不计个人业绩'] if pending else []) if strict_ratio else ratio_health(keyed, metric) + _ratio_fallback_notes(keyed, metric),
         orphan_amount=money_float(orphan_amount),
         orphan_keys=len(orphan_keys),
         uncovered_rows=keyed.height - covered,
+        allocation_pending=pending,
     )
+    if strict_ratio and keyed.filter(pl.col(metric.allocate.by).is_null() & (pl.col('__allocation_reason')=='')).height:
+        proj.notes.append(f'{metric.name}：没有收入分配率的订单，已按完整买家实付扣退款后占比分摊')
     if orphan_keys and metric.posting_basis not in {"transaction", "order_number"}:
         proj.notes.append(
             f"{metric.name}：源表里有 {len(orphan_keys):,} 个键、{orphan_amount:,.2f} 元"
@@ -245,6 +283,7 @@ def project_transactions(source_facts: pl.DataFrame, metric: Metric, spine: Spin
     eligible = spine.eligible(metric.link).frame
     parts: list[pl.DataFrame] = []
     notes: list[str] = []
+    pending=[]
     for (store, period), scoped in rows.partition_by("store", "period", as_dict=True).items():
         if not store or not period or period == "(未知账期)":
             notes.append(f"{metric.name} 有流水缺少店铺或发生日期，未入账")
@@ -252,6 +291,7 @@ def project_transactions(source_facts: pl.DataFrame, metric: Metric, spine: Spin
         target = eligible.filter(pl.col(SPINE_STORE) == store) if SPINE_STORE in eligible.columns else eligible.clear()
         target = target.with_columns(pl.lit(period).alias(SPINE_PERIOD))
         projected = project(scoped, metric, Spine(target))
+        pending.extend(projected.allocation_pending)
         notes.extend(projected.notes)
         if not projected.facts.is_empty():
             parts.append(projected.facts)
@@ -263,7 +303,7 @@ def project_transactions(source_facts: pl.DataFrame, metric: Metric, spine: Spin
                 pl.col("amount").sum()
             ).with_columns(pl.lit(1.0).alias("factor"), pl.lit(None, dtype=pl.UInt32).alias("spine_row"))
             parts.append(direct.select(SPINE_FACT_COLUMNS))
-    return Projection(facts=pl.concat(parts, how="vertical_relaxed") if parts else _empty(), notes=notes)
+    return Projection(facts=pl.concat(parts, how="vertical_relaxed") if parts else _empty(), notes=notes,allocation_pending=pending)
 
 
 def _orderless_keys(source_facts: pl.DataFrame, metric: Metric) -> set[str]:
@@ -466,23 +506,9 @@ def _factor(keyed: pl.DataFrame, metric: Metric) -> pl.Expr:
     if alloc is None:
         return pl.lit(1.0)
     if alloc.mode == "ratio":
-        derived = _derived_share(keyed)
-        if alloc.by in keyed.columns:
-            declared = pl.col(alloc.by).cast(pl.Float64, strict=False)
-            return (
-                pl.when(_vacant_ratio(keyed, alloc.by))
-                .then(derived)
-                .otherwise(declared.fill_null(0.0))
-            )
-        # 天猫千牛导出经常没有「收入分配率」这一列。绝不能按 1 填——
-        # 一个主订单有几个子订单，钱就会被记几遍，利润凭空翻倍。
-        #
-        # 自己推的时候照财务表的定义推。淘宝喜必顺那份订单明细是人工工作表原件，
-        # 第一行逐列写着公式：子订单收入 = 买家实付金额 - 退款金额（报错取买家实付、
-        # 负数计 0），主订单收入 = 按主订单编号汇总子订单收入，收入分配率 = 两者相除。
-        # 退款金额那一格常填「无退款申请」，转数值后是空，正好落回买家实付。
-        # 全退的子订单权重为 0，费用不该摊到它头上。
-        return derived
+        if '__allocation_factor' not in keyed.columns:
+            raise ValueError('比例分摊必须先校验完整分配依据，不允许按笔数兜底')
+        return pl.col('__allocation_factor')
     return _even()
 
 

@@ -293,6 +293,13 @@ def _order_base(
         if "sub_order_id" in base.columns:
             extra = extra.with_columns(pl.lit(None, dtype=pl.Utf8).alias("sub_order_id"))
         base = pl.concat([base, extra], how="diagonal_relaxed")
+    pending_orders={item['order_id'] for projection in getattr(result,'projections',{}).values()
+                    for item in projection.allocation_pending
+                    if item.get('store') in stores and item.get('period')==period and item.get('metric_id') in metrics}
+    if pending_orders:
+        pending=pl.col('spine_row').is_null()
+        if 'order_id' in base.columns:pending |= pl.col('order_id').is_in(sorted(pending_orders)).fill_null(False)
+        base=base.with_columns(pending.alias('allocation_pending'))
 
     # SPINE_PRODUCT 本来就叫 product_id，就地转型，不要 alias 到同名再 drop。
     return base.with_columns(

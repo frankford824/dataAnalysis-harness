@@ -66,6 +66,26 @@ def _upload(client, *named: tuple[str, bytes]):
 # --------------------------------------------------------------------------- #
 
 
+def test_allocation_export_preserves_ids_and_explains_repeated_control(client):
+    import csv
+    from ledger.storage_integrity import seal
+    ws=api.workspace()
+    rid=ws.record('taobao_mt9scjag','2026-06',{'can_close':False},[])
+    path=ws.facts_path(rid).with_suffix('.allocation.parquet')
+    pl.DataFrame({'metric_id':['trade_receipt'],'link_key':['3310016558088144654'],
+        'sub_order_id':['3310016558088180664'],'product_id':['1033349629267'],
+        'source_amount':[51.4],'factor':[.3888888889],'amount':[19.988889],
+        'spine_row':[0],'allocation_basis_source':['历史冻结流水与核对后比例']}).write_parquet(path)
+    seal(path)
+    response=client.get(f'/api/runs/{rid}/allocation.csv')
+    assert response.status_code==200
+    row=next(csv.DictReader(io.StringIO(response.text.lstrip('\ufeff'))))
+    assert row['主订单号']=="'3310016558088144654"
+    assert row['商品ID']=="'1033349629267"
+    assert row['分配依据']=='历史冻结流水与核对后比例'
+    assert '不可直接相加' in row['汇总说明']
+
+
 class TestBootstrap:
     def test_gives_the_ui_everything_it_needs_at_once(self, client):
         """分开取的话，中间有人改了配置，界面会拿半新半旧的结构去渲染。"""

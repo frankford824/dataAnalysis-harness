@@ -114,6 +114,9 @@ def slice_dict(sl: Slice, store: Store, model: Model) -> dict[str, Any]:
         "cost_review": {"observed": observed({"calculation_inputs": sl.calculation_inputs}),
                         "requires_human": not sl.cost_coverage.get("passed", False)},
         "calculation_inputs": sl.calculation_inputs,
+        "allocation_pending": sl.allocation_pending[:50],
+        "allocation_pending_count": len(sl.allocation_pending),
+        "has_allocation_evidence": not sl.allocation_evidence.is_empty(),
         "statement": _statement(sl, model),
         "findings": [
             {"id": f.check_id, "name": f.name, "passed": f.passed,

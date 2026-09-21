@@ -1064,6 +1064,14 @@ class OrderFeed:
         for item in ingestion.frames_of("order_detail"):
             if item.frame is None or item.template is None:
                 continue
+            if item.template.id.startswith('taobao_order'):
+                from .engine.allocation import enrich_order_table
+                item.frame=enrich_order_table(item.frame,feed,getattr(ingestion,'model',None))
+                roles={binding.role for binding in item.template.bindings}
+                additions=tuple(ColumnBinding(role=name,columns=(name,),required=False,kind=kind)
+                    for name,kind in [('buyer_paid','number'),('refund_amount','number'),('allocation_basis_source','text')]
+                    if name in item.frame.columns and name not in roles)
+                if additions:item.template=item.template.model_copy(update={'bindings':item.template.bindings+additions})
             key = "sub_order_id" if "sub_order_id" in item.frame.columns else "order_id"
             if key not in item.frame.columns or key not in feed.columns:
                 continue
@@ -1178,6 +1186,7 @@ class OrderFeed:
             if captured["snapshot_id"] != manifest["snapshot_id"]:
                 raise OrderFeedError("订单快照刚发生切换，本次计算等待重试")
             fingerprint = f"order-feed:{captured['snapshot_id']}:{captured['consumed_seq']}"
+            self._captured_snapshot_id = captured['snapshot_id']
             self._captured_seq = int(captured["consumed_seq"])
             order_store_ids = [
                 str(r[0]) for r in conn.execute(
@@ -1248,7 +1257,7 @@ class OrderFeed:
         after_items = self._append_records(after_items, child_records)
 
         reship_origins = self._reshipment_origins(after, items, exported_orders)
-        order_frame = self._order_frame(orders, items, after, relations, store, fingerprint, reship_origins)
+        order_frame = self._order_frame(orders, items, after, relations, store, fingerprint, reship_origins, exported_orders)
         cost_frame = self._cost_frame(orders, items, costs, relations, store, fingerprint, reship_origins, require_history, require_pricing)
         after_frame = self._after_frame(after, after_items, items, store, fingerprint)
         cost_item = self._item("order_cost", "order_console_cost_v1", "订单台日期时点成本", cost_frame,
@@ -1442,6 +1451,7 @@ class OrderFeed:
         self, orders: pl.DataFrame, items: pl.DataFrame, after: pl.DataFrame,
         relations: pl.DataFrame,
         store: Store, fingerprint: str, reship_origins: dict[str, str] | None = None,
+        exported_orders: dict[str, str | None] | None = None,
     ) -> pl.DataFrame:
         reships = (
             relations.filter(pl.col("relation_type") == "reship")
@@ -1455,11 +1465,41 @@ class OrderFeed:
         product_columns = [pl.col(c).cast(pl.Utf8).replace("", None)
                            for c in ("shop_item_id", "merchant_sku") if c in items.columns]
         product = pl.coalesce(product_columns) if product_columns else pl.lit(None, dtype=pl.Utf8)
+        is_reship=(pl.col('order_id').cast(pl.Utf8).is_in(reships)
+            | pl.col('outer_sku').cast(pl.Utf8).str.to_lowercase().is_in(list(reship_origins or {})).fill_null(False)
+            | pl.concat_str([pl.col('outer_sku').cast(pl.Utf8).str.to_lowercase(),pl.lit('|'),pl.col('sub_order_id').cast(pl.Utf8)])
+              .is_in(list(reship_origins or {})).fill_null(False))
+        if store.platform=='taobao' and 'paid_amount' in orders.columns:
+            item_paid=pl.col('paid_amount').cast(pl.Float64,strict=False)
+            # Synthetic reship rows are not part of the sales payment control.
+            # Their quoted amounts must not invalidate genuine sales children.
+            sale_items=items.filter(~is_reship)
+            totals=sale_items.group_by('order_id').agg(
+                item_paid.sum().alias('__item_paid_total'),
+                (item_paid.is_not_null() & item_paid.is_finite() & (item_paid>=0)).all().alias('__item_paid_complete'))
+            headers=orders.select('order_id',pl.col('paid_amount').cast(pl.Float64,strict=False).alias('__order_paid'),
+                (pl.col('freight_amount').cast(pl.Float64,strict=False) if 'freight_amount' in orders.columns else pl.lit(None,dtype=pl.Float64)).alias('__freight'))
+            controls=totals.join(headers,on='order_id',how='left').with_columns(
+                (pl.col('__item_paid_complete') & pl.col('__order_paid').is_finite()
+                 & (((pl.col('__order_paid')-pl.col('__item_paid_total')).abs()<=.01)
+                    | ((pl.col('__order_paid')-pl.col('__item_paid_total')-pl.col('__freight')).abs()<=.01).fill_null(False)))
+                .fill_null(False).alias('__payment_valid'))
+            items=items.join(controls.select('order_id','__payment_valid'),on='order_id',how='left',maintain_order='left').with_columns(
+                pl.when(pl.col('__payment_valid')).then(pl.col('paid_amount')).otherwise(None).alias('paid_amount')).drop('__payment_valid')
+        parent=pl.col('online_order_no_order').fill_null(pl.col('online_order_no')).cast(pl.Utf8)
+        if store.platform=='taobao' and exported_orders:
+            certified={str(k):str(v) for k,v in exported_orders.items() if v}
+            child=pl.col('outer_sku').fill_null(pl.col('sub_order_id')).cast(pl.Utf8)
+            known=child.replace_strict(certified,default=None,return_dtype=pl.Utf8)
+            aliases=parent.str.replace_all('[，;；]',',').str.split(',').list.eval(pl.element().str.strip_chars().str.split(':').list.last())
+            # Merged ERP orders carry several platform master IDs. Resolve an
+            # item only through its unique, certified platform child identity.
+            parent=pl.when(known.is_not_null() & (parent.is_null() | (parent=='') | aliases.list.contains(known).fill_null(False))).then(known).otherwise(parent)
         frame = items.join(orders, on="order_id", how="inner", suffix="_order").join(
             refund, on="order_id", how="left",
         ).select(
             (self._pdd_original(pl.col("outer_sku"), pl.col("online_order_no"), pl.col("online_order_no_order"))
-             if store.platform == "pdd" else pl.col("online_order_no_order").fill_null(pl.col("online_order_no"))).cast(pl.Utf8).alias("order_id"),
+             if store.platform == "pdd" else parent).cast(pl.Utf8).alias("order_id"),
             pl.col("outer_sku").fill_null(pl.col("sub_order_id")).cast(pl.Utf8).alias("sub_order_id"),
             product.cast(pl.Utf8).fill_null("").alias("product_id"),
             pl.col("product_name").cast(pl.Utf8),
@@ -1469,20 +1509,18 @@ class OrderFeed:
             pl.col("tracking_no").fill_null(pl.col("tracking_no_order")).cast(pl.Utf8),
             pl.col("order_status_raw").cast(pl.Utf8).alias("order_state"),
             *([pl.col("order_flag").cast(pl.Utf8)] if store.platform == "pdd" else []),
-            pl.when(pl.col("order_id").cast(pl.Utf8).is_in(reships)
-                    | pl.col("outer_sku").cast(pl.Utf8).str.to_lowercase().is_in(list(reship_origins or {})).fill_null(False)
-                    | pl.concat_str([pl.col("outer_sku").cast(pl.Utf8).str.to_lowercase(), pl.lit("|"), pl.col("sub_order_id").cast(pl.Utf8)])
-                      .is_in(list(reship_origins or {})).fill_null(False))
+            pl.when(is_reship)
             .then(pl.lit("补发订单")).otherwise(pl.lit("销售订单")).alias("order_type"),
             self._dt("order_time").alias("order_time"),
             self._dt("pay_time").alias("pay_time"),
         ).group_by("order_id", "sub_order_id", maintain_order=True).agg(
-            pl.col("product_id").drop_nulls().first(),
+            pl.when(pl.col('product_id').drop_nulls().n_unique()==1)
+            .then(pl.col('product_id').drop_nulls().first()).otherwise(None).alias('product_id'),
             pl.col("product_name").drop_nulls().first(),
             pl.lit(1.0).alias("quantity"),
             pl.when(pl.col("buyer_paid").is_not_null().all())
             .then(pl.col("buyer_paid").sum()).otherwise(None).alias("buyer_paid"),
-            pl.col("refund_amount").sum(),
+            pl.when(pl.col('refund_amount').is_not_null().all()).then(pl.col('refund_amount').sum()).otherwise(None).alias('refund_amount'),
             pl.col("refund_status").drop_nulls().last(),
             pl.col("tracking_no").drop_nulls().first(),
             pl.col("order_state").drop_nulls().first(),
@@ -1515,10 +1553,11 @@ class OrderFeed:
         sale = pl.col("order_type") != "补发订单"
         net = pl.when(sale).then(pl.max_horizontal(paid - refund, pl.lit(0.0))).otherwise(0.0)
         total = net.sum().over("order_id")
-        sale_count = sale.sum().over("order_id")
+        complete=(~sale | (pl.col('buyer_paid').is_not_null() & pl.col('buyer_paid').is_finite() & (pl.col('buyer_paid')>=0)
+                          & pl.col('refund_amount').is_not_null() & pl.col('refund_amount').is_finite() & (pl.col('refund_amount')>=0))).all().over('order_id')
         frame = frame.with_columns(
             pl.when(~sale).then(0.0)
-            .when(total == 0).then(1.0 / sale_count.clip(lower_bound=1))
+            .when(~complete | (total <= 0)).then(None)
             .otherwise(net / total)
             .alias("alloc_ratio")
         )

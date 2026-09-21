@@ -137,6 +137,8 @@ class Slice:
     cost_coverage: dict = field(default_factory=dict)
     calculation_inputs: dict = field(default_factory=dict)
     coverage_gap_rows: pl.DataFrame = field(default_factory=pl.DataFrame)
+    allocation_pending: list[dict] = field(default_factory=list)
+    allocation_evidence: pl.DataFrame = field(default_factory=pl.DataFrame)
 
     @property
     def can_close(self) -> bool:
@@ -645,6 +647,9 @@ def run(ingestion: Ingestion, platform: str = "*") -> RunResult:
         name: s.name for s in model.stores for name in (s.name, *s.aliases) if name
     }
     spine = _build_spine(ingestion, notes, store_names)
+    if platform=='taobao':
+        from .allocation import enrich
+        spine=Spine(enrich(spine.frame))
     from . import refund_dates
     refund_date_references = refund_dates.lookup(ingestion.items, store_names)
 
@@ -667,6 +672,9 @@ def run(ingestion: Ingestion, platform: str = "*") -> RunResult:
     # 平台限定的指标只在对应平台生效。三家店的利润口径互不相同，
     # 全部一起算会让 1688 的收支口径混进淘宝的账。下面两个循环都要按这份名单走。
     metrics = [r for r in (m.for_platform(platform) for m in model.metrics) if r is not None]
+    if platform=='taobao':
+        metrics=[m.model_copy(update={'link':m.link.model_copy(update={'prefer_exported_orders':True})})
+                 if m.link and m.allocate and m.allocate.mode=='ratio' and m.link.grain=='order' else m for m in metrics]
 
     for metric in metrics:
         items = ingestion.frames_of(metric.source)
@@ -763,6 +771,7 @@ def run(ingestion: Ingestion, platform: str = "*") -> RunResult:
         result.slices[(store, period)] = _build_slice(
             model, ingestion, facts, spine_facts, spine.frame, store, period,
             link_reports, classify_report, platform, eval_errors, result.pricing_gaps,
+            [item for projection in projections.values() for item in projection.allocation_pending],
         )
     return result
 
@@ -843,6 +852,7 @@ def _project_scoped_live(
         orphan_keys=sum(part.orphan_keys for part in parts),
         uncovered_rows=sum(part.uncovered_rows for part in parts),
         notes=[note for part in parts for note in part.notes],
+        allocation_pending=[item for part in parts for item in part.allocation_pending],
     )
 
 
@@ -1082,6 +1092,7 @@ def _build_slice(
     platform: str,
     eval_errors: dict[str, list[str]] | None = None,
     pricing_gaps: pl.DataFrame | None = None,
+    allocation_pending: list[dict] | None = None,
 ) -> Slice:
     scoped = facts.filter((pl.col("store") == store) & (pl.col("period") == period))
     # 损益从脊柱事实出数；源事实留作证据链与挂钩率统计。
@@ -1141,6 +1152,25 @@ def _build_slice(
                 node.value = None
                 node.unavailable_reason = "已算现有成本，支持人工确认金额"
     result = audit(model, scoped, scoped_reports, own, completeness, nodes)
+    own_pending=[x for x in allocation_pending or [] if x.get('store')==store and x.get('period')==period]
+    allocation_evidence=pl.DataFrame()
+    ratio_metrics=[m.id for original in model.metrics if (m:=original.for_platform(platform)) is not None and m.allocate and m.allocate.mode=='ratio']
+    ratio_facts=scoped_spine.filter(pl.col('metric_id').is_in(ratio_metrics)) if not scoped_spine.is_empty() else scoped_spine
+    if not ratio_facts.is_empty():
+        context=spine if 'spine_row' in spine.columns else spine.with_row_index('spine_row')
+        columns=[x for x in ('spine_row','order_id','sub_order_id','product_id','buyer_paid','refund_amount','alloc_ratio','allocation_basis_source','__spine_origin__') if x in context.columns]
+        allocation_evidence=ratio_facts.join(context.select(columns),on='spine_row',how='left')
+        if not scoped.is_empty():
+            control=scoped.filter(pl.col('counted')).group_by('metric_id','link_key').agg(pl.col('contribution').sum().alias('source_amount'))
+            allocation_evidence=allocation_evidence.join(control,on=['metric_id','link_key'],how='left')
+        if own_pending:
+            reasons=pl.DataFrame(own_pending).select('metric_id',pl.col('order_id').alias('link_key'),pl.col('reason').alias('allocation_reason'))
+            allocation_evidence=allocation_evidence.join(reasons,on=['metric_id','link_key'],how='left')
+    if own_pending:
+        from .types import Finding
+        result.findings.append(Finding('allocation_basis','主子订单分配依据待核对',passed=False,blocking=True,
+            message=f'{len(own_pending)} 项金额已计入店铺、尚未分配到商品；请补齐实付金额或完整分配率，不能按笔数均摊。',
+            detail={'items':own_pending[:20],'count':len(own_pending)}))
     if ingestion.source_sync_pending:
         from .types import Finding
         result.findings.append(Finding("source_sync_pending", "订单数据仍在同步", passed=False, blocking=True,
@@ -1186,6 +1216,8 @@ def _build_slice(
         link_reports=scoped_reports, classify_report=own,
         pricing_gaps=own_gaps, cost_coverage=cost_coverage,
         coverage_gap_rows=_goods_coverage_rows(model, own_spine, platform, scoped_reports),
+        allocation_pending=own_pending,
+        allocation_evidence=allocation_evidence,
         calculation_inputs={
             "metric_totals": totals,
             "unavailable_metrics": sorted(unavailable),

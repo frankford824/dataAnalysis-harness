@@ -297,6 +297,7 @@ const tableColumns=computed(()=>{
     minWidth:index===0?170:undefined,mobileWidth:['amount','selected_amount','labor_cost','sales','gross','profit_after_labor','base','store_amount','trial_amount','diff_amount'].includes(key)?115:key==='period'?84:index===0?135:undefined,
     mobile:index===0||['amount','selected_amount','trial_amount','diff_amount','sales','gross','profit_after_labor','labor_cost','period','person','team'].includes(key),align:['amount','selected_amount','labor_cost','sales','gross','profit_after_labor','base','store_amount','trial_amount','diff_amount'].includes(key)?'right':'left',
     render:row=>{
+      if(key==='sales'&&state.reportView==='store_people'&&row.kind==='person'&&!row.sales_pending&&!row.sales_pending_products?.length)return h('div',{class:'table-money',title:'个人非托管销售额；托管销售额在托管明细单独列出，两者不是重复金额'},[cell(row,key),h('small',{class:'table-secondary',style:'display:block'},'非托管')])
       if(key==='subject')return h('span',{class:'table-product',style:'display:inline-block;vertical-align:middle;max-width:calc(100% - 32px)',title:row.product_id||row.notes},[row.subject,row.product_id?h('span',{class:'table-secondary',style:'display:block'},row.product_id):null])
       if(key==='sales'&&(row.sales_pending||row.sales_pending_products?.length))return h('span',{style:'color:#a16207'},'归属待确认')
       if(key==='status')return h(NTag,{bordered:false,size:'small',type:row.status?.includes('试算')?'warning':row.is_confirmed||row.status?.includes('已人工确认')?'success':'default'},()=>status(row.status))

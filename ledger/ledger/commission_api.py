@@ -193,7 +193,7 @@ def csv_response(filename, columns, rows):
                     value = json_text(value)
                 if isinstance(value, str):
                     # Prevent formulas; preserve long identifiers as text in Excel.
-                    if value[:1] in "=+@-\t\r\n" or column.endswith("_id") or column in {"product_id", "宝贝ID", "人员ID", "工号"}:
+                    if value[:1] in "=+@-\t\r\n" or column.endswith("_id") or column in {"product_id", "宝贝ID", "人员ID", "工号", "主订单号", "子订单号", "商品ID"}:
                         value = "'" + value if value else ""
                 values.append(value)
             writer.writerow(values)
@@ -880,13 +880,18 @@ def install(app, workspace, model, model_root: Path | None = None):
 
     @router.post('/profit-exclusions')
     def profit_exclusion_save(change: ProfitExclusionChange, request: Request):
-        store_name = profit_scope(change.store_id, change.period, change.person_id, change.run_id)
-        return commission_profit.save(
-            reg(), store_id=change.store_id, period=change.period,
-            person_id=change.person_id, run_id=change.run_id,
-            source_sha=change.source_sha,
-            excluded_product_ids=change.excluded_product_ids,
-            note=change.note, actor=actor(request)['id'], store_name=store_name)
+        from .finance_guard import guard
+        with guard(workspace().root,change.store_id,change.period):
+            state=workspace().state(change.store_id,change.period)
+            if state and state.closed and state.run_id!=change.run_id:
+                raise RevisionConflict('结账版本已变更，请重新打开当前利润构成')
+            store_name = profit_scope(change.store_id, change.period, change.person_id, change.run_id)
+            return commission_profit.save(
+                reg(), store_id=change.store_id, period=change.period,
+                person_id=change.person_id, run_id=change.run_id,
+                source_sha=change.source_sha,
+                excluded_product_ids=change.excluded_product_ids,
+                note=change.note, actor=actor(request)['id'], store_name=store_name)
 
     @router.get('/payout-confirmations/context')
     def payout_confirmation_context(store_id: str, period: str, run_id: int):

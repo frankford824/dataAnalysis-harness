@@ -239,6 +239,7 @@ def compose(registry, store_id, period, person_id, run_id, *, store_name='', dut
         'store_id': store_id, 'store': store_name or store_id, 'period': period,
         'person_id': person_id, 'person': person_name, 'run_id': run_id,
         'calculation_id': meta['id'], 'calculation_sha': meta['sha'],
+        'allocation_correction':json.loads(meta['summary_json']).get('allocation_correction'),
         'source_sha': hashlib.sha256((meta['sha'] + '|producer-output-v1').encode()).hexdigest(),
         'commission_trial': trial,
         'allocated_profit': None if split is None or engine_pid not in split

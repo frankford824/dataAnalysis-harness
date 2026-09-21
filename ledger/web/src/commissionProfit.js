@@ -80,7 +80,7 @@ export function profitCompositionExportRows(data, includedIds = []) {
     [PROFIT_BEFORE_LABOR]: row.profit,
     本人点数: rateLabel(row),
     是否计入阶梯: keep.has(row.product_id) ? '计入' : '剔除',
-    利润口径: PROFIT_BASIS_NOTE,
+    利润口径: PROFIT_BASIS_NOTE + (data.allocation_correction ? `；历史分配更正自核算 ${data.allocation_correction.from_run}，已核实 ${data.allocation_correction.verified_orders} 个主单，另有 ${data.allocation_correction.pending_orders?.length || 0} 个主单保留原分配待复核；已核定实发未改变` : ''),
   }))
 }
 

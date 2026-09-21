@@ -174,6 +174,7 @@ function exportTable() {
         负数为这个商品分到本人的亏损，尚未扣店级兼职。
         <b>本人点数</b>是此人在这个宝贝上的份额，不是链接合计。
       </n-alert>
+      <n-alert v-if="data?.allocation_correction" type="info" :bordered="false">本次为历史分配更正，原核算 {{data.allocation_correction.from_run}} 已保留。全店已核实 {{data.allocation_correction.verified_orders}} 个主单，另有 {{data.allocation_correction.pending_orders?.length || 0}} 个主单仍保留历史分配待复核；原已核定实发未改变。</n-alert>
       <n-alert v-if="data?.sales_pending_products?.length" type="warning" :bordered="false">本店本月有 {{data.sales_pending_products.length}} 个商品的销售归属待确认，请在提成设置中明确生效身份后刷新；当前不计为已确认个人业绩。</n-alert>
       <n-spin :show="loading">
         <div class="profit-kpis">

@@ -568,7 +568,13 @@ def _keep_facts(ws: Workspace, run_id: int, sl: Slice) -> None:
     path = ws.facts_path(run_id)
     pricing_path = ws.pricing_gaps_path(run_id)
     coverage_path = ws.coverage_gaps_path(run_id)
+    allocation_path = path.with_suffix('.allocation.parquet')
     try:
+        allocation_evidence=getattr(sl,'allocation_evidence',pl.DataFrame())
+        if not allocation_evidence.is_empty():
+            allocation_evidence.write_parquet(allocation_path,row_group_size=100_000)
+            from .storage_integrity import seal
+            seal(allocation_path)
         pending = getattr(sl, "pricing_gaps", pl.DataFrame())
         if not pending.is_empty():
             pending.write_parquet(pricing_path)
@@ -601,6 +607,7 @@ def _keep_facts(ws: Workspace, run_id: int, sl: Slice) -> None:
         path.unlink(missing_ok=True)
         pricing_path.unlink(missing_ok=True)
         coverage_path.unlink(missing_ok=True)
+        allocation_path.unlink(missing_ok=True)
         ws.mark_evidence(run_id, ready=False, error=str(exc))
 
 

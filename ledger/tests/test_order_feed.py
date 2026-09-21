@@ -137,6 +137,31 @@ def test_delta_uses_snapshot_schema_without_losing_long_ids_or_nested_evidence()
     assert result.columns==base.columns
 
 
+@pytest.mark.parametrize('certified_parent,expected',[('ON2','ON2'),('WRONG','ON1,10:ON2')])
+def test_merged_master_uses_only_certified_child_parent(tmp_path,certified_parent,expected):
+    manifest=_fixture(tmp_path/'feed')
+    def table(name):return pl.read_parquet(tmp_path/'feed'/manifest['objects'][name]['path'])
+    feed=OrderFeed(tmp_path/'ws',feed_root=tmp_path/'feed')
+    orders=table('orders.parquet').with_columns(pl.lit('ON1,10:ON2').alias('online_order_no'))
+    result=feed._order_frame(orders,table('order_items.parquet'),table('after_sales.parquet'),
+        table('order_relations.parquet'),Store(id='taobao_test',name='测试店',platform='taobao'),'test',
+        exported_orders={'S1':certified_parent})
+    assert result['order_id'].item()==expected
+    assert result['buyer_paid'].item()==20
+
+
+@pytest.mark.parametrize('header,freight,valid',[(20,None,True),(25,5,True),(25,None,False),(21,0,False)])
+def test_order_header_controls_supplemental_payment(tmp_path,header,freight,valid):
+    manifest=_fixture(tmp_path/'feed')
+    def table(name):return pl.read_parquet(tmp_path/'feed'/manifest['objects'][name]['path'])
+    feed=OrderFeed(tmp_path/'ws',feed_root=tmp_path/'feed')
+    orders=table('orders.parquet').with_columns(pl.lit(header).alias('paid_amount'),pl.lit(freight,dtype=pl.Float64).alias('freight_amount'))
+    result=feed._order_frame(orders,table('order_items.parquet'),table('after_sales.parquet'),
+        table('order_relations.parquet'),Store(id='taobao_test',name='测试店',platform='taobao'),'test')
+    assert (result['buyer_paid'].item() is not None)==valid
+    assert (result['alloc_ratio'].item() is not None)==valid
+
+
 def _write(root: Path, name: str, frame: pl.DataFrame) -> dict:
     data = root / "objects" / name
     data.parent.mkdir(parents=True, exist_ok=True)
@@ -168,7 +193,7 @@ def _fixture(root: Path, after_sku: str | None = "SKU1", second_unnamed: bool = 
         "orders.parquet": _write(root, "orders.parquet", pl.DataFrame({
             "order_id": ["1"], "online_order_no": ["ON1"], "order_store_id": ["10"],
             "order_time": ["2026-06-02 10:00:00"], "pay_time": ["2026-06-02 10:01:00"],
-            "order_status_raw": ["Sent"], "paid_amount": ["20.00"],
+            "order_status_raw": ["Sent"], "paid_amount": ["30.00" if second_unnamed else "20.00"],
             "refund_amount": ["0.00"], "tracking_no": ["SF1"],
         })),
         "order_items.parquet": _write(root, "order_items.parquet", pl.DataFrame({
@@ -299,7 +324,9 @@ def test_snapshot_and_delta_become_normalized_engine_sources(tmp_path):
     assert order.row(0, named=True)["product_id"] == "P1"
     assert order.get_column("order_date").null_count() == 0
     assert order.row(0, named=True)["refund_status"] == "退款成功"
-    assert order.row(0, named=True)["alloc_ratio"] == 1.0
+    # The delta changed the header to 21 while the item still says 20. Do not
+    # turn an incomplete source refresh into a certified 100% payment basis.
+    assert order.row(0, named=True)["alloc_ratio"] is None
     assert cost is not None and cost.row(0, named=True)["unit_cost"] == 3.5
     assert cost.row(0, named=True)["order_type"] == "销售订单"
     assert after is not None and after.row(0, named=True)["goods_status"] == "买家未收到货"

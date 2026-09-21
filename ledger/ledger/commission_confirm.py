@@ -120,6 +120,15 @@ def context(ws, registry, model, store_id, period, *, expected_run=None):
 def confirm(ws, registry: Registry, model, *, store_id, period, run_id,
             source_sha, expected_confirmation_id, payouts, no_payout,
             reason, actor):
+    from .finance_guard import guard
+    with guard(ws.root,store_id,period):
+        return _confirm(ws,registry,model,store_id=store_id,period=period,run_id=run_id,
+            source_sha=source_sha,expected_confirmation_id=expected_confirmation_id,payouts=payouts,
+            no_payout=no_payout,reason=reason,actor=actor)
+
+
+def _confirm(ws, registry: Registry, model, *, store_id, period, run_id,
+             source_sha, expected_confirmation_id, payouts, no_payout, reason, actor):
     if not reason.strip():
         raise RegistryError('请写明人工确认依据')
     current = context(ws, registry, model, store_id, period,
@@ -156,6 +165,8 @@ def confirm(ws, registry: Registry, model, *, store_id, period, run_id,
         if (previous['id'] if previous else '') != expected_confirmation_id:
             raise RevisionConflict('提成已经由其他操作更新，请刷新后重看')
         shown, source, _ = _shown(ws, store_id, period)
+        if source.get('allocation_pending') or (source.get('allocation_correction') or {}).get('pending_orders'):
+            raise RegistryError('主子订单分配依据待核对，不能核定最终实发；请先补齐分配依据')
         if (shown != run_id or hashlib.sha256(json_text(source.get('commission') or {})
                                            .encode()).hexdigest() != source_sha):
             raise RevisionConflict('本店计算数据已更新，请重新打开确认窗口')

@@ -1555,6 +1555,31 @@ def pricing_gaps_page(run_id: int, q: str = "", offset: int = 0, limit: int = 10
     return pricing_gaps.page(path, q=q, offset=offset, limit=limit)
 
 
+@app.get('/api/runs/{run_id}/allocation.csv')
+def allocation_export(run_id:int):
+    from .storage_integrity import verified
+    import polars as pl
+    from .commission_api import csv_response
+    path=workspace().facts_path(run_id).with_suffix('.allocation.parquet')
+    if not path.exists():raise HTTPException(404,'本次核算尚无分配依据留档；历史账目不会因此自动重算')
+    if not verified(path):raise HTTPException(409,'分配依据留档校验失败，请核对证据文件')
+    frame=pl.read_parquet(path)
+    names={m.id:m.name for m in _model().metrics}
+    columns=['核算记录','科目','主订单号','子订单号','商品ID','主单进账总额','子单实付','子单退款','原表分配率','实际分配率','分摊金额','分配依据','状态','汇总说明']
+    def rows():
+        for row in frame.iter_rows(named=True):
+            basis=('历史冻结流水与核对后比例' if row.get('allocation_basis_source')=='历史冻结流水与核对后比例' else
+                   '原表完整分配率' if row.get('alloc_ratio') is not None else
+                   '单一平台子单（主子编号相同）' if row.get('sub_order_id')==row.get('link_key') and row.get('__spine_origin__')=='order_detail_file' and row.get('factor')==1 else
+                   '订单台精确匹配金额' if row.get('allocation_basis_source')=='exact_order_feed_match' else '原始实付金额')
+            yield dict(zip(columns,[run_id,names.get(row['metric_id'],row['metric_id']),row.get('link_key'),
+                row.get('sub_order_id'),row.get('product_id'),row.get('source_amount'),row.get('buyer_paid'),row.get('refund_amount'),
+                row.get('alloc_ratio'),row.get('factor'),row.get('amount'),basis if row.get('spine_row') is not None else '店铺级保留金额',
+                '已分配' if row.get('spine_row') is not None else '未分配到商品',
+                '按科目汇总分摊金额；主单进账总额在子单行重复展示，不可直接相加']))
+    return csv_response(f'allocation-{run_id}.csv',columns,rows())
+
+
 @app.get("/api/stores/{store_id}/pricing-status")
 def pricing_progress(store_id: str, period: str) -> dict:
     from .pricing_status import status

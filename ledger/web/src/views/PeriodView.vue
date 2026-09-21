@@ -1,4 +1,5 @@
 <script setup>
+import AllocationNotice from '../components/AllocationNotice.vue'
 /* 一家店一个账期：损益表、自检、所需资料、质量、结账。
  *
  * 损益表每一行都能点开——这是这套系统和一张普通报表的唯一区别。数字点不开，
@@ -499,6 +500,7 @@ watch(
           </div>
         </n-alert>
 
+        <AllocationNotice :snapshot="snap" />
         <div class="cols">
           <div class="card" style="margin-top: 0">
             <header>

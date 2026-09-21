@@ -24,6 +24,8 @@
 
 from __future__ import annotations
 
+from .finance_guard import locked as financial_decision
+
 import hashlib
 import json
 import os
@@ -915,6 +917,7 @@ class Workspace:
     # 账期
     # ------------------------------------------------------------------ #
 
+    @financial_decision
     def close_period(
         self,
         store_id: str,
@@ -1181,6 +1184,7 @@ class Workspace:
         assert state is not None
         return state
 
+    @financial_decision
     def reopen_period(self, store_id: str, period: str, by: str = "", note: str = "") -> PeriodState:
         """反结账。谁反的、为什么反，必须留痕。"""
         if not note.strip():

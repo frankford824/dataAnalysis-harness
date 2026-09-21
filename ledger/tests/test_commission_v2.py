@@ -314,7 +314,16 @@ def test_live_feed_recompute_persists_commission_and_financial_evidence(tmp_path
     root = tmp_path / "feed"
     manifest = _fixture(root)
     ws = Workspace(tmp_path / "workspace")
-    OrderFeed(ws.root, client=FakeClient(manifest), feed_root=root).sync()
+    client=FakeClient(manifest)
+    original_get=client.get
+    # Keep the payment complete in this persistence test; mismatch rejection
+    # has its own coverage in test_order_feed.
+    def consistent_get(path,params=None):
+        response=original_get(path,params)
+        if path in {'entities/order/1','orders/1'}:response['order']['paid_amount']='20.00'
+        return response
+    client.get=consistent_get
+    OrderFeed(ws.root, client=client, feed_root=root).sync()
     monkeypatch.setenv("LEDGER_ORDER_FEED_ENABLED", "1")
     monkeypatch.setenv("LEDGER_ORDER_FEED_ROOT", str(root))
     model = load_model(Path(__file__).resolve().parents[2] / "models" / "cn-ecommerce")

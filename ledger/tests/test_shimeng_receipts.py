@@ -40,6 +40,9 @@ def test_reshipment_never_dilutes_original_sales_receipt(sales, amount, missing)
     frame = object.__new__(OrderFeed)._order_frame(orders, items, pl.DataFrame(), pl.DataFrame(),
         Store(id="taobao_test", name="test", platform="taobao"), "test", {"$asr-1": "PLATFORM"})
     sale = frame.filter(pl.col("order_type") == "销售订单")
-    assert sale["alloc_ratio"].sum() == pytest.approx(1)
-    assert amount * sale["alloc_ratio"].sum() == pytest.approx(amount)
+    if missing:
+        assert sale['alloc_ratio'].null_count()==sale.height
+    else:
+        assert sale["alloc_ratio"].sum() == pytest.approx(1)
+        assert amount * sale["alloc_ratio"].sum() == pytest.approx(amount)
     assert frame.filter(pl.col("order_type") == "补发订单")["alloc_ratio"].item() == 0
