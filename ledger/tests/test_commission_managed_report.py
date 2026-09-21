@@ -42,7 +42,14 @@ def test_person_managed_subset_preserves_costs_and_payouts(tmp_path):
     assert filtered['children']==[people[a]]
     columns,rows=business_export({'managed':[root]},'managed')
     out=list(rows)
-    assert len(out)==2 and sum(Decimal(str(r['托管系统应发'])) for r in out)==Decimal('2')
+    assert len(out)==5
+    assert [r['层级'] for r in out]==[1,2,3,2,3]
+    assert [r['行类型'] for r in out]==['团队合计','个人小计','商品明细','个人小计','商品明细']
+    for field,key in [('托管销售额','sales'),('托管毛利额','gross'),('托管利润额（分摊后）','profit_after_labor'),('托管系统应发','trial_amount')]:
+        for level in (1,2,3):
+            assert sum(Decimal(str(r[field])) for r in out if r['层级']==level)==Decimal(str(root[key]))
+    assert all('不可重复相加' in r['说明'] for r in out)
+    assert all(not r['宝贝ID'] and not r['商品'] for r in out if r['层级']<3)
     assert '实发' not in ''.join(columns)
 
 
@@ -128,10 +135,31 @@ def test_report_query_and_export_use_same_managed_tree(tmp_path):
     exported=client.post('/api/commission-v2/export/reports/managed',json={**selected,'run_ids':body['run_ids'],'fingerprint':body['fingerprint'],'presentation':True})
     assert exported.status_code==200,exported.text
     lines=list(csv.DictReader(io.StringIO(exported.text.lstrip('\ufeff'))))
-    assert len(lines)==1 and lines[0]['托管销售额']=='100.0'
+    assert len(lines)==3 and all(Decimal(r['托管销售额'])==Decimal('100') for r in lines)
+    assert [r['层级'] for r in lines]==['1','2','3']
     team_filtered=client.post('/api/commission-v2/reports/query',json={**selected,'managed_team_ids':[pid]}).json()
     assert team_filtered['count']==1 and team_filtered['selection']['managed_team_ids']==[pid]
     absent=client.post('/api/commission-v2/reports/query',json={**selected,'managed_team_ids':['other-team']}).json()
     assert absent['count']==0
     after=client.post('/api/commission-v2/reports/query',json={**selected,'view':'people'}).json()
     assert after==before
+
+
+def test_filtered_export_labels_subtotal_and_matches_selected_person(tmp_path):
+    reg,a,b,c,kw,_=sample(tmp_path)
+    tree=scope(reg,c,**kw,selected_people=[a])
+    _,rows=business_export({'managed':tree,'selection':{'person_ids':[a]}},'managed')
+    exported=list(rows)
+    assert [r['行类型'] for r in exported]==['团队小计（筛选人员）','个人小计','商品明细']
+    assert all(r['托管系统应发']==.8 for r in exported)
+    assert all('不代表完整团队' in r['说明'] for r in exported)
+
+
+def test_unknown_values_and_unassigned_subtotal_remain_explicit(tmp_path):
+    reg,_,_,_,kw,_=sample(tmp_path)
+    tree=scope(reg,{},**kw)
+    _,rows=business_export({'managed':tree},'managed')
+    exported=list(rows)
+    assert [r['行类型'] for r in exported]==['团队合计','待分配小计','商品明细']
+    assert all(r['托管毛利额'] is None and r['托管利润额（分摊后）'] is None and r['托管系统应发'] is None for r in exported)
+    assert all(r['托管销售额']==100 for r in exported)

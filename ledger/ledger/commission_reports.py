@@ -1025,7 +1025,7 @@ def build(workspace, registry, model, start, end, store_ids=None, person_ids=Non
 
 
 COLUMNS={
- 'managed':['托管团队','店铺','月份','人员','宝贝ID','商品','托管销售额','托管毛利额','托管利润额（分摊后）','托管系统应发','说明'],
+ 'managed':['层级','行类型','托管团队','店铺','月份','人员','宝贝ID','商品','托管销售额','托管毛利额','托管利润额（分摊后）','托管系统应发','说明'],
  'teams':['团队/团队长','系统应发','实发提成','调整差额','团队人数','店铺数','账期数','计算状态'],
  'people':['人员','工号','提成金额','店铺数','账期数','计算状态','人员ID'],
  'stores':['店铺','提成金额','兼职分摊','提成设置人数','已出金额人数','已计算账期数','未计算账期数','计算状态'],
@@ -1056,11 +1056,23 @@ def export_rows(report, kind):
 
 def business_export(report, kind):
     if kind=='managed':
+        selected_people=bool(report.get('selection',{}).get('person_ids'))
+        def export_item(item,level,kind):
+            note='仅对同一层级求和；团队合计、个人小计与商品明细不可重复相加'
+            if selected_people:
+                note+='；当前仅包含筛选人员，不代表完整团队'
+            note+='；'+item.get('notes','')+'；'+item.get('status','')
+            return dict(zip(COLUMNS['managed'],[level,kind,item['team'],item['store'],item['period'],
+                item.get('person','') if level>1 else '',item.get('product_id','') if level==3 else '',
+                item.get('subject','') if level==3 else '',item.get('sales'),item.get('gross'),
+                item.get('profit_after_labor'),item.get('trial_amount'),note]))
         def managed_lines():
             for team in report.get('managed',[]):
+                yield export_item(team,1,'团队小计（筛选人员）' if selected_people else '团队合计')
                 for person in team.get('children',[]):
+                    yield export_item(person,2,'个人小计' if person.get('person_id') else '待分配小计')
                     for item in person.get('children',[]):
-                        yield dict(zip(COLUMNS[kind],[item['team'],item['store'],item['period'],item['person'],item['product_id'],item['subject'],item['sales'],item['gross'],item['profit_after_labor'],item['trial_amount'],item['notes']+'；'+item['status']]))
+                        yield export_item(item,3,'商品明细')
         return COLUMNS[kind],managed_lines()
     columns = {
         'teams': [('团队/团队长','team'),('系统应发','trial_amount'),('实发提成','amount'),('调整差额','diff_amount'),('团队人数','members_count'),('负责店铺数','stores'),('月份数','periods'),('状态','status')],
