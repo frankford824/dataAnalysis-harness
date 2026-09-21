@@ -94,6 +94,7 @@ class ReportSelection(BaseModel):
     end: str
     store_ids: list[str] = Field(default_factory=list, max_length=2000)
     person_ids: list[str] = Field(default_factory=list, max_length=2000)
+    managed_team_ids: list[str] = Field(default_factory=list, max_length=2000)
     run_ids: list[int] | None = Field(default=None, max_length=240000)
     fingerprint: str = ""
     view: str = ""
@@ -790,7 +791,8 @@ def install(app, workspace, model, model_root: Path | None = None):
             report_cache.clear()
 
     def report_result(selection: ReportSelection, *, view: str | None = None):
-        key = report_cache_key(selection)
+        need_managed = (view or selection.view)=='managed'
+        key = (*report_cache_key(selection),need_managed,tuple(sorted(selection.managed_team_ids)) if need_managed else ())
         now_ts = time.time()
         with report_cache_lock:
             hit = report_cache.get(key)
@@ -799,7 +801,10 @@ def install(app, workspace, model, model_root: Path | None = None):
         def build_report():
             report = commission_reports.build(workspace(), reg(), model(), selection.start, selection.end,
                                           selection.store_ids, selection.person_ids, selection.run_ids,
-                                          model_root=model_root, need_product_rates=True)
+                                          model_root=model_root, need_product_rates=True, need_managed=need_managed)
+            if need_managed and selection.managed_team_ids:
+                report['managed']=[r for r in report['managed'] if r['team_id'] in selection.managed_team_ids]
+                report['selection']['managed_team_ids']=sorted(selection.managed_team_ids)
             return (time.time(), report, hashlib.sha256(json_text(report).encode()).hexdigest())
         from .read_cache import cached
         _, report, fingerprint = cached(report_cache, key, build_report, 16)
@@ -828,7 +833,7 @@ def install(app, workspace, model, model_root: Path | None = None):
         rows = report['rows' if selection.view == 'breakdown' else selection.view]
         visible_stores = (len({row['store_id'] for row in rows if row['kind'] == 'store'})
                           if selection.view == 'store_people' else len(report['stores']))
-        return {k:v for k,v in report.items() if k not in {'people','stores','rows','coverage','teams','store_people'}} | {
+        return {k:v for k,v in report.items() if k not in {'people','stores','rows','coverage','teams','store_people','managed'}} | {
             'items': rows[selection.offset:selection.offset+selection.limit], 'count': len(rows),
             'people_count':len(report['people']), 'store_count':visible_stores,
             'view':selection.view, 'offset':selection.offset,

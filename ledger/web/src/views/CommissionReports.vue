@@ -23,8 +23,10 @@ const payoutFocus = ref(null), payoutScopeAccepted = ref(false)
 const payoutTargetsOpen = ref(false), payoutTargets = ref([]), payoutTargetTitle = ref('')
 const profit = ref(null)
 let payoutRequest = 0
-const kinds = [{key:'teams',label:'按团队汇总'},{key:'people',label:'按人员汇总'},{key:'store_people',label:'店铺与分配人'},{key:'stores',label:'按店铺汇总'},{key:'breakdown',label:'按月明细'},{key:'coverage',label:'月份进度'}]
-const scope = computed(() => ({start:state.start,end:state.end,...state.scope}))
+const kinds = [{key:'managed',label:'托管明细'},{key:'teams',label:'按团队汇总'},{key:'people',label:'按人员汇总'},{key:'store_people',label:'店铺与分配人'},{key:'stores',label:'按店铺汇总'},{key:'breakdown',label:'按月明细'},{key:'coverage',label:'月份进度'}]
+const managedTeam=ref(null)
+const scope = computed(() => ({start:state.start,end:state.end,...state.scope,...(state.reportView==='managed'&&managedTeam.value?{managed_team_ids:[managedTeam.value.id]}:{})}))
+watch(()=>state.reportView,view=>{if(view!=='managed')managedTeam.value=null})
 const salesAuditUrl = computed(()=>{
   const query=new URLSearchParams({start:state.start,end:state.end})
   for(const id of state.storeIds)query.append('store_ids',id)
@@ -50,7 +52,7 @@ const payoutReady = computed(() => !!payoutContext.value && !!payoutReason.value
     ? payoutPeople.value.every(person => validMoney(person.amount)) : payoutNoPeople.value))
 const payoutTotal = computed(() => payoutPeople.value.length && payoutPeople.value.every(p => validMoney(p.amount))
   ? money(payoutPeople.value.reduce((sum, person) => sum + Number(person.amount), 0)) : '—')
-const labels = {teams:'团队汇总',store_people:'店铺人员构成',people:'人员汇总',stores:'店铺汇总',breakdown:'按月明细',coverage:'月份进度'}
+const labels = {managed:'托管明细',teams:'团队汇总',store_people:'店铺人员构成',people:'人员汇总',stores:'店铺汇总',breakdown:'按月明细',coverage:'月份进度'}
 function status(value='') { return value.replaceAll('未计算提成','未出金额').replaceAll('未计算','未出金额').replaceAll('试算','待核对').replaceAll('历史口径','历史提成').replaceAll('已计算','待结账').replaceAll('无对应提成记录','暂无提成').replaceAll('合计待核对','金额待核对') }
 function explanation(row) {
   if(!row.has_result)return '本月还没有提成金额'
@@ -62,6 +64,7 @@ function explanation(row) {
   return row.status==='已结账'?'本月已结账':''
 }
 const columns = computed(() => ({
+  managed:[['subject','托管团队 → 人员 → 商品'],['store','店铺'],['period','月份'],['sales','托管销售额'],['gross','托管毛利额'],['profit_after_labor','托管利润（分摊后）'],['trial_amount','托管系统应发'],['status','口径 / 状态']],
   teams:[['team','团队 / 团队长'],['sales','团队销售额'],['managed_sales','托管类销售额'],['trial_amount','系统应发'],['amount','实发提成'],['diff_amount','调整差额'],['members_count','团队人数'],['stores','涉及店铺'],['periods','月份'],['status','状态']],
   people:[['person','人员'],['team','所属团队'],['employee_no','工号'],['trial_amount','系统应发'],['amount','实发提成'],['diff_amount','调整差额'],['stores','店铺'],['periods','月份'],['status','状态']],
   store_people:[['store','店铺'],['person','分配人'],['team','所属团队'],['period','月份'],['sales','销售额'],['managed_sales','托管类销售额'],['gross','毛利额'],['profit_after_labor','利润额'],
@@ -285,7 +288,7 @@ async function viewSettlement(item){
   finally{settlementLoading.value=false}
 }
 
-const rowKey=row=>[row.kind||'',row.team_id||'',row.person_id||'',row.store_id,row.period].filter(Boolean).join(':')
+const rowKey=row=>row.key || [row.kind||'',row.team_id||'',row.person_id||'',row.store_id,row.period].filter(Boolean).join(':')
 const tableColumns=computed(()=>{
   const composition=state.reportView==='store_people'
   const list=columns.value.map(([key,title],index)=>({title,key,
@@ -294,6 +297,7 @@ const tableColumns=computed(()=>{
     minWidth:index===0?170:undefined,mobileWidth:['amount','selected_amount','labor_cost','sales','gross','profit_after_labor','base','store_amount','trial_amount','diff_amount'].includes(key)?115:key==='period'?84:index===0?135:undefined,
     mobile:index===0||['amount','selected_amount','trial_amount','diff_amount','sales','gross','profit_after_labor','labor_cost','period','person','team'].includes(key),align:['amount','selected_amount','labor_cost','sales','gross','profit_after_labor','base','store_amount','trial_amount','diff_amount'].includes(key)?'right':'left',
     render:row=>{
+      if(key==='subject')return h('span',{class:'table-product',style:'display:inline-block;vertical-align:middle;max-width:calc(100% - 32px)',title:row.product_id||row.notes},[row.subject,row.product_id?h('span',{class:'table-secondary',style:'display:block'},row.product_id):null])
       if(key==='sales'&&(row.sales_pending||row.sales_pending_products?.length))return h('span',{style:'color:#a16207'},'归属待确认')
       if(key==='status')return h(NTag,{bordered:false,size:'small',type:row.status?.includes('试算')?'warning':row.is_confirmed||row.status?.includes('已人工确认')?'success':'default'},()=>status(row.status))
       if(key==='team')return h('span',{class:'report-team-tag',style:'color:#475569;font-size:12.5px'},row.team||'—')
@@ -326,7 +330,7 @@ const tableColumns=computed(()=>{
         ])
       }
       if(key==='person' && row.person_id)return h('button',{type:'button',class:'text-button',disabled:locked.value||!targetsFor(row).length,onClick:()=>choosePayout(row)},row.person)
-      if(key==='managed_sales')return h('div',{class:'table-money',title:'包含在销售额中，不另行相加；指定人员筛选不包含团队托管池'},cell(row,key))
+      if(key==='managed_sales')return row[key]!=null&&row.kind!=='person'?h('button',{type:'button',class:'text-button table-money',title:'查看团队内个人托管销售额、利润和系统应发',onClick:()=>{if(row.store_id)state.storeIds=[row.store_id];managedTeam.value=row.team_id?{id:row.team_id,name:row.team}:null;state.reportView='managed'}},[cell(row,key),h('small',{style:'display:block;font-size:11px'},'个人明细 →')]):h('div',{class:'table-money'},cell(row,key))
       return h('div',{class:['amount','selected_amount','labor_cost','sales','gross','profit_after_labor','base','store_amount'].includes(key)?['table-money',row[key]<0?'negative':'']:undefined,
                title:state.reportView==='store_people'&&row.kind==='person'&&['sales','gross'].includes(key)?'产出按商品做货身份归属，抽点不参与分摊':
                  state.reportView==='store_people'&&key==='profit_after_labor'?row.kind==='person'?'商品利润按做货身份归属；兼职及未归属净亏损按归属销售额分摊':'店铺经营账利润减本店兼职额':
@@ -338,6 +342,7 @@ const tableColumns=computed(()=>{
     }
   }))
   for(const column of list)if(column.key==='managed_sales')Object.assign(column,{width:135,mobileWidth:115,mobile:true,align:'right'})
+  for(const column of list)if(column.key==='subject')Object.assign(column,{width:320,minWidth:240,mobileWidth:220})
   if(['teams','people','stores','store_people','breakdown','coverage'].includes(state.reportView))list.push({
     title:'操作',key:'action',width:292,minWidth:220,mobileWidth:176,mobile:true,fixed:'right',
     render:row=>renderRowActions(row),
@@ -377,32 +382,34 @@ defineExpose({reload:load})
     <div class="report-months"><span class="month-label">月份</span><input v-model="state.start" type="month" aria-label="开始月份"/><span class="date-separator">至</span><input v-model="state.end" type="month" aria-label="结束月份"/><div class="month-shortcuts"><button class="text-button" @click="shortcut('this')">本月</button><button class="text-button" @click="shortcut('last')">上月</button><button class="text-button" @click="shortcut('three')">最近三个月</button></div></div>
     <div v-if="monthError" class="commission-error" role="alert">{{ monthError }}</div>
     <div v-if="error || downloadError || settlementError" class="commission-error" role="alert">{{ error || downloadError || settlementError }}<button class="text-button" @click="downloadError='';settlementError='';load();loadSettlements()">重试</button></div>
-    <div class="report-overview" :class="{'commission-stale':stale}"><div class="report-total"><span>{{warnings ? "已出金额合计" : "提成合计"}}</span><strong><small v-if="report?.total!=null">¥</small>{{ money(report?.total) }}</strong></div><div class="report-count"><strong>{{ report?.configured_people_count ?? '—' }}</strong><span>位人员已设置</span></div><div class="report-count"><strong>{{ report?.people_count ?? '—' }}</strong><span>位人员已有金额</span></div><div class="report-count"><strong>{{ report?.store_count ?? '—' }}</strong><span>家店铺</span></div><button v-if="warnings" class="report-attention" @click="state.reportView='coverage'"><span class="attention-dot"/>{{ state.reportView==='store_people'&&state.personIds.length ? (report?.missing_periods ? `全公司另有 ${report.missing_periods} 个店铺月份未出金额` : '全公司金额待核对') : (report?.missing_periods ? `${report.missing_periods} 个月份未出金额` : '金额待核对') }} <span>查看</span></button></div>
-    <n-alert v-if="warnings" type="warning" style="margin-bottom:16px"><template v-if="state.reportView==='store_people'&&state.personIds.length">当前个人产出可查看；全公司仍有店铺月份未出金额或待核对，提成合计还不是最终应发金额。</template><template v-else>还有店铺月份未出金额或待核对，当前合计不是最终应发金额。</template></n-alert>
+    <div v-if="state.reportView!=='managed'" class="report-overview" :class="{'commission-stale':stale}"><div class="report-total"><span>{{warnings ? "已出金额合计" : "提成合计"}}</span><strong><small v-if="report?.total!=null">¥</small>{{ money(report?.total) }}</strong></div><div class="report-count"><strong>{{ report?.configured_people_count ?? '—' }}</strong><span>位人员已设置</span></div><div class="report-count"><strong>{{ report?.people_count ?? '—' }}</strong><span>位人员已有金额</span></div><div class="report-count"><strong>{{ report?.store_count ?? '—' }}</strong><span>家店铺</span></div><button v-if="warnings" class="report-attention" @click="state.reportView='coverage'"><span class="attention-dot"/>{{ state.reportView==='store_people'&&state.personIds.length ? (report?.missing_periods ? `全公司另有 ${report.missing_periods} 个店铺月份未出金额` : '全公司金额待核对') : (report?.missing_periods ? `${report.missing_periods} 个月份未出金额` : '金额待核对') }} <span>查看</span></button></div>
+    <n-alert v-if="warnings&&state.reportView!=='managed'" type="warning" style="margin-bottom:16px"><template v-if="state.reportView==='store_people'&&state.personIds.length">当前个人产出可查看；全公司仍有店铺月份未出金额或待核对，提成合计还不是最终应发金额。</template><template v-else>还有店铺月份未出金额或待核对，当前合计不是最终应发金额。</template></n-alert>
     <n-alert v-if="payoutNotice" type="success" :bordered="false" style="margin-bottom:16px">{{ payoutNotice }}</n-alert>
-    <n-alert v-if="assignmentGaps.length" type="warning" style="margin-bottom:16px">
+    <n-alert v-if="assignmentGaps.length&&state.reportView!=='managed'" type="warning" style="margin-bottom:16px">
       <template v-for="gap in assignmentGaps.slice(0,3)" :key="`${gap.store_id}:${gap.period}`">
         <span>{{ gap.store }} {{ gap.period }}：{{ gap.orders }} 笔订单尚未分配人，未分配利润基数 ¥{{ money(gap.base) }}。表内提成额只算已分配订单，是试算，不是最终应发金额。</span>
         <router-link :to="{name:'period',params:{id:gap.store_id},query:{period:gap.period}}" class="text-button">到店铺人工确认提成 →</router-link>
       </template>
       <span v-if="assignmentGaps.length>3">另有 {{ assignmentGaps.length-3 }} 个店铺月份未分配完整，可在月份进度中查看。</span>
     </n-alert>
-    <n-alert v-else-if="latestSettlement" :type="settlementDifference ? 'warning' : 'success'" style="margin-bottom:16px">
+    <n-alert v-else-if="latestSettlement&&state.reportView!=='managed'" :type="settlementDifference ? 'warning' : 'success'" style="margin-bottom:16px">
       本范围最近一次结算为 {{ displayTime(latestSettlement.at) }}，金额 ¥{{ money(latestSettlement.total) }}。
       <template v-if="settlementDifference">当前金额比该次结算{{settlementDifference>0?'增加':'减少'}} ¥{{money(Math.abs(settlementDifference))}}，原结算记录未改变。</template>
       <template v-else>当前金额与该次结算一致。</template>
     </n-alert>
     <p v-if="state.reportView==='stores'" style="color:#64748b;margin:0 0 12px">提成设置人数按所选月份的有效设置统计；已出金额人数只统计已有结算金额的人员。</p>
-    <p class="report-grain-note">系统应发来自核算；实发列只显示人工核定金额，部分核定时仅合计已核定部分，尚未核定显示「—」。核定不代表已付款。点击人员或「核定实发」选择店铺月份；保存范围为该店该月全部提成人员。人员按当前组织归属展示；托管销售按商品规则生效时指定的团队归属，不随调组改变。</p>
-    <p class="report-grain-note">托管类销售额已包含在团队/店铺销售额中，不要重复相加；不计个人销售额，不改变个人毛利、利润、提成及原成本分摊基数。指定人员筛选不包含团队托管池。</p>
-    <div class="report-tabs-row"><LedgerTabs v-model="state.reportView" :options="kinds" label="汇总方式" @update:model-value="detail=null" /><div class="report-actions"><n-button type="primary" :disabled="!report || locked || !(report.confirmation_scopes||[]).length" @click="openToolbarPayout">核定实发</n-button><n-button :disabled="!canSettle" @click="openSettlement">确认员工结算</n-button><n-button :disabled="!report || locked" :loading="downloading" @click="download">导出表格</n-button></div></div>
+    <p v-if="state.reportView!=='managed'" class="report-grain-note">系统应发来自核算；实发列只显示人工核定金额，部分核定时仅合计已核定部分，尚未核定显示「—」。核定不代表已付款。点击人员或「核定实发」选择店铺月份；保存范围为该店该月全部提成人员。人员按当前组织归属展示；托管销售按商品规则生效时指定的团队归属，不随调组改变。</p>
+    <p v-if="state.reportView!=='managed'" class="report-grain-note">托管类销售额已包含在团队/店铺销售额中，不要重复相加；不计个人销售额，不改变个人毛利、利润、提成及原成本分摊基数。指定人员筛选不包含团队托管池。</p>
+    <div class="report-tabs-row"><LedgerTabs v-model="state.reportView" :options="kinds" label="汇总方式" @update:model-value="detail=null" /><div class="report-actions"><n-button v-if="state.reportView!=='managed'" type="primary" :disabled="!report || locked || !(report.confirmation_scopes||[]).length" @click="openToolbarPayout">核定实发</n-button><n-button v-if="state.reportView!=='managed'" :disabled="!canSettle" @click="openSettlement">确认员工结算</n-button><n-button :disabled="!report || locked" :loading="downloading" @click="download">导出表格</n-button></div></div>
     <n-alert v-if="report?.sales_pending_scopes?.length" type="warning" :bordered="false">当前有 {{report.sales_pending_scopes.length}} 项人员店铺月份的销售归属待确认，不计为已确认业绩。<a :href="salesAuditUrl" download>导出全部待确认商品清单</a></n-alert>
     <p v-if="state.reportView==='store_people'" class="report-grain-note"><template v-if="state.personIds.length">当前仅显示所选人员；请清空人员筛选后再核对店铺合计。 </template>销售额按明确生效的商品身份或归档身份归属：一位做货人员归全额，多位做货人员按原档案中做货人员点数分摊，抽点不分走销售额。身份依据不足时明确待确认。成本、毛利、利润、兼职分摊及提成保持原核算口径；本次销售归属纠正不替换已结账数据。</p>
 
+    <n-alert v-if="state.reportView==='managed'" type="info" :bordered="false">展开团队查看个人，再展开个人查看商品。以下均为原核算中的「其中托管部分」，不能与人员或店铺合计重复相加。利润已按原销售基数拆分原有费用；销售额不并入个人普通业绩；实发未按比例拆分。筛选人员时仅显示所选人员小计；「—」表示证据不足，待核对。</n-alert>
+    <p v-if="state.reportView==='managed'&&managedTeam" class="report-grain-note">当前托管团队：{{managedTeam.name}} <button class="text-button" @click="managedTeam=null">查看全部团队</button></p>
     <div v-if="loading" class="commission-loading-line"/>
     <LedgerTable :rows="rows" :columns="tableColumns" :row-key="rowKey" :loading="loading" :max-height="440" empty="没有找到提成记录，可调整店铺、人员或月份" />
     <div class="commission-paging"><span class="row-count">共 {{report?.count || 0}} {{state.reportView==='people'?'人':state.reportView==='stores'?'家店铺':state.reportView==='teams'?'个团队':'条'}}</span><n-button size="small" :disabled="page<=1||locked" @click="page--">上一页</n-button><span>{{page}} / {{Math.max(1,Math.ceil((report?.count||0)/50))}}</span><n-button size="small" :disabled="page*50>=(report?.count||0)||locked" @click="page++">下一页</n-button></div>
-    <section v-if="settlementLoading || matchingSettlements.length" class="settlement-history">
+    <section v-if="state.reportView!=='managed'&&(settlementLoading || matchingSettlements.length)" class="settlement-history">
       <div class="spread"><div><h3>员工结算记录</h3><p>记录确认时所见金额；后续到账只显示差额，不改旧记录。</p></div></div>
       <n-spin :show="settlementLoading"><n-table v-if="matchingSettlements.length" size="small" :bordered="false"><thead><tr><th>确认时间</th><th>说明</th><th class="right">结算金额</th><th>操作</th></tr></thead><tbody><tr v-for="item in matchingSettlements" :key="item.id"><td>{{displayTime(item.at)}}</td><td>{{item.note}}</td><td class="right num">¥{{money(item.total)}}</td><td><n-button text type="primary" @click="viewSettlement(item)">查看当时明细</n-button></td></tr></tbody></n-table></n-spin>
     </section>
@@ -460,7 +467,7 @@ defineExpose({reload:load})
     </n-modal>
     <n-modal v-model:show="settlementOpen" preset="card" class="commission-modal" title="确认员工结算" style="width:min(520px,calc(100vw - 32px))">
       <p class="settlement-help">确认后保存当前计算记录和金额。以后补到账单时，旧记录保持不变，页面会显示差额。</p>
-      <n-alert v-if="warnings" type="warning">还有未出金额或待核对账期，暂不能结算。</n-alert>
+      <n-alert v-if="warnings&&state.reportView!=='managed'" type="warning">还有未出金额或待核对账期，暂不能结算。</n-alert>
       <n-input v-model:value="settlementNote" type="textarea" :rows="3" maxlength="2000" show-count placeholder="填写结算说明，例如：已于8月15日与员工核对并发放" />
       <template #footer><div class="settlement-footer"><n-button @click="settlementOpen=false">取消</n-button><n-button type="primary" :loading="settling" :disabled="!settlementNote.trim()||!canSettle" @click="confirmSettlement">确认并保存</n-button></div></template>
     </n-modal>

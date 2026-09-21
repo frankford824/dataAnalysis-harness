@@ -39,7 +39,7 @@ export const useCommission = defineStore('commission', () => {
         personIds.value = query.people ? String(query.people).split(',').filter(Boolean) : []
         start.value = /^\d{4}-\d{2}$/.test(query.from || '') ? query.from : month
         end.value = /^\d{4}-\d{2}$/.test(query.to || '') ? query.to : start.value
-        if(['teams','store_people','people','stores','breakdown','coverage'].includes(query.view))reportView.value=query.view
+        if(['managed','teams','store_people','people','stores','breakdown','coverage'].includes(query.view))reportView.value=query.view
         ready.value = true
       } catch (error) { initError.value = error.message }
       finally { bootstrap = null }

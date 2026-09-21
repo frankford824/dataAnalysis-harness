@@ -37,7 +37,7 @@ function applyQuery(query) {
   }
   if (/^\d{4}-\d{2}$/.test(query.from || '')) state.start = query.from
   if (/^\d{4}-\d{2}$/.test(query.to || '')) state.end = query.to
-  if(['teams','people','stores','store_people','breakdown','coverage'].includes(query.view))state.reportView=query.view
+  if(['managed','teams','people','stores','store_people','breakdown','coverage'].includes(query.view))state.reportView=query.view
 }
 watch(() => route.query, query => {if(!localQueries.has(queryKey(query)))applyQuery(query)})
 function syncQuery() {

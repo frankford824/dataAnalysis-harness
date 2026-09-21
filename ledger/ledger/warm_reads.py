@@ -45,6 +45,9 @@ def main():
         started=time.perf_counter()
         asyncio.run(request(app,'/api/commission-v2/reports/query',{'start':month,'end':month,'view':'people','limit':50}))
         print(f'WARM reports {month} {time.perf_counter()-started:.2f}s',flush=True)
+        started=time.perf_counter()
+        asyncio.run(request(app,'/api/commission-v2/reports/query',{'start':month,'end':month,'view':'managed','limit':50}))
+        print(f'WARM managed {month} {time.perf_counter()-started:.2f}s',flush=True)
     ws.close()
 
 

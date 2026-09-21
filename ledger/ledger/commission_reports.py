@@ -511,7 +511,8 @@ def ensure_report_slices(workspace, start, end, run_ids=None):
 
 
 def build(workspace, registry, model, start, end, store_ids=None, person_ids=None, run_ids=None,
-          model_root: Path | None = None, need_product_rates: bool = True):
+          model_root: Path | None = None, need_product_rates: bool = True, need_managed: bool = False):
+    managed_rows=[]
     periods=months(start,end)
     selected_stores=set(store_ids or []); selected_people=set(person_ids or [])
     from .store_display import names as display_names
@@ -819,6 +820,13 @@ def build(workspace, registry, model, start, end, store_ids=None, person_ids=Non
                                 else f'{residual_profit:,.2f} 元')
                 notes.append(f'{label}：利润额 {profit_label}；人员行与店铺合计的差额已显式列出')
                 scope['notes']='；'.join(notes)
+        if need_managed and managed:
+            from .commission_managed_report import scope as managed_scope
+            managed_rows.extend(managed_scope(registry,source_c,managed=managed,outputs=person_output,
+                profits=person_profit,payout_profits=payout_profit,rates=profit_rates,
+                trials={r['person_id']:r.get('trial_amount') for r in member_rows if r.get('kind')=='person'},
+                keep=(Decimal(1) if source_c.get('manual_amounts_after_labor') else labor_keep(base_total,labor_cut)),
+                roster=roster,store_id=sid,store=names[sid],period=period,run_id=record['id'],selected_people=selected_people))
         scopes[(sid,period)]=scope
         if not selected_people:
             for tid, value in managed.items():
@@ -1006,7 +1014,7 @@ def build(workspace, registry, model, start, end, store_ids=None, person_ids=Non
             row.update(payout_summary(by_scope.get((row['person_id'], row['store_id'], row['period']), [])))
     for line in lines:
         line.update(payout_summary([line]))
-    return {'teams':team_rows,'people':sorted(person_rows,key=lambda x:x['person']),'stores':store_rows,'rows':lines,
+    return {'managed':managed_rows,'teams':team_rows,'people':sorted(person_rows,key=lambda x:x['person']),'stores':store_rows,'rows':lines,
             'sales_pending_scopes':[{k:r.get(k) for k in ('store_id','store','period','person_id','person','finance_run','sales_pending_products','sales_sources')} for r in sales_pending],
             'store_people':store_person_rows,'coverage':coverage,
             'configured_people_count':len(configured_total),'available_people':list(available.values()),'run_ids':[r['id'] for r in records],
@@ -1017,6 +1025,7 @@ def build(workspace, registry, model, start, end, store_ids=None, person_ids=Non
 
 
 COLUMNS={
+ 'managed':['托管团队','店铺','月份','人员','宝贝ID','商品','托管销售额','托管毛利额','托管利润额（分摊后）','托管系统应发','说明'],
  'teams':['团队/团队长','系统应发','实发提成','调整差额','团队人数','店铺数','账期数','计算状态'],
  'people':['人员','工号','提成金额','店铺数','账期数','计算状态','人员ID'],
  'stores':['店铺','提成金额','兼职分摊','提成设置人数','已出金额人数','已计算账期数','未计算账期数','计算状态'],
@@ -1026,7 +1035,9 @@ COLUMNS={
 
 
 def export_rows(report, kind):
-    if kind=='teams':
+    if kind=='managed':
+        yield from business_export(report,kind)[1]
+    elif kind=='teams':
         for r in report.get('teams',[]):yield dict(zip(COLUMNS[kind],[r['team'],r.get('trial_amount'),r['amount'],r.get('diff_amount'),r['members_count'],r['stores'],r['periods'],r['status']]))
     elif kind=='people':
         for r in report['people']:yield dict(zip(COLUMNS[kind],[r['person'],r['employee_no'],r['amount'],r['stores'],r['periods'],r['status'],r['person_id']]))
@@ -1044,6 +1055,13 @@ def export_rows(report, kind):
 
 
 def business_export(report, kind):
+    if kind=='managed':
+        def managed_lines():
+            for team in report.get('managed',[]):
+                for person in team.get('children',[]):
+                    for item in person.get('children',[]):
+                        yield dict(zip(COLUMNS[kind],[item['team'],item['store'],item['period'],item['person'],item['product_id'],item['subject'],item['sales'],item['gross'],item['profit_after_labor'],item['trial_amount'],item['notes']+'；'+item['status']]))
+        return COLUMNS[kind],managed_lines()
     columns = {
         'teams': [('团队/团队长','team'),('系统应发','trial_amount'),('实发提成','amount'),('调整差额','diff_amount'),('团队人数','members_count'),('负责店铺数','stores'),('月份数','periods'),('状态','status')],
         'people': [('人员','person'),('所属团队','team'),('工号','employee_no'),('系统应发','trial_amount'),('提成金额','amount'),('调整差额','diff_amount'),('店铺数','stores'),('月份数','periods'),('状态','status')],
