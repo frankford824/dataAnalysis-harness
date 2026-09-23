@@ -5,10 +5,11 @@ import polars as pl
 import pytest
 
 from ledger.commission_engine import allocated_outputs
-from ledger.commission_sales import attach, totals
+from ledger.commission_sales import attach, creator_fields, totals
 from ledger.commission_registry import Registry
 from ledger.commission_reports import _archived_allocated_outputs
 from ledger.commission_profit import compose
+from ledger.money import money_float
 from test_commission_profit import _persist
 
 
@@ -40,12 +41,25 @@ def test_effective_duties_correct_sales_only_from_original_income(archived):
     assert original['amount'].to_list()==[121.18,181.78]
 
 
+def test_creator_output_uses_effective_producer_duty_without_changing_commission():
+    original=frame(['',''])
+    old=allocated_outputs(original,production=True)
+    resolved=creator_fields(attach(None,'s','2026-06',original,snapshot=snapshot()))
+    current=totals(resolved,old)
+    assert current['member']['sales']==16736.38
+    assert (current['member']['creator_cost'],current['member']['creator_gross'],current['member']['creator_profit']) == (6498.57,10237.81,6059.18)
+    assert (current['leader']['sales'],current['leader']['creator_cost'],current['leader']['creator_gross'],current['leader']['creator_profit']) == (0,0,0,0)
+    assert current['leader']['profit']==old['leader']['profit']
+    assert original['amount'].to_list()==[121.18,181.78]
+
+
 def test_unknown_duties_and_out_of_effective_range_are_not_guessed():
     for configured in (snapshot((None,None)),snapshot(start='2026-07-01T00:00:00'),snapshot(end='2026-06-04T00:00:00')):
         original=frame();before=allocated_outputs(original,production=True)
         result=totals(attach(None,'s','2026-06',original,snapshot=configured),before)
         assert all(v['sales'] is None and v['sales_pending_products']==['p'] for v in result.values())
         assert result['member']['profit']==before['member']['profit']
+        assert result['member']['creator_profit'] is None
 
 
 def test_two_producers_use_decimal_ratio_and_signed_income():
@@ -59,6 +73,36 @@ def test_managed_archive_never_credits_person_sales_even_with_missing_duty():
     original=frame().with_columns(pl.lit(True).alias('managed'))
     result=totals(attach(None,'s','2026-06',original,snapshot=snapshot((None,None))),allocated_outputs(original,production=True))
     assert all(v['sales']==0 and not v['sales_pending_products'] for v in result.values())
+    assert all(v['creator_gross'] is None and v['creator_profit'] is None for v in result.values())
+    assert result['member']['profit']==allocated_outputs(original,production=True)['member']['profit']
+
+
+def test_no_producer_keeps_creator_profit_pending_and_preserves_cent_remainder():
+    missing=frame(['','']).with_columns(pl.lit(4020.758299).alias('participation_profit'))
+    no_producer=totals(attach(None,'s','2026-06',missing,snapshot=snapshot(('cut','cut'))),
+                       allocated_outputs(missing,production=True))
+    assert all(person['creator_pending'] and person['creator_profit'] is None for person in no_producer.values())
+    known=totals(attach(None,'s','2026-06',missing,snapshot=snapshot()),
+                 allocated_outputs(missing,production=True))
+    assert known['member']['creator_profit']==4020.76
+    assert known['leader']['creator_profit']==0
+
+
+def test_three_producers_assign_one_cent_residue_deterministically():
+    names=['a','b','c']
+    original=pl.DataFrame({'product_id':['p']*3,'person_id':names,'person':names,
+        'spine_row':[1]*3,'order_at':['2026-06-05T00:00:00']*3,
+        'status':['distribute']*3,'share':[.01]*3,'total_rate':[.03]*3,
+        'participation_sales':[100.01]*3,'participation_gross':[70.01]*3,
+        'participation_profit':[20.01]*3})
+    cfg={'p':[{'valid_from':'2026-06-01T00:00:00','valid_to':'',
+        'allocations':[{'person_id':pid,'duty':'produce','rate':'.01'} for pid in names]}]}
+    resolved=creator_fields(attach(None,'s','2026-06',original,snapshot=(1,(cfg,[]))))
+    by_id={row['person_id']:row for row in resolved.iter_rows(named=True)}
+    assert [money_float(by_id[pid]['creator_sales']) for pid in names]==[33.33,33.34,33.34]
+    for field,expected in [('creator_sales',100.01),('creator_gross',70.01),
+                           ('creator_profit',20.01),('creator_cost',30.00)]:
+        assert sum(Decimal(str(money_float(by_id[pid][field]))) for pid in names)==Decimal(str(expected))
 
 
 @pytest.mark.parametrize('field',['product_id','order_at'])
@@ -116,6 +160,7 @@ def test_rule_revision_refreshes_sales_but_keeps_archive_profit_and_cost(tmp_pat
     calculation=_persist(registry,a['id'],rows=data.to_dict(as_series=False))
     c={'calculation_id':calculation}
     before=compose(registry,'s1','2026-06',a['id'],11)
+    before_leader=compose(registry,'s1','2026-06',b['id'],11)
     assert before['products'][0]['sales'] is None
     assert _archived_allocated_outputs(registry,c,production=True,sales=True)[a['id']]['sales'] is None
     with registry.connect() as conn: path=registry.root/'calculations'/conn.execute('select path from calculation where id=?',(calculation,)).fetchone()[0]
@@ -124,6 +169,7 @@ def test_rule_revision_refreshes_sales_but_keeps_archive_profit_and_cost(tmp_pat
         'allocations':[{'person_id':a['id'],'duty':'produce','rate':'.02'}, {'person_id':b['id'],'duty':'cut','rate':'.03'}]},'test')
     after=compose(registry,'s1','2026-06',a['id'],11)
     assert after['products'][0]['sales']==16736.38
+    assert (after['products'][0]['creator_cost'],after['products'][0]['creator_gross'],after['products'][0]['creator_profit'])==(6498.57,10237.81,6059.18)
     assert after['products'][0]['gross']==before['products'][0]['gross']
     assert after['products'][0]['profit']==before['products'][0]['profit']
     assert after['products'][0]['cost']==before['products'][0]['cost']
@@ -132,6 +178,8 @@ def test_rule_revision_refreshes_sales_but_keeps_archive_profit_and_cost(tmp_pat
     assert hashlib.sha256(path.read_bytes()).hexdigest()==checksum
     leader=compose(registry,'s1','2026-06',b['id'],11,duties={b['id']:{'duty':'cut'}})
     assert leader['products'][0]['sales']==0 and leader['commission_trial']==181.78
+    assert (leader['products'][0]['creator_cost'],leader['products'][0]['creator_gross'],leader['products'][0]['creator_profit'])==(0,0,0)
+    assert leader['products'][0]['profit']==before_leader['products'][0]['profit']
 
 
 def test_closed_report_and_pending_export_share_sales_resolution(tmp_path):
@@ -162,4 +210,18 @@ def test_closed_report_and_pending_export_share_sales_resolution(tmp_path):
     assert not after['sales_pending_scopes']
     rows={r['person_id']:r for r in after['store_people'] if r['kind']=='person'}
     assert rows[a]['sales']==16736.38 and rows[b]['sales']==0
+    assert (rows[a]['creator_cost'],rows[a]['creator_gross'],rows[a]['creator_profit'])==(6498.57,10237.81,6059.18)
+    assert (rows[b]['creator_cost'],rows[b]['creator_gross'],rows[b]['creator_profit'])==(0,0,0)
+    assert rows[a]['creator_rule_revision'] == rows[b]['creator_rule_revision']
+    assert rows[b]['gross'] == 6142.69  # archived financial participation remains visible
+    exported=client.post('/api/commission-v2/export/reports/store_people',json={
+        **scope,'run_ids':[run],'fingerprint':after['fingerprint'],'presentation':True})
+    assert exported.status_code==200,exported.text
+    csv_rows=list(csv.DictReader(io.StringIO(exported.text.lstrip('\ufeff'))))
+    producer=next(row for row in csv_rows if row['分配人']=='甲')
+    cut=next(row for row in csv_rows if row['分配人']=='乙')
+    assert producer['做货创造毛利']=='10237.81' and producer['做货创造利润']=='6059.18'
+    assert cut['做货创造毛利']=='0.0' and cut['做货创造利润']=='0.0'
+    assert producer['核算记录']==cut['核算记录']=='1'
+    assert producer['做货规则指纹']==cut['做货规则指纹']==rows[a]['creator_rule_revision']
     assert ws.state('s1','2026-06').run_id==1

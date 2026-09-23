@@ -10,11 +10,15 @@ const people=[{...base,key:'a',subject:'做货甲',person:'做货甲',person_id:
   {...base,key:'b',subject:'抽点乙',person:'抽点乙',person_id:'b',sales:0,gross:0,profit_after_labor:0,trial_amount:1.2}]
 const tree=[{...base,key:'team',subject:'淘系运营一部 · 托管合计',sales:100,gross:55,profit_after_labor:40,trial_amount:2,
   children:people.map(p=>({...p,children:[{...p,key:p.key+'-product',subject:'托管生日派对布置商品',product_id:'1054398586749'}]}))}]
+const creator=new URLSearchParams(location.search).has('creator')
 window.fetch=async(url,options={})=>{
   const path=String(url),reply=data=>new Response(JSON.stringify(data),{headers:{'Content-Type':'application/json'}})
   if(path.endsWith('/reports/query')){
     const scope=JSON.parse(options.body)
-    return reply({view:scope.view,items:scope.view==='managed'?tree:[{...base,kind:'managed',person:'托管商品',managed_sales:100,sales:100}],count:1,total:999,
+    const creatorRows=[{...base,kind:'person',person:'李素林',status:'已结账',sales:6842.17,
+      creator_cost:1534.78,creator_gross:5307.39,creator_profit:4020.76,
+      gross:2122.96,profit_after_labor:1608.3,amount:80.67,trial_amount:80.67}]
+    return reply({view:scope.view,items:scope.view==='managed'?tree:creator?creatorRows:[{...base,kind:'managed',person:'托管商品',managed_sales:100,sales:100}],count:1,total:999,
       missing_periods:0,trial_periods:0,run_ids:[1],fingerprint:'fixture',selection:{start:'2026-06',end:'2026-06'},available_people:[]})
   }
   if(path.includes('/settlements'))return reply({settlements:[]})

@@ -122,6 +122,7 @@ def _product_rows(parts, include_orders=True):
     aggs = [
         pl.col('__sales_versions').filter(pl.col('__sales_versions')!='').unique().sort().alias('sales_rule_versions') if '__sales_versions' in parts.columns else pl.lit(None).alias('sales_rule_versions'),
         pl.col('__sales_pending').any().alias('sales_pending') if '__sales_pending' in parts.columns else pl.lit(False).alias('sales_pending'),
+        pl.col('creator_pending').any().alias('creator_pending') if 'creator_pending' in parts.columns else pl.lit(True).alias('creator_pending'),
         (pl.col('__reference_person_sales') - pl.col('participation_gross')).sum().alias('cost') if '__reference_person_sales' in parts.columns and 'participation_gross' in parts.columns else pl.lit(None).alias('cost'),
         pl.col('managed').fill_null(False).any().alias('managed') if 'managed' in parts.columns else pl.lit(False).alias('managed'),
         pl.col('product_name').drop_nulls().first().alias('product_name')
@@ -138,6 +139,8 @@ def _product_rows(parts, include_orders=True):
         if 'participation_gross' in parts.columns else pl.lit(None).alias('gross'),
         pl.col('participation_profit').sum().alias('profit')
         if 'participation_profit' in parts.columns else pl.lit(None).alias('profit'),
+        *[pl.col(name).sum().alias(name) if name in parts.columns else pl.lit(None).alias(name)
+          for name in ('creator_cost','creator_gross','creator_profit')],
         pl.col('share').cast(pl.Float64).unique().alias('rates'),
     ]
     grouped = parts.group_by('product_id').agg(aggs)
@@ -158,6 +161,10 @@ def _product_rows(parts, include_orders=True):
             'product_gross': _money_or_none(row.get('product_gross')),
             'gross': _money_or_none(row.get('gross')),
             'profit': _money_or_none(row.get('profit')),
+            'creator_pending': bool(row.get('creator_pending')),
+            'creator_cost': None if row.get('creator_pending') or row.get('managed') else _money_or_none(row.get('creator_cost')),
+            'creator_gross': None if row.get('creator_pending') or row.get('managed') else _money_or_none(row.get('creator_gross')),
+            'creator_profit': None if row.get('creator_pending') or row.get('managed') else _money_or_none(row.get('creator_profit')),
             'rate': rates[0] if len(rates) == 1 else None,
             'rates': rates,
             'rate_mixed': len(rates) > 1,
@@ -180,6 +187,9 @@ def _order_rows(parts):
         aggs.append(pl.col('order_id').drop_nulls().first().alias('order_id'))
     if 'participation_profit' in parts.columns:
         aggs.append(pl.col('participation_profit').sum().alias('profit'))
+    if 'creator_profit' in parts.columns:
+        aggs.append(pl.when(pl.col('creator_profit').is_not_null().any())
+                    .then(pl.col('creator_profit').sum()).otherwise(None).alias('creator_profit'))
     if 'amount' in parts.columns:
         aggs.append(pl.col('amount').sum().alias('amount'))
     grouped = parts.group_by(keys).agg(aggs or [pl.len().alias('n')])
@@ -189,6 +199,7 @@ def _order_rows(parts):
         out.setdefault(pid, []).append({
             'order_id': str(row.get('order_id') or row.get('spine_row') or ''),
             'profit': _money_or_none(row.get('profit')),
+            'creator_profit': _money_or_none(row.get('creator_profit')),
             'amount': _money_or_none(row.get('amount')),
         })
     for rows in out.values():
@@ -211,8 +222,8 @@ def compose(registry, store_id, period, person_id, run_id, *, store_name='', dut
     available = set(pl.scan_parquet(path).collect_schema().names())
     details = pl.read_parquet(path, columns=[name for name in _WANTED if name in available])
     details = production_weights(details.filter(pl.col('status') == 'distribute'))
-    from .commission_sales import attach
-    details = attach(registry,store_id,period,details)
+    from .commission_sales import attach, creator_fields
+    details = creator_fields(attach(registry,store_id,period,details))
     roster = {row['id']: row for row in registry.people()}
     person_details = _person_rows(details, store_id, person_id, set(roster))
     if product_id is not None:
@@ -239,6 +250,7 @@ def compose(registry, store_id, period, person_id, run_id, *, store_name='', dut
         'store_id': store_id, 'store': store_name or store_id, 'period': period,
         'person_id': person_id, 'person': person_name, 'run_id': run_id,
         'calculation_id': meta['id'], 'calculation_sha': meta['sha'],
+        'creator_rule_revision': details['__sales_rule_revision'][0] if not details.is_empty() and '__sales_rule_revision' in details.columns else '',
         'allocation_correction':json.loads(meta['summary_json']).get('allocation_correction'),
         'source_sha': hashlib.sha256((meta['sha'] + '|producer-output-v1').encode()).hexdigest(),
         'commission_trial': trial,
@@ -246,6 +258,7 @@ def compose(registry, store_id, period, person_id, run_id, *, store_name='', dut
         else split[engine_pid].get('profit'),
         'products': products,
         'sales_pending_products':[p['product_id'] for p in products if p.get('sales_pending')],
+        'creator_pending_products':[p['product_id'] for p in products if p.get('creator_pending') and not p.get('managed')],
         'excluded_product_ids': excluded_ids,
         'included_profit': _sum_profit(products, lambda row: row['product_id'] not in cut) if products else None,
         'excluded_profit': _sum_profit(products, lambda row: row['product_id'] in cut) if products else None,

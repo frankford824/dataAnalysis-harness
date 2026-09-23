@@ -1,7 +1,8 @@
-"""Read-only sales attribution over immutable financial evidence.
+"""Read-only creator attribution over immutable financial evidence.
 
-Confirmed, effective product duties may correct sales ownership. They never
-replace archived income, cost, gross/profit, share, payout or confirmation data.
+Confirmed, effective product duties resolve independent sales, cost, gross and
+product-profit output. They never replace archived income, financial splits,
+share, payout or confirmation data.
 Organization roles and suggestions are deliberately not authority.
 """
 from collections import OrderedDict, defaultdict
@@ -9,6 +10,7 @@ from decimal import Decimal
 from datetime import datetime
 import json
 import hashlib
+import math
 import threading
 
 import polars as pl
@@ -178,14 +180,130 @@ def expression(frame):
     return value
 
 
+def creator_fields(frame):
+    """Independent product output; commission shares remain in archived money.
+
+    The effective, proven producer share already resolved by ``attach`` owns
+    every source fact. Managed merchandise keeps its established team sales
+    treatment and is shown through the managed report instead.
+    """
+    required = {'__sales_share','__sales_rate','__sales_pending','person_id','spine_row',
+                'product_id','participation_sales'}
+    if not required <= set(frame.columns) or frame.is_empty():
+        return frame
+    managed = (pl.col('managed').fill_null(False) if 'managed' in frame.columns
+               else pl.lit(False))
+    share = pl.col('__sales_share').cast(pl.Decimal(16,8))
+    rate = pl.col('__sales_rate').cast(pl.Decimal(16,8))
+    no_producer = (share.sum().over('spine_row','product_id') <= 0)
+    missing = (pl.col('participation_sales').is_null() |
+               pl.col('spine_row').is_null() |
+               pl.col('person_id').is_null() |
+               pl.col('__sales_rate').is_null() | (rate <= 0) | (share < 0))
+    for field in ('participation_gross','participation_profit'):
+        if field in frame.columns:
+            missing |= pl.col(field).is_null()
+        else:
+            missing |= pl.lit(True)
+    for field in ('participation_sales','participation_gross','participation_profit'):
+        if field in frame.columns:
+            missing |= pl.col(field).n_unique().over('spine_row','product_id') != 1
+    pending = (~managed) & (pl.col('__sales_pending') | no_producer |
+                            missing.any().over('spine_row','product_id'))
+    values = {}
+    for name, source in (('creator_sales','participation_sales'),
+                         ('creator_gross','participation_gross'),
+                         ('creator_profit','participation_profit')):
+        amount = (pl.col(source).cast(pl.Decimal(28,10), strict=False)
+                  if source in frame.columns else pl.lit(None, dtype=pl.Decimal(28,10)))
+        values[name] = amount * share / rate
+    creator_values = [(key,value) for key,value in values.items() if key!='creator_sales']
+    calculated = frame.with_columns(
+        pending.alias('creator_pending'),
+        pl.when(managed).then(0).when(pending).then(None)
+          .otherwise(values['creator_sales']).alias('creator_sales'),
+        *[pl.when(managed | pending).then(None).otherwise(value).alias(name)
+          for name,value in creator_values],
+    )
+    calculated = reconcile_creator_cents(calculated)
+    return calculated.with_columns(
+        (pl.col('creator_sales') - pl.col('creator_gross')).alias('creator_cost'))
+
+
+def reconcile_creator_cents(frame):
+    """Assign each product's display-cent residue to one proven producer.
+
+    Keep sub-cent source precision until the product/person aggregation, then
+    add the small rounding residue to the largest producer. This makes the
+    person rows add to the once-rounded product source without touching money.
+    """
+    metric_sources = {'creator_sales':'participation_sales',
+                      'creator_gross':'participation_gross',
+                      'creator_profit':'participation_profit'}
+    if not set(metric_sources.values()) <= set(frame.columns):
+        return frame
+    complete = frame.group_by('product_id').agg(
+        pl.col('creator_pending').any().alias('__pending'))
+    valid = complete.filter(~pl.col('__pending'))['product_id'].to_list()
+    eligible = frame.filter(pl.col('product_id').is_in(valid) &
+                            pl.col('creator_gross').is_not_null())
+    if eligible.is_empty():
+        return frame
+    source = eligible.unique(subset=['product_id','spine_row']).group_by('product_id').agg(*[
+        pl.col(column).alias('__source_'+name)
+        for name,column in metric_sources.items()])
+    # Sum each source product deterministically. Parallel float group sums can
+    # vary at a half-cent when row order changes between archival reads.
+    from .money import money_float
+    source = source.with_columns(*[
+        pl.Series('__target_'+name,[money_float(math.fsum(values))
+                                    for values in source['__source_'+name]])
+          .cast(pl.Decimal(28,10)) for name in metric_sources])
+    people = eligible.group_by('product_id','person_id').agg(
+        *[pl.col(name).sum().alias('__raw_'+name) for name in metric_sources],
+        pl.col('__sales_share').sum().alias('__weight'),
+        pl.col('spine_row').min().alias('__first_row')).join(source,on='product_id')
+    people = people.with_columns(*[
+        pl.col('__raw_'+name).round(2,mode='half_away_from_zero').alias('__rounded_'+name)
+        for name in metric_sources])
+    winner = pl.when(pl.col('__weight')==pl.col('__weight').max().over('product_id'))
+    winner = winner.then(pl.col('person_id')).otherwise(None).min().over('product_id')
+    people = people.with_columns(winner.alias('__winner'), *[
+        (pl.col('__target_'+name) - pl.col('__rounded_'+name).sum().over('product_id')).alias('__residual_'+name)
+        for name in metric_sources])
+    adjustments = people.select('product_id','person_id','__first_row',*[
+        pl.when(pl.col('person_id')==pl.col('__winner'))
+          .then(pl.col('__residual_'+name)).otherwise(0).alias('__adjust_'+name)
+        for name in metric_sources])
+    adjusted = frame.join(adjustments,on=['product_id','person_id'],how='left',maintain_order='left')
+    return adjusted.with_columns(*[
+        (pl.col(name) + pl.when(pl.col('spine_row')==pl.col('__first_row'))
+         .then(pl.col('__adjust_'+name).fill_null(0)).otherwise(0)).alias(name)
+        for name in metric_sources]).drop('__first_row',*[f'__adjust_{name}' for name in metric_sources])
+
+
 def totals(frame, outputs):
     if outputs is None or '__sales_share' not in frame.columns or 'participation_sales' not in frame.columns:
         return outputs
+    frame = creator_fields(frame)
+    creator = 'creator_pending' in frame.columns
     grouped = frame.with_columns(expression(frame).alias('__corrected_sales')).group_by('person_id').agg(
         pl.col('__corrected_sales').filter(~pl.col('__sales_pending')).sum().alias('known_sales'),
         pl.col('__sales_pending').any().alias('pending'),
         pl.col('product_id').filter(pl.col('__sales_pending')).unique().sort().alias('pending_products'),
         pl.col('__sales_source').unique().sort().alias('sources'))
+    if creator:
+        fields=('creator_cost','creator_gross','creator_profit')
+        per_product=frame.group_by('person_id','product_id').agg(
+            pl.col('creator_pending').any(),
+            (pl.col('managed').fill_null(False).not_().sum() if 'managed' in frame.columns
+             else pl.len()).alias('__creator_rows'),
+            *[pl.col(name).sum().round(2,mode='half_away_from_zero').alias(name)
+              for name in fields])
+        by_person=per_product.group_by('person_id').agg(
+            pl.col('creator_pending').any(),pl.col('__creator_rows').sum(),
+            *[pl.col(name).sum() for name in fields])
+        grouped=grouped.join(by_person,on='person_id',how='left',maintain_order='left')
     from .money import money_float
     result = {pid:dict(value) for pid,value in outputs.items()}
     for row in grouped.iter_rows(named=True):
@@ -198,6 +316,13 @@ def totals(frame, outputs):
         out['known_sales'] = money_float(row['known_sales'])
         out['sales_pending_products'] = row['pending_products']
         out['sales_sources'] = row['sources']
+        if '__sales_rule_revision' in frame.columns:
+            out['creator_rule_revision'] = frame['__sales_rule_revision'][0]
+        if creator:
+            out['creator_pending'] = bool(row['creator_pending'])
+            out['creator_active'] = bool(row['__creator_rows'])
+            for name in ('creator_cost','creator_gross','creator_profit'):
+                out[name] = None if row['creator_pending'] or not row['__creator_rows'] else money_float(row[name])
     return result
 
 
@@ -239,7 +364,7 @@ def archived(registry, commission, outputs, frame=None):
                 from .commission_registry import RegistryError
                 raise RegistryError('销售归属证据校验失败，请核对原始提成档案')
             schema = pl.read_parquet_schema(BytesIO(data))
-            cols = [c for c in ('product_id','person_id','status','spine_row','order_at','fallback_reason','share','total_rate','duty','managed','participation_sales') if c in schema]
+            cols = [c for c in ('product_id','person_id','status','spine_row','order_at','fallback_reason','share','total_rate','duty','managed','participation_sales','participation_gross','participation_profit') if c in schema]
             loaded = pl.read_parquet(BytesIO(data),columns=cols)
         else:
             loaded = frame

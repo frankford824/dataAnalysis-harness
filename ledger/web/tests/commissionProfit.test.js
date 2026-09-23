@@ -8,15 +8,22 @@ const products = [
   {product_id:'c', product_name:'赠品C', profit:-5.2},
 ]
 
-test('sales correction does not redefine archived cost and exposes pending ownership', () => {
-  const data={products:[{product_id:'a',product_sales:16736.38,sales:16736.38,gross:4095.12,cost:2599.43,profit:2423.67,sales_rule_versions:['version-1']},
-    {product_id:'b',sales:null,sales_pending:true,cost:0,gross:12,profit:10}]}
+test('creator export separates effective output from archived payout evidence', () => {
+  const data={products:[{product_id:'a',product_sales:16736.38,sales:16736.38,
+    creator_cost:6498.57,creator_gross:10237.81,creator_profit:6059.18,
+    gross:4095.12,cost:2599.43,profit:2423.67,sales_rule_versions:['version-1']},
+    {product_id:'b',sales:null,sales_pending:true,creator_pending:true,cost:0,gross:12,profit:10}]}
   const rows=profitCompositionExportRows(data,[])
-  assert.equal(rows[0].本人成本,2599.43)
+  assert.equal(rows[0].做货成本,6498.57)
+  assert.equal(rows[0].做货毛利,10237.81)
+  assert.equal(rows[0]['做货创造利润（未扣兼职）'],6059.18)
+  assert.equal(rows[0].原核算分摊成本,2599.43)
+  assert.equal(rows[0]['原核算阶梯利润（未扣兼职）'],2423.67)
   assert.equal(rows[0].销售身份规则版本,'version-1')
   assert.equal(rows[1].本人销售额,null)
   assert.equal(rows[1].销售归属状态,'待确认身份')
-  assert.equal(rows[1].本人成本,0)
+  assert.equal(rows[1].创造业绩归属状态,'待确认身份或商品金额')
+  assert.equal(rows[1].原核算分摊成本,0)
 })
 
 test('live totals follow included products and ignore search', () => {
@@ -46,8 +53,9 @@ test('export names the person and says profit is before labor', () => {
   assert.match(header, /人员/)
   assert.match(header, /商品销售收入（全额）/)
   assert.match(header, /本人销售额/)
-  assert.match(header, /本人毛利/)
-  assert.match(header, /本人创造利润（未扣兼职）/)
+  assert.match(header, /做货毛利/)
+  assert.match(header, /做货创造利润（未扣兼职）/)
+  assert.match(header, /原核算阶梯利润（未扣兼职）/)
   assert.match(header, /利润口径/)
   assert.match(row, /^陈慨,/)
   assert.match(row, /-88.3/)
@@ -72,4 +80,10 @@ test('export keeps this persons 1.5% share and lists mixed shares', () => {
     products: [{product_id: 'p2', rate_mixed: true, rates: [0.015, 0.03]}],
   }, [])
   assert.equal(mixed['本人点数'], '1.5% / 3%')
+})
+
+test('long product ids stay exact text in Excel and formulas stay inert', () => {
+  const csv=profitCompositionCsv({products:[{product_id:'123456789012345678',product_name:'=危险公式'}]},[])
+  assert.ok(csv.includes("'123456789012345678"))
+  assert.ok(csv.includes("'=危险公式"))
 })

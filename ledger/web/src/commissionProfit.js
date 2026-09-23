@@ -38,12 +38,13 @@ export function sameIds(left = [], right = []) {
   return left.every(id => other.has(id))
 }
 
-export const PROFIT_BEFORE_LABOR = '本人创造利润（未扣兼职）'
-export const PROFIT_BASIS_NOTE = '销售额按明确生效的商品身份或归档身份归属：单人做货归全额，多人仅按做货人员点数分摊，抽点不参与；依据不足时待确认。成本、毛利、利润与提成保持原核算口径，未扣店级兼职'
+export const PROFIT_BEFORE_LABOR = '做货创造利润（未扣兼职）'
+export const PROFIT_BASIS_NOTE = '非托管商品销售额、成本、毛利及商品利润按明确生效的做货身份归属：单人做货归全额，多人仅按做货人员点数分摊，抽点不参与；依据不足时待确认。原核算分摊利润仍用于阶梯剔除和提成参考，不因创造归属变化而重算；托管商品另列'
 
-function csvCell(value) {
+function csvCell(value, header = '') {
   if (value == null || value === '') return ''
-  const text = String(value)
+  let text = String(value)
+  if ((header === '宝贝ID' && /^\d{15,}$/.test(text)) || /^[=+@\t\r\n]/.test(text)) text = "'" + text
   return /[",\n\r]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text
 }
 
@@ -67,17 +68,23 @@ export function profitCompositionExportRows(data, includedIds = []) {
     人员: data.person || '',
     店铺: data.store || '',
     月份: data.period || '',
+    核算记录: data.run_id || '',
+    核算档案校验值: data.calculation_sha || '',
+    做货归属规则指纹: data.creator_rule_revision || '',
     商品: row.product_name || '',
     宝贝ID: row.product_id || '',
     订单数: row.orders ?? '',
     '商品销售收入（全额）': row.product_sales,
     本人销售额: row.sales,
     销售归属状态: row.sales_pending ? '待确认身份' : '已解析',
+    创造业绩归属状态: row.managed ? '托管商品另列' : row.creator_pending ? '待确认身份或商品金额' : '已解析',
     销售身份规则版本: (row.sales_rule_versions || []).join(';'),
-    本人成本: row.cost != null ? row.cost : row.sales != null && row.gross != null
-      ? Math.round((Number(row.sales) - Number(row.gross)) * 100) / 100 : null,
-    本人毛利: row.gross,
-    [PROFIT_BEFORE_LABOR]: row.profit,
+    做货成本: row.creator_cost,
+    做货毛利: row.creator_gross,
+    [PROFIT_BEFORE_LABOR]: row.creator_profit,
+    原核算分摊成本: row.cost,
+    原核算分摊毛利: row.gross,
+    '原核算阶梯利润（未扣兼职）': row.profit,
     本人点数: rateLabel(row),
     是否计入阶梯: keep.has(row.product_id) ? '计入' : '剔除',
     利润口径: PROFIT_BASIS_NOTE + (data.allocation_correction ? `；历史分配更正自核算 ${data.allocation_correction.from_run}，已核实 ${data.allocation_correction.verified_orders} 个主单，另有 ${data.allocation_correction.pending_orders?.length || 0} 个主单保留原分配待复核；已核定实发未改变` : ''),
@@ -85,11 +92,13 @@ export function profitCompositionExportRows(data, includedIds = []) {
 }
 
 export function profitCompositionCsv(data, includedIds = []) {
-  const headers = ['人员', '店铺', '月份', '商品', '宝贝ID', '订单数',
-    '商品销售收入（全额）', '本人销售额', '销售归属状态', '销售身份规则版本', '本人成本', '本人毛利',
-    PROFIT_BEFORE_LABOR, '本人点数', '是否计入阶梯', '利润口径']
+  const headers = ['人员', '店铺', '月份', '核算记录', '核算档案校验值', '做货归属规则指纹', '商品', '宝贝ID', '订单数',
+    '商品销售收入（全额）', '本人销售额', '销售归属状态', '创造业绩归属状态', '销售身份规则版本',
+    '做货成本', '做货毛利', PROFIT_BEFORE_LABOR,
+    '原核算分摊成本', '原核算分摊毛利', '原核算阶梯利润（未扣兼职）',
+    '本人点数', '是否计入阶梯', '利润口径']
   const rows = profitCompositionExportRows(data, includedIds)
-  const lines = [headers.map(csvCell).join(','),
-    ...rows.map(row => headers.map(key => csvCell(row[key])).join(','))]
+  const lines = [headers.map(label => csvCell(label)).join(','),
+    ...rows.map(row => headers.map(key => csvCell(row[key], key)).join(','))]
   return `\uFEFF${lines.join('\r\n')}`
 }
