@@ -50,6 +50,38 @@ def _last(conn, store_id, period, run_id):
     return result
 
 
+def _allocation_risk(ws, store_id, period, run_id, source, closed):
+    """Expose a run-bound human close decision without treating it as clean data."""
+    pending = source.get('allocation_pending') or []
+    correction = (source.get('allocation_correction') or {}).get('pending_orders') or []
+    count = max(int(source.get('allocation_pending_count') or 0), len(pending)) + len(correction)
+    if not count:
+        return None
+    result = {'pending_count': count, 'can_confirm': False,
+              'close_override_id': None, 'close_at': '', 'close_by': '',
+              'close_reason': '', 'ignored_findings': [],
+              'has_allocation_evidence': bool(source.get('has_allocation_evidence'))}
+    if not closed or correction:
+        return result
+    rows = ws.conn.execute('''SELECT id,at,by,before_json,after_json FROM config_log
+      WHERE kind='manual-close' AND summary=? ORDER BY id DESC LIMIT 50''',
+      (f'人工结账 {store_id} {period}',)).fetchall()
+    for row in rows:
+        before = json.loads(row['before_json'] or '{}')
+        after = json.loads(row['after_json'] or '{}')
+        ignored = set(after.get('ignored') or [])
+        if before.get('run_id') != run_id or 'allocation_basis' not in ignored:
+            continue
+        blockers = {item['id']: item for item in before.get('blockers') or []
+                    if item.get('id')}
+        return {**result, 'can_confirm': True, 'close_override_id': row['id'],
+                'close_at': row['at'], 'close_by': row['by'],
+                'close_reason': after.get('reason') or '',
+                'ignored_findings': [blockers.get(key, {'id': key, 'name': key})
+                                     for key in sorted(ignored)]}
+    return result
+
+
 def context(ws, registry, model, store_id, period, *, expected_run=None):
     commission_reports.months(period, period)
     if store_id not in {store.id for store in model.stores}:
@@ -81,7 +113,7 @@ def context(ws, registry, model, store_id, period, *, expected_run=None):
     with registry.connect() as conn:
         latest = _last(conn, store_id, period, run_id)
         history = [dict(row) for row in conn.execute('''SELECT id,finance_run,at,actor,
-          reason,confirmed_total,payouts_json FROM payout_confirmation
+          reason,confirmed_total,payouts_json,trial_json FROM payout_confirmation
           WHERE store_id=? AND period=? ORDER BY at DESC,id DESC LIMIT 10''',
           (store_id, period))]
     suggestions = {row['person_id']: row['amount'] for row in report['rows']
@@ -109,26 +141,30 @@ def context(ws, registry, model, store_id, period, *, expected_run=None):
             person['excluded_count'] = extra['excluded_count']
     for item in history:
         item['payouts'] = json.loads(item.pop('payouts_json'))
+        item['trial'] = json.loads(item.pop('trial_json'))
     from .store_display import names
     return {'store_id': store_id, 'store': names(ws.root,model)[store_id],
             'period': period, 'run_id': run_id, 'store_closed': closed,
             'source_sha': hashlib.sha256(json_text(commission).encode()).hexdigest(),
             'people': people, 'latest': latest, 'history': history,
-            'unassigned_orders': commission.get('unassigned_orders') or 0}
+            'unassigned_orders': commission.get('unassigned_orders') or 0,
+            'allocation_risk': _allocation_risk(ws,store_id,period,run_id,source,closed)}
 
 
 def confirm(ws, registry: Registry, model, *, store_id, period, run_id,
             source_sha, expected_confirmation_id, payouts, no_payout,
-            reason, actor):
+            reason, actor, allocation_risk_ack=False, allocation_override_id=None):
     from .finance_guard import guard
     with guard(ws.root,store_id,period):
         return _confirm(ws,registry,model,store_id=store_id,period=period,run_id=run_id,
             source_sha=source_sha,expected_confirmation_id=expected_confirmation_id,payouts=payouts,
-            no_payout=no_payout,reason=reason,actor=actor)
+            no_payout=no_payout,reason=reason,actor=actor,
+            allocation_risk_ack=allocation_risk_ack,allocation_override_id=allocation_override_id)
 
 
 def _confirm(ws, registry: Registry, model, *, store_id, period, run_id,
-             source_sha, expected_confirmation_id, payouts, no_payout, reason, actor):
+             source_sha, expected_confirmation_id, payouts, no_payout, reason, actor,
+             allocation_risk_ack=False, allocation_override_id=None):
     if not reason.strip():
         raise RegistryError('请写明人工确认依据')
     current = context(ws, registry, model, store_id, period,
@@ -138,6 +174,16 @@ def _confirm(ws, registry: Registry, model, *, store_id, period, run_id,
     expected = current['latest']['id'] if current['latest'] else ''
     if expected_confirmation_id != expected:
         raise RevisionConflict('提成已经由其他操作更新，请刷新后重看')
+    risk = current['allocation_risk']
+    if risk:
+        if not risk['can_confirm']:
+            raise RegistryError('本期分配依据待核对，尚无同一核算版本的人工结账确认；请先核对分配依据')
+        if not allocation_risk_ack:
+            raise RegistryError('请单独确认分配依据待核对的风险，并逐人核定实发金额')
+        if allocation_override_id != risk['close_override_id']:
+            raise RevisionConflict('人工结账风险记录已变化，请重新打开实发确认窗口')
+    elif allocation_risk_ack or allocation_override_id is not None:
+        raise RevisionConflict('分配依据状态已变化，请重新打开实发确认窗口')
     ids = {row['person_id'] for row in current['people']}
     entered = [str(row.get('person_id') or '') for row in payouts]
     if no_payout and (ids or payouts):
@@ -158,15 +204,16 @@ def _confirm(ws, registry: Registry, model, *, store_id, period, run_id,
               'reason': reason.strip(), 'source_sha': source_sha,
               'payouts_json': json_text(snapshot),
               'trial_json': json_text({'people': current['people'],
-                                      'unassigned_orders': current['unassigned_orders']}),
+                                      'unassigned_orders': current['unassigned_orders'],
+                                      'allocation_risk': {**risk, 'acknowledged': True} if risk else None}),
               'confirmed_total': str(total)}
     with registry.transaction() as conn:
         previous = _last(conn, store_id, period, run_id)
         if (previous['id'] if previous else '') != expected_confirmation_id:
             raise RevisionConflict('提成已经由其他操作更新，请刷新后重看')
-        shown, source, _ = _shown(ws, store_id, period)
-        if source.get('allocation_pending') or (source.get('allocation_correction') or {}).get('pending_orders'):
-            raise RegistryError('主子订单分配依据待核对，不能核定最终实发；请先补齐分配依据')
+        shown, source, closed = _shown(ws, store_id, period)
+        if _allocation_risk(ws,store_id,period,shown,source,closed) != risk:
+            raise RevisionConflict('人工结账风险记录已变化，请重新打开实发确认窗口')
         if (shown != run_id or hashlib.sha256(json_text(source.get('commission') or {})
                                            .encode()).hexdigest() != source_sha):
             raise RevisionConflict('本店计算数据已更新，请重新打开确认窗口')

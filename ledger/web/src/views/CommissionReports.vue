@@ -20,6 +20,7 @@ const payoutError = ref(''), payoutContext = ref(null), payoutPeople = ref([])
 const payoutReason = ref(''), payoutNoPeople = ref(false)
 const payoutNotice = ref('')
 const payoutFocus = ref(null), payoutScopeAccepted = ref(false)
+const payoutRiskAccepted = ref(false)
 const payoutTargetsOpen = ref(false), payoutTargets = ref([]), payoutTargetTitle = ref('')
 const profit = ref(null)
 let payoutRequest = 0
@@ -48,6 +49,8 @@ const canSettle = computed(() => !!report.value && report.value.total != null &&
 const validMoney = value => /^-?\d+(?:\.\d{1,2})?$/.test(String(value ?? '').trim())
 const payoutReady = computed(() => !!payoutContext.value && !!payoutReason.value.trim()
   && payoutScopeAccepted.value
+  && (!payoutContext.value.allocation_risk ||
+    (payoutContext.value.allocation_risk.can_confirm && payoutRiskAccepted.value))
   && !payoutLoading.value && !payoutSaving.value && (payoutPeople.value.length
     ? payoutPeople.value.every(person => validMoney(person.amount)) : payoutNoPeople.value))
 const payoutTotal = computed(() => payoutPeople.value.length && payoutPeople.value.every(p => validMoney(p.amount))
@@ -114,7 +117,7 @@ async function openPayout(row) {
   if(locked.value || !row.run_id)return
   const ticket=++payoutRequest
   payoutOpen.value=true;payoutLoading.value=true;payoutError.value='';payoutContext.value=null
-  payoutReason.value='';payoutNoPeople.value=false;payoutPeople.value=[];payoutScopeAccepted.value=false
+  payoutReason.value='';payoutNoPeople.value=false;payoutPeople.value=[];payoutScopeAccepted.value=false;payoutRiskAccepted.value=false
   try {
     const params=new URLSearchParams({store_id:row.store_id,period:row.period,run_id:String(row.run_id)})
     const context=await commissionRequest(`/payout-confirmations/context?${params}`)
@@ -214,6 +217,8 @@ async function savePayout() {
       source_sha:context.source_sha,expected_confirmation_id:context.latest?.id||'',
       payouts:payoutPeople.value.map(({person_id,amount})=>({person_id,amount})),
       no_payout:payoutNoPeople.value,reason:payoutReason.value.trim(),
+      allocation_risk_ack:!!context.allocation_risk && payoutRiskAccepted.value,
+      allocation_override_id:context.allocation_risk?.close_override_id ?? null,
     }})
     payoutOpen.value=false
     payoutNotice.value=`${context.store} ${context.period} 的提成已确认。当前范围若还有其他店铺待确认，可先筛选这家店结算。`
@@ -431,6 +436,16 @@ defineExpose({reload:load})
         <template v-if="payoutContext">
           <p class="settlement-help">{{ payoutContext.store }} · {{ payoutContext.period }}<template v-if="payoutFocus"> · 当前查看：{{ payoutFocus.person }}</template>。修改下方实发金额并填写依据。</p>
           <n-alert type="warning" :bordered="false">保存范围：{{ payoutContext.store }} {{ payoutContext.period }} 的全部 {{ payoutPeople.length }} 位提成人员。其他人员也会按表单中的金额一并核定；此操作记录核定结果，不执行付款。</n-alert>
+          <n-alert v-if="payoutContext.allocation_risk" type="warning" :bordered="false" style="margin-top:10px">
+            本店本月仍有 {{ payoutContext.allocation_risk.pending_count }} 项主子订单金额缺少分配依据，系统应发只供参考，不能视为已核实的个人提成。
+            <template v-if="payoutContext.allocation_risk.can_confirm">
+              结账时已人工确认忽略此项<template v-if="payoutContext.allocation_risk.close_reason">（依据：{{ payoutContext.allocation_risk.close_reason }}）</template>。
+              你可逐人核对下方金额，并将其作为人工核定实发留档。
+            </template>
+            <template v-else>当前没有与本次核算对应的人工结账确认，请先核对分配依据。</template>
+            <div v-if="payoutContext.allocation_risk.ignored_findings?.length" class="payout-risk-list">结账时另外接受的事项：{{ payoutContext.allocation_risk.ignored_findings.filter(item=>item.id!=='allocation_basis').map(item=>item.name).join('、') || '无' }}。</div>
+            <a v-if="payoutContext.allocation_risk.has_allocation_evidence" :href="`/api/runs/${payoutContext.run_id}/allocation.csv`" target="_blank" rel="noopener">查看本次分配依据明细</a>
+          </n-alert>
           <n-alert v-if="payoutContext.unassigned_orders" type="info" :bordered="false" style="margin-bottom:12px">还有 {{ payoutContext.unassigned_orders }} 笔订单没有提成归属，可由人工直接确认最终金额。</n-alert>
           <div v-if="payoutPeople.length" class="payout-people">
             <label v-for="person in payoutPeople" :key="person.person_id" :class="{'payout-focused':person.person_id===payoutFocus?.person_id}">
@@ -453,11 +468,13 @@ defineExpose({reload:load})
           <n-checkbox v-else v-model:checked="payoutNoPeople">确认本期无需发放提成</n-checkbox>
           <n-input v-model:value="payoutReason" type="textarea" :rows="2" maxlength="500" show-count placeholder="填写实发确认依据，例如：已与运营核对本期提成、扣除上月预发等" style="margin-top:12px" />
           <n-checkbox v-model:checked="payoutScopeAccepted" style="margin-top:12px">我已核对本店本月全部人员的实发金额，确认一并保存</n-checkbox>
+          <n-checkbox v-if="payoutContext.allocation_risk?.can_confirm" v-model:checked="payoutRiskAccepted" style="margin-top:10px">我知道本店仍有未分配金额、系统应发仅供参考；已按人工依据逐人核定实发，本次确认不代表分配依据已补齐</n-checkbox>
           <details v-if="payoutContext.history?.length" class="payout-history">
             <summary>查看之前确认的实发记录（{{ payoutContext.history.length }}）</summary>
             <div v-for="item in payoutContext.history" :key="item.id">
               <span>{{ displayTime(item.at) }} · ¥{{ money(item.confirmed_total) }}<small v-if="item.finance_run !== payoutContext.run_id">后来有新核算</small></span>
               <small>{{ item.reason }}</small>
+              <small v-if="item.trial?.allocation_risk?.acknowledged">已人工接受 {{ item.trial.allocation_risk.pending_count }} 项分配依据待核对风险</small>
               <small>{{ item.payouts.map(person => `${person.person} ¥${money(person.amount)}`).join(' · ') }}</small>
             </div>
           </details>
@@ -475,6 +492,7 @@ defineExpose({reload:load})
   </div>
 </template>
 <style scoped>
+.payout-risk-list{margin-top:6px;font-size:12px}.payout-editor .n-alert a{display:inline-block;margin-top:6px;color:#2559d6;text-decoration:underline}
 .mobile-context{display:none}
 .payout-people label>span,.payout-targets button>span:first-child{min-width:0;overflow-wrap:anywhere}
 .actual-payout-cell.actual-payout-cell.is-editable{box-sizing:border-box;min-width:0;width:100%;max-width:132px}

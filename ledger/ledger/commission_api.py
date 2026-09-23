@@ -49,6 +49,8 @@ class PayoutConfirmationChange(BaseModel):
     payouts: list[dict] = Field(default_factory=list, max_length=100)
     no_payout: bool = False
     reason: str = Field(min_length=1, max_length=500)
+    allocation_risk_ack: bool = False
+    allocation_override_id: int | None = Field(default=None, gt=0)
 
 
 class SettingChange(BaseModel):
@@ -906,7 +908,9 @@ def install(app, workspace, model, model_root: Path | None = None):
             source_sha=change.source_sha,
             expected_confirmation_id=change.expected_confirmation_id,
             payouts=change.payouts, no_payout=change.no_payout,
-            reason=change.reason, actor=actor(request)['id'])
+            reason=change.reason, actor=actor(request)['id'],
+            allocation_risk_ack=change.allocation_risk_ack,
+            allocation_override_id=change.allocation_override_id)
         clear_report_cache()
         return result
 

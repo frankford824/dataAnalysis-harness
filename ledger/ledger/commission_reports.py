@@ -604,6 +604,8 @@ def build(workspace, registry, model, start, end, store_ids=None, person_ids=Non
         sid=record['store_id'];period=record['period']
         source_c=c
         decision=confirmed.get((sid,period,record['id']))
+        payout_risk = ((json.loads(decision['trial_json']).get('allocation_risk') or {})
+                       if decision else {})
         if decision and hashlib.sha256(json_text(c).encode()).hexdigest() == decision['source_sha']:
             c={**c,'people':[dict(person) for person in c.get('people') or []]}
             by_id={str(person.get('person_id')):person for person in c['people']}
@@ -620,12 +622,15 @@ def build(workspace, registry, model, start, end, store_ids=None, person_ids=Non
                      manual_amounts_after_labor=True,manual_confirmed=True,
                      amount_complete=True)
             c.setdefault('notes',[]).append('本期提成已由人工逐人确认，原试算和未分配订单保留')
+            if payout_risk.get('acknowledged'):
+                c['notes'].append('人工核定实发时已接受分配依据待核对风险；系统应发仍为参考，原始分配缺口未消除')
         else:
             decision=None
         names.setdefault(sid,record['store_name'] or sid)
         closed=record['state']=='closed' and record['frozen_id']==record['id']
         legacy=c.get('engine')!='commission-v2'
-        status=('已人工确认' if decision else
+        status=('已人工确认（分配待复核）' if decision and payout_risk.get('acknowledged') else
+                '已人工确认' if decision else
                 '试算（店铺已结账）' if closed and c.get('amount_complete') is False else
                 '已结账' if closed else
                 '历史口径' if legacy else

@@ -869,6 +869,9 @@ watch(
             <n-checkbox :value="f.id"><b>{{ f.name }}</b>：{{ f.head || f.message }}</n-checkbox>
           </div>
         </n-checkbox-group>
+        <n-alert v-if="ignoredBlockers.includes('allocation_basis')" type="warning" :bordered="false" style="margin:10px 0">
+          本次人工结账会保留未分配的订单金额。以后核定实发时，系统应发仍只是参考，必须逐人确认最终金额，并单独接受这项风险；结账不会自动完成实发核定。
+        </n-alert>
         <n-input v-model:value="manualCloseNote" type="textarea" :rows="3" maxlength="500" show-count placeholder="填写人工确认依据与处理原因" />
         <n-alert v-if="manualCloseNeeds.length" type="info" :bordered="false">还需完成：{{ manualCloseNeeds.join('；') }}</n-alert>
       </div>
