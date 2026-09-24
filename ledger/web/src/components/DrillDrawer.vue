@@ -338,8 +338,8 @@ function close() {
               <tr>
                 <th>{{ data.key_label || '订单号' }}</th>
                 <th>科目</th>
-                <th class="right">金额</th>
-                <th class="right">进账</th>
+                <th class="right nowrap">金额</th>
+                <th class="right nowrap">进账</th>
                 <th>在哪一行</th>
               </tr>
             </thead>
@@ -359,8 +359,8 @@ function close() {
                   {{ r.minor || r.subject || r.metric }}
                   <div v-if="r.classify_via" class="xs muted">{{ r.classify_via }}</div>
                 </td>
-                <td class="right num" :class="{ neg: r.amount < 0 }">{{ money(r.amount) }}</td>
-                <td class="right num" :class="{ neg: r.contribution < 0 }">
+                <td class="right num nowrap" :class="{ neg: r.amount < 0 }">{{ money(r.amount) }}</td>
+                <td class="right num nowrap" :class="{ neg: r.contribution < 0 }">
                   {{ r.counted ? money(r.contribution) : '—' }}
                 </td>
                 <td class="xs num">
