@@ -8,7 +8,7 @@ import sqlite3
 import logging
 from contextlib import closing
 
-from . import commission_catalog, commission_import, order_feed, service
+from . import commission_catalog, commission_import, order_feed, service, fee_jobs
 from .commission_registry import Registry, json_text
 
 
@@ -22,9 +22,11 @@ class Manager:
         self.current_pending = None
         self.last_error = ""
         self.last_error_store = None
+        self._yield_fee = False
 
     def start(self):
         registry = Registry(self.workspace().root)
+        fee_jobs.restart(registry)
         with registry.transaction() as conn:
             conn.execute("UPDATE job SET status='queued' WHERE status='running'")
         self.thread = threading.Thread(target=self.run, name="commission-manager", daemon=True)
@@ -39,15 +41,23 @@ class Manager:
         self.current_pending = None
         ws = self.workspace()
         registry = Registry(ws.root)
+        fee_jobs.recover(ws, self.model)
+        skip_fee = self._yield_fee
+        self._yield_fee = False
         with registry.transaction() as conn:
-            row = conn.execute("SELECT * FROM job WHERE status='queued' ORDER BY at LIMIT 1").fetchone()
+            row = conn.execute("SELECT * FROM job WHERE status='queued' " +
+                ("AND kind<>'fee_rules' " if skip_fee else "") + "ORDER BY at LIMIT 1").fetchone()
             if row:
                 conn.execute("UPDATE job SET status='running' WHERE id=?", (row["id"],))
         if row:
             job = dict(row)
             payload = json.loads(job["payload"])
             try:
-                if job["kind"] == "catalog":
+                if job["kind"] == fee_jobs.KIND:
+                    fee_jobs.step(ws, self.model, job)
+                    self._yield_fee = True
+                    return
+                elif job["kind"] == "catalog":
                     result = commission_catalog.refresh(registry, self.model())
                     self.last_catalog = time.time()
                 elif job["kind"] == "import":

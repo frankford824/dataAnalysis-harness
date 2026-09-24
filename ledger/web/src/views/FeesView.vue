@@ -3,16 +3,17 @@
 
  * 对账和引擎对不上，十有八九是某一条业务描述或备注没有挂到口径项上。
  * 这一页把「引擎认识什么 / 这个月认不出什么 / 人配了哪些规则」摊在同一处，
- * 配完先试算一家店看损益哪几行会变，确认后再落库、重算全部有表的店。
+ * 配完先试算一家店看损益哪几行会变，确认后落库，后台重算受影响平台的店铺。
  *
  * 模型只给建议，不落库。exclude 和「没挂上订单也进账」两个开关能静默改利润，
  * 必须人自己勾，试算里会单独标出来。
  */
 import { useDialog, useMessage } from 'naive-ui'
-import { computed, ref, watch } from 'vue'
+import { computed, ref, watch, onMounted, onUnmounted } from 'vue'
 import { onBeforeRouteLeave, useRoute } from 'vue-router'
 import { useLatest } from '../components/ui/useLatest'
 import { mergeRuleResponse, feePreviewKey } from '../components/ui/editableRules'
+import { feeRequestId } from '../feeJobState'
 
 import { api } from '../api'
 import { count, money, prettyUnmatched, stamp } from '../format'
@@ -37,6 +38,35 @@ const editIndex = ref(-1)
 const preview = ref(null)
 const suggesting = ref(false)
 const picked = ref({})
+const feeJob = ref(null)
+const jobError = ref('')
+const retrying = ref(false)
+const submitAttempt = ref(null)
+const jobActive = computed(() => ['preparing','queued','running'].includes(feeJob.value?.status))
+const jobLabel = computed(() => feeJob.value?.status==='failed' && feeJob.value.saved===false ? '规则未保存，请核对错误后重新试算' : ({preparing:'正在确认规则保存',queued:'规则已保存，等待后台重算',running:'规则已保存，后台重算中',done:'本批核算已完成',failed:'本批存在失败项，请查看原因'})[feeJob.value?.status] || '')
+let jobTimer, jobPolling=false, disposed=false, jobAbort, jobEpoch=0
+async function pollJob() {
+  if (jobPolling || disposed || document.hidden) return
+  jobPolling=true
+  const epoch=jobEpoch
+  jobAbort=new AbortController()
+  const timeout=setTimeout(()=>jobAbort?.abort(),10000)
+  try {
+    const previous=feeJob.value
+    const result=await api.feeJobs({signal:jobAbort.signal})
+    if(disposed || epoch!==jobEpoch)return
+    feeJob.value=result.job;jobError.value=''
+    if(previous && ['queued','running','preparing'].includes(previous.status) && ['done','failed'].includes(result.job?.status))app.invalidate()
+  }catch(e){if(!disposed)jobError.value='任务状态暂时读取失败；后台任务不会因此取消，请重试。'}
+  finally{clearTimeout(timeout);jobPolling=false}
+}
+async function retryJob() {
+  retrying.value=true
+  try{const result=await api.feeJobRetry(feeJob.value.id);jobEpoch++;feeJob.value=result.job;jobError.value=''}
+  catch(e){message.error(e.message)}finally{retrying.value=false}
+}
+onMounted(()=>{pollJob();jobTimer=setInterval(pollJob,3000)})
+onUnmounted(()=>{disposed=true;clearInterval(jobTimer);jobAbort?.abort()})
 
 const dirty = computed(() => JSON.stringify(draft.value) !== JSON.stringify(data.value?.rules || []))
 
@@ -328,21 +358,27 @@ async function apply() {
     return
   }
   try {
-    const hadOverview = !!app.overview
-    await app.run('正在保存并重算', () =>
+    const signature=feePreviewKey(draft.value,app.storeId)
+    if(submitAttempt.value?.signature!==signature)submitAttempt.value={signature,id:feeRequestId()}
+    const result=await app.run('正在保存规则', () =>
       api.feesApply({
-        rules: draft.value,
+        rules: JSON.parse(JSON.stringify(draft.value)),
+        expected_fee_revision: preview.value.fee_revision,
+        request_id: submitAttempt.value.id,
         store_id: app.storeId,
         recompute: true,
         note: `界面改费项规则，共 ${draft.value.length} 条`,
       }),
     )
+    jobEpoch++;feeJob.value=result.job
+    if(!result.saved){submitAttempt.value=null;throw new Error(result.job.error || '规则尚未确认保存，请查看任务状态')}
     preview.value = null
+    const sameDraft=signature===feePreviewKey(draft.value,app.storeId)
+    if(sameDraft)data.value={...data.value,rules:JSON.parse(JSON.stringify(draft.value))}
     app.invalidate()
-    await app.loadNavigation(true)
-    if (hadOverview) await app.loadOverview(true)
-    await load(true)
-    message.success('规则已生效，有表的店都重算过了')
+    await load(sameDraft)
+    if(result.job.status==='failed')message.warning('规则已保存，但后台核算有失败项，请查看任务详情')
+    else message.success(result.job.total ? `规则已保存，后台处理 ${result.job.total} 家受影响店铺，可离开或刷新页面` : '规则已保存，无需重算店铺')
   } catch (e) {
     message.error(e.message)
   }
@@ -355,6 +391,21 @@ onBeforeRouteLeave(()=>{
 </script>
 
 <template>
+  <n-alert v-if="feeJob" :type="feeJob.status==='failed' ? 'error' : jobActive ? 'info' : 'success'" :bordered="false" style="margin-bottom:16px" role="status">
+    <strong>{{ jobLabel }}</strong>
+    <p>已处理 {{ feeJob.completed }} / {{ feeJob.total }} 家 · 成功 {{ feeJob.succeeded }} 家 · 失败 {{ feeJob.failed }} 家。保存与核算是两个阶段；核算完成不代表资料已齐或已结账。已结账结果与核定实发不自动改写。</p>
+    <n-progress v-if="feeJob.total" type="line" :percentage="feeJob.percent" :status="feeJob.status==='failed' ? 'error' : feeJob.status==='done' ? 'success' : 'default'" />
+    <p v-if="jobActive">可以离开或刷新页面，返回本页可继续查看进度，无需重复保存。</p>
+    <p v-if="feeJob.error">{{ feeJob.error }}</p>
+    <details><summary>逐店进度与结果（{{ feeJob.total }} 家）</summary>
+      <div v-for="item in feeJob.stores" :key="item.store_id" style="margin:6px 0;overflow-wrap:anywhere">
+        {{ item.store || item.store_id }}：{{ item.phase }}<span v-if="item.state==='running'"> · {{ item.percent }}%</span>
+        <span v-if="item.review_required"> · 另有资料待核对</span><span v-if="item.error"> · {{ item.error }}</span>
+      </div>
+    </details>
+    <n-button v-if="feeJob.status==='failed' && feeJob.saved" :loading="retrying" @click="retryJob">仅重试未完成项</n-button>
+  </n-alert>
+  <n-alert v-if="jobError" type="warning" :bordered="false">{{ jobError }} <n-button size="small" @click="pollJob">重试读取</n-button></n-alert>
   <n-alert v-if="failed" type="error" :bordered="false" style="margin-bottom: var(--s4)">
     {{ failed }}
   </n-alert>
@@ -366,8 +417,8 @@ onBeforeRouteLeave(()=>{
   >
     <template #actions>
       <n-button size="small" :disabled="!dirty || loading || !!app.busy" :loading="!!app.busy" @click="runPreview">试算当前店</n-button>
-      <n-button type="primary" :disabled="!dirty || !preview || loading || !!app.busy" :loading="!!app.busy" @click="apply">
-        保存并重算
+      <n-button type="primary" :disabled="!dirty || !preview || loading || !!app.busy || jobActive" :loading="!!app.busy" @click="apply">
+        保存并后台重算
       </n-button>
     </template>
   </PageHead>

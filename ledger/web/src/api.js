@@ -195,6 +195,8 @@ export const api = {
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify(body),
     }),
+  feeJobs: (options = {}) => call('/api/fees/jobs', options),
+  feeJobRetry: (id) => call(`/api/fees/jobs/${encodeURIComponent(id)}/retry`, {method:'POST'}),
   feesSuggest: (body) =>
     call('/api/fees/suggest', {
       method: 'POST',

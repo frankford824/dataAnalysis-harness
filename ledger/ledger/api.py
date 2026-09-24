@@ -2328,6 +2328,8 @@ class FeeRulesBody(BaseModel):
     note: str = ""
     store_id: str = ""
     recompute: bool = True
+    expected_fee_revision: str | None = None
+    request_id: str = ""
 
 
 class FeeSuggestIn(BaseModel):
@@ -2339,6 +2341,7 @@ class FeeSuggestIn(BaseModel):
 def fees_catalog(section: str = "", platform: str = "") -> dict:
     """费项台账：引擎认识什么、这个月认不出什么、界面上配了哪些规则。"""
     model = _model()
+    from . import fee_jobs
     all_sections = not section
     payload: dict[str, Any] = {
         "majors": fees_mod.major_options(model),
@@ -2350,6 +2353,7 @@ def fees_catalog(section: str = "", platform: str = "") -> dict:
         "platforms": view.platform_options(model),
         "platform_aliases": fees_mod.platform_aliases(model),
         "model_revision": _model_revision(),
+        "fee_revision": fee_jobs.revision(model.fee_rules),
     }
     if all_sections or section in {"unmatched", "rules"}:
         payload["rules"] = [fees_mod.rule_dict(r) for r in model.fee_rules]
@@ -2386,7 +2390,8 @@ def fees_suggest(body: FeeSuggestIn) -> dict:
 def fees_preview(body: FeeRulesBody) -> dict:
     """用提交的规则真算一家店，不写任何东西。"""
     if not body.store_id:
-        raise HTTPException(400, "试算必须指定一家店。全公司重算只在确认落库时做。")
+        raise HTTPException(400, "试算必须指定一家店。确认保存后会在后台重算受影响平台的店铺。")
+    from . import fee_jobs
     base = _model()
     store = _store(base, body.store_id)
     try:
@@ -2397,6 +2402,7 @@ def fees_preview(body: FeeRulesBody) -> dict:
     return {
         "store_id": store.id,
         "store": _display_store(store)['name'],
+        "fee_revision": fee_jobs.revision(base.fee_rules),
         "periods": [
             {
                 "period": sl["period"],
@@ -2411,40 +2417,35 @@ def fees_preview(body: FeeRulesBody) -> dict:
 
 @app.post("/api/fees")
 def fees_apply(body: FeeRulesBody) -> dict:
-    """把规则写进 fee-rules.csv，然后把有表的店重算。"""
-    base = _model()
-    before = [fees_mod.rule_dict(r) for r in base.fee_rules]
-    stamp = datetime.now().astimezone().isoformat(timespec="seconds")
-    for row in body.rules:
-        if not row.at:
-            row.at = stamp
+    """Save once, return immediately, and reuse the durable background worker."""
+    from . import fee_jobs
     try:
-        rules = [_fee_rule(r) for r in body.rules]
-        count = replace_fee_rules(DEFAULT_MODEL, rules)
+        job=fee_jobs.submit(workspace(),DEFAULT_MODEL,[_fee_rule(r) for r in body.rules],
+            expected=body.expected_fee_revision,request_id=body.request_id,note=body.note,actor=ANONYMOUS,recompute=body.recompute)
+    except fee_jobs.Conflict as exc:
+        raise HTTPException(409,str(exc)) from exc
     except (ModelError, ValidationError, ValueError) as exc:
         raise HTTPException(400, str(exc)) from exc
-    _invalidate_model()
-    after = [fees_mod.rule_dict(r) for r in _model().fee_rules]
-    workspace().log_config(
-        "fee-rules",
-        body.note.strip() or f"费项规则改为 {count} 条",
-        by=ANONYMOUS,
-        before=before,
-        after=after,
-    )
-    periods: list[dict] = []
-    failures: list[dict] = []
-    if body.recompute:
-        model = _model()
-        ws = workspace()
-        for store in model.stores:
-            if store.archived or not ws.active_files(store.id):
-                continue
-            done = service.recompute(ws, model, store)
-            periods.extend(done.periods)
-            if done.failure:
-                failures.append(done.failure)
-    return {"count": count, "periods": periods, "failures": failures}
+    finally:
+        _invalidate_model()
+    return {"count":job['count'],"saved":job['saved'],"job":job}
+
+
+@app.get('/api/fees/jobs')
+def fees_job_status() -> dict:
+    from . import fee_jobs
+    job=fee_jobs.status(workspace())
+    if job:
+        names=store_display.names(workspace().root,_model())
+        for row in job['stores']:row['store']=names.get(row['store_id'],row['store_id'])
+    return {'job':job}
+
+
+@app.post('/api/fees/jobs/{job_id}/retry')
+def fees_job_retry(job_id: str) -> dict:
+    from . import fee_jobs
+    try:return {'job':fee_jobs.retry(workspace(),_model(),job_id)}
+    except fee_jobs.Conflict as exc:raise HTTPException(409,str(exc)) from exc
 
 
 def _model_with_fee_rules(model: Model, rows: list[FeeRuleIn]) -> Model:
