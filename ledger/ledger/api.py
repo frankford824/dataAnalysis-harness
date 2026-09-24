@@ -1535,11 +1535,21 @@ def drill(run_id: int, node_id: str, limit: int = view.DRILL_LIMIT,
     """
     facts = workspace().facts_path(run_id)
     if not facts.exists():
+        if node_id == view.UNCLASSIFIED_NODE:
+            raise HTTPException(409, "该次核算的明细留档缺失，无法核对未归类行；不能显示为零，原账未改动")
         raise HTTPException(404, "这次算账没留明细，重算一次就有了")
     try:
         model=_model()
         metrics=([node_id[len(view.METRIC_PREFIX):]] if node_id.startswith(view.METRIC_PREFIX) else view.node_metrics(model,node_id))
         from . import frozen_costs
+        if node_id == view.UNCLASSIFIED_NODE:
+            from .unclassified_evidence import for_run
+            try:
+                facts=for_run(workspace(),run_id,model)
+            except WorkspaceError:
+                raise
+            except Exception as exc:
+                raise WorkspaceError('未归类明细的原始依据暂时无法读取，请核对留档；原账未改动，不需要反结账') from exc
         if frozen_costs.COST_METRICS.intersection(metrics):
             facts=frozen_costs.for_run(workspace(),run_id,facts,model,metrics=metrics)
         return view.drill(facts, model, node_id, limit=min(limit, 2000),

@@ -766,16 +766,13 @@ def _special_drill(facts: pl.DataFrame, model: Model, node_id: str):
         total = 0.0 if scoped.is_empty() else float(scoped.select(pl.col("amount").sum()).item() or 0)
         return scoped, bucket, money_float(total), "unlinked"
     if node_id == UNCLASSIFIED_NODE:
-        known = {e.raw for e in model.dictionary}
-        if facts.is_empty() or "subject" not in facts.columns:
-            scoped = facts
-        elif not known:
-            scoped = facts.filter(pl.col("subject").fill_null("") != "")
-        else:
-            scoped = facts.filter(
-                (pl.col("subject").fill_null("") != "")
-                & ~pl.col("subject").is_in(list(known))
-            )
+        from .unclassified_evidence import LABEL, AMOUNT
+        from .workspace import WorkspaceError
+        if LABEL not in facts.columns or AMOUNT not in facts.columns:
+            raise WorkspaceError('缺少该次核算的未归类行依据，请从账期入口读取原始留档；不能按当前字典重新筛选')
+        scoped = facts.filter(pl.col(LABEL).is_not_null()).with_columns(
+            pl.col(LABEL).alias('subject'),pl.lit(None,dtype=pl.String).alias('minor'),
+            pl.col(AMOUNT).alias('amount'))
         keys = [c for c in ("file_sha", "sheet", "row_no") if c in scoped.columns]
         if keys and not scoped.is_empty():
             scoped = scoped.unique(subset=keys, keep="first", maintain_order=True)

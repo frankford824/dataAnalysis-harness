@@ -820,13 +820,13 @@ def run(ingestion: Ingestion, platform: str = "*") -> RunResult:
     )
     facts = _mark_counted(facts, spine_facts, metrics)
     _assert_reconciled(facts, spine_facts)
+    classify_report = merge_reports(classify_reports)
 
     result = RunResult(
         model=model, ingestion=ingestion, facts=facts, notes=notes, spine_rows=spine.size,
         spine_facts=spine_facts, projections=projections, spine=spine.frame,
         eval_errors=eval_errors, pricing_gaps=pl.DataFrame(pricing_gaps) if pricing_gaps else pl.DataFrame(),
     )
-    classify_report = merge_reports(classify_reports)
 
     slice_keys = set(_slice_keys(spine_facts if not spine_facts.is_empty() else facts))
     slice_keys.update(_slice_keys(result.pricing_gaps))
@@ -1389,8 +1389,9 @@ def _build_slice(
             message=f"已确认的退货冲回已计入；另有{len(return_issues)}条售后记录缺少有效日期、数量或商品对应关系，暂未冲回。",
             detail={"items": return_issues},
         ))
+    from ..unclassified_evidence import attach
     return Slice(
-        store=store, period=period, nodes=nodes, facts=scoped,
+        store=store, period=period, nodes=nodes, facts=attach(scoped, own),
         completeness=completeness, audit=result,
         link_reports=scoped_reports, classify_report=own,
         pricing_gaps=own_gaps, cost_coverage=cost_coverage,
