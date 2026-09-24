@@ -1818,7 +1818,17 @@ class OrderFeed:
         source_id: str, template_id: str, name: str, frame: pl.DataFrame,
         template: Template, fingerprint: str,
     ) -> Ingested:
-        ref = FileRef(hashlib.sha256(fingerprint.encode()).hexdigest(), name, "订单台")
+        # The upstream cursor certifies freshness, not financial content. A
+        # cursor change in an unrelated shop must not rewrite this shop's input
+        # identity. Include the full typed frame and template, not just amounts.
+        content = frame.drop([c for c in (ANCHOR_SHA, ANCHOR_ROW, ANCHOR_FILE, ANCHOR_SHEET) if c in frame.columns])
+        digest = hashlib.sha256(template.model_dump_json().encode())
+        from .content_fingerprint import update_frame
+        update_frame(digest, content)
+        source_sha = digest.hexdigest()
+        if ANCHOR_SHA in frame.columns:
+            frame = frame.with_columns(pl.lit(source_sha).alias(ANCHOR_SHA))
+        ref = FileRef(source_sha, name, "订单台")
         return Ingested(
             ref=ref,
             recognition=Recognition(

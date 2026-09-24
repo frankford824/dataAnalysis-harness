@@ -13,6 +13,7 @@ const targets=[
   {person_id:'p1',person:'测试甲',store_id:'s2',store:'测试店二',period:'2026-06',run_id:102,status:'试算',amount:20},
 ]
 const riskMode=new URLSearchParams(location.search).has('risk')
+const statementRiskMode=new URLSearchParams(location.search).has('statement-risk')
 let contextRequests=0, saved=null
 window.fetch=async (url,options={})=>{
   const path=String(url)
@@ -22,6 +23,7 @@ window.fetch=async (url,options={})=>{
     if(!path.includes('run_id=101'))throw new Error('Incorrect selected run')
     contextRequests++
     return reply({store_id:'s1',store:'测试店一',period:'2026-06',run_id:101,source_sha:'fixture',people:[{person_id:'p2',person:'测试乙',suggested:5},{person_id:'p1',person:'测试甲',suggested:10},...Array.from({length:10},(_,i)=>({person_id:`p${i+3}`,person:`测试成员${i+3}`,suggested:i+1}))],history:[],
+      statement_risk:statementRiskMode?['测试原对账单第 12 行流水金额冲突']:[],
       allocation_risk:riskMode?{pending_count:388,can_confirm:true,close_override_id:77,close_reason:'已核对并人工结账',has_allocation_evidence:true,ignored_findings:[{id:'allocation_basis',name:'分配依据待核对'},{id:'source_sync_pending',name:'订单数据仍在同步'}]}:null})
   }
   if(path.endsWith('/payout-confirmations')){saved=JSON.parse(options.body);return reply({id:'saved'})}
@@ -79,7 +81,13 @@ try{
       document.querySelector('#test-result').textContent='PASS: 风险和结账依据可见；未单独确认前保存按钮不可用（仅测试数据）'
     }else riskBox.click()
   }
-  if(!new URLSearchParams(location.search).has('preview')){
+  if(statementRiskMode){
+    await new Promise(r=>setTimeout(r,0))
+    assert(modal.textContent.includes('原对账单流水存在冲突或精度丢失'),'Statement risk must be visible before save')
+    assert(save().disabled,'Acknowledgment must not bypass statement identity conflicts')
+    assert(saved===null,'A conflicted statement must not submit a payout')
+    document.querySelector('#test-result').textContent='PASS: 原流水风险打开即显示；填写并确认范围后仍禁止核定（仅测试数据）'
+  }else if(!new URLSearchParams(location.search).has('preview')){
     await wait(()=>!save().disabled)
     save().click()
     await wait(()=>saved)

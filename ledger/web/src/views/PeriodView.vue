@@ -264,8 +264,9 @@ const historicalArchive = computed(() => snap.value?.archive?.kind === 'legacy_f
 const historicalChecks = computed(() => historicalArchive.value ? (snap.value?.findings || []) : [])
 //: 真正待处理的那几条。灰掉的结账按钮不说明理由，人只能猜是不是坏了。
 const blockers = computed(() => bad.value.filter((f) => f.blocking))
-const manualBlockers = computed(() => blockers.value.filter((f) => f.id !== 'evidence_archive'))
-const hardBlockers = computed(() => blockers.value.filter((f) => f.id === 'evidence_archive'))
+const hardBlockerIds = ['evidence_archive', 'statement_identity']
+const manualBlockers = computed(() => blockers.value.filter((f) => !hardBlockerIds.includes(f.id)))
+const hardBlockers = computed(() => blockers.value.filter((f) => hardBlockerIds.includes(f.id)))
 const profitUnavailable = computed(() => (snap.value?.statement || []).some(
   (row) => (row.id === 'net_profit' || row.name === '利润') && (!row.available || row.value == null),
 ))
@@ -390,6 +391,11 @@ watch(
     <n-alert v-if="failed" type="error" :bordered="false">{{ failed }}</n-alert>
 
     <template v-else-if="info">
+      <n-alert v-if="snap?.deduplication?.length" :type="snap.deduplication.some(d => d.status === 'conflict') ? 'error' : 'info'" :bordered="false" style="margin-bottom:16px">
+        <strong>对账流水重复核查</strong>
+        <p>以下是本店全部已上传对账表的去重结果，行数不限定当前月份。重复流水只计一次，不同流水号的后续到账仍保留；原文件不修改。存在金额或身份冲突时，先核对再结账。</p>
+        <div v-for="(item, index) in snap.deduplication" :key="index" style="margin-top:6px;overflow-wrap:anywhere">{{ item.message }}</div>
+      </n-alert>
       <n-alert v-if="snap?.file_errors?.length" type="error" :bordered="false" style="margin-bottom:16px">
         <strong>{{ snap.file_errors.length }} 张源表未进入核算，需要核对</strong>
         <p>这些工作表尚未生成核算流水，因此不会出现在金额明细的「没进账」列表。同一文件中其他已成功解析的工作表不受此提示影响。</p>

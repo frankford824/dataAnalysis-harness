@@ -2,7 +2,8 @@ param(
   [Parameter(Mandatory=$true)][string]$Payload,
   [Parameter(Mandatory=$true)][string]$ExpectedVersion,
   [Parameter(Mandatory=$true)][string]$Version,
-  [switch]$AllowTemplateUpdate
+  [switch]$AllowTemplateUpdate,
+  [switch]$AllowSourceUpdate
 )
 $ErrorActionPreference = 'Stop'
 [Console]::OutputEncoding = [Text.Encoding]::UTF8
@@ -20,7 +21,8 @@ try {
     $Name = $Entry.FullName.Replace('\','/')
     if ($Name -eq 'manifest.json') { continue }
     if ($Name -ne 'VERSION' -and -not $Name.StartsWith('ledger/ledger/') -and
-        -not ($AllowTemplateUpdate -and $Name -eq 'models/cn-ecommerce/templates.yaml')) { throw "Unexpected file: $Name" }
+        -not ($AllowTemplateUpdate -and $Name -eq 'models/cn-ecommerce/templates.yaml') -and
+        -not ($AllowSourceUpdate -and $Name -eq 'models/cn-ecommerce/sources.yaml')) { throw "Unexpected file: $Name" }
     $Destination = [IO.Path]::GetFullPath((Join-Path $AppRoot $Name))
     if (-not $Destination.StartsWith($AppRoot + '\',[StringComparison]::OrdinalIgnoreCase)) { throw "Unsafe destination: $Name" }
   }
@@ -44,6 +46,16 @@ foreach ($File in $Manifest.files) {
 $Backup = Join-Path $ReleaseRoot 'before.zip'
 $Archive = [IO.Compression.ZipFile]::Open($Backup,[IO.Compression.ZipArchiveMode]::Create)
 try {
+  # Recheck after writers stop; a UI edit during staging must never be lost.
+  foreach ($File in $Manifest.files) {
+    $Target = Join-Path $AppRoot $File.path
+    if ($File.before_sha256) {
+      if (-not (Test-Path -LiteralPath $Target) -or
+          (Get-FileHash -LiteralPath $Target -Algorithm SHA256).Hash.ToLower() -ne $File.before_sha256) {
+        throw "Production file changed during staging: $($File.path)"
+      }
+    }
+  }
   foreach ($File in $Manifest.files) {
     $Target = Join-Path $AppRoot $File.path
     if (Test-Path -LiteralPath $Target) { [IO.Compression.ZipFileExtensions]::CreateEntryFromFile($Archive,$Target,$File.path) | Out-Null }
@@ -85,10 +97,12 @@ try {
   throw
 }
 $ModelHashes = @{}
+$FilesReplaced = $false
 Get-ChildItem -LiteralPath (Join-Path $AppRoot 'models\cn-ecommerce') -File | ForEach-Object {
   $ModelHashes[$_.Name] = (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash
 }
 try {
+  $FilesReplaced = $true
   foreach ($File in $Manifest.files) {
     $Target = Join-Path $AppRoot $File.path
     New-Item -ItemType Directory -Force -Path (Split-Path -Parent $Target) | Out-Null
@@ -98,6 +112,8 @@ try {
     $ExpectedHash = $ModelHashes[$Name]
     $TemplatePayload = @($Manifest.files | Where-Object { $_.path -eq 'models/cn-ecommerce/templates.yaml' })
     if ($AllowTemplateUpdate -and $Name -eq 'templates.yaml' -and $TemplatePayload.Count -eq 1) { $ExpectedHash = $TemplatePayload[0].sha256 }
+    $SourcePayload = @($Manifest.files | Where-Object { $_.path -eq 'models/cn-ecommerce/sources.yaml' })
+    if ($AllowSourceUpdate -and $Name -eq 'sources.yaml' -and $SourcePayload.Count -eq 1) { $ExpectedHash = $SourcePayload[0].sha256 }
     if ((Get-FileHash -LiteralPath (Join-Path $AppRoot ('models\cn-ecommerce\'+$Name)) -Algorithm SHA256).Hash -ne $ExpectedHash) { throw "Model changed during code release: $Name" }
   }
   # Warm immutable read projections while background writers are stopped.
@@ -112,6 +128,10 @@ try {
 } catch {
   $Failure = $_
   Stop-LedgerOnly
+  if (-not $FilesReplaced) {
+    Start-ScheduledTask -TaskName 'LedgerHarness'
+    throw $Failure
+  }
   $Restore = Join-Path $ReleaseRoot 'restore'
   [IO.Compression.ZipFile]::ExtractToDirectory($Backup,$Restore)
   foreach ($File in $Manifest.files) {

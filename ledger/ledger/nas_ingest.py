@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import hashlib
+import logging
 import re
 import shutil
 import sqlite3
 import threading
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from contextlib import closing
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from time import time
 from typing import Callable
@@ -35,6 +37,8 @@ create index if not exists ledger_apply_sha on ledger_apply(sha256);
 """
 
 _DEFAULT_MODEL = Path(__file__).resolve().parents[2] / "models" / "cn-ecommerce"
+logger = logging.getLogger(__name__)
+RETRY_SECONDS = 300
 _STORE_FOLDER = re.compile(r"^(.+) \[([^\]]+)\]$")
 _DATE_TAIL = re.compile(
     r"(?:[_-](?:\d{8}|\d{4}-\d{2}-\d{2})(?:[ T_]\d{2}[_.:-]\d{2}[_.:-]\d{2})?(?:[_-]\d+)*)+$"
@@ -100,7 +104,11 @@ def _accept_uploaded(path: Path, root: Path, sha: str) -> Path:
     target.parent.mkdir(parents=True, exist_ok=True)
     if target.exists():
         if _hash(target) != sha:
-            raise FileExistsError(f"已接收目录存在同名不同内容：{target}")
+            # An explicitly uploaded replacement supersedes the current file,
+            # but the previous bytes remain immutable and recoverable.
+            _archive(target, _hash(target), root)
+            path.replace(target)
+            return target
         path.unlink()
         return target
     path.replace(target)
@@ -160,6 +168,7 @@ def _live_path(catalog_path: str, nas_root: Path, sha: str) -> Path | None:
     candidates = [original]
     relative = _relative_to_areas(original, nas_root, "00_上传区", "10_已接收")
     if relative is not None:
+        candidates.append(nas_root / "10_已接收" / relative)
         quarantine = nas_root / "20_需修正" / relative
         candidates.append(quarantine)
         candidates.append(quarantine.with_name(f"{relative.stem}__conflict{relative.suffix}"))
@@ -180,7 +189,7 @@ def _relocate_catalog(connection: sqlite3.Connection, old_path: str, new_path: s
     if old_path == new_path:
         return
     existing = connection.execute(
-        "select path from file_catalog where path=?", (new_path,),
+        "select path,sha256 from file_catalog where path=?", (new_path,),
     ).fetchone()
     if existing is None:
         connection.execute(
@@ -189,14 +198,28 @@ def _relocate_catalog(connection: sqlite3.Connection, old_path: str, new_path: s
             (new_path, old_path, sha),
         )
     else:
+        if existing["sha256"] != sha:
+            source = connection.execute("select * from file_catalog where path=? and sha256=?", (old_path, sha)).fetchone()
+            if source is None:
+                raise ValueError("接收目录缺少本次源文件索引，请重新扫描")
+            columns = [c for c in source.keys() if c != "path"]
+            connection.execute("update file_catalog set " + ",".join(f'"{c}"=?' for c in columns) + " where path=?",
+                               (*[source[c] for c in columns], new_path))
         connection.execute(
             "update file_catalog set missing_scans=0, missing_since=null where path=?",
             (new_path,),
         )
     connection.execute(
-        "update ledger_apply set path=? where path=? and sha256=?",
+        "insert into ledger_apply(path,sha256,store_id,name,state,applied_at,error,removed_at) "
+        "select ?,sha256,store_id,name,case when state='relocated' then 'applied' else state end,applied_at,"
+        "case when state='relocated' then '' else error end,removed_at from ledger_apply where path=? and sha256=? "
+        "on conflict(path) do update set sha256=excluded.sha256,store_id=excluded.store_id,name=excluded.name,"
+        "state=excluded.state,applied_at=excluded.applied_at,error=excluded.error,removed_at=excluded.removed_at",
         (new_path, old_path, sha),
     )
+    # Retain the old path as an audited alias, not an indefinitely failed import.
+    connection.execute("update ledger_apply set state='relocated',error=? where path=? and sha256=?",
+                       (f"已迁移到：{new_path}", old_path, sha))
 
 
 @dataclass
@@ -438,8 +461,40 @@ def _pending_rows(connection: sqlite3.Connection) -> list[sqlite3.Row]:
         "select f.* from file_catalog f join ledger_apply a on a.path=f.path and a.sha256=f.sha256 "
         "where a.state='quarantined' and f.sha256<>'' order by f.indexed_at,f.path"
     ).fetchall()
+    retry_before = (datetime.now(timezone.utc) - timedelta(seconds=RETRY_SECONDS)).isoformat()
+    retry = connection.execute(
+        "select f.* from file_catalog f join ledger_apply a on a.path=f.path and a.sha256=f.sha256 "
+        "where a.state='error' and f.state in ('ready','finance_only') and f.sha256<>'' "
+        "and (julianday(a.applied_at) is null or julianday(a.applied_at)<=julianday(?)) "
+        "order by a.applied_at,f.path", (retry_before,),
+    ).fetchall()
     seen = {row["path"] for row in fresh}
-    return list(fresh) + [row for row in quarantined if row["path"] not in seen]
+    return list(fresh) + [row for row in [*quarantined, *retry] if row["path"] not in seen]
+
+
+def application_errors(catalog: Path) -> list[dict]:
+    """Read finance-reception failures as well as indexer failures, without writes."""
+    if not catalog.is_file():
+        return []
+    with closing(sqlite3.connect(catalog.resolve().as_uri() + "?mode=ro", uri=True, timeout=2)) as conn:
+        conn.row_factory = sqlite3.Row
+        if not conn.execute("select 1 from sqlite_master where name='ledger_apply'").fetchone():
+            return []
+        return [dict(r) for r in conn.execute(
+            "select a.path,a.sha256,a.store_id,a.name,a.state,a.applied_at,a.error,'finance_intake' as stage "
+            "from ledger_apply a join file_catalog f on f.path=a.path and f.sha256=a.sha256 "
+            "where a.state in ('error','quarantined') and (f.missing_scans=0 or a.state='quarantined') "
+            "order by a.applied_at desc limit 200")]
+
+
+def _source_ids(model: Model) -> dict[str, str]:
+    labels: dict[str, str] = {}
+    for source in model.sources:
+        for label in (source.name, *source.directory_aliases):
+            if label in labels and labels[label] != source.id:
+                raise ValueError(f"目录数据源别名冲突：{label}")
+            labels[label] = source.id
+    return labels
 
 
 def reconcile_ready(
@@ -481,6 +536,7 @@ def reconcile_ready(
                     _record(connection, row, "quarantined", decision.reason)
                 errors.append(f"{live.name}：{decision.reason}")
             else:
+                _record(connection, row, "error", decision.reason)
                 errors.append(f"{live.name}：{decision.reason}")
             continue
         if decision.audit:
@@ -490,7 +546,7 @@ def reconcile_ready(
     connection.commit()
 
     if applicable:
-        source_ids = {source.name: source.id for source in model.sources}
+        source_ids = _source_ids(model)
         assigned = []
         assigned_rows = []
         for row in applicable:
@@ -503,6 +559,9 @@ def reconcile_ready(
             live = live_paths[row["path"]]
             assigned.append((live.name, live, row["store_id"], source_id))
             assigned_rows.append(row)
+        # Parsing/recomputing a batch can take minutes. Do not hold the catalog
+        # write lock while the indexer needs to publish new files.
+        connection.commit()
         result = service.intake_assigned(
             ws, model, assigned,
             by="NAS自动接收",
@@ -531,6 +590,7 @@ def reconcile_ready(
             except Exception as exc:  # workspace is already consistent; leave a retryable audit
                 _record(connection, row, "error", str(exc))
                 errors.append(f"{name}：{exc}")
+            connection.commit()
         connection.commit()
     applied = connection.execute("select count(*) from ledger_apply where state='applied'").fetchone()[0]
     connection.close()
@@ -623,10 +683,16 @@ class NasIngestWorker:
             try:
                 if self.catalog.is_file() and self.root.is_dir():
                     ws, model = self.workspace_fn(), self.model_fn()
-                    reconcile_ready(ws, model, self.catalog, self.root, model_dir=self.model_dir)
-                    reconcile_missing(ws, model, self.catalog)
+                    operations = (
+                        lambda: reconcile_ready(ws, model, self.catalog, self.root, model_dir=self.model_dir),
+                        lambda: reconcile_missing(ws, model, self.catalog),
+                    )
+                    for operation in operations:
+                        outcome = operation()
+                        for error in outcome.get("errors", []):
+                            logger.warning("NAS finance intake: %s", error)
             except Exception:
                 # The catalog retains per-file errors. A transient SMB/SQLite failure must not kill
                 # the worker or be reinterpreted as deletion.
-                pass
+                logger.exception("NAS finance intake worker failed; source files and previous accounts retained")
             self.stop_event.wait(30)

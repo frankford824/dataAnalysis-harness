@@ -97,6 +97,8 @@ class Ingestion:
     model: Model
     items: list[Ingested] = field(default_factory=list)
     source_sync_pending: bool = False
+    validation_errors: dict[str, list[str]] = field(default_factory=dict)
+    deduplication: list[dict] = field(default_factory=list)
 
     @property
     def known(self) -> list[Ingested]:
@@ -139,6 +141,7 @@ class Slice:
     coverage_gap_rows: pl.DataFrame = field(default_factory=pl.DataFrame)
     allocation_pending: list[dict] = field(default_factory=list)
     allocation_evidence: pl.DataFrame = field(default_factory=pl.DataFrame)
+    deduplication: list[dict] = field(default_factory=list)
 
     @property
     def can_close(self) -> bool:
@@ -261,9 +264,14 @@ def _ingest_file_cached(
     file_sha = digest(path)
     # The parser dispatches by suffix, so equal bytes under a different file
     # type cannot safely share an entry.  Filename/store/period are not in the
-    # key: those hints and evidence labels are reapplied when loading.
+    # key: those hints are reapplied when loading. Source-disambiguation and
+    # auxiliary-sheet context do affect recognition and must be captured.
+    recognition_context = json.dumps([
+        sorted(source.id for source in model.sources if any(h in path.name for h in source.filename_hints)),
+        "小额打款" in path.name,
+    ], ensure_ascii=False)
     key = sha256(
-        (file_sha + "\0" + path.suffix.lower() + "\0" + model_key).encode("utf-8")
+        (file_sha + "\0" + path.suffix.lower() + "\0" + recognition_context + "\0" + model_key).encode("utf-8")
     ).hexdigest()
     target = cache_root / key[:2] / key
     with _parse_cache_lock(key):
@@ -301,6 +309,7 @@ def _save_ingest_cache(target: Path, items: list[Ingested]) -> None:
                 frame_name = f"{index}.parquet"
                 item.frame.write_parquet(temp / frame_name, row_group_size=100_000)
             payload.append({
+                "filename": item.ref.filename,
                 "sheet": item.ref.sheet,
                 "recognition": {
                     **asdict(item.recognition),
@@ -340,6 +349,9 @@ def _load_ingest_cache(
     out: list[Ingested] = []
     for raw in payload:
         ref = FileRef(sha256=file_sha, filename=path.name, sheet=raw.get("sheet"))
+        def relabel(message):
+            previous = raw.get("filename")
+            return message.replace(previous, path.name) if previous else message
         recog_raw = raw["recognition"]
         recognition = Recognition(
             ref=ref,
@@ -347,7 +359,7 @@ def _load_ingest_cache(
             header_count=int(recog_raw.get("header_count", 0)),
             template_id=recog_raw.get("template_id"),
             source_id=recog_raw.get("source_id"),
-            reason=recog_raw.get("reason", ""),
+            reason=relabel(recog_raw.get("reason", "")),
             unmapped_columns=list(recog_raw.get("unmapped_columns") or []),
             near_misses=[
                 (str(item[0]), tuple(item[1]))
@@ -359,17 +371,18 @@ def _load_ingest_cache(
             frame = pl.read_parquet(target / raw["frame"])
             if "__file__" in frame.columns:
                 frame = frame.with_columns(pl.lit(path.name).alias("__file__"))
-            frame = _attach_hints(frame, hint_store, hint_period)
+            sheet_periods = infer_period_range(ref.sheet or "")
+            frame = _attach_hints(frame, hint_store, hint_period or (sheet_periods[0] if sheet_periods else None))
         out.append(Ingested(
             ref=ref,
             recognition=recognition,
             rows=int(raw.get("rows", 0)),
             frame=frame,
             template=model.template(raw["template_id"]) if raw.get("template_id") else None,
-            notes=list(raw.get("notes") or []),
+            notes=[relabel(note) for note in (raw.get("notes") or [])],
             controls=[ControlResult(**item) for item in (raw.get("controls") or [])],
             derivative=Derivative(**raw["derivative"]) if raw.get("derivative") else None,
-            error=raw.get("error", ""),
+            error=relabel(raw.get("error", "")),
         ))
     return out
 
@@ -427,6 +440,16 @@ def _ingest_file(
             # 认不出来的表也判一次。人工汇总表本来就不该有模板，
             # 报「这是汇总表，不用交」比报「认不出来」有用得多。
             verdict = detect_derivative(table.headers, [r.cells for r in table.rows[:3]])
+            if not table.rows:
+                verdict = Derivative(True, "空表（只有表头），无业务行可计入")
+            headers = {str(h).strip() for h in table.headers if str(h).strip()}
+            if "小额打款" in path.name:
+                if headers == {"原始线上订单号", "下单时间", "已付金额", "旗帜", "店铺名称"}:
+                    verdict = Derivative(True, "小额打款工作簿中的订单核对辅助页；已付金额不是打款金额", "small_payment")
+                elif headers == {"网店名称"} and all(
+                    not any(c not in (None, "") for c in row.cells[1:]) for row in table.rows
+                ):
+                    verdict = Derivative(True, "仅含店铺名称的辅助清单，无打款金额", "small_payment")
             item.derivative = verdict if verdict else None
             item.error = (
                 f"人工加工产物，不参与算钱：{verdict.reason}" if verdict else recog.reason
@@ -476,7 +499,14 @@ def _ingest_file(
             continue
 
         try:
+            from .layout import supplier_columns
+            table, layout_evidence = supplier_columns(table, template, model)
             frame, notes = normalize(table, template)
+            if layout_evidence:
+                from .types import ANCHOR_ROW
+                frame = frame.with_columns(pl.col(ANCHOR_ROW).replace_strict(
+                    layout_evidence, default=None, return_dtype=pl.Utf8).alias("source_note"))
+                notes.append(f"按日期与已登记店名验证了 {len(layout_evidence)} 行店铺/付款日期列互换，原文件未修改")
         except NormalizeError as exc:
             item.error = str(exc)
             items.append(item)
@@ -493,6 +523,30 @@ def _ingest_file(
         frame = _attach_hints(frame, hint_store, hint_period or sheet_period)
         item.frame = frame
         items.append(item)
+    # The two-level JD export carries an order summary alongside transaction
+    # details. Only a recognized detail sheet proves the summary is redundant.
+    if any(i.ok and i.recognition.template_id == "jd_settlement_v12" for i in items):
+        for item, table in zip(items, tables, strict=True):
+            candidates = [table.headers, *(r.cells for r in table.rows[:2])]
+            if any({"业务单据编号", "结算金额合计", "收入金额合计", "支出金额合计"}
+                   <= {str(c).strip() for c in row if c is not None} for row in candidates):
+                item.derivative = Derivative(True, "同工作簿费用明细的交易汇总，不重复记账")
+                item.error = "交易汇总仅供核对，金额以费用明细为准"
+    payment_sources = [t for i, t in zip(items, tables, strict=True)
+                       if i.ok and i.recognition.source_id == "small_payment"]
+    if payment_sources and "小额打款" in path.name:
+        from .layout import payment_reference
+        for item, table in zip(items, tables, strict=True):
+            if not item.ok and item.derivative is None:
+                copies = payment_reference(table, payment_sources)
+                if copies is not None:
+                    item.derivative = Derivative(True, f"店铺辅助清单；附带{copies}行报销副本已与本工作簿正式明细逐字段核对，不重复记账", "small_payment")
+                    item.error = item.derivative.reason
+    if not payment_sources:
+        for item in items:
+            if item.derivative and item.derivative.upstream == "small_payment":
+                item.derivative = None
+                item.error = item.recognition.reason
     return items
 
 
@@ -511,6 +565,10 @@ def _dedupe_across_files(result: Ingestion, model: Model) -> None:
     了一份补充导出」而变小——上传一个新文件改掉了旧文件的数，这种事不该发生。
     """
     for source in model.sources:
+        if source.dedupe_mode == "statement_events":
+            from .statement_dedupe import dedupe_statements
+            dedupe_statements(result, source)
+            continue
         if not source.dedupe_key:
             continue
         items = [i for i in result.items if i.recognition.source_id == source.id and i.frame is not None]
@@ -656,7 +714,8 @@ def run(ingestion: Ingestion, platform: str = "*") -> RunResult:
     from .cost_returns import build as build_cost_returns
     derived_return, return_errors = build_cost_returns(ingestion, platform, spine=spine)
     if derived_return is not None:
-        ingestion = Ingestion(model=model, items=[*ingestion.items, derived_return])
+        from dataclasses import replace
+        ingestion = replace(ingestion, items=[*ingestion.items, derived_return])
 
     bridges = _build_bridges(ingestion, notes)
 
@@ -664,7 +723,9 @@ def run(ingestion: Ingestion, platform: str = "*") -> RunResult:
     link_reports: dict[str, LinkReport] = {}
     classify_reports: list[ClassifyReport] = []
     #: 数据源 id → 求值报错。用途见下面 except 分支里的说明。
-    eval_errors: dict[str, list[str]] = {"cost_return": return_errors} if return_errors else {}
+    eval_errors = {key: list(value) for key, value in ingestion.validation_errors.items()}
+    if return_errors:
+        eval_errors.setdefault("cost_return", []).extend(return_errors)
     pricing_gaps: list[dict] = list(getattr(derived_return,'pricing_gaps',()))
     require_history = any(p.id == platform and p.cost_pricing == "historical" for p in model.platforms)
     require_pricing = any(p.id == platform and p.cost_pricing in {"required", "historical"} for p in model.platforms)
@@ -742,21 +803,23 @@ def run(ingestion: Ingestion, platform: str = "*") -> RunResult:
     # 每个子订单各算一遍。
     spine_parts: list[pl.DataFrame] = []
     projections: dict[str, Projection] = {}
+    projectable = facts.filter(pl.col("store") != "(未知店铺)")
     for metric in metrics:
         if not (metric.link and metric.link.to) or metric.posting_basis in {"transaction", "order_number"}:
-            proj = project_transactions(facts, metric, spine)
+            proj = project_transactions(projectable, metric, spine)
         elif live_feed or (metric.link is not None and metric.link.grain == "product"):
-            proj = _project_scoped_live(facts, metric, spine)
+            proj = _project_scoped_live(projectable, metric, spine)
         else:
-            proj = project(facts, metric, spine)
+            proj = project(projectable, metric, spine)
         projections[metric.id] = proj
         notes.extend(proj.notes)
         if not proj.facts.is_empty():
             spine_parts.append(proj.facts)
     spine_facts = (
-        pl.concat(spine_parts, how="vertical_relaxed") if spine_parts else _empty_spine_facts()
+        pl.concat(spine_parts, how="diagonal_relaxed") if spine_parts else _empty_spine_facts()
     )
     facts = _mark_counted(facts, spine_facts, metrics)
+    _assert_reconciled(facts, spine_facts)
 
     result = RunResult(
         model=model, ingestion=ingestion, facts=facts, notes=notes, spine_rows=spine.size,
@@ -773,6 +836,13 @@ def run(ingestion: Ingestion, platform: str = "*") -> RunResult:
             link_reports, classify_report, platform, eval_errors, result.pricing_gaps,
             [item for projection in projections.values() for item in projection.allocation_pending],
         )
+        result.slices[(store, period)].deduplication = ingestion.deduplication
+        conflicts = [d["message"] for d in ingestion.deduplication if d["status"] == "conflict"]
+        if conflicts:
+            from .types import Finding
+            result.slices[(store, period)].audit.findings.append(Finding(
+                "statement_identity", "对账流水身份待核对", passed=False, blocking=True,
+                message="原账单流水存在冲突或精度丢失，不能人工忽略；请更正原始账单后重算。\n" + "\n".join(conflicts)))
     return result
 
 
@@ -781,6 +851,24 @@ def _promotion_periods(row: dict) -> list[str]:
     if not months and row.get("period") and row["period"] != "(未知账期)":
         months = [row["period"]]
     return months
+
+
+def _assert_reconciled(facts: pl.DataFrame, projected: pl.DataFrame) -> None:
+    """Never publish a new run whose posted evidence disagrees with its totals."""
+    if facts.is_empty() and projected.is_empty():
+        return
+    keys = ["store", "period", "metric_id"]
+    source = facts.group_by(keys).agg(pl.col("contribution").sum().alias("__evidence"))
+    totals = projected.group_by(keys).agg(pl.col("amount").sum().alias("__statement"))
+    checked = source.join(totals, on=keys, how="full", coalesce=True, nulls_equal=True).with_columns(
+        pl.col("__evidence").fill_null(0), pl.col("__statement").fill_null(0))
+    bad = checked.filter(
+        ~pl.col("__evidence").is_finite() | ~pl.col("__statement").is_finite()
+        | ((pl.col("__evidence") - pl.col("__statement")).abs() > 0.01000001)
+    )
+    if not bad.is_empty():
+        context = "；".join(f"{r['store']} {r['period']} {r['metric_id']}" for r in bad.head(3).to_dicts())
+        raise calc.CalculateError(f"看板与已进账明细金额不一致，已阻止发布本次结果：{context}")
 
 
 def _project_scoped_live(
@@ -840,14 +928,27 @@ def _project_scoped_live(
             months = [p for p in block["__promotion_scope"][0].split("|") if p]
             targets = projection_spine.filter(pl.col(SPINE_STORE) == store)
             allocated = calculated.filter(pl.col("store") == store)
+            if not months and targets[SPINE_PERIOD].n_unique() > 1:
+                # The export does not certify a time window. Spreading its
+                # control over every live month invents a financial allocation.
+                # Keep the source unposted; the slice exposes a blocking issue.
+                parts.append(Projection(facts=_empty_spine_facts(), notes=[
+                    f"{metric.name} 的控制表未声明月份，未在多个账期之间分摊"] ))
+                continue
             if months:
                 targets = targets.filter(pl.col(SPINE_PERIOD).is_in(months))
                 allocated = allocated.filter(pl.col("period").is_in(months))
-            parts.append(project(block.drop("__promotion_scope"), metric, Spine(targets),
-                                 store_wide_facts=allocated))
+            part = project(block.drop("__promotion_scope"), metric, Spine(targets),
+                           store_wide_facts=allocated)
+            # Carry the exact residual pool to the evidence writer. The sentinel
+            # alone is shared by unrelated monthly and undated control totals.
+            part.facts = part.facts.with_columns(
+                pl.lit(block["__promotion_scope"][0]).alias("__control_pool")
+            )
+            parts.append(part)
     frames = [part.facts for part in parts if not part.facts.is_empty()]
     return Projection(
-        facts=pl.concat(frames, how="vertical_relaxed") if frames else parts[0].facts,
+        facts=pl.concat(frames, how="diagonal_relaxed") if frames else parts[0].facts,
         orphan_amount=money_float(sum(decimal_amount(part.orphan_amount) for part in parts)),
         orphan_keys=sum(part.orphan_keys for part in parts),
         uncovered_rows=sum(part.uncovered_rows for part in parts),
@@ -968,7 +1069,11 @@ def _mark_counted(facts: pl.DataFrame, spine_facts: pl.DataFrame,
             pl.lit(False, dtype=pl.Boolean).alias("counted"),
             pl.lit(0.0, dtype=pl.Float64).alias("contribution"),
         )
-    weights = spine_facts.group_by("metric_id", "store", "period", "link_key").agg(
+    weight_keys = ["metric_id", "store", "period", "link_key"]
+    pooled = "__control_pool" in spine_facts.columns
+    if pooled:
+        weight_keys.append("__control_pool")
+    weights = spine_facts.group_by(weight_keys).agg(
         pl.col("factor").sum().alias("__share__")
     )
     claim = pl.lit(False)
@@ -978,20 +1083,49 @@ def _mark_counted(facts: pl.DataFrame, spine_facts: pl.DataFrame,
     # defines the periods and residual shares; a missing source period must not
     # drop an amount that is already present in the statement from exports.
     wide = (pl.col("link_key") == STORE_WIDE_PRODUCT).fill_null(False)
-    marked = facts.filter(~wide).join(weights, on=["metric_id", "store", "period", "link_key"], how="left", nulls_equal=True)
+    normal_weights = weights.filter((pl.col("link_key") != STORE_WIDE_PRODUCT).fill_null(True))
+    if pooled:
+        normal_weights = normal_weights.drop("__control_pool")
+    marked = facts.filter(~wide).join(normal_weights, on=["metric_id", "store", "period", "link_key"], how="left", nulls_equal=True)
     if facts.filter(wide).height:
         controls = facts.filter(wide)
         scope_columns = [c for c in ("file_name", "sheet", "period") if c in controls.columns]
         controls = controls.with_columns(pl.struct(scope_columns).map_elements(
             _promotion_periods, return_dtype=pl.List(pl.Utf8)).alias("__promotion_periods"))
+        join_keys = ["metric_id", "store", "link_key"]
+        if pooled:
+            controls = controls.with_columns(
+                pl.col("__promotion_periods").list.join("|").alias("__control_pool"))
+            join_keys.append("__control_pool")
+            controls = controls.with_columns(
+                pl.col("amount").sum().over(join_keys).alias("__declared"),
+                pl.len().over(join_keys).alias("__controls"),
+            )
+            weights = spine_facts.filter(wide).group_by(weight_keys).agg(
+                pl.col("factor").sum().alias("__share__"),
+                pl.col("amount").sum().alias("__projected"),
+            )
         dated = controls.filter(pl.col("__promotion_periods").list.len() > 0).drop("period").explode(
             "__promotion_periods").rename({"__promotion_periods": "period"}).join(
-            weights, on=["metric_id", "store", "period", "link_key"], how="left", nulls_equal=True)
+            weights, on=[*join_keys, "period"], how="left", nulls_equal=True)
         undated = controls.filter(pl.col("__promotion_periods").list.len() == 0).drop(
             "__promotion_periods").rename({"period": "__source_period__"}).join(
-            weights, on=["metric_id", "store", "link_key"], how="left", nulls_equal=True)
+            weights, on=join_keys, how="left", nulls_equal=True)
         undated = undated.with_columns(pl.coalesce("period", "__source_period__").alias("period")).drop("__source_period__")
-        marked = pl.concat([marked, dated.select(marked.columns), undated.select(marked.columns)], how="vertical_relaxed")
+        if pooled:
+            # A zero control total can legitimately reverse already allocated
+            # product spend. Multiplying a zero source amount loses that credit.
+            extra = pl.concat([dated, undated], how="diagonal_relaxed").with_columns(
+                pl.when(pl.col("__declared").abs() < 0.005)
+                .then(pl.col("__projected") / pl.col("__controls"))
+                .otherwise(pl.col("amount") * pl.col("__share__")).alias("__control_contribution")
+            )
+            marked = pl.concat([marked, extra.select([*marked.columns, "__control_contribution"])], how="diagonal_relaxed")
+        else:
+            marked = pl.concat([marked, dated.select(marked.columns), undated.select(marked.columns)], how="vertical_relaxed")
+    contribution = pl.col("amount") * pl.col("__share__")
+    if "__control_contribution" in marked.columns:
+        contribution = pl.coalesce(pl.col("__control_contribution"), contribution)
     return (
         marked
         .with_columns(
@@ -999,11 +1133,11 @@ def _mark_counted(facts: pl.DataFrame, spine_facts: pl.DataFrame,
         )
         .with_columns(
             pl.when(pl.col("counted"))
-            .then(pl.col("amount") * pl.col("__share__"))
+            .then(contribution)
             .otherwise(pl.lit(0.0))
             .alias("contribution"),
         )
-        .drop("__share__")
+        .drop([c for c in ("__share__", "__control_contribution") if c in marked.columns])
     )
 
 
@@ -1152,6 +1286,51 @@ def _build_slice(
                 node.value = None
                 node.unavailable_reason = "已算现有成本，支持人工确认金额"
     result = audit(model, scoped, scoped_reports, own, completeness, nodes)
+    controls = facts.filter((pl.col("store") == store) & (pl.col("link_key") == STORE_WIDE_PRODUCT))
+    if not controls.is_empty() and spine.filter(pl.col(SPINE_STORE) == store)[SPINE_PERIOD].n_unique() > 1:
+        ambiguous = [r for r in controls.select("file_name", "sheet").unique().to_dicts()
+                     if not _promotion_periods(r)]
+        if ambiguous:
+            from .types import Finding
+            unavailable.update(controls["metric_id"].unique().to_list())
+            nodes = calc.evaluate_statement(model, totals, unavailable, inapplicable)
+            for node in nodes.values():
+                if "promotion" in node.missing_sources:
+                    node.unavailable_reason = "推广控制表月份范围待确认，未将未知范围金额分摊到其他月份"
+            result.findings.append(Finding(
+                "promotion_scope_evidence", "推广控制表月份待确认", passed=False, blocking=True,
+                message="多月份订单中存在未明确月份范围的推广控制表，未将该控制金额跨月分摊，相关费用与利润暂不可核定。请核对文件或工作表日期范围后再结账："
+                        + "、".join(r["file_name"] for r in ambiguous[:3])))
+    repaired = scoped.filter(pl.col("source_note").str.starts_with("代发表列互换校验：").fill_null(False))
+    if not repaired.is_empty():
+        from .types import Finding
+        result.findings.append(Finding(
+            "supplier_column_layout", "代发表列互换已核对", passed=True, blocking=False,
+            message=f"{repaired.height} 行以已登记店名与有效日期核对后恢复店铺/付款日期列，原文件及逐行说明均已保留。"))
+    shared_pending = facts.filter(
+        (pl.col("store") == "(未知店铺)")
+        & pl.col("period").is_in([period, "(未知账期)"])
+        & pl.col("source_note").str.contains("共享表店铺归属待核对", literal=True).fill_null(False)
+        & (pl.col("amount") != 0)
+    )
+    if not shared_pending.is_empty():
+        claim = pl.lit(False)
+        for original in model.metrics:
+            metric = original.for_platform(platform)
+            if metric is not None:
+                claim = claim | claims(metric)
+        shared_pending = shared_pending.filter(claim)
+    if not shared_pending.is_empty():
+        from .types import Finding
+        pending_rows = shared_pending.unique(subset=["file_sha", "sheet", "row_no", "metric_id"])
+        result.findings.append(Finding(
+            "shared_store_identity", "共享表店铺归属待核对", passed=False, blocking=True,
+            message=f"共享表有 {pending_rows.height} 项金额未确定店铺，未计入任何店铺。请核对原表店铺列及列错位，不能默认归给当前店铺。",
+            detail={"count": pending_rows.height, "items": pending_rows.select(
+                "file_name", "sheet", "row_no", "metric_id", "amount", "source_note"
+            ).head(100).to_dicts()},
+        ))
+        scoped = pl.concat([scoped, shared_pending], how="vertical_relaxed")
     own_pending=[x for x in allocation_pending or [] if x.get('store')==store and x.get('period')==period]
     allocation_evidence=pl.DataFrame()
     ratio_metrics=[m.id for original in model.metrics if (m:=original.for_platform(platform)) is not None and m.allocate and m.allocate.mode=='ratio']

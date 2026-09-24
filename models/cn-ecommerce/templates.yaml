@@ -82,7 +82,8 @@
 - id: pdd_order_detail_v1
   source: order_detail
   name: 拼多多订单明细（发货管理-订单查询导出）
-  match_columns: [订单号, 商品id, 商家实收金额(元), 用户实付金额(元), 快递单号]
+  # 用户实付列并未用于此模板；新版可不导出它，仍以商家实收作为既有口径。
+  match_columns: [订单号, 商品id, 商家实收金额(元), 快递单号]
   parse: {header_row: 1}
   total_row_marker: order_id
   time_slots: {order_date: order_time}
@@ -91,7 +92,7 @@
     - {role: product_id, columns: [商品id]}
     - {role: product_name, columns: [商品], required: false}
     - {role: quantity, columns: ["商品数量(件)"], required: false}
-    - {role: buyer_paid, columns: ["商家实收金额(元)"]}
+    - {role: buyer_paid, columns: ["商家实收金额(元)"], kind: number}
     - {role: sku, columns: [商家编码-规格维度], required: false}
     - {role: order_state, columns: [订单状态], required: false}
     - {role: tracking_no, columns: [快递单号], required: false}
@@ -147,6 +148,8 @@
 # 对账：两个资金渠道，两条规则链
 # ======================================================================== #
 - id: taobao_settlement_alipay_v1
+  event_namespace: taobao_alipay
+  event_id_role: txn_id
   source: settlement
   name: 淘宝对账-支付宝账务明细
   match_columns: [账务流水号, 业务流水号, 业务描述, 业务基础订单号, 商户订单号]
@@ -446,6 +449,9 @@
       note: 业务描述为空的交易分账，按营销费用处理
 
 - id: taobao_settlement_wechat_v1
+  event_namespace: taobao_wechat
+  event_id_role: txn_id
+  event_directional: true
   source: settlement
   name: 淘宝对账-微信账单
   match_columns: [商家昵称, 支付流水号, 主订单id, 子订单id, 入帐类型]
@@ -562,6 +568,9 @@
       note: 提现是资金搬运，不是损益
 
 - id: taobao_settlement_wechat_v2
+  event_namespace: taobao_wechat
+  event_id_role: txn_id
+  event_directional: true
   source: settlement
   name: 淘宝对账-微信账单（天猫八列版）
   # 同一个千牛入口能导出两种表头。喜必顺那份 14 列，带商家昵称、主/子订单id 两列、
@@ -1012,11 +1021,24 @@
     表头在第一行，没有说明行——和抖音其他几张表不一样，别顺手写成 header_row: 1。
     本期整张表只有表头。
 
+- id: insurance_douyin_v2
+  source: insurance
+  name: 抖店保费支出（投保单明细）
+  match_columns: [投保单号, 订单编号, 下单时间, 动账时间, 动账流水号, 保险名称, 支付保费]
+  time_slots: {settle_date: settle_time}
+  bindings:
+    - {role: txn_id, columns: [动账流水号]}
+    - {role: sub_order_id, columns: [订单编号]}
+    - {role: total_cost, columns: [支付保费], kind: number}
+    - {role: settle_time, columns: [动账时间], kind: time}
+    - {role: remark, columns: [备注], required: false}
+
 # --------------------------------------------------------------------------- #
 # 1688 与抖音的对账表。三家店的对账表结构完全不同，各建各的模板。
 # --------------------------------------------------------------------------- #
 
 - id: alibaba1688_settlement_in_v1
+  event_namespace: alibaba1688_receipts
   source: settlement
   name: 1688 收款明细
   match_columns: [账单编号, 应收金额(元), 已收金额(元), 账单类型, 场景类型, 关联订单号]
@@ -1042,6 +1064,7 @@
     右边第 17、18 列是人工加的关联订单号和求和项，不参与解析。
 
 - id: alibaba1688_settlement_out_v1
+  event_namespace: alibaba1688_payments
   source: settlement
   name: 1688 付款明细
   match_columns: [账单编号, 应付金额(元), 已付金额(元), 账单类型, 场景类型, 关联订单号]
@@ -1067,6 +1090,7 @@
     合计只有 667.50 元，拆开对利润没有意义，保持和人工口径一致。
 
 - id: jd_settlement_v1
+  event_namespace: jd_settlement
   source: settlement
   name: 京东对账（财务-对账中心导出）
   match_columns: [订单编号, 父单号, 费用名称, 应结金额, 收支方向, 结算状态]
@@ -1112,6 +1136,7 @@
     未归类而不是无声消失。
 
 - id: pdd_settlement_v1
+  event_namespace: pdd_settlement
   source: settlement
   name: 拼多多对账（账户资金-对账中心导出）
   match_columns: [商户订单号, 发生时间, 收入金额（+元）, 支出金额（-元）, 账务类型, 业务描述]
@@ -1146,6 +1171,8 @@
     合计 -99,600 元，占对账表流水的大头，混进去的话利润会变成负十万。
 
 - id: douyin_settlement_v1
+  event_namespace: douyin_settlement
+  event_id_role: txn_id
   source: settlement
   name: 抖音对账单
   match_columns: [动账时间, 动账金额, 动账场景, 子订单号]
@@ -1187,6 +1214,8 @@
 # 识别按「必需列更多的赢」，整张对账被当成权益保险，损益表上收入/服务费/运费/赔付
 # 全空，只有权益保险一行。真保费表是 insurance_douyin_v1（保险单号 + 金额(元)）。
 - id: douyin_settlement_v2
+  event_namespace: douyin_settlement
+  event_id_role: txn_id
   source: settlement
   name: 抖音对账单（关联订单号版）
   match_columns: [关联订单号, 动账金额(元), 动账流水号, 关联子订单号, 动账时间, 动账场景]
@@ -1228,6 +1257,7 @@
 # 金额列两种写法都收：京东原始导出叫「金额」，手改过的那份叫「应结金额」
 # （和旧版同名）。两版都在人手上，认一种就会有一版突然不出数。
 - id: settlement_v10
+  event_namespace: jd_settlement
   source: settlement
   name: 京东对账（后台-费用明细导出）
   # 签名只用两版共有的列。「订单下单时间」是手改出来的名字，原始导出叫「下单时间」，
@@ -1277,6 +1307,7 @@
 # 接表向导登记。2026-08-22 财务重新导出时列名换成了「到账时间」（旧版叫结算时间），
 # 仓库里没有这份模板，部署会把它盖掉。列和角色照抄，归类沿用上面 v10 的字典和改判。
 - id: settlement_v11
+  event_namespace: jd_settlement
   source: settlement
   name: 京东对账（后台-费用明细导出，到账时间）
   match_columns: [订单下单时间, 商品名称, 订单编号, 父单号, 订单状态, 到账时间]
@@ -1310,6 +1341,34 @@
     - {role: product_name, columns: [商品名称], required: false}
     - {role: spend, columns: [总营销花费(元)], kind: number, required: false}
   total_row_marker: product_id
+
+- id: jd_settlement_v12
+  event_namespace: jd_settlement
+  source: settlement
+  name: 京东对账（业务单据费用明细）
+  match_columns: [商家ID, 订单编号, 业务单据编号, 结算时间, 商户订单号, 资金动账备注, 费用名称, 金额, 结算主体]
+  parse: {header_row: 1}
+  time_slots: {settle_date: settle_time}
+  bindings:
+    - {role: txn_id, columns: [业务单据编号]}
+    - {role: base_order_id, columns: [订单编号]}
+    - {role: order_time, columns: [下单时间], kind: time, required: false}
+    - {role: settle_time, columns: [结算时间], kind: time}
+    - {role: product_id, columns: [商品编号], required: false}
+    - {role: product_name, columns: [商品名称], required: false}
+    - {role: income, columns: [金额], kind: number}
+    - {role: subject, columns: [费用名称]}
+    - {role: remark, columns: [资金动账备注], required: false}
+    - {role: direction, columns: [费用分类, 收支方向], required: false}
+    - {role: bill_status, columns: [结算状态], required: false}
+  classify_rules:
+    - dictionary: true
+  reclassify:
+    - when_major: trade_receipt
+      and_when: {field: direction, equals: [支出]}
+      major: trade_refund
+  total_row_marker: base_order_id
+  note: 缺少结算状态时保留待确认，不以存在结算时间推断所有行已结算。
 
 - id: refund_order_dates_v1
   source: refund_order_dates

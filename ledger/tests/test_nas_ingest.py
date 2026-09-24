@@ -12,7 +12,68 @@ from ledger.nas_ingest import (
     _extract_store_name,
     reconcile_missing,
     reconcile_ready,
+    _pending_rows, _source_ids, _record, _relocate_catalog, _accept_uploaded, application_errors,
 )
+
+
+def test_reviewed_source_aliases_are_exact():
+    labels = _source_ids(load_model(MODEL))
+    assert labels["刷单"] == labels["补单"] == labels["刷单（本金佣金）"] == "brushing"
+    assert "刷单截图" not in labels
+
+
+def test_error_retry_is_bounded_and_visible(tmp_path):
+    catalog = tmp_path / "catalog.db"
+    conn = sqlite3.connect(catalog)
+    conn.row_factory = sqlite3.Row
+    conn.executescript(CATALOG + APPLY_SCHEMA)
+    path = tmp_path / "file.csv"
+    path.write_text("col\n1\n")
+    add_catalog(catalog, path)
+    row = conn.execute("select * from file_catalog").fetchone()
+    _record(conn, row, "error", "read failed")
+    conn.commit()
+    assert _pending_rows(conn) == []
+    assert application_errors(catalog)[0]["error"] == "read failed"
+    conn.execute("update ledger_apply set applied_at='2020-01-01T00:00:00+00:00'")
+    conn.commit()
+    assert len(_pending_rows(conn)) == 1
+    _record(conn, row, "applied")
+    conn.commit()
+    assert not application_errors(catalog)
+    conn.close()
+
+
+def test_duplicate_catalog_destination_is_idempotent_and_retains_alias(tmp_path):
+    catalog = tmp_path / "catalog.db"
+    conn = sqlite3.connect(catalog)
+    conn.row_factory = sqlite3.Row
+    conn.executescript(CATALOG + APPLY_SCHEMA)
+    before, after = tmp_path / "before.csv", tmp_path / "after.csv"
+    before.write_text("same")
+    after.write_text("same")
+    sha = add_catalog(catalog, before)
+    add_catalog(catalog, after)
+    for row in conn.execute("select * from file_catalog").fetchall():
+        _record(conn, row, "applied")
+    _relocate_catalog(conn, str(before), str(after), sha)
+    _relocate_catalog(conn, str(before), str(after), sha)
+    assert conn.execute("select state from ledger_apply where path=?", (str(before),)).fetchone()[0] == "relocated"
+    assert conn.execute("select state from ledger_apply where path=?", (str(after),)).fetchone()[0] == "applied"
+    conn.close()
+
+
+def test_replacement_preserves_previous_accepted_bytes(tmp_path):
+    upload = tmp_path / "00_上传区" / "s" / "f.csv"
+    target = tmp_path / "10_已接收" / "s" / "f.csv"
+    upload.parent.mkdir(parents=True)
+    target.parent.mkdir(parents=True)
+    upload.write_bytes(b"new")
+    target.write_bytes(b"old")
+    assert _accept_uploaded(upload, tmp_path, hashlib.sha256(b"new").hexdigest()) == target
+    assert target.read_bytes() == b"new"
+    old_sha = hashlib.sha256(b"old").hexdigest()
+    assert (tmp_path / "90_历史版本" / old_sha[:2] / old_sha / "payload").read_bytes() == b"old"
 from ledger.workspace import Workspace
 
 
@@ -320,7 +381,7 @@ def test_unknown_store_without_feed_is_skipped_not_quarantined(tmp_path):
     assert "不在订单台映射中" in result["errors"][0]
     assert file.is_file()
     assert not list((root / "20_需修正").rglob("*.csv")) if (root / "20_需修正").exists() else True
-    assert apply_states(catalog) == {}
+    assert apply_states(catalog) == {file.name: "error"}
     assert "ghost_shop" not in {store.id for store in load_model(model_dir).stores}
 
 

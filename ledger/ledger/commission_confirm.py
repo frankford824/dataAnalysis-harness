@@ -147,6 +147,7 @@ def context(ws, registry, model, store_id, period, *, expected_run=None):
             'period': period, 'run_id': run_id, 'store_closed': closed,
             'source_sha': hashlib.sha256(json_text(commission).encode()).hexdigest(),
             'people': people, 'latest': latest, 'history': history,
+            'statement_risk': [d.get('message') for d in source.get('deduplication', []) if d.get('status') == 'conflict'],
             'unassigned_orders': commission.get('unassigned_orders') or 0,
             'allocation_risk': _allocation_risk(ws,store_id,period,run_id,source,closed)}
 
@@ -169,6 +170,8 @@ def _confirm(ws, registry: Registry, model, *, store_id, period, run_id,
         raise RegistryError('请写明人工确认依据')
     current = context(ws, registry, model, store_id, period,
                       expected_run=run_id)
+    if current.get('statement_risk'):
+        raise RegistryError('原对账单流水存在冲突或精度丢失，暂不能核定实发；请先更正原始账单并重算')
     if source_sha != current['source_sha']:
         raise RevisionConflict('本店计算数据已更新，请重新打开确认窗口')
     expected = current['latest']['id'] if current['latest'] else ''
@@ -212,6 +215,8 @@ def _confirm(ws, registry: Registry, model, *, store_id, period, run_id,
         if (previous['id'] if previous else '') != expected_confirmation_id:
             raise RevisionConflict('提成已经由其他操作更新，请刷新后重看')
         shown, source, closed = _shown(ws, store_id, period)
+        if any(d.get('status') == 'conflict' for d in source.get('deduplication', [])):
+            raise RevisionConflict('对账流水核查状态已变化，请重新打开实发确认窗口')
         if _allocation_risk(ws,store_id,period,shown,source,closed) != risk:
             raise RevisionConflict('人工结账风险记录已变化，请重新打开实发确认窗口')
         if (shown != run_id or hashlib.sha256(json_text(source.get('commission') or {})

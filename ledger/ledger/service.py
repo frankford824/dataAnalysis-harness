@@ -28,6 +28,7 @@ from . import commission_catalog
 from .commission_registry import Registry
 from . import progress
 from . import order_feed
+from . import recompute_reuse
 from .engine.runtime import Ingestion, RunResult, Slice, ingest, run
 from .model.schema import Model, Store
 from .view import commission_dict, slice_dict
@@ -389,6 +390,13 @@ def _recompute_locked(
             out.failure = {"store": store.name, "why": f"订单台证据未就绪：{exc}"}
             return out
     out.unknown_tables = unknown_tables(ing, store)
+    registry = Registry(ws.root) if (ws.root / "commission" / "registry.db").exists() else None
+    reuse_signature = recompute_reuse.fingerprint(ws, model, store, ing, registry)
+    cached = recompute_reuse.load(ws, store, reuse_signature, registry)
+    if cached is not None:
+        report(f"核算输入未变化 · {where}")
+        out.periods = cached
+        return out
     # 这一段说不出份数：挂钩、归类、核算是把全店的行放在一起算的，没有「第几份」
     # 可报。硬报个 0/9 会让人以为它卡在第零份上。
     report(f"归类核算 · {where}")
@@ -421,7 +429,6 @@ def _recompute_locked(
         (model_revision + "\0" + engine_version() + "\0" + "\0".join(sorted(shas))).encode("utf-8")
     ).hexdigest()
     slices = sorted(own_slices.items(), key=lambda kv: (kv[0][1] or ""))
-    registry = Registry(ws.root) if (ws.root / "commission" / "registry.db").exists() else None
     if registry:
         commission_catalog.observe(registry, store, result.spine)
     for i, ((_s, _p), sl) in enumerate(slices, 1):
@@ -533,6 +540,7 @@ def _recompute_locked(
             "state": state.state if state else "open",
             "stale": bool(state and state.stale),
         })
+    recompute_reuse.remember(ws, store, reuse_signature, registry, out.periods)
     return out
 
 

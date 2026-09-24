@@ -296,6 +296,8 @@ class SourceContract(Base):
     #: 补发表是从聚水潭成本表按订单类型筛出来另存的，两张表表头一模一样，
     #: 靠表头签名区分不了，只能靠文件来源区分。
     filename_hints: tuple[str, ...] = ()
+    #: Exact, reviewed NAS folder aliases. Never use substring inference for routing.
+    directory_aliases: tuple[str, ...] = ()
     #: 这些角色的组合唯一确定一行。多份文件落到同一个数据源时按它去重，而不是直接拼接。
     #:
     #: 有些数据是全公司一张主表（运费、小额打款），每个店长导出的都是同一份，
@@ -305,6 +307,7 @@ class SourceContract(Base):
     #: 这种事不能靠叮嘱店长「别重复传」来防：交叉重叠是协作的常态，
     #: 得让引擎在结构上不可能算错。声明了去重键，重复交多少份都是同一个结果。
     dedupe_key: tuple[str, ...] = ()
+    dedupe_mode: Literal["keys", "statement_events"] = "keys"
     #: 这份数据交上来是全公司的，每家店只取属于自己订单的那部分。
     #:
     #: 和 dedupe_key 是两件事：去重键管的是「同一份被交了好几遍」，
@@ -419,6 +422,12 @@ class Template(Base):
     direction_role: str | None = None
     direction_outflow_values: tuple[str, ...] = ()
     dedup: DedupRule = DedupRule()
+    #: Reviewed payment channel; different channels must never share event IDs.
+    event_namespace: str | None = None
+    #: Only atomic payment event IDs, never order IDs or settlement bill IDs.
+    event_id_role: str | None = None
+    #: Some channel transfers expose one payment ID for both debit and credit legs.
+    event_directional: bool = False
     #: 时间槽位映射：槽位 → 字段角色。
     time_slots: dict[TimeSlot, str] = Field(default_factory=dict)
     #: 时间槽位空着时的兜底取法。
@@ -439,6 +448,8 @@ class Template(Base):
         if self.sign == "by_direction" and not self.direction_role:
             raise ValueError(f"{self.id}: sign=by_direction 必须声明 direction_role")
         roles = {b.role for b in self.bindings}
+        if self.event_id_role and (not self.event_namespace or self.event_id_role not in roles):
+            raise ValueError(f"{self.id}: 流水唯一标识必须声明渠道和有效字段角色")
         for slot, role in self.time_slots.items():
             if role not in roles:
                 raise ValueError(f"{self.id}: 时间槽位 {slot} 指向未定义的角色 {role}")

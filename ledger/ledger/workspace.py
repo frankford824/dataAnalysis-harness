@@ -572,7 +572,7 @@ class Workspace:
     def store_ids(self) -> list[str]:
         return [
             row["store_id"] for row in self.conn.execute(
-                "select distinct store_id from slot where store_id<>? order by store_id",
+                "select store_id from slot where store_id<>? union select store_id from period order by store_id",
                 (SHARED_STORE_ID,),
             ).fetchall()
         ]
@@ -942,6 +942,8 @@ class Workspace:
             why = run["evidence_error"] or "事实证据尚未完成留档"
             raise WorkspaceError(f"{period} 结不了账：{why}")
         result = json.loads(run["result"])
+        if any(d.get("status") == "conflict" for d in result.get("deduplication", [])):
+            raise WorkspaceError("原对账单流水存在冲突或精度丢失，不能人工忽略；请更正原始账单后重算")
         if manual_result is None and self.coverage_gaps_path(run["id"]).exists():
             from .cost_lines import current
             if current(self, run["id"], store_id, period)["reviewed_count"]:

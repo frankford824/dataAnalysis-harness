@@ -241,10 +241,28 @@ def evaluate_metric(
         if "__spine_store__" in frame.columns
         else own_store
     )
-    store = pl.coalesce(store, pl.lit(store_hint or None, dtype=pl.Utf8))
+    if shared_table:
+        # A caller's current shop is not evidence of ownership of a company-wide
+        # row. In particular, a date accidentally pasted into the shop column
+        # must not become a cost in every shop that reads the shared workbook.
+        written = (pl.col("store_name").cast(pl.Utf8).fill_null("").str.strip_chars()
+                   if "store_name" in frame.columns else pl.lit(""))
+        invalid = (written != "") & own_store.is_null()
+        conflict = (own_store.is_not_null() & pl.col("__spine_store__").is_not_null()
+                    & (own_store != pl.col("__spine_store__"))) if "__spine_store__" in frame.columns else pl.lit(False)
+        store = pl.when(invalid | conflict).then(pl.lit(None, dtype=pl.Utf8)).otherwise(store)
+    else:
+        store = pl.coalesce(store, pl.lit(store_hint or None, dtype=pl.Utf8))
 
     grain = metric.link.grain if metric.link else "period"
     source_note = pl.col("source_note").cast(pl.Utf8) if "source_note" in frame.columns else pl.lit(None, dtype=pl.Utf8)
+    if shared_table:
+        needs_owner_review = invalid | conflict
+        if metric.source in {"dropship", "brushing", "small_payment"}:
+            needs_owner_review = needs_owner_review | store.is_null()
+        source_note = pl.when(needs_owner_review).then(pl.concat_str([
+            source_note, pl.lit("共享表店铺归属待核对：未用当前店铺兜底")
+        ], separator="；", ignore_nulls=True)).otherwise(source_note)
     if metric.posting_basis == "order_number":
         period_label = pl.lit("下单月份：")
         if metric.orderless_time_basis:
@@ -451,6 +469,8 @@ def _value_expr(expr: ValueExpr, frame: pl.DataFrame, notes: list[str]) -> pl.Ex
 
 
 def _predicates(where: tuple[Predicate, ...], frame: pl.DataFrame, notes: list[str]) -> pl.Expr:
+    if "bill_status" not in frame.columns and any(p.field == "bill_status" and not p.allow_missing for p in where):
+        raise CalculateError("缺少结算状态（bill_status），无法确认哪些收支已结算；请补充含结算状态的原始明细，不以结算日期代替结算确认")
     try:
         return compile_where(where, frame)
     except PredicateError as exc:

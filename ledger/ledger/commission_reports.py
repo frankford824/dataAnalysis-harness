@@ -86,6 +86,13 @@ def creator_rollup(rows):
                for name in fields}}
 
 
+def metric_rollup(rows, fields=('managed_sales','labor_cost','profit_after_labor')):
+    """Display totals keep unknown values distinct from an actual zero."""
+    return {field: (money_float(sum((decimal(row[field]) for row in rows), Decimal(0)))
+                    if rows and all(row.get(field) is not None for row in rows) else None)
+            for field in fields}
+
+
 def labor_keep(base_total, labor_cut):
     """Scale trial payouts so the store labor cut is taken out of the pool."""
     base = decimal(base_total or 0)
@@ -242,7 +249,15 @@ def _profit_from_sales(people, operating, labor):
     return {pid: money_float(sign * parts[pid]) for pid in parts}
 
 
-def attributed_profit(commission, operating, labor, registry, *, store_id='', manual_cost=False, duties=None, production=False):
+def attributed_labor(commission, labor, registry, *, duties=None, production=True):
+    """Expose the exact cost split already used by attributed_profit, not a new charge."""
+    if labor is None:
+        return {}
+    return attributed_profit(commission, None, labor, registry, duties=duties,
+                             production=production, _labor_only=True)
+
+
+def attributed_profit(commission, operating, labor, registry, *, store_id='', manual_cost=False, duties=None, production=False, _labor_only=False):
     """Additive person profit; keep full sales and gross output separate.
 
     Manual cost changes the store profit, not the ownership split. The
@@ -253,21 +268,23 @@ def attributed_profit(commission, operating, labor, registry, *, store_id='', ma
     also has 做货 product IDs is a producer even if the store default is 抽点.
     """
     people = commission.get('people') or []
-    if operating is None or not people:
+    if (operating is None and not _labor_only) or not people:
         return {}
     ids = [p.get('person_id') for p in people]
     if any(not pid for pid in ids) or len(ids) != len(set(ids)):
         return {}
+    if _labor_only and not decimal(labor or 0):
+        return {pid: 0.0 for pid in ids}
     production_split = _archived_allocated_outputs(registry, commission, production=True) if production else None
     if len(people) == 1 and production_split is None:
-        return {ids[0]: profit_after_labor(operating, labor)}
+        return {ids[0]: money_float(decimal(labor or 0)) if _labor_only else profit_after_labor(operating, labor)}
     # duty-based: producers get all profit, cut members get 0
     if duties and len(people) > 1 and production_split is None:
         producers = [p for p in people if duties.get(p['person_id'], {}).get('duty', 'produce') == 'produce']
         if producers and len(producers) < len(people):
             producer_result = attributed_profit(
                 {**commission, 'people': producers}, operating, labor, registry,
-                store_id=store_id, manual_cost=manual_cost)
+                store_id=store_id, manual_cost=manual_cost, _labor_only=_labor_only)
             result = {pid: 0.0 for pid in ids}
             result.update(producer_result)
             return result
@@ -282,14 +299,18 @@ def attributed_profit(commission, operating, labor, registry, *, store_id='', ma
     elif len(split) != len(people):
         split = _archived_allocated_outputs(registry, commission)
     if split is None or any(p.get('person_id') not in split for p in people):
+        if _labor_only:
+            return _profit_from_sales(people, labor or 0, 0)
         return _profit_from_sales(people, operating, labor)
-    values = {p['person_id']: decimal(split[p['person_id']]['profit']) for p in people}
     weights = {p['person_id']: max(decimal(split[p['person_id']].get('sales_basis', split[p['person_id']].get('sales')) or 0), Decimal(0))
                for p in people}
     # A negative store residual is shared as operating loss. Positive
     # unattributed profit remains at the store until its owner is known.
-    residual = max(sum(values.values(), Decimal(0)) - decimal(operating), Decimal(0))
     cost = _split_cents(labor or 0, weights)
+    if _labor_only:
+        return {} if cost is None else {pid: money_float(value) for pid, value in cost.items()}
+    values = {p['person_id']: decimal(split[p['person_id']]['profit']) for p in people}
+    residual = max(sum(values.values(), Decimal(0)) - decimal(operating), Decimal(0))
     loss = _split_cents(residual, weights)
     if cost is None or loss is None:
         return {}
@@ -706,6 +727,8 @@ def build(workspace, registry, model, start, end, store_ids=None, person_ids=Non
                 managed_scopes.append({'team_id':tid, 'sales':value, 'store_id':sid, 'period':period})
         payout_profit=attributed_profit(source_c,operating,visible_labor,registry,store_id=sid,duties=effective_duties)
         person_profit=attributed_profit(source_c,operating,visible_labor,registry,store_id=sid,duties=effective_duties,production=True)
+        person_labor=attributed_labor(source_c, labor_cut if spread.total is not None else None,
+                                     registry, duties=effective_duties)
         profit_rates={person.get('person_id'):confirmed_profit_rate(
             source_c,person.get('person_id'),sid) for person in source_c.get('people') or []}
         if not decision and any(
@@ -717,6 +740,7 @@ def build(workspace, registry, model, start, end, store_ids=None, person_ids=Non
                 notes.append('产出按商品做货身份归属，抽点不参与产出分摊；提成金额沿用原核算基数与点数')
             scope['notes']='；'.join(notes)
         member_rows=[]
+        member_sources={}
         original_people = {}
         for original_person in source_c.get('people', []):
             original_people.setdefault(original_person.get('person_id'), original_person)
@@ -731,6 +755,7 @@ def build(workspace, registry, model, start, end, store_ids=None, person_ids=Non
             if pid not in roster:label+=f'（历史记录 · {names[sid]}）'
             available.setdefault(pid,{'id':pid,'name':label})
             if selected_people and pid not in selected_people:continue
+            member_sources[pid]=person.get('person_id')
             duty=((effective_duties.get(person.get('person_id') or pid) or {}).get('duty')
                   or person.get('duty')
                   or (store_duties or {}).get(person.get('person_id') or pid, {}).get('duty'))
@@ -751,7 +776,7 @@ def build(workspace, registry, model, start, end, store_ids=None, person_ids=Non
                                         'creator_active':person_output.get(person.get('person_id'),{}).get('creator_active'),
                                         'creator_rule_revision':person_output.get(person.get('person_id'),{}).get('creator_rule_revision'),
                                         'profit_after_labor':person_profit.get(person.get('person_id')),
-                                        'labor_cost':None,'base':None,'base_name':'',
+                                        'labor_cost':person_labor.get(person.get('person_id')),'base':None,'base_name':'',
                                         'amount':None,'store_amount':None,
                                         'status':status,'finance_run':record['id']})
                 continue
@@ -806,7 +831,7 @@ def build(workspace, registry, model, start, end, store_ids=None, person_ids=Non
                                 'creator_active':person_output.get(person.get('person_id'),{}).get('creator_active'),
                                 'creator_rule_revision':person_output.get(person.get('person_id'),{}).get('creator_rule_revision'),
                                 'profit_after_labor':person_profit.get(person.get('person_id')),
-                                'labor_cost':None,
+                                'labor_cost':person_labor.get(person.get('person_id')),
                                 'base':person.get('base'),'base_name':scope['base_name'],
                                 'amount':money_float(amount),
                                 'trial_amount':money_float(trial_val),'actual_amount':money_float(amount),
@@ -837,7 +862,9 @@ def build(workspace, registry, model, start, end, store_ids=None, person_ids=Non
             reference_residual = _output_residual(sales, {pid:{'sales':value.get('reference_sales',value.get('sales'))} for pid,value in person_output.items()}, 'sales')
             if reference_residual is not None:
                 reference_residual = money_float(decimal(reference_residual)-decimal(managed_total))
-            residuals = (residual_sales, reference_residual, residual_gross, residual_profit)
+            residual_labor = (money_float(decimal(labor_cut) - sum((decimal(v) for v in person_labor.values()), Decimal(0)))
+                              if spread.total is not None else None)
+            residuals = (residual_sales, reference_residual, residual_gross, residual_profit, residual_labor)
             if any(value is not None and abs(value) > .01 for value in residuals):
                 missing_count = int(source_c.get('unassigned_orders') or 0)
                 label = (f'未分配（{missing_count}笔订单信息不完整）'
@@ -846,7 +873,7 @@ def build(workspace, registry, model, start, end, store_ids=None, person_ids=Non
                     'kind':'unassigned','person_id':None,'person':label,'employee_no':'',
                     'store_id':sid,'store':names[sid],'period':period,
                     'sales':residual_sales,'gross':residual_gross,
-                    'profit_after_labor':residual_profit,'labor_cost':None,
+                    'profit_after_labor':residual_profit,'labor_cost':residual_labor,
                     'base':source_c.get('unassigned_base'),'base_name':scope['base_name'],
                     'amount':None,'store_amount':None,'status':'待核对',
                     'finance_run':record['id'],
@@ -855,13 +882,34 @@ def build(workspace, registry, model, start, end, store_ids=None, person_ids=Non
                                 else f'{residual_profit:,.2f} 元')
                 notes.append(f'{label}：利润额 {profit_label}；人员行与店铺合计的差额已显式列出')
                 scope['notes']='；'.join(notes)
-        if need_managed and managed:
+        scope_managed=[]
+        if managed:
             from .commission_managed_report import scope as managed_scope
-            managed_rows.extend(managed_scope(registry,source_c,managed=managed,outputs=person_output,
+            managed_arguments=dict(managed=managed,outputs=person_output,
                 profits=person_profit,payout_profits=payout_profit,rates=profit_rates,
                 trials={r['person_id']:r.get('trial_amount') for r in member_rows if r.get('kind')=='person'},
                 keep=(Decimal(1) if source_c.get('manual_amounts_after_labor') else labor_keep(base_total,labor_cut)),
-                roster=roster,store_id=sid,store=names[sid],period=period,run_id=record['id'],selected_people=selected_people))
+                roster=roster,store_id=sid,store=names[sid],period=period,run_id=record['id'])
+            scope_managed=managed_scope(registry,source_c,**managed_arguments)
+            if need_managed:
+                managed_rows.extend(managed_scope(registry,source_c,**managed_arguments,selected_people=selected_people)
+                                    if selected_people else scope_managed)
+        managed_people={}
+        managed_known=not managed or bool(scope_managed) and all(t.get('evidence_available') for t in scope_managed)
+        for team in scope_managed:
+            for person in team.get('children',[]):
+                if person.get('person_id'):
+                    managed_people.setdefault(person['person_id'],[]).append(person)
+        for row in member_rows:
+            if row.get('kind')!='person':
+                continue
+            source_pid=member_sources.get(row['person_id'])
+            parts=managed_people.get(source_pid,[])
+            row['managed_sales']=(money_float(sum((decimal(p['sales']) for p in parts),Decimal(0)))
+                                  if managed_known and all(p.get('sales') is not None for p in parts) else None)
+            row['managed_sales_pending']=row['managed_sales'] is None
+            row['store_labor_cost']=money_float(labor_cut) if spread.total is not None else None
+            row['labor_pending']=spread.total is not None and row.get('labor_cost') is None
         scopes[(sid,period)]=scope
         if not selected_people:
             for tid, value in managed.items():
@@ -917,6 +965,9 @@ def build(workspace, registry, model, start, end, store_ids=None, person_ids=Non
             creator_scopes.setdefault(row['person_id'], []).append(row)
     for r in person_rows:
         r.update(creator_rollup(creator_scopes.get(r['person_id'], [])))
+        r.update(metric_rollup(creator_scopes.get(r['person_id'], [])))
+        r['managed_sales_pending']=r['managed_sales'] is None
+        r['labor_pending']=any(s.get('labor_pending') for s in creator_scopes.get(r['person_id'], []))
         r.pop('statuses',None)
         r.pop('confirmed_count',None)
 
@@ -988,7 +1039,6 @@ def build(workspace, registry, model, start, end, store_ids=None, person_ids=Non
             t['stores'].add(row['store_id']); t['periods'].add(row['period']); t['statuses'].add(row['status'])
     for row in person_rows:
         row['sales'] = money_float(person_sales[row['person_id']]) if row['person_id'] in person_sales else None
-        row['managed_sales'] = 0
     sales_pending = [r for r in store_person_rows if r.get('sales_pending_products')]
     creator_pending = [r for r in store_person_rows if r.get('kind') == 'person' and r.get('creator_active') and r.get('creator_pending')]
     pending_people = {r['person_id'] for r in sales_pending}
@@ -1017,8 +1067,11 @@ def build(workspace, registry, model, start, end, store_ids=None, person_ids=Non
     team_rows.sort(key=lambda x: -(x['amount'] or 0))
     creator_people = {row['person_id']: row for row in person_rows}
     for row in team_rows:
-        row.update(creator_rollup([creator_people[member['person_id']] for member in row['members']
-                                   if member['person_id'] in creator_people]))
+        members=[creator_people[member['person_id']] for member in row['members']
+                 if member['person_id'] in creator_people]
+        row.update(creator_rollup(members))
+        row.update(metric_rollup(members, ('labor_cost','profit_after_labor')))
+        row['labor_pending']=any(member.get('labor_pending') for member in members)
     pending_teams = {find_team_info(pid,roster)['team_id'] or pid for pid in pending_people}
     for row in team_rows:
         if row['team_id'] in pending_teams:
@@ -1029,6 +1082,7 @@ def build(workspace, registry, model, start, end, store_ids=None, person_ids=Non
                  'status':'、'.join(sorted(r['statuses']))} for r in store_totals.values()]
     for row in store_rows:
         row['managed_sales'] = money_float(sum((decimal(s['sales']) for s in managed_scopes if s['store_id']==row['store_id']), Decimal(0))) if not selected_people else None
+        row.update(metric_rollup([r for r in store_person_rows if r.get('kind')=='store' and r['store_id']==row['store_id']], ('profit_after_labor',)))
     for r in store_rows:r.pop('statuses')
     coverage=[{**r,'selected_amount':money_float(r['selected_amount']) if r['has_result'] else None} for r in scopes.values()]
     configured_total=set().union(*(configured.get(sid,set()) for sid in covered_stores))
@@ -1059,6 +1113,10 @@ def build(workspace, registry, model, start, end, store_ids=None, person_ids=Non
             row.update(payout_summary(by_scope.get((row['person_id'], row['store_id'], row['period']), [])))
     for line in lines:
         line.update(payout_summary([line]))
+    row_metrics={(r['person_id'],r['store_id'],r['period']):r for r in store_person_rows if r.get('kind')=='person'}
+    for line in lines:
+        reference=row_metrics.get((line['person_id'],line['store_id'],line['period']),{})
+        line.update({key:reference.get(key) for key in ('managed_sales','labor_cost','profit_after_labor','store_labor_cost','managed_sales_pending','labor_pending')})
     return {'managed':managed_rows,'teams':team_rows,'people':sorted(person_rows,key=lambda x:x['person']),'stores':store_rows,'rows':lines,
             'sales_pending_scopes':[{k:r.get(k) for k in ('store_id','store','period','person_id','person','finance_run','sales_pending_products','sales_sources')} for r in sales_pending],
             'creator_pending_scopes':[{k:r.get(k) for k in ('store_id','store','period','person_id','person','finance_run')} for r in creator_pending],
@@ -1072,11 +1130,11 @@ def build(workspace, registry, model, start, end, store_ids=None, person_ids=Non
 
 COLUMNS={
  'managed':['层级','行类型','托管团队','店铺','月份','人员','宝贝ID','商品','托管销售额','托管毛利额','托管利润额（分摊后）','托管系统应发','说明'],
- 'teams':['团队/团队长','系统应发','实发提成','调整差额','团队人数','店铺数','账期数','计算状态','做货创造毛利','做货创造利润'],
- 'people':['人员','工号','提成金额','店铺数','账期数','计算状态','人员ID','做货创造毛利','做货创造利润'],
- 'stores':['店铺','提成金额','兼职分摊','提成设置人数','已出金额人数','已计算账期数','未计算账期数','计算状态'],
- 'store_people':['店铺','分配人','月份','销售额/参与销售额','毛利额/参与毛利额','利润额','兼职额','本人参与基数','基数名称','提成额','店铺提成合计','状态','做货成本','做货创造毛利','做货创造利润'],
- 'breakdown':['人员','工号','店铺','账期','提成金额','本人参与基数','基数名称','计算状态','计算时间','说明','计算记录'],
+ 'teams':['团队/团队长','系统应发','实发提成','调整差额','团队人数','店铺数','账期数','计算状态','做货创造毛利','做货创造利润','托管类销售额','兼职额','利润额（扣兼职）'],
+ 'people':['人员','工号','提成金额','店铺数','账期数','计算状态','人员ID','做货创造毛利','做货创造利润','托管类销售额','兼职额','利润额（扣兼职）'],
+ 'stores':['店铺','提成金额','兼职分摊','提成设置人数','已出金额人数','已计算账期数','未计算账期数','计算状态','托管类销售额','利润额（扣兼职）'],
+ 'store_people':['店铺','分配人','月份','销售额/参与销售额','毛利额/参与毛利额','利润额','兼职额','本人参与基数','基数名称','提成额','店铺提成合计','状态','做货成本','做货创造毛利','做货创造利润','托管类销售额'],
+ 'breakdown':['人员','工号','店铺','账期','提成金额','本人参与基数','基数名称','计算状态','计算时间','说明','计算记录','托管类销售额','兼职额','利润额（扣兼职）'],
  'coverage':['店铺','账期','筛选范围提成金额','计算状态','未分配订单数','计算时间','说明','计算记录']}
 
 
@@ -1084,18 +1142,18 @@ def export_rows(report, kind):
     if kind=='managed':
         yield from business_export(report,kind)[1]
     elif kind=='teams':
-        for r in report.get('teams',[]):yield dict(zip(COLUMNS[kind],[r['team'],r.get('trial_amount'),r['amount'],r.get('diff_amount'),r['members_count'],r['stores'],r['periods'],r['status'],r.get('creator_gross'),r.get('creator_profit')]))
+        for r in report.get('teams',[]):yield dict(zip(COLUMNS[kind],[r['team'],r.get('trial_amount'),r['amount'],r.get('diff_amount'),r['members_count'],r['stores'],r['periods'],r['status'],r.get('creator_gross'),r.get('creator_profit'),r.get('managed_sales'),r.get('labor_cost'),r.get('profit_after_labor')]))
     elif kind=='people':
-        for r in report['people']:yield dict(zip(COLUMNS[kind],[r['person'],r['employee_no'],r['amount'],r['stores'],r['periods'],r['status'],r['person_id'],r.get('creator_gross'),r.get('creator_profit')]))
+        for r in report['people']:yield dict(zip(COLUMNS[kind],[r['person'],r['employee_no'],r['amount'],r['stores'],r['periods'],r['status'],r['person_id'],r.get('creator_gross'),r.get('creator_profit'),r.get('managed_sales'),r.get('labor_cost'),r.get('profit_after_labor')]))
     elif kind=='stores':
-        for r in report['stores']:yield dict(zip(COLUMNS[kind],[r['store'],r['amount'],r['labor_cost'],r['configured_people'],r['people'] if r['periods'] else None,r['periods'],r['missing'],r['status']]))
+        for r in report['stores']:yield dict(zip(COLUMNS[kind],[r['store'],r['amount'],r['labor_cost'],r['configured_people'],r['people'] if r['periods'] else None,r['periods'],r['missing'],r['status'],r.get('managed_sales'),r.get('profit_after_labor')]))
     elif kind=='store_people':
         for r in report['store_people']:
             yield dict(zip(COLUMNS[kind],[r['store'],r['person'],r['period'],r['sales'],r['gross'],r['profit_after_labor'],r['labor_cost'],
                                           r['base'],r['base_name'],r['amount'],r['store_amount'],r['status'],
-                                          r.get('creator_cost'),r.get('creator_gross'),r.get('creator_profit')] ))
+                                          r.get('creator_cost'),r.get('creator_gross'),r.get('creator_profit'),r.get('managed_sales')] ))
     elif kind=='breakdown':
-        for r in report['rows']:yield dict(zip(COLUMNS[kind],[r['person'],r['employee_no'],r['store'],r['period'],r['amount'],r['base'],r['base_name'],r['status'],r['calculated_at'],r['notes'],r['finance_run']]))
+        for r in report['rows']:yield dict(zip(COLUMNS[kind],[r['person'],r['employee_no'],r['store'],r['period'],r['amount'],r['base'],r['base_name'],r['status'],r['calculated_at'],r['notes'],r['finance_run'],r.get('managed_sales'),r.get('labor_cost'),r.get('profit_after_labor')]))
     elif kind=='coverage':
         for r in report['coverage']:yield dict(zip(COLUMNS[kind],[r['store'],r['period'],r['selected_amount'],r['status'],r['unassigned_orders'],r['calculated_at'],r['notes'],r['finance_run']]))
     else:raise RegistryError('请选择导出类型')
@@ -1126,7 +1184,7 @@ def business_export(report, kind):
         'people': [('人员','person'),('所属团队','team'),('工号','employee_no'),('做货创造毛利','creator_gross'),('做货创造利润','creator_profit'),('系统应发','trial_amount'),('提成金额','amount'),('调整差额','diff_amount'),('店铺数','stores'),('月份数','periods'),('状态','status')],
         'stores': [('店铺','store'),('提成金额','amount'),('兼职分摊','labor_cost'),('提成设置人数','configured_people'),('已出金额人数','people'),('已有金额月份','periods'),('未出金额月份','missing'),('状态','status')],
         'store_people': [('店铺','store'),('分配人','person'),('所属团队','team'),('月份','period'),('核算记录','finance_run'),('做货规则指纹','creator_rule_revision'),('销售额','sales'),('做货成本','creator_cost'),('做货创造毛利','creator_gross'),('做货创造利润','creator_profit'),('原核算毛利','gross'),
-                         ('分摊后利润','profit_after_labor'),('兼职额','labor_cost'),('本人参与提成基数','base'),('系统应发','trial_amount'),('提成额','amount'),('调整差额','diff_amount'),
+                         ('利润额（扣兼职）','profit_after_labor'),('兼职额','labor_cost'),('本人参与提成基数','base'),('系统应发','trial_amount'),('提成额','amount'),('调整差额','diff_amount'),
                          ('店铺提成合计','store_amount'),('状态','status')],
         'breakdown': [('人员','person'),('所属团队','team'),('工号','employee_no'),('店铺','store'),('月份','period'),('系统应发','trial_amount'),('提成金额','amount'),('调整差额','diff_amount'),('状态','status')],
         'coverage': [('店铺','store'),('月份','period'),('提成金额','selected_amount'),('状态','status'),('未分配人员订单数','unassigned_orders')],
@@ -1136,17 +1194,29 @@ def business_export(report, kind):
         columns += [('已核定实发','confirmed_amount'), ('核定状态','confirmation_state'),
                     ('已核定项数','confirmed_count'), ('待核定及已核定项数','confirmation_count')]
     if kind in {'teams', 'people'}:
-        columns += [('销售额','sales')]
+        columns += [('销售额','sales'),('兼职额','labor_cost'),('利润额（扣兼职）','profit_after_labor')]
+    if kind in {'stores','breakdown'}:
+        columns += [('利润额（扣兼职）','profit_after_labor')]
+    if kind=='breakdown':
+        columns += [('兼职额','labor_cost'),('托管类销售额','managed_sales')]
     if kind in {'teams', 'people', 'store_people', 'stores'}:
         columns += [('托管类销售额','managed_sales')]
     if kind in {'teams','people','store_people'}:
         columns += [('销售归属状态','sales_attribution_state')]
-    if kind=='store_people':columns += [('销售口径','sales_scope')]
+    if kind=='store_people':columns += [('行类型','kind'),('销售口径','sales_scope')]
+    if kind in {'teams','people','stores','store_people','breakdown'}:
+        columns += [('利润口径','profit_scope'),('兼职分摊说明','labor_scope')]
     def rows():
         for row in report['rows' if kind == 'breakdown' else kind]:
             item = {label:row.get(key) for label,key in columns}
+            if '利润口径' in item:
+                item['利润口径']=('全店经营利润（含托管）减本店兼职' if kind=='stores' or row.get('kind')=='store' else
+                               '原财务分摊利润（含托管及调整），已经扣兼职；不等同非托管做货创造利润')
+                item['兼职分摊说明']='沿用原利润扣减的销售基数（含托管）；仅展示已扣金额，不再次扣减；筛选不重分摊'
             if '销售口径' in item:
                 item['销售口径']={'person':'非托管商品创造业绩按做货身份归属；提成与原核算另列','managed':'托管销售额；不计入个人非托管销售','store':'全店财务销售额（含托管）；个人创造列不作店铺合计','unassigned':'尚未分配到人员'}.get(row.get('kind'),'')
+                item['销售口径']+='；店铺合计、个人和托管团队小计为不同层级，托管额不可重复相加'
+                item['行类型']={'person':'个人','managed':'托管团队小计','store':'店铺合计','unassigned':'待分配'}.get(row.get('kind'),'')
             if '销售归属状态' in item:
                 item['销售归属状态'] = ('店铺财务口径' if row.get('kind')=='store' else
                     '托管团队归属' if row.get('kind')=='managed' else

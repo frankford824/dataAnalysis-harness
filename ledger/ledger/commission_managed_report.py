@@ -120,6 +120,7 @@ def scope(registry, commission, *, managed, outputs, profits, payout_profits, ra
         if {k:money_float(v) for k,v in archived_totals.items()}!={k:money_float(Decimal(str(v))) for k,v in managed.items()}:
             raw=None  # Never mix a new classification with an older sales pool.
     common={'store_id':store_id,'store':store,'period':period,'finance_run':run_id,
+            'evidence_available':raw is not None,
             'amount':None,'confirmed_amount':None,'kind':'managed_detail',
             'notes':'其中托管部分，不与人员/店铺合计重复相加；不拆分实发'}
     leaves=[]

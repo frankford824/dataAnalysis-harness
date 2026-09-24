@@ -1375,7 +1375,13 @@ def index_jobs() -> dict:
 
 @app.get("/api/index/errors")
 def index_errors() -> dict:
-    return _index_proxy("/errors")
+    result = _index_proxy("/errors")
+    catalog = Path(os.environ.get("LEDGER_INDEX_CATALOG", r"D:\ledger\index\catalog.db"))
+    try:
+        intake = nas_ingest.application_errors(catalog)
+    except Exception as exc:
+        raise HTTPException(503, "财务接收错误状态暂时无法读取，请稍后重试") from exc
+    return {**result, "files": [*(result.get("files") or []), *intake], "intake_errors": intake}
 
 
 @app.get("/api/index/storage")
