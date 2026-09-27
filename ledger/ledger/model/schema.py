@@ -421,6 +421,7 @@ class Template(Base):
     #: sign 为 by_direction 时，方向所在的字段角色与表示"支出"的取值。
     direction_role: str | None = None
     direction_outflow_values: tuple[str, ...] = ()
+    direction_inflow_values: tuple[str, ...] = ()
     dedup: DedupRule = DedupRule()
     #: Reviewed payment channel; different channels must never share event IDs.
     event_namespace: str | None = None

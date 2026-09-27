@@ -103,3 +103,24 @@ def test_failed_optional_upload_cannot_be_hidden_by_another_contributing_file():
                                  "shop", "2026-06", 1, {"promotion": ["日期缺失或无效"]})
     assert "promotion" in completeness.missing
     assert "promotion" not in completeness.arrived
+
+
+@pytest.mark.parametrize('live', [True, False])
+def test_pdd_control_inherits_detail_month_not_default_period(live):
+    result = calculate([['P1', 20, '2026-07-02'], ['-', 30, '总计']], platform='pdd', live=live)
+    assert not result.eval_errors
+    facts = result.facts.filter(pl.col('metric_id') == 'ad_cost')
+    assert facts['period'].unique().to_list() == ['2026-07']
+    assert facts['contribution'].sum() == pytest.approx(-30.)
+    for sl in result.slices.values():
+        assert not any(f.check_id == 'promotion_scope_evidence' for f in sl.audit.findings)
+
+
+def test_multimonth_dated_total_is_not_arbitrarily_allocated_even_with_hint():
+    result = calculate([['P1', 10, '2026-06-02'], ['P1', 20, '2026-07-02'],
+                        ['-', 50, '总计']], platform='pdd')
+    controls = result.facts.filter(pl.col('promotion_scope') == 'pending')
+    assert controls.height == 1
+    assert not controls['counted'].item()
+    assert result.spine_facts.filter(pl.col('metric_id') == 'ad_cost')['amount'].sum() == -30
+    assert any(f.check_id == 'promotion_scope_evidence' for f in result.slices[('shop','2026-07')].audit.findings)

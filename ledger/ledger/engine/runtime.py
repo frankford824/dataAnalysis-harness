@@ -723,7 +723,13 @@ def run(ingestion: Ingestion, platform: str = "*") -> RunResult:
     link_reports: dict[str, LinkReport] = {}
     classify_reports: list[ClassifyReport] = []
     #: 数据源 id → 求值报错。用途见下面 except 分支里的说明。
-    eval_errors = {key: list(value) for key, value in ingestion.validation_errors.items()}
+    # Statement identity failures are row-scoped below, after linking has
+    # established accounting month. A June damaged upload must not blanket-
+    # block an unrelated July receipt or every category in the same file.
+    identity_messages = {d['message'] for d in ingestion.deduplication if d['status'] == 'conflict'}
+    eval_errors = {key: [v for v in value if v not in identity_messages]
+                   for key, value in ingestion.validation_errors.items()}
+    eval_errors = {key: value for key, value in eval_errors.items() if value}
     if return_errors:
         eval_errors.setdefault("cost_return", []).extend(return_errors)
     pricing_gaps: list[dict] = list(getattr(derived_return,'pricing_gaps',()))
@@ -803,7 +809,7 @@ def run(ingestion: Ingestion, platform: str = "*") -> RunResult:
     # 每个子订单各算一遍。
     spine_parts: list[pl.DataFrame] = []
     projections: dict[str, Projection] = {}
-    projectable = facts.filter(pl.col("store") != "(未知店铺)")
+    projectable = facts.filter((pl.col("store") != "(未知店铺)") & ~_statement_pending(facts))
     for metric in metrics:
         if not (metric.link and metric.link.to) or metric.posting_basis in {"transaction", "order_number"}:
             proj = project_transactions(projectable, metric, spine)
@@ -829,6 +835,9 @@ def run(ingestion: Ingestion, platform: str = "*") -> RunResult:
     )
 
     slice_keys = set(_slice_keys(spine_facts if not spine_facts.is_empty() else facts))
+    # A period containing only quarantined entries must remain visible even
+    # when another month has valid projections.
+    slice_keys.update(_slice_keys(facts.filter(_statement_pending(facts))))
     slice_keys.update(_slice_keys(result.pricing_gaps))
     for store, period in sorted(slice_keys):
         result.slices[(store, period)] = _build_slice(
@@ -836,21 +845,45 @@ def run(ingestion: Ingestion, platform: str = "*") -> RunResult:
             link_reports, classify_report, platform, eval_errors, result.pricing_gaps,
             [item for projection in projections.values() for item in projection.allocation_pending],
         )
-        result.slices[(store, period)].deduplication = ingestion.deduplication
-        conflicts = [d["message"] for d in ingestion.deduplication if d["status"] == "conflict"]
-        if conflicts:
+        pending = _statement_pending_scope(facts, metrics, store, period)
+        deduplication = [d for d in ingestion.deduplication if d['status'] != 'conflict']
+        if pending.height:
             from .types import Finding
+            anchors = pending.select('file_sha', 'file_name', 'sheet', 'row_no').unique()
+            message = (f"本店本月有 {anchors.height} 行对账流水身份待核对，已隔离且未计入账目；"
+                       "不能人工忽略，请核对原账单：" + '；'.join(
+                           f"{r['file_name']} · {r['sheet'] or ''} 第{r['row_no']}行"
+                           for r in anchors.head(8).to_dicts()))
+            deduplication.append(dict(source='settlement', status='conflict', events=anchors.height,
+                                      removed_rows=0, message=message))
             result.slices[(store, period)].audit.findings.append(Finding(
                 "statement_identity", "对账流水身份待核对", passed=False, blocking=True,
-                message="原账单流水存在冲突或精度丢失，不能人工忽略；请更正原始账单后重算。\n" + "\n".join(conflicts)))
+                message=message))
+        result.slices[(store, period)].deduplication = deduplication
     return result
 
 
 def _promotion_periods(row: dict) -> list[str]:
+    if row.get("promotion_scope"):
+        return [] if row["promotion_scope"] == "pending" else [row["promotion_scope"]]
     months = sorted({p for key in ("file_name", "sheet") for p in infer_period_range(str(row.get(key) or ""))})
     if not months and row.get("period") and row["period"] != "(未知账期)":
         months = [row["period"]]
     return months
+
+
+def _statement_pending(frame: pl.DataFrame) -> pl.Expr:
+    return (pl.col("source_note").str.starts_with("对账流水待核对：").fill_null(False)
+            if "source_note" in frame.columns else pl.lit(False))
+
+
+def _statement_pending_scope(facts, metrics, store, period):
+    claim = pl.lit(False)
+    for metric in metrics:
+        claim = claim | claims(metric)
+    return facts.filter(_statement_pending(facts) & (claim.fill_null(False) | pl.col('major').is_null())
+        & pl.col('store').is_in([store, '(未知店铺)'])
+        & pl.col('period').is_in([period, '(未知账期)']))
 
 
 def _assert_reconciled(facts: pl.DataFrame, projected: pl.DataFrame) -> None:
@@ -920,7 +953,7 @@ def _project_scoped_live(
             if calculated_parts else _empty_spine_facts()
         )
         # Independent monthly control totals must never share a residual pool.
-        scope_columns = [c for c in ("file_name", "sheet", "period") if c in wide.columns]
+        scope_columns = [c for c in ("file_name", "sheet", "period", "promotion_scope") if c in wide.columns]
         grouped = wide.with_columns(pl.struct(scope_columns).map_elements(
             lambda row: "|".join(_promotion_periods(row)), return_dtype=pl.Utf8).alias("__promotion_scope"))
         for block in grouped.partition_by(["store", "__promotion_scope"], maintain_order=True):
@@ -928,7 +961,8 @@ def _project_scoped_live(
             months = [p for p in block["__promotion_scope"][0].split("|") if p]
             targets = projection_spine.filter(pl.col(SPINE_STORE) == store)
             allocated = calculated.filter(pl.col("store") == store)
-            if not months and targets[SPINE_PERIOD].n_unique() > 1:
+            if not months and (targets[SPINE_PERIOD].n_unique() > 1 or
+                               ("promotion_scope" in block.columns and "pending" in block["promotion_scope"].to_list())):
                 # The export does not certify a time window. Spreading its
                 # control over every live month invents a financial allocation.
                 # Keep the source unposted; the slice exposes a blocking issue.
@@ -1089,7 +1123,7 @@ def _mark_counted(facts: pl.DataFrame, spine_facts: pl.DataFrame,
     marked = facts.filter(~wide).join(normal_weights, on=["metric_id", "store", "period", "link_key"], how="left", nulls_equal=True)
     if facts.filter(wide).height:
         controls = facts.filter(wide)
-        scope_columns = [c for c in ("file_name", "sheet", "period") if c in controls.columns]
+        scope_columns = [c for c in ("file_name", "sheet", "period", "promotion_scope") if c in controls.columns]
         controls = controls.with_columns(pl.struct(scope_columns).map_elements(
             _promotion_periods, return_dtype=pl.List(pl.Utf8)).alias("__promotion_periods"))
         join_keys = ["metric_id", "store", "link_key"]
@@ -1129,7 +1163,7 @@ def _mark_counted(facts: pl.DataFrame, spine_facts: pl.DataFrame,
     return (
         marked
         .with_columns(
-            (claim & pl.col("__share__").is_not_null()).alias("counted"),
+            (claim & pl.col("__share__").is_not_null() & ~_statement_pending(marked)).alias("counted"),
         )
         .with_columns(
             pl.when(pl.col("counted"))
@@ -1270,6 +1304,14 @@ def _build_slice(
     unavailable = {
         m.id for m in model.metrics if m.source in completeness.missing
     }
+    pending_statement = _statement_pending_scope(facts,
+        [m for original in model.metrics if (m := original.for_platform(platform)) is not None], store, period)
+    if pending_statement.height:
+        unavailable.update(pending_statement['metric_id'].unique().to_list())
+        if 'settlement' not in completeness.missing:
+            completeness.missing.append('settlement')
+        completeness.arrived = [s for s in completeness.arrived if s != 'settlement']
+        completeness.reasons['settlement'] = '本店本月对账流水身份待核对，争议行已隔离，未计入账目'
     if pricing_blocks:
         if cost_coverage["expected"] > 0:
             unavailable.add("goods_cost")
@@ -1280,6 +1322,10 @@ def _build_slice(
     totals = calc.totals_by_metric(scoped_spine, only_linked=False)
     inapplicable = {m.id for m in model.metrics if m.for_platform(platform) is None}
     nodes = calc.evaluate_statement(model, totals, unavailable, inapplicable)
+    if pending_statement.height:
+        for node in nodes.values():
+            if not node.available and 'settlement' in node.missing_sources:
+                node.unavailable_reason = '本月相关对账流水身份待核对，争议行已隔离，尚不能核定完整金额'
     if pricing_blocks:
         for node in nodes.values():
             if "order_cost" in node.missing_sources:
@@ -1287,9 +1333,11 @@ def _build_slice(
                 node.unavailable_reason = "已算现有成本，支持人工确认金额"
     result = audit(model, scoped, scoped_reports, own, completeness, nodes)
     controls = facts.filter((pl.col("store") == store) & (pl.col("link_key") == STORE_WIDE_PRODUCT))
-    if not controls.is_empty() and spine.filter(pl.col(SPINE_STORE) == store)[SPINE_PERIOD].n_unique() > 1:
-        ambiguous = [r for r in controls.select("file_name", "sheet").unique().to_dicts()
-                     if not _promotion_periods(r)]
+    if not controls.is_empty():
+        multi_period = spine.filter(pl.col(SPINE_STORE) == store)[SPINE_PERIOD].n_unique() > 1
+        scope_columns = [c for c in ("file_name", "sheet", "period", "promotion_scope") if c in controls.columns]
+        ambiguous = [r for r in controls.select(scope_columns).unique().to_dicts()
+                     if not _promotion_periods(r) and (multi_period or r.get("promotion_scope") == "pending")]
         if ambiguous:
             from .types import Finding
             unavailable.update(controls["metric_id"].unique().to_list())

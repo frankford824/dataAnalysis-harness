@@ -1178,15 +1178,20 @@
   match_columns: [动账时间, 动账金额, 动账场景, 子订单号]
   parse: {header_row: 1}
   time_slots: {settle_date: settle_time}
+  sign: by_direction
+  direction_role: direction
+  direction_outflow_values: [出账, 支出]
+  direction_inflow_values: [入账, 收入]
   bindings:
     - {role: txn_id, columns: [动帐流水号, 动账流水号]}
     - {role: sub_order_id, columns: [子订单号], occurrence: 0}
     - {role: base_order_id, columns: [订单号], required: false}
-    # 动账金额自带符号：入账 379 行为正、出账 1,403 行为负，不需要取反。
+    # 新版 CSV 用绝对金额 + 动账方向；旧版带符号。方向明确时统一取绝对值后定符号。
     - {role: income, columns: [动账金额]}
     - {role: subject, columns: [动账场景]}
     - {role: direction, columns: [动账方向], required: false}
     - {role: charge_type, columns: [计费类型], required: false}
+    - {role: remark, columns: [备注], required: false}
     - {role: settle_time, columns: [动账时间]}
   note: >
     费项走字典，不再用一条「凡是有动账场景就算净额」的规则盖过去。业务这次把抖音的

@@ -212,7 +212,20 @@ def _store_wide_residual(
         f"保留推广表总花费 {float(declared):,.2f} 元作为全店托管控制总数"
         f"（推广表商品行合计 {detail_amount:,.2f} 元；最终差额按订单明细实际算入金额计算）"
     )
-    return pl.DataFrame(row).cast(kept.schema, strict=False)
+    control = pl.DataFrame(row).cast(kept.schema, strict=False)
+    # The total's date cell says 总计. Its scope comes from ALL dated detail,
+    # not from the filename or whichever order happens to link first.
+    date_role = template.time_slots.get("spend_date")
+    if date_role and date_role in kept.columns:
+        dated = _normalize_time(kept, template, [])
+        amounts = _number_expr("spend", kept.schema["spend"])
+        relevant = dated.filter(amounts.is_not_null())
+        days = relevant["spend_date"]
+        months = sorted({d.strftime("%Y-%m") for d in days if d is not None})
+        scope = months[0] if len(months) == 1 and not days.null_count() else "pending"
+        control = control.with_columns(pl.lit(scope).alias("promotion_scope"))
+        notes.append(f"推广控制总数按明细日期归月：{scope}；明细月份：{'、'.join(months) or '无有效日期'}")
+    return control
 
 
 # --------------------------------------------------------------------------- #
@@ -421,8 +434,20 @@ def _normalize_amounts(frame: pl.DataFrame, template: Template, notes: list[str]
     elif sign == "by_direction":
         role = template.direction_role
         if role not in frame.columns:
+            # Historic signed exports may not contain a direction column.
+            # Only reviewed templates explicitly listing inflows permit this.
+            if template.direction_inflow_values:
+                notes.append("未提供收支方向列，沿用原始金额符号")
+                return frame.with_columns(pl.lit(1.0).alias(AMOUNT_SIGN))
             raise NormalizeError(f"模板 {template.id} 的方向列角色 {role} 没有绑定")
         outflow = [str(v) for v in template.direction_outflow_values]
+        if template.direction_inflow_values:
+            direction = pl.col(role).cast(pl.String).fill_null("").str.strip_chars()
+            known = [*outflow, *template.direction_inflow_values]
+            monetary = [r for r in roles if r in {"income", "outgo", "amount"}]
+            nonzero = pl.any_horizontal([pl.col(r).fill_null(0) != 0 for r in monetary]) if monetary else pl.lit(False)
+            if frame.filter(nonzero & ~direction.is_in(known)).height:
+                raise NormalizeError(f"模板 {template.id} 的非零金额缺少有效收支方向，不能猜测金额正负")
         factor = (
             pl.when(pl.col(role).cast(pl.Utf8).str.strip_chars().is_in(outflow))
             .then(pl.lit(-1.0))
@@ -443,6 +468,8 @@ def _normalize_amounts(frame: pl.DataFrame, template: Template, notes: list[str]
             exprs.append((-col.abs()).alias(r))
         elif sign == "abs_positive":
             exprs.append(col.abs().alias(r))
+        elif sign == "by_direction" and template.direction_inflow_values:
+            exprs.append((col.abs() * factor).alias(r))
         else:
             exprs.append((col * factor).alias(r))
     return frame.with_columns(exprs).with_columns(factor.alias(AMOUNT_SIGN))

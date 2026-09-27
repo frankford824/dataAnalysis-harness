@@ -135,11 +135,14 @@ def _missing(payload: dict[str, Any], model: Model) -> list[dict[str, Any]]:
     out = []
     for name in payload.get("missing_sources") or []:
         hard = name in required
+        source = next((s for s in payload.get('sources', []) if s.get('name') == name), {})
+        reason = source.get('reason') or ''
+        review = '待核对' in reason or '算不出来' in reason or '解析' in reason
         out.append(_gap(
             "missing", "blocking" if hard else "info",
-            f"{name} 没交",
-            "结账要用这张表，缺了这个月的账算不全" if hard
-            else "不影响结账，但这一项会一直是 0",
+            f"{name} 待核对" if review else f"{name} 没交",
+            reason if review else ("结账要用这张表，缺了这个月的账算不全" if hard
+            else "不影响结账，但这一项会一直是 0"),
             source=name,
         ))
     return out

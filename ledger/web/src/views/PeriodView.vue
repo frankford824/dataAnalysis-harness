@@ -393,7 +393,7 @@ watch(
     <template v-else-if="info">
       <n-alert v-if="snap?.deduplication?.length" :type="snap.deduplication.some(d => d.status === 'conflict') ? 'error' : 'info'" :bordered="false" style="margin-bottom:16px">
         <strong>对账流水重复核查</strong>
-        <p>以下是本店全部已上传对账表的去重结果，行数不限定当前月份。重复流水只计一次，不同流水号的后续到账仍保留；原文件不修改。存在金额或身份冲突时，先核对再结账。</p>
+        <p>去重统计覆盖本店已上传的对账表；待核对提示按实际受影响账期列出。重复流水只计一次，不同流水号的后续到账仍保留；原文件不修改。争议行不计入账目，核对后才能结账。</p>
         <div v-for="(item, index) in snap.deduplication" :key="index" style="margin-top:6px;overflow-wrap:anywhere">{{ item.message }}</div>
       </n-alert>
       <n-alert v-if="snap?.file_errors?.length" type="error" :bordered="false" style="margin-bottom:16px">
@@ -531,7 +531,7 @@ watch(
                 :role="row.drillable?'button':undefined" :tabindex="row.drillable?0:undefined" :aria-label="row.drillable?`查看${row.name}明细`:undefined" @keydown.enter="openDrill(row)" @keydown.space.prevent="openDrill(row)" @click="openDrill(row)"
               >
                 <span>{{ row.name }}</span>
-                <span v-if="!row.available" class="na" :title="row.unavailable_reason && !snap.cost_coverage?.passed ? '现有资料已核算，成本金额可由人工确认' : row.unavailable_reason || ''">{{ row.unavailable_reason && !snap.cost_coverage?.passed && row.missing_sources?.length === 0 ? '可人工确认' : '资料未齐' }}</span>
+                <span v-if="!row.available" class="na" :title="row.unavailable_reason || ''">{{ row.unavailable_reason?.includes('待核对') ? '待核对' : row.unavailable_reason && !snap.cost_coverage?.passed && row.missing_sources?.length === 0 ? '可人工确认' : '资料未齐' }}</span>
                 <span v-else class="amt" :class="{ neg: row.value < 0 }">
                   {{ row.display === 'percent' ? percent(row.value) : money(row.value) }}
                 </span>

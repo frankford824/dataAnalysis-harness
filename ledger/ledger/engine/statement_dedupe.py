@@ -6,6 +6,8 @@ source anchors are never rewritten; normalization uses narrow shadow keys.
 """
 from collections import defaultdict
 from datetime import datetime
+from decimal import Decimal, InvalidOperation
+import re
 
 import polars as pl
 
@@ -29,6 +31,97 @@ def _id(frame, name):
     # Spreadsheet display wrappers are not part of identifiers. Never expand
     # scientific notation: the missing digits cannot be recovered from a float.
     return _text(frame, name).str.replace(r'^="(.*)"$', '$1').str.strip_chars("'`\" ")
+
+
+_SCIENTIFIC = re.compile(r"^\d+(?:\.\d+)?e[+-]?\d+$", re.I)
+
+
+def _shipping_reference(row):
+    """Only a verbatim waybill in the remark certifies a lost carrier prefix."""
+    original = row["_order"]
+    if row["_subject"] != "上门取件-支付快递费" or not row["_child"].isdigit():
+        return original
+    match = re.search(r"运单([A-Za-z]*\d+)(?!\w)", row["_remark"])
+    missing_corroborated = original == "" and f"订单{row['_child']}" in row["_remark"]
+    if match and (missing_corroborated or original in (match[1], re.sub(r"^[A-Za-z]+", "", match[1]))):
+        return match[1]
+    return original
+
+
+def _compatible_precision(damaged, exact):
+    """Compatibility only, never reconstruct an ID from an Excel float."""
+    if not _SCIENTIFIC.fullmatch(damaged) or not exact.isdigit():
+        return False
+    try:
+        value = Decimal(damaged)
+        digits = value.as_tuple()
+        # Fixed 15-digit Excel precision, not a tolerance widened by missing
+        # mantissa digits. Written trailing zeroes may disappear (e.g. ...085).
+        return (len(digits.digits) >= 8 and 0 < digits.exponent <= 20 and len(exact) > 15
+                and abs(value - Decimal(exact)) < Decimal(10) ** (len(exact) - 15))
+    except InvalidOperation:
+        return False
+
+
+def _corroborate_douyin(keys, ingestion, source, namespace):
+    """Replace shadow identity only with a unique full-precision source event.
+
+    Same store, parent, child, exact timestamp, subject and signed money are
+    mandatory. Two full event IDs with identical business fields are ambiguous.
+    Contradictory full-ID copies cannot certify a damaged copy either.
+    """
+    fields = ["_owner", "_order", "_child", "_time", "_subject", "_in", "_out", "_leg"]
+    if not keys['_event'].str.contains(r'(?i)^\d+(?:\.\d+)?e[+-]?\d+$').any():
+        return keys
+    records = keys.to_dicts()
+    index = defaultdict(dict)
+    versions = defaultdict(set)
+    for row in records:
+        event = row["_event"]
+        if event.isdigit() and row["_valid_money"]:
+            key = tuple(row[k] for k in fields)
+            index[key].setdefault(event, row)
+            versions[(row["_owner"], event, row["_leg"])].add(
+                (*key, row["_biz"], row["_remark"]))
+    matches = []
+    for row in records:
+        if not _SCIENTIFIC.fullmatch(row["_event"]) or not row["_valid_money"]:
+            continue
+        if not (re.fullmatch(r'\d{15,}(?:[A-Za-z]\w*)?', row["_child"])
+                and row["_order"] and row["_subject"] and row["_time"]):
+            continue
+        try:
+            datetime.fromisoformat(row["_time"])
+        except ValueError:
+            continue
+        candidates = index.get(tuple(row[k] for k in fields), {})
+        if len(candidates) != 1:
+            continue
+        event, full = next(iter(candidates.items()))
+        if len(versions[(row["_owner"], event, row["_leg"])]) != 1:
+            continue
+        distinct_export_versions = {row['_template'], full['_template']} == {'douyin_settlement_v1', 'douyin_settlement_v2'}
+        if not distinct_export_versions and any(row[k] and full[k] and row[k] != full[k] for k in ("_biz", "_remark")):
+            continue
+        if not _compatible_precision(row["_event"], event):
+            continue
+        matches.append({"item": row["_item"], "row": row["_row"],
+                        "verified_item": full["_item"], "verified_row": full["_row"], "event": event})
+        # Leave the original frame untouched; only deduplication shadow keys
+        # inherit the corroborating original's identity and optional wording.
+        row.update(_event=event, _biz=full["_biz"], _remark=full["_remark"], _precision=1)
+    if matches:
+        samples = []
+        for match in matches[:12]:
+            old, full = ingestion.items[match['item']], ingestion.items[match['verified_item']]
+            samples.append(dict(file_sha=old.ref.sha256, sheet=old.ref.sheet,
+                row_no=int(old.frame[ANCHOR_ROW][match['row']]),
+                verified_file_sha=full.ref.sha256, verified_sheet=full.ref.sheet,
+                verified_row_no=int(full.frame[ANCHOR_ROW][match['verified_row']]), event_id=match['event']))
+        ingestion.deduplication.append(dict(source=source.id, namespace=namespace,
+            status="corroborated", rows=len(matches), removed_rows=0, samples=samples,
+            message=f"{len(matches)} 行精度受损流水已由完整原账单逐笔唯一互证，优先保留完整流水，未猜补原始编号。"))
+    return pl.from_dicts(records, schema=keys.schema)
 
 
 def dedupe_statements(ingestion, source):
@@ -62,10 +155,13 @@ def dedupe_statements(ingestion, source):
             part = frame.select(
                 pl.int_range(0, pl.len(), dtype=pl.UInt32).alias("_row"),
                 pl.lit(index, dtype=pl.UInt32).alias("_item"),
+                pl.lit(item.template.id).alias('_template'),
                 owner.alias("_owner"), event.alias("_event"),
                 (direction if item.template.event_directional else pl.lit("event")).alias("_leg"),
                 _id(frame, "txn_id").alias("_txn"),
                 _id(frame, "base_order_id").alias("_order"),
+                _id(frame, "sub_order_id").alias("_child"),
+                pl.lit(0, dtype=pl.Int64).alias("_precision"),
                 _text(frame, "settle_time").alias("_time"),
                 _text(frame, "subject").alias("_subject"),
                 _text(frame, "remark").alias("_remark"),
@@ -81,7 +177,14 @@ def dedupe_statements(ingestion, source):
         if not parts:
             continue
         keys = pl.concat(parts, how="vertical_relaxed")
-        economic = ["_order", "_time", "_subject", "_biz", "_remark", "_in", "_out"]
+        if namespace == "douyin_settlement":
+            keys = keys.with_columns(pl.when((pl.col('_subject') == '货款结算入账') &
+                pl.col('_remark').is_in(['订单结算', '商家货款入账'])).then(pl.lit('货款结算入账'))
+                .otherwise(pl.col('_remark')).alias('_remark'))
+            keys = keys.with_columns(pl.struct("_order", "_subject", "_child", "_remark").map_elements(
+                _shipping_reference, return_dtype=pl.String).alias("_order"))
+            keys = _corroborate_douyin(keys, ingestion, source, namespace)
+        economic = ["_order", "_child", "_time", "_subject", "_biz", "_remark", "_in", "_out"]
         identity = ["_owner", "_event", "_leg"]
         complete = pl.col("_valid_money") & (pl.col("_time") != "")
         atomic = keys.filter(pl.col("_event") != "")
@@ -106,7 +209,7 @@ def dedupe_statements(ingestion, source):
 
         # Conflicts remain traceable; completeness blocks authoritative totals.
         safe = atomic.join(conflicts.select(identity), on=identity, how="anti")
-        strong_keep = safe.unique(subset=identity, keep="first", maintain_order=True).select("_item", "_row")
+        strong_keep = safe.sort("_precision", maintain_order=True).unique(subset=identity, keep="first", maintain_order=True).select("_item", "_row")
         conflict_keep = atomic.join(conflicts.select(identity), on=identity, how="inner").select("_item", "_row")
         fallback = keys.filter(pl.col("_event") == "")
         composite = ["_owner", "_txn", *economic]
@@ -127,8 +230,15 @@ def dedupe_statements(ingestion, source):
             ingestion.validation_errors.setdefault(source.id, []).append(message)
             ingestion.deduplication.append(dict(source=source.id, namespace=namespace,
                 status="conflict", events=unresolved_count, removed_rows=0, message=message))
+        pending = pl.concat([conflict_keep, fallback.filter(~complete & ~non_event).select("_item", "_row")])
         keep = pl.concat([strong_keep, conflict_keep, weak_keep, unresolved_keep]).sort("_item", "_row")
         for index, item in items:
+            pending_ids = pending.filter(pl.col("_item") == index)["_row"].to_list()
+            if pending_ids:
+                old_note = pl.col("source_note") if "source_note" in item.frame.columns else pl.lit(None, dtype=pl.String)
+                item.frame = item.frame.with_columns(pl.when(pl.int_range(0, pl.len()).is_in(pending_ids)).then(
+                    pl.concat_str([pl.lit("对账流水待核对：身份冲突或证据不足，未计入账目"), old_note], separator="；", ignore_nulls=True)
+                ).otherwise(old_note).alias("source_note"))
             row_ids = keep.filter(pl.col("_item") == index)["_row"]
             removed = item.frame.height - len(row_ids)
             if not removed:

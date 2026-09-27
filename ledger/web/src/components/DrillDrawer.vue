@@ -274,7 +274,8 @@ function close() {
           >
             另有 {{ count(data.uncounted.rows) }} 行、合计
             <span class="num">{{ money(data.uncounted.amount) }}</span>
-            没进这家店的账——多半是全公司的表里属于别家店铺的行。切到「没进账」能看。
+            未计入当前店铺本月账目，可能涉及其他店铺、其他账期、未匹配订单或流水待核对。
+            切到「没进账」查看逐行原因；不能把这些金额直接加到看板。
           </n-alert>
 
           <n-table v-if="data.by_subject?.length" size="small" :bordered="false">
@@ -358,6 +359,9 @@ function close() {
                 <td class="xs">
                   {{ r.minor || r.subject || r.metric }}
                   <div v-if="r.classify_via" class="xs muted">{{ r.classify_via }}</div>
+                  <div v-if="r.source_note" class="xs" :class="r.source_note.startsWith('对账流水待核对：') ? 'neg' : 'muted'">
+                    {{ r.source_note }}
+                  </div>
                 </td>
                 <td class="right num nowrap" :class="{ neg: r.amount < 0 }">{{ money(r.amount) }}</td>
                 <td class="right num nowrap" :class="{ neg: r.contribution < 0 }">

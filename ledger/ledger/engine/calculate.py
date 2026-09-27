@@ -32,7 +32,7 @@ FACT_COLUMNS = (
     "link_key", "linked", "amount", "subject", "major", "minor",
     "count_without_order", "classify_via",
     "file_sha", "file_name", "sheet", "row_no",
-    "order_id", "internal_order_id", "sku", "source_note",
+    "order_id", "internal_order_id", "sku", "source_note", "promotion_scope",
     # 投影之后才知道，见 runtime._mark_counted：这一行有没有算进损益表、算进去多少。
     "counted", "contribution",
 )
@@ -234,6 +234,10 @@ def evaluate_metric(
         period = pl.when(pl.col(LINK_KEY) == STORE_WIDE_PRODUCT).then(
             pl.coalesce(own_period, pl.lit(period_hint or None, dtype=pl.Utf8))
         ).otherwise(period)
+    if "promotion_scope" in frame.columns:
+        period = pl.when(pl.col("promotion_scope").str.contains(r"^\d{4}-\d{2}$").fill_null(False)).then(
+            pl.col("promotion_scope")
+        ).when(pl.col("promotion_scope") == "pending").then(pl.lit(None, dtype=pl.String)).otherwise(period)
 
     own_store = _own_store(frame, store_names or {}, notes if not shared_table else None)
     store = (
@@ -330,6 +334,9 @@ def evaluate_metric(
             supplied_zero = supplied_zero & (pl.col(COL_MAJOR) == metric.major)
         keep = keep | supplied_zero
     keep = keep | erp_exempt
+    # Missing/invalid amounts are not evidence of zero. Preserve quarantined
+    # anchors even when fill_null(0) would otherwise discard the entire row.
+    keep = keep | source_note.str.starts_with('对账流水待核对：').fill_null(False)
     source_note = pl.when(erp_exempt).then(pl.concat_str([
         source_note, pl.when(is_cancelled(frame)).then(pl.lit("商品已取消，成本计 0"))
         .when(pl.col("__cost_exempt_reason").is_not_null() if "__cost_exempt_reason" in frame.columns else pl.lit(False))
@@ -382,6 +389,7 @@ def evaluate_metric(
             for role in ("order_id", "internal_order_id", "sku")
         ],
         source_note.alias("source_note"),
+        (pl.col("promotion_scope") if "promotion_scope" in frame.columns else pl.lit(None, dtype=pl.String)).alias("promotion_scope"),
     )
     return facts, notes
 
@@ -434,6 +442,7 @@ def _empty_facts() -> pl.DataFrame:
         "count_without_order": pl.Boolean, "classify_via": pl.Utf8,
         "file_sha": pl.Utf8, "file_name": pl.Utf8, "sheet": pl.Utf8, "row_no": pl.Int64,
         "order_id": pl.Utf8, "internal_order_id": pl.Utf8, "sku": pl.Utf8, "source_note": pl.Utf8,
+        "promotion_scope": pl.Utf8,
         "counted": pl.Boolean, "contribution": pl.Float64,
     }
     return pl.DataFrame(schema=schema)
