@@ -23,6 +23,7 @@ import PageHead from '../components/PageHead.vue'
 import PeriodStrip from '../components/PeriodStrip.vue'
 import PricingPending from '../components/PricingPending.vue'
 import { suggestedManualPayout } from '../commissionPayout'
+import { periodDrillTarget } from '../periodDrill'
 import { count, money, percent, stamp } from '../format'
 import { useApp } from '../store'
 
@@ -251,7 +252,7 @@ async function reopen() {
 }
 
 function openDrill(row, only = 'counted') {
-  if (row.unavailable_reason && pricingPanel.value) { pricingPanel.value.open(); return }
+  if (periodDrillTarget(row) === 'pricing' && pricingPanel.value) { pricingPanel.value.open(); return }
   if (!row.drillable || !snap.value?.run_id) return
   drill.value = {
     runId: snap.value.run_id, node: row.id, name: row.name,

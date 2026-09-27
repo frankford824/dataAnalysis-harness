@@ -1661,7 +1661,9 @@ def _node_value(run_id: int, node_id: str) -> float | None:
     state = workspace().state_by_run(run_id)
     for line in ((state.result or {}).get("statement") or []) if state else []:
         if line.get("id") == node_id:
-            return line.get("value")
+            # Unavailable group nodes can carry an internal zero accumulator.
+            # It is not an authoritative reported zero or a reconciliation gap.
+            return line.get("value") if line.get("available", True) else None
     return None
 
 

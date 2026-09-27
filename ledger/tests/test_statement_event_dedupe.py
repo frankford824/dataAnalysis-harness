@@ -306,6 +306,48 @@ def test_received_but_conflicting_source_is_not_called_missing_upload():
     assert '待核对' in str(entries)
 
 
+@pytest.mark.parametrize('reverse',[False,True])
+def test_complete_event_across_douyin_versions_accepts_complementary_metadata(reverse):
+    old=item([douyin_row(remark='商家货款入账')],'old','douyin_settlement_v2')
+    new=item([douyin_row(sub_order_id=None,remark='运费单结算')],'monthly','douyin_settlement_v1')
+    ing=dedup(*([new,old] if reverse else [old,new]))
+    assert not ing.validation_errors
+    assert sum(i.frame.height for i in ing.items)==1
+
+
+@pytest.mark.parametrize('changed',[{'base_order_id':'different'}, {'sub_order_id':'different'}, {'income':12.8}])
+def test_cross_version_metadata_does_not_hide_real_conflict(changed):
+    ing=dedup(item([douyin_row(remark='商家货款入账')],'old','douyin_settlement_v2'),
+              item([douyin_row(remark='订单结算',**changed)],'monthly','douyin_settlement_v1'))
+    assert ing.validation_errors
+    assert sum(i.frame.height for i in ing.items)==2
+
+
+@pytest.mark.parametrize('subject,child,parent,remark',[
+    ('偏远地区物流服务','AWE202607132456730031','6954408957673673998','偏远地区配送费_PK7661893509678465306_YT0055441899497'),
+    ('在线寄件费','SCP-R7670736723303612724','321282757476038','配送费（预扣）_321282757476038'),
+])
+def test_charge_reference_is_not_mistaken_for_an_order_child(subject,child,parent,remark):
+    base=douyin_row(base_order_id=parent,sub_order_id=None,subject=subject,income=-3.5,remark=remark)
+    old={**base,'txn_id':'2.02608020914033e+27','sub_order_id':child}
+    new={**base,'base_order_id':None if subject=='在线寄件费' else parent}
+    ing=dedup(item([old],'old','douyin_settlement_v2'),item([new],'new','douyin_settlement_v1'))
+    assert not ing.validation_errors
+    assert sum(i.frame.height for i in ing.items)==1
+    wrong={**new,'remark':remark+'-different'}
+    ing=dedup(item([old],'old','douyin_settlement_v2'),item([wrong],'new','douyin_settlement_v1'))
+    assert ing.validation_errors
+
+
+@pytest.mark.parametrize('available,wanted',[(False,None),(True,0.)])
+def test_unavailable_report_value_is_not_a_false_zero_in_drill(monkeypatch,available,wanted):
+    from types import SimpleNamespace
+    from ledger import api
+    state=SimpleNamespace(result={'statement':[{'id':'n_receipt','value':0.,'available':available}]})
+    monkeypatch.setattr(api,'workspace',lambda:SimpleNamespace(state_by_run=lambda _:state))
+    assert api._node_value(1,'n_receipt') is wanted or api._node_value(1,'n_receipt')==wanted
+
+
 def test_conflict_is_visible_before_payout_and_cannot_be_ignored_on_close(tmp_path):
     from test_commission_reports import fixture
     from ledger.workspace import WorkspaceError

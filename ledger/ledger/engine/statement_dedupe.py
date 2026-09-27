@@ -39,6 +39,10 @@ _SCIENTIFIC = re.compile(r"^\d+(?:\.\d+)?e[+-]?\d+$", re.I)
 def _shipping_reference(row):
     """Only a verbatim waybill in the remark certifies a lost carrier prefix."""
     original = row["_order"]
+    if row['_subject'] == '在线寄件费' and (not row['_child'] or re.fullmatch(r'SCP-R\d+',row['_child'])):
+        match = re.fullmatch(r'配送费（预扣）_(\d+)', row['_remark'])
+        if match and original in ('', match[1]):
+            return match[1]
     if row["_subject"] != "上门取件-支付快递费" or not row["_child"].isdigit():
         return original
     match = re.search(r"运单([A-Za-z]*\d+)(?!\w)", row["_remark"])
@@ -87,7 +91,9 @@ def _corroborate_douyin(keys, ingestion, source, namespace):
     for row in records:
         if not _SCIENTIFIC.fullmatch(row["_event"]) or not row["_valid_money"]:
             continue
-        if not (re.fullmatch(r'\d{15,}(?:[A-Za-z]\w*)?', row["_child"])
+        charge_reference = (not row['_child'] and row['_order'].isdigit() and row['_remark']
+                            and row['_subject'] in ['偏远地区物流服务','在线寄件费'])
+        if not ((re.fullmatch(r'\d{15,}(?:[A-Za-z]\w*)?', row["_child"]) or charge_reference)
                 and row["_order"] and row["_subject"] and row["_time"]):
             continue
         try:
@@ -98,6 +104,8 @@ def _corroborate_douyin(keys, ingestion, source, namespace):
         if len(candidates) != 1:
             continue
         event, full = next(iter(candidates.items()))
+        if charge_reference and row['_remark'] != full['_remark']:
+            continue
         if len(versions[(row["_owner"], event, row["_leg"])]) != 1:
             continue
         distinct_export_versions = {row['_template'], full['_template']} == {'douyin_settlement_v1', 'douyin_settlement_v2'}
@@ -122,6 +130,46 @@ def _corroborate_douyin(keys, ingestion, source, namespace):
             status="corroborated", rows=len(matches), removed_rows=0, samples=samples,
             message=f"{len(matches)} 行精度受损流水已由完整原账单逐笔唯一互证，优先保留完整流水，未猜补原始编号。"))
     return pl.from_dicts(records, schema=keys.schema)
+
+
+def _compatible_export_metadata(keys):
+    """A full event ID can reconcile optional metadata across reviewed layouts.
+
+    Never resolve contradictory parent/child IDs, time, subject or money. The
+    two official layouts use different descriptive remark vocabularies and one
+    omits certain charge-reference child IDs. Missing is not contradictory.
+    """
+    reviewed = ['douyin_settlement_v1', 'douyin_settlement_v2']
+    identity = ['_owner', '_event', '_leg']
+    economic = ['_order', '_time', '_subject', '_in', '_out']
+    candidates = keys.filter(pl.col('_template').is_in(reviewed) &
+        pl.col('_event').str.contains(r'^\d+$') & pl.col('_valid_money') & (pl.col('_time') != ''))
+    groups = candidates.group_by(identity).agg(
+        pl.col('_template').n_unique().alias('_layouts'),
+        pl.struct(economic).n_unique().alias('_economics'),
+        pl.col('_child').filter(pl.col('_child') != '').n_unique().alias('_children'),
+        pl.col('_child').filter(pl.col('_child') != '').first().fill_null('').alias('_canonical_child'),
+        pl.col('_biz').filter(pl.col('_biz') != '').n_unique().alias('_businesses'),
+        pl.col('_biz').filter(pl.col('_biz') != '').first().fill_null('').alias('_canonical_biz'),
+    ).filter((pl.col('_layouts') == 2) & (pl.col('_economics') == 1)
+             & (pl.col('_children') <= 1) & (pl.col('_businesses') <= 1))
+    # A third/unreviewed layout or an incomplete copy cannot piggyback on the
+    # compatible pair to erase a genuine conflict.
+    blockers = keys.filter(~pl.col('_template').is_in(reviewed) | ~pl.col('_valid_money') | (pl.col('_time') == '')).select(identity)
+    within_layout = candidates.group_by([*identity, '_template']).agg(
+        pl.col('_remark').filter(pl.col('_remark') != '').n_unique().alias('_remarks')
+    ).filter(pl.col('_remarks') > 1).select(identity)
+    groups = groups.join(pl.concat([blockers, within_layout]), on=identity, how='anti')
+    if groups.is_empty():
+        return keys
+    keys = keys.join(groups.select(*identity, '_canonical_child', '_canonical_biz'), on=identity,
+                     how='left', maintain_order='left')
+    return keys.with_columns(
+        pl.coalesce('_canonical_child','_child').alias('_child'),
+        pl.coalesce('_canonical_biz','_biz').alias('_biz'),
+        pl.when(pl.col('_canonical_child').is_not_null()).then(pl.lit('已核对的跨版本描述'))
+          .otherwise(pl.col('_remark')).alias('_remark'),
+    ).drop('_canonical_child','_canonical_biz')
 
 
 def dedupe_statements(ingestion, source):
@@ -183,6 +231,14 @@ def dedupe_statements(ingestion, source):
                 .otherwise(pl.col('_remark')).alias('_remark'))
             keys = keys.with_columns(pl.struct("_order", "_subject", "_child", "_remark").map_elements(
                 _shipping_reference, return_dtype=pl.String).alias("_order"))
+            # These layouts place charge references, not order children, in
+            # the child column. Preserve them in raw frames; the comparable
+            # economic reference is the unchanged parent/remark reference.
+            keys = keys.with_columns(pl.when(
+                ((pl.col('_subject') == '偏远地区物流服务') & pl.col('_child').str.contains(r'^AWE\d+$'))
+                | ((pl.col('_subject') == '在线寄件费') & pl.col('_child').str.contains(r'^SCP-R\d+$'))
+            ).then(pl.lit('')).otherwise(pl.col('_child')).alias('_child'))
+            keys = _compatible_export_metadata(keys)
             keys = _corroborate_douyin(keys, ingestion, source, namespace)
         economic = ["_order", "_child", "_time", "_subject", "_biz", "_remark", "_in", "_out"]
         identity = ["_owner", "_event", "_leg"]
