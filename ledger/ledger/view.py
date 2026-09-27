@@ -584,6 +584,7 @@ def drill(facts: pl.DataFrame | str | Path, model: Model, node_id: str,
                     "amount", "subject", "minor", "classify_via", "file_name",
                     "sheet", "row_no", "major", "file_sha", "order_id", "internal_order_id", "sku", "source_note",
                     "record_type", "closing_run_id", "closing_at", "closing_by",
+                    "booking_status", "allocation_control", "source_period",
                 )
                 if column in columns
             ]

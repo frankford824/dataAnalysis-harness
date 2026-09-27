@@ -71,7 +71,7 @@ def test_equal_totals_cannot_hide_wrong_source_month():
     with pytest.raises(CalculateError,match='原表发生月份'):_assert_reconciled(facts,projected)
 
 
-def test_indirect_rows_are_disclosed_without_being_counted_twice():
+def test_indirect_rows_are_disclosed_without_being_counted_twice(tmp_path):
     from ledger.view import drill,fees_csv
     from test_promotion_dates import calculate
     result=calculate([['P1',10,'2026-07-01'],['P2',20,'2026-07-01'],['-',40,'总计']],platform='pdd')
@@ -84,6 +84,11 @@ def test_indirect_rows_are_disclosed_without_being_counted_twice():
     assert shown['uncounted']['rows']==0
     assert shown['sample'][0]['allocation_control']
     assert '已含全店分摊' in fees_csv(facts,result.model)
+    path=tmp_path/'archived-facts.parquet'
+    facts.write_parquet(path)
+    for mode in ('counted','allocated','uncounted','all'):
+        assert drill(path,result.model,'ad',only=mode)==drill(facts,result.model,'ad',only=mode)
+    assert fees_csv(path,result.model)==fees_csv(facts,result.model)
 
 
 def payment_fixture(changes=None,original=True,legacy_order=False,competing=False):
