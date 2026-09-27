@@ -8,6 +8,8 @@ from collections import defaultdict
 from datetime import datetime
 from decimal import Decimal, InvalidOperation
 import re
+import json
+import hashlib
 
 import polars as pl
 
@@ -287,6 +289,28 @@ def dedupe_statements(ingestion, source):
             ingestion.deduplication.append(dict(source=source.id, namespace=namespace,
                 status="conflict", events=unresolved_count, removed_rows=0, message=message))
         pending = pl.concat([conflict_keep, fallback.filter(~complete & ~non_event).select("_item", "_row")])
+        evidence_by_row = {}
+        pending_keys = keys.join(pending,on=['_item','_row'],how='inner')
+        pending_keys=pending_keys.with_columns(pl.when(pl.col('_event')=='').then(
+            pl.concat_str(pl.col('_item').cast(pl.String),pl.lit(':'),pl.col('_row').cast(pl.String)))
+            .otherwise(pl.col('_event')).alias('_pending_identity'))
+        for group in pending_keys.partition_by(['_owner','_pending_identity','_leg'],maintain_order=True):
+            members=[]
+            for r in group.iter_rows(named=True):
+                original=ingestion.items[r['_item']]
+                members.append(dict(file_sha=original.ref.sha256,file_name=original.ref.filename,
+                    template_id=original.template.id,namespace=namespace,
+                    order_label=('订单号' if original.template.id=='douyin_settlement_v1' else
+                                 '关联订单号' if original.template.id=='douyin_settlement_v2' else '订单引用'),
+                    sheet=original.ref.sheet or '',row_no=int(original.frame[ANCHOR_ROW][r['_row']]),
+                    event_id=r['_event'],order=r['_order'],child=r['_child'],time=r['_time'],
+                    income=r['_in'] if r['_valid_money'] else None,outgo=r['_out'] if r['_valid_money'] else None,
+                    subject=r['_subject'],valid=bool(r['_valid_money'])))
+            members.sort(key=lambda r:(r['file_sha'],r['sheet'],r['row_no']))
+            fingerprint=hashlib.sha256(json.dumps(members,ensure_ascii=False,sort_keys=True).encode()).hexdigest()
+            doc=json.dumps(dict(group_id=fingerprint,namespace=namespace,leg=group['_leg'][0],members=members[:50],
+                                truncated=len(members)>50),ensure_ascii=False)
+            for r in group.iter_rows(named=True):evidence_by_row[(r['_item'],r['_row'])]=doc
         keep = pl.concat([strong_keep, conflict_keep, weak_keep, unresolved_keep]).sort("_item", "_row")
         for index, item in items:
             pending_ids = pending.filter(pl.col("_item") == index)["_row"].to_list()
@@ -295,6 +319,8 @@ def dedupe_statements(ingestion, source):
                 item.frame = item.frame.with_columns(pl.when(pl.int_range(0, pl.len()).is_in(pending_ids)).then(
                     pl.concat_str([pl.lit("对账流水待核对：身份冲突或证据不足，未计入账目"), old_note], separator="；", ignore_nulls=True)
                 ).otherwise(old_note).alias("source_note"))
+                item.frame=item.frame.with_columns(pl.Series('statement_evidence',
+                    [evidence_by_row.get((index,pos)) for pos in range(item.frame.height)],dtype=pl.String))
             row_ids = keep.filter(pl.col("_item") == index)["_row"]
             removed = item.frame.height - len(row_ids)
             if not removed:

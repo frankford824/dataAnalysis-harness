@@ -409,6 +409,10 @@ def _store_wide_periods(source_facts: pl.DataFrame) -> tuple[str, ...]:
     """
     if source_facts.is_empty():
         return ()
+    if 'promotion_scope' in source_facts.columns:
+        explicit = source_facts['promotion_scope'].drop_nulls().unique().to_list()
+        if explicit:
+            return tuple(sorted(p for p in explicit if p != 'pending'))
     months: list[str] = []
     seen: set[str] = set()
     for column in ("file_name", "sheet"):

@@ -38,6 +38,13 @@ function query(params) {
 }
 
 export const api = {
+  statementReview: (storeId,period,runId,offset=0) => call(`/api/stores/${encodeURIComponent(storeId)}/periods/${encodeURIComponent(period)}/statement-review${query({run_id:runId,offset})}`),
+  confirmStatementReview: (storeId,period,body) => call(`/api/stores/${encodeURIComponent(storeId)}/periods/${encodeURIComponent(period)}/statement-review`,{
+    method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(body),
+  }),
+  revokeStatementReview: (storeId,period,body) => call(`/api/stores/${encodeURIComponent(storeId)}/periods/${encodeURIComponent(period)}/statement-review/revoke`,{
+    method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(body),
+  }),
   pricingStatus: (id, period, init) => call(`/api/stores/${encodeURIComponent(id)}/pricing-status${query({period})}`, init),
   pricingGaps: (runId, params, options = {}) => call(`/api/runs/${runId}/pricing-gaps${query(params)}`, options),
   coverageGaps: (runId, params, options = {}) => call(`/api/runs/${runId}/coverage-gaps${query(params)}`, options),

@@ -84,6 +84,7 @@ class Ingested:
     #: 判定为人工加工产物时的依据。非空表示这张表不参与算钱。
     derivative: Derivative | None = None
     error: str = ""
+    business_fingerprint: str = ""
 
     @property
     def ok(self) -> bool:
@@ -99,6 +100,7 @@ class Ingestion:
     source_sync_pending: bool = False
     validation_errors: dict[str, list[str]] = field(default_factory=dict)
     deduplication: list[dict] = field(default_factory=list)
+    statement_decisions: dict = field(default_factory=dict)
 
     @property
     def known(self) -> list[Ingested]:
@@ -245,7 +247,11 @@ def ingest(
 
     for batch in batches:
         result.items.extend(batch)
+    from .payment_evidence import resolve_supplemental_payments
+    resolve_supplemental_payments(result)
     _dedupe_across_files(result, model)
+    from .promotion_guard import overlaps
+    overlaps(result)
     return result
 
 
@@ -321,6 +327,7 @@ def _save_ingest_cache(target: Path, items: list[Ingested]) -> None:
                 "controls": [asdict(control) for control in item.controls],
                 "derivative": asdict(item.derivative) if item.derivative else None,
                 "error": item.error,
+                "business_fingerprint":item.business_fingerprint,
                 "frame": frame_name,
             })
         (temp / "meta.json").write_text(
@@ -375,6 +382,7 @@ def _load_ingest_cache(
             frame = _attach_hints(frame, hint_store, hint_period or (sheet_periods[0] if sheet_periods else None))
         out.append(Ingested(
             ref=ref,
+            business_fingerprint=raw.get('business_fingerprint',''),
             recognition=recognition,
             rows=int(raw.get("rows", 0)),
             frame=frame,
@@ -512,6 +520,9 @@ def _ingest_file(
             items.append(item)
             continue
         item.notes.extend(notes)
+        if template.source=='promotion':
+            from .promotion_guard import business_fingerprint
+            item.business_fingerprint=business_fingerprint(table)
         item.controls = verify_controls(table, frame, template)
         if item.controls:
             item.notes.append(summarize_controls(item.controls))
@@ -803,13 +814,26 @@ def run(ingestion: Ingestion, platform: str = "*") -> RunResult:
             )
 
     facts = pl.concat(fact_parts, how="vertical_relaxed") if fact_parts else calc._empty_facts()
+    from ..statement_review import bind_scopes, apply_to_facts
+    facts=bind_scopes(facts,metrics)
+    facts=apply_to_facts(facts,ingestion.statement_decisions)
 
     # 投影到脊柱。源事实是证据链（一行一条源记录，带文件行号），脊柱事实是口径
     # （一行一条订单记录，含分摊）。损益表从脊柱事实出数，否则主订单级的钱会被
     # 每个子订单各算一遍。
     spine_parts: list[pl.DataFrame] = []
     projections: dict[str, Projection] = {}
-    projectable = facts.filter((pl.col("store") != "(未知店铺)") & ~_statement_pending(facts))
+    # Product-only exports without any certified source month must not inherit
+    # the first product match when the order spine spans several months.
+    if not facts.is_empty():
+        multi=spine.frame.group_by(SPINE_STORE).agg(pl.col(SPINE_PERIOD).n_unique().alias('__months'))
+        owners=multi.filter(pl.col('__months')>1)[SPINE_STORE].to_list()
+        unknown=(pl.col('source_id')=='promotion') & pl.col('source_period').is_null() & (pl.col('link_key')!=STORE_WIDE_PRODUCT) & pl.col('store').is_in(owners)
+        if facts.filter(unknown).height:
+            message='推广证据待核对：原表及文件范围没有可验证月份，禁止跟随首个商品订单跨月入账'
+            facts=facts.with_columns(pl.when(unknown).then(pl.lit(message)).otherwise(pl.col('source_note')).alias('source_note'))
+            eval_errors.setdefault('promotion',[]).append(message)
+    projectable = facts.filter((pl.col("store") != "(未知店铺)") & ~_statement_pending(facts) & ~_promotion_pending(facts))
     for metric in metrics:
         if not (metric.link and metric.link.to) or metric.posting_basis in {"transaction", "order_number"}:
             proj = project_transactions(projectable, metric, spine)
@@ -825,6 +849,7 @@ def run(ingestion: Ingestion, platform: str = "*") -> RunResult:
         pl.concat(spine_parts, how="diagonal_relaxed") if spine_parts else _empty_spine_facts()
     )
     facts = _mark_counted(facts, spine_facts, metrics)
+    facts = _promotion_booking_evidence(facts)
     _assert_reconciled(facts, spine_facts)
     classify_report = merge_reports(classify_reports)
 
@@ -855,7 +880,8 @@ def run(ingestion: Ingestion, platform: str = "*") -> RunResult:
                            f"{r['file_name']} · {r['sheet'] or ''} 第{r['row_no']}行"
                            for r in anchors.head(8).to_dicts()))
             deduplication.append(dict(source='settlement', status='conflict', events=anchors.height,
-                                      removed_rows=0, message=message))
+                removed_rows=0, message=message,groups=[json.loads(v) for v in
+                    pending['statement_evidence'].drop_nulls().unique().to_list()] if 'statement_evidence' in pending.columns else []))
             result.slices[(store, period)].audit.findings.append(Finding(
                 "statement_identity", "对账流水身份待核对", passed=False, blocking=True,
                 message=message))
@@ -877,6 +903,36 @@ def _statement_pending(frame: pl.DataFrame) -> pl.Expr:
             if "source_note" in frame.columns else pl.lit(False))
 
 
+def _promotion_pending(frame):
+    return (pl.col('source_note').str.starts_with('推广证据待核对：').fill_null(False)
+            if 'source_note' in frame.columns else pl.lit(False))
+
+
+def _promotion_booking_evidence(facts):
+    """Explain indirect inclusion without adding the source amount twice."""
+    facts = facts.with_columns(pl.when(pl.col('counted')).then(pl.lit('direct'))
+        .otherwise(pl.lit('unposted')).alias('booking_status'),pl.lit(None,dtype=pl.String).alias('allocation_control'))
+    if facts.is_empty() or 'file_sha' not in facts.columns:
+        return facts
+    controls = facts.filter((pl.col('source_id')=='promotion') & pl.col('counted')
+                           & (pl.col('link_key')==STORE_WIDE_PRODUCT))
+    if controls.is_empty():
+        return facts
+    keys=['store','period','file_sha','sheet']
+    refs=controls.group_by(keys).agg(pl.concat_str(pl.col('file_name'),pl.lit(' · '),
+        pl.col('sheet').fill_null(''),pl.lit(' · 第'),pl.col('row_no').cast(pl.String),pl.lit('行'))
+        .str.join('；').alias('__control_ref'))
+    joined=facts.join(refs,on=keys,how='left',maintain_order='left')
+    indirect=(pl.col('source_id')=='promotion') & ~pl.col('counted') & pl.col('__control_ref').is_not_null()
+    return joined.with_columns(
+        pl.when(indirect).then(pl.lit('allocated')).otherwise(pl.col('booking_status')).alias('booking_status'),
+        pl.when(indirect).then(pl.col('__control_ref')).otherwise(pl.col('allocation_control')).alias('allocation_control'),
+        pl.when(indirect).then(pl.concat_str([pl.col('source_note'),
+            pl.lit('未直接匹配原商品订单；已包含在本月全店推广分摊，不得重复加总。控制依据：'),
+            pl.col('__control_ref')],separator='；',ignore_nulls=True)).otherwise(pl.col('source_note')).alias('source_note'),
+    ).drop('__control_ref')
+
+
 def _statement_pending_scope(facts, metrics, store, period):
     claim = pl.lit(False)
     for metric in metrics:
@@ -890,6 +946,11 @@ def _assert_reconciled(facts: pl.DataFrame, projected: pl.DataFrame) -> None:
     """Never publish a new run whose posted evidence disagrees with its totals."""
     if facts.is_empty() and projected.is_empty():
         return
+    if {'source_period','counted'} <= set(facts.columns):
+        wrong_month = facts.filter(pl.col('counted') & (pl.col('source_id')=='promotion')
+            & pl.col('source_period').is_not_null() & (pl.col('source_period') != pl.col('period')))
+        if wrong_month.height:
+            raise calc.CalculateError('推广入账月份与原表发生月份不一致，已阻止发布；控制总额对齐不能覆盖跨月错误')
     keys = ["store", "period", "metric_id"]
     source = facts.group_by(keys).agg(pl.col("contribution").sum().alias("__evidence"))
     totals = projected.group_by(keys).agg(pl.col("amount").sum().alias("__statement"))
@@ -1096,6 +1157,10 @@ def _mark_counted(facts: pl.DataFrame, spine_facts: pl.DataFrame,
     里都在。只按键标的话，一笔软件服务费会在「销售收入」名下也标成进账——检索里
     这行钱就顶着「销售收入」的名字出来。所以还要过一遍认领条件。
     """
+    blocked=facts.filter(_promotion_pending(facts))
+    if blocked.height and 'counted' not in facts.columns:
+        good=_mark_counted(facts.filter(~_promotion_pending(facts)),spine_facts,metrics)
+        return pl.concat([good,blocked.with_columns(pl.lit(False).alias('counted'),pl.lit(0.).alias('contribution'))],how='diagonal_relaxed')
     if "counted" in facts.columns:
         return facts
     if spine_facts.is_empty() or facts.is_empty():
@@ -1332,6 +1397,10 @@ def _build_slice(
                 node.value = None
                 node.unavailable_reason = "已算现有成本，支持人工确认金额"
     result = audit(model, scoped, scoped_reports, own, completeness, nodes)
+    integrity=[v for v in (eval_errors or {}).get('promotion',[]) if v.startswith('推广证据待核对：')]
+    if integrity:
+        from .types import Finding
+        result.findings.append(Finding('promotion_integrity','推广原始证据待核对',passed=False,blocking=True,message='；'.join(integrity)))
     controls = facts.filter((pl.col("store") == store) & (pl.col("link_key") == STORE_WIDE_PRODUCT))
     if not controls.is_empty():
         multi_period = spine.filter(pl.col(SPINE_STORE) == store)[SPINE_PERIOD].n_unique() > 1
@@ -1344,10 +1413,10 @@ def _build_slice(
             nodes = calc.evaluate_statement(model, totals, unavailable, inapplicable)
             for node in nodes.values():
                 if "promotion" in node.missing_sources:
-                    node.unavailable_reason = "推广控制表月份范围待确认，未将未知范围金额分摊到其他月份"
+                    node.unavailable_reason = "推广控制额账期待核对：缺少可验证的单月归属或逐月金额，未跨月猜分"
             result.findings.append(Finding(
-                "promotion_scope_evidence", "推广控制表月份待确认", passed=False, blocking=True,
-                message="多月份订单中存在未明确月份范围的推广控制表，未将该控制金额跨月分摊，相关费用与利润暂不可核定。请核对文件或工作表日期范围后再结账："
+                "promotion_scope_evidence", "推广控制额账期待核对", passed=False, blocking=True,
+                message="推广控制总额尚未明确归属单月，或跨月汇总缺少逐月金额；有日期的明细保留按月归属，不把未确认控制额跨月均分。请核对所属月份；跨月来源应替换为分月来源后重算："
                         + "、".join(r["file_name"] for r in ambiguous[:3])))
     repaired = scoped.filter(pl.col("source_note").str.starts_with("代发表列互换校验：").fill_null(False))
     if not repaired.is_empty():

@@ -1192,6 +1192,8 @@
     - {role: direction, columns: [动账方向], required: false}
     - {role: charge_type, columns: [计费类型], required: false}
     - {role: remark, columns: [备注], required: false}
+    - {role: payment_title, columns: [商品名称], required: false}
+    - {role: payment_case_id, columns: [售后编号], required: false}
     - {role: settle_time, columns: [动账时间]}
   note: >
     费项走字典，不再用一条「凡是有动账场景就算净额」的规则盖过去。业务这次把抖音的
@@ -1341,10 +1343,12 @@
 - id: promotion_v5
   source: promotion
   match_columns: [总营销花费(元), 商品ID, 商品名称]
+  time_slots: {spend_date: spend_time}
   bindings:
     - {role: product_id, columns: [商品ID], required: false}
     - {role: product_name, columns: [商品名称], required: false}
     - {role: spend, columns: [总营销花费(元)], kind: number, required: false}
+    - {role: spend_time, columns: [日期], kind: time, required: false}
   total_row_marker: product_id
 
 - id: jd_settlement_v12

@@ -942,6 +942,8 @@ class Workspace:
             why = run["evidence_error"] or "事实证据尚未完成留档"
             raise WorkspaceError(f"{period} 结不了账：{why}")
         result = json.loads(run["result"])
+        if any(f.get('id') in {'promotion_integrity','promotion_scope_evidence'} and not f.get('passed') for f in result.get('findings',[])):
+            raise WorkspaceError('推广原始证据范围有冲突或月份不明，不能人工忽略；请先核对原表并重算')
         if any(d.get("status") == "conflict" for d in result.get("deduplication", [])):
             raise WorkspaceError("原对账单流水存在冲突或精度丢失，不能人工忽略；请更正原始账单后重算")
         if manual_result is None and self.coverage_gaps_path(run["id"]).exists():

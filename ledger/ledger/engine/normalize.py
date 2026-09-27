@@ -76,6 +76,14 @@ def normalize(table: RawTable, template: Template) -> tuple[pl.DataFrame, list[s
     """
     notes = list(table.notes)
     index = _bind_columns(table.headers, template, notes)
+    if template.source == 'promotion':
+        # New/onboarded templates must not silently discard an actual date
+        # column. Range exports bind spend_period explicitly, not a fake day.
+        temporal_roles = set(template.time_slots.values()) | {'spend_period'}
+        temporal_positions = {index[r] for r in temporal_roles if r in index}
+        for pos, header in enumerate(table.headers):
+            if normalize_header(header) in {'日期','统计日期','消耗日期','推广日期'} and pos not in temporal_positions:
+                raise NormalizeError(f'模板 {template.id} 未使用推广表的「{header}」列，禁止按订单月份入账；请绑定推广发生日期后重算')
 
     if not table.rows:
         notes.append(f"{table.ref.label()} 没有数据行")
@@ -102,6 +110,32 @@ def normalize(table: RawTable, template: Template) -> tuple[pl.DataFrame, list[s
     frame = _drop_total_rows(frame, template, notes)
     frame = _normalize_amounts(frame, template, notes)
     frame = _normalize_time(frame, template, notes)
+    if template.source == 'promotion':
+        if 'spend_date' in frame.columns:
+            frame = frame.with_columns(pl.col('spend_date').dt.strftime('%Y-%m').alias('source_period'))
+        elif 'spend_period' in frame.columns:
+            from .recognize import infer_period_range
+            def period_range(value):
+                text=str(value or '').strip()
+                ends=re.split(r'\s*[~～至]\s*',text)
+                if len(ends)==2:
+                    start,end=(to_date(v) for v in ends)
+                    if start and end and start<=end and start.strftime('%Y-%m')==end.strftime('%Y-%m'):
+                        return start.strftime('%Y-%m')
+                    return None
+                day=to_date(text)
+                if day:return day.strftime('%Y-%m')
+                periods = infer_period_range(text)
+                return periods[0] if len(periods) == 1 else None
+            frame = frame.with_columns(pl.col('spend_period').map_elements(period_range, return_dtype=pl.String).alias('source_period'))
+            detail=(pl.col('product_id')!=STORE_WIDE_PRODUCT).fill_null(True) if 'product_id' in frame.columns else pl.lit(True)
+            if frame.filter(detail & (pl.col('spend').fill_null(0) != 0) & pl.col('source_period').is_null()).height:
+                raise NormalizeError('推广汇总日期范围缺失、无效或跨月，无法证明各月费用；请提供分月或分天明细')
+            periods=frame.filter(detail)['source_period'].drop_nulls().unique().to_list()
+            if 'product_id' in frame.columns:
+                scope=periods[0] if len(periods)==1 else 'pending'
+                frame=frame.with_columns(pl.when(~detail).then(pl.lit(scope)).otherwise(None).alias('promotion_scope'),
+                    pl.when(~detail).then(pl.lit(periods[0] if len(periods)==1 else None,dtype=pl.String)).otherwise(pl.col('source_period')).alias('source_period'))
     frame = _mark_parent_rows(frame, template, notes)
     return frame, notes
 
@@ -137,6 +171,12 @@ def _drop_total_rows(frame: pl.DataFrame, template: Template, notes: list[str]) 
         )
         used = marker
     if template.source == "promotion":
+        # The footer's total label can be in the declared date/range column,
+        # even when an onboarded template chose product_id as its marker.
+        for temporal in {template.time_slots.get('spend_date'), 'spend_period'}:
+            if temporal and temporal in frame.columns:
+                is_total = is_total | pl.col(temporal).cast(pl.String).str.strip_chars().is_in(list(_TOTAL_LABELS)).fill_null(False)
+                used = used or temporal
         for extra in ("product_id", "product_name"):
             if extra in frame.columns:
                 is_total = is_total | (
@@ -217,12 +257,13 @@ def _store_wide_residual(
     # not from the filename or whichever order happens to link first.
     date_role = template.time_slots.get("spend_date")
     if date_role and date_role in kept.columns:
-        dated = _normalize_time(kept, template, [])
-        amounts = _number_expr("spend", kept.schema["spend"])
-        relevant = dated.filter(amounts.is_not_null())
-        days = relevant["spend_date"]
+        dated = _normalize_time(_normalize_amounts(kept, template, []), template, [])
+        relevant = dated.filter(pl.col('spend').is_not_null())
+        # Hosted-product rows may disclose their dates but not their spend.
+        # Those dates still constrain the scope of the footer's control total.
+        days = dated["spend_date"]
         months = sorted({d.strftime("%Y-%m") for d in days if d is not None})
-        scope = months[0] if len(months) == 1 and not days.null_count() else "pending"
+        scope = months[0] if len(months) == 1 and not relevant['spend_date'].null_count() else "pending"
         control = control.with_columns(pl.lit(scope).alias("promotion_scope"))
         notes.append(f"推广控制总数按明细日期归月：{scope}；明细月份：{'、'.join(months) or '无有效日期'}")
     return control

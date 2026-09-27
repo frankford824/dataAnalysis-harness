@@ -257,6 +257,9 @@ def _statement(sl: Slice, model: Model) -> list[dict[str, Any]]:
         out.append({
             "id": nv.id, "name": nv.name, "level": nv.level,
             "value": nv.value, "available": nv.available, "display": nv.display,
+            "verified_partial": (money_float(sum(sl.calculation_inputs.get('metric_totals',{}).get(mid,0.)
+                for mid in node_metrics(model,node.id))) if node.id=='n_receipt' and not nv.available
+                and '流水身份待核对' in nv.unavailable_reason else None),
             "unavailable_reason": nv.unavailable_reason,
             "missing_sources": [source_name(model, s) for s in nv.missing_sources
                                 if not (nv.unavailable_reason and s == "order_cost")],
@@ -556,7 +559,7 @@ def drill(facts: pl.DataFrame | str | Path, model: Model, node_id: str,
     汇总区是导航入口：点科目就把它筛掉的话，剩一行、也回不去了。顶上两个数不变则是
     因为人下钻的目的就是拿它跟报表核对——核对基准在翻页过程中变来变去，这事就没法做了。
     """
-    only = only if only in ("counted", "uncounted", "all") else "counted"
+    only = only if only in ("counted", "uncounted", "allocated", "all") else "counted"
     if isinstance(facts, (str, Path)):
         lazy = pl.scan_parquet(facts)
         columns = set(lazy.collect_schema().names())
@@ -630,14 +633,20 @@ def drill(facts: pl.DataFrame | str | Path, model: Model, node_id: str,
 
     out_rows = int(facts.filter(~pl.col("counted")).height)
     out_amount = float(facts.filter(~pl.col("counted")).get_column("amount").sum() or 0.0)
+    allocated = (pl.col('booking_status')=='allocated').fill_null(False) if 'booking_status' in facts.columns else pl.lit(False)
+    allocated_rows = facts.filter(allocated)
+    actual_unposted = facts.filter(~pl.col('counted') & ~allocated)
+    allocation_summary = {'rows':allocated_rows.height,'amount':money_float(allocated_rows['amount'].sum() or 0.)}
+    out_rows,out_amount=actual_unposted.height,float(actual_unposted['amount'].sum() or 0.)
 
     scope = {
         "counted": facts.filter(pl.col("counted")),
-        "uncounted": facts.filter(~pl.col("counted")),
+        "uncounted": actual_unposted,
+        "allocated": allocated_rows,
     }.get(only, facts)
     if scope.is_empty():
         return {**empty, "graded": graded,
-                "uncounted": _uncounted(out_rows, out_amount)}
+                "uncounted": _uncounted(out_rows, out_amount), 'allocated':allocation_summary}
 
     # 进了账的那部分要按实际算进去的金额报，否则跟报表差一个分摊比例。
     money = pl.col("contribution") if only == "counted" else pl.col("amount")
@@ -677,6 +686,7 @@ def drill(facts: pl.DataFrame | str | Path, model: Model, node_id: str,
                 "metric_id", "link_key", "linked", "counted", "contribution",
                 "amount", "subject", "minor", "classify_via", "record_type", "closing_run_id", "closing_at", "closing_by",
                 "file_sha", "file_name", "sheet", "row_no", "order_id", "internal_order_id", "sku", "source_note",
+                "booking_status", "allocation_control", "source_period",
             ) if c in picked.columns]
         )
         .sort(by, descending=descending)
@@ -707,6 +717,7 @@ def drill(facts: pl.DataFrame | str | Path, model: Model, node_id: str,
         #: 没进账的那部分。运费表是全公司的运单，这里会是绝大多数行——
         #: 它们不进这家店的账，但删掉就没法回答「这笔钱去哪了」。
         "uncounted": _uncounted(out_rows, out_amount),
+        "allocated": allocation_summary,
         "by_subject": [
             {"subject": r["shown"], "raw": r["shown"],
              "count": r["count"], "amount": r["amount"]}
@@ -962,6 +973,7 @@ def fees_csv(facts: Path | pl.DataFrame, model: Model, *, review_status: str = "
             "link_key", "metric_id", "subject", "amount", "contribution",
             "counted", "linked", "file_name", "sheet", "row_no", "source_note",
             "order_id", "internal_order_id", "sku", "record_type", "closing_run_id", "closing_at", "closing_by",
+            "booking_status", "allocation_control", "source_period",
         )
         if c in facts.columns
     ]
@@ -976,6 +988,9 @@ def fees_csv(facts: Path | pl.DataFrame, model: Model, *, review_status: str = "
         lines[0] += ",计算说明"
     if frozen:
         lines[0] += ',记录类型,结账核算记录,结账确认时间,结账确认人'
+    routing = 'booking_status' in frame.columns
+    if routing:
+        lines[0] += ',入账路径,分摊依据,原表账期'
     for row in frame.iter_rows(named=True):
         lines.append(",".join((
             _excel_identifier_cell(row.get("link_key")),
@@ -992,7 +1007,10 @@ def fees_csv(facts: Path | pl.DataFrame, model: Model, *, review_status: str = "
             _excel_identifier_cell(row.get("sku")),
             _excel_identifier_cell(row.get("internal_order_id")),
         )) + (("," + csv_cell(row.get("source_note"))) if with_notes else "")
-           + (','+','.join(csv_cell(row.get(k)) for k in ('record_type','closing_run_id','closing_at','closing_by')) if frozen else ''))
+           + (','+','.join(csv_cell(row.get(k)) for k in ('record_type','closing_run_id','closing_at','closing_by')) if frozen else '')
+           + (','+','.join(csv_cell(v) for v in (
+               {'direct':'直接入账','allocated':'已含全店分摊','unposted':'未入账'}.get(row.get('booking_status'),'待核对'),
+               row.get('allocation_control'),row.get('source_period'))) if routing else ''))
     if review_status:
         lines = [lines[0] + ",核对状态"] + [line + "," + csv_cell(review_status) for line in lines[1:]]
     return "\n".join(lines) + "\n"

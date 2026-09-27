@@ -1100,6 +1100,46 @@ def recompute(store_id: str) -> dict:
     }
 
 
+class StatementReviewRequest(BaseModel):
+    model_config = {'extra':'forbid'}
+    run_id: int
+    group_id: str = Field(min_length=64,max_length=64)
+    chosen: str = Field(min_length=1,max_length=500)
+    reason: str = Field(min_length=8,max_length=500)
+    reviewer: str = Field(min_length=1,max_length=80)
+    acknowledged: bool = False
+
+
+@app.get('/api/stores/{store_id}/periods/{period}/statement-review')
+def statement_review_context(store_id:str,period:str,run_id:int,offset:int=0,limit:int=20):
+    from .statement_review import context
+    try:return context(workspace(),store_id,period,run_id,_model(),offset,limit)
+    except WorkspaceError as exc:raise HTTPException(409,str(exc)) from exc
+
+
+@app.post('/api/stores/{store_id}/periods/{period}/statement-review')
+def statement_review_confirm(store_id:str,period:str,body:StatementReviewRequest):
+    from .statement_review import confirm
+    try:return confirm(workspace(),_model(),store_id,period,body.run_id,body.group_id,body.chosen,
+        body.reason,body.acknowledged,body.reviewer.strip())
+    except WorkspaceError as exc:raise HTTPException(409,str(exc)) from exc
+
+
+class StatementReviewRevoke(BaseModel):
+    model_config={'extra':'forbid'}
+    run_id:int
+    group_id:str=Field(min_length=64,max_length=64)
+    reason:str=Field(min_length=8,max_length=500)
+    reviewer:str=Field(min_length=1,max_length=80)
+
+
+@app.post('/api/stores/{store_id}/periods/{period}/statement-review/revoke')
+def statement_review_revoke(store_id:str,period:str,body:StatementReviewRevoke):
+    from .statement_review import revoke
+    try:return revoke(workspace(),store_id,period,body.run_id,body.group_id,body.reason,body.reviewer.strip())
+    except WorkspaceError as exc:raise HTTPException(409,str(exc)) from exc
+
+
 @app.get("/api/recompute/progress")
 def recompute_progress() -> dict:
     model = _model()

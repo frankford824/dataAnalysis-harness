@@ -32,7 +32,7 @@ FACT_COLUMNS = (
     "link_key", "linked", "amount", "subject", "major", "minor",
     "count_without_order", "classify_via",
     "file_sha", "file_name", "sheet", "row_no",
-    "order_id", "internal_order_id", "sku", "source_note", "promotion_scope",
+    "order_id", "internal_order_id", "sku", "source_note", "promotion_scope", "source_period", "statement_evidence",
     # 投影之后才知道，见 runtime._mark_counted：这一行有没有算进损益表、算进去多少。
     "counted", "contribution",
 )
@@ -238,6 +238,14 @@ def evaluate_metric(
         period = pl.when(pl.col("promotion_scope").str.contains(r"^\d{4}-\d{2}$").fill_null(False)).then(
             pl.col("promotion_scope")
         ).when(pl.col("promotion_scope") == "pending").then(pl.lit(None, dtype=pl.String)).otherwise(period)
+    source_period = pl.lit(None, dtype=pl.String)
+    if metric.source == 'promotion':
+        source_period = pl.col('source_period') if 'source_period' in frame.columns else pl.lit(period_hint or None,dtype=pl.String)
+        if 'promotion_scope' in frame.columns:
+            source_period = pl.coalesce(source_period, pl.col('promotion_scope').replace('pending',None))
+        # Explicit row/range evidence takes priority over a matching product's
+        # arbitrary first order month, including user-created templates.
+        period = pl.coalesce(source_period, period)
 
     own_store = _own_store(frame, store_names or {}, notes if not shared_table else None)
     store = (
@@ -390,6 +398,8 @@ def evaluate_metric(
         ],
         source_note.alias("source_note"),
         (pl.col("promotion_scope") if "promotion_scope" in frame.columns else pl.lit(None, dtype=pl.String)).alias("promotion_scope"),
+        source_period.alias('source_period'),
+        (pl.col('statement_evidence') if 'statement_evidence' in frame.columns else pl.lit(None,dtype=pl.String)).alias('statement_evidence'),
     )
     return facts, notes
 
@@ -443,6 +453,8 @@ def _empty_facts() -> pl.DataFrame:
         "file_sha": pl.Utf8, "file_name": pl.Utf8, "sheet": pl.Utf8, "row_no": pl.Int64,
         "order_id": pl.Utf8, "internal_order_id": pl.Utf8, "sku": pl.Utf8, "source_note": pl.Utf8,
         "promotion_scope": pl.Utf8,
+        "source_period": pl.Utf8,
+        "statement_evidence":pl.Utf8,
         "counted": pl.Boolean, "contribution": pl.Float64,
     }
     return pl.DataFrame(schema=schema)

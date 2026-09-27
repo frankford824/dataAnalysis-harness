@@ -16,6 +16,7 @@ import { useRoute, useRouter } from 'vue-router'
 import { useLatest } from '../components/ui/useLatest'
 import { api } from '../api'
 import DrillDrawer from '../components/DrillDrawer.vue'
+import StatementReview from '../components/StatementReview.vue'
 import DropZone from '../components/DropZone.vue'
 import FixPanel from '../components/FixPanel.vue'
 import GapList from '../components/GapList.vue'
@@ -28,6 +29,8 @@ import { count, money, percent, stamp } from '../format'
 import { useApp } from '../store'
 
 const props = defineProps({ id: { type: String, required: true } })
+const reviewingStatement=ref(false)
+async function statementUpdated(){reviewingStatement.value=false;app.invalidate();await load(true)}
 
 const app = useApp()
 const route = useRoute()
@@ -265,7 +268,7 @@ const historicalArchive = computed(() => snap.value?.archive?.kind === 'legacy_f
 const historicalChecks = computed(() => historicalArchive.value ? (snap.value?.findings || []) : [])
 //: 真正待处理的那几条。灰掉的结账按钮不说明理由，人只能猜是不是坏了。
 const blockers = computed(() => bad.value.filter((f) => f.blocking))
-const hardBlockerIds = ['evidence_archive', 'statement_identity']
+const hardBlockerIds = ['evidence_archive', 'statement_identity', 'promotion_integrity', 'promotion_scope_evidence']
 const manualBlockers = computed(() => blockers.value.filter((f) => !hardBlockerIds.includes(f.id)))
 const hardBlockers = computed(() => blockers.value.filter((f) => hardBlockerIds.includes(f.id)))
 const profitUnavailable = computed(() => (snap.value?.statement || []).some(
@@ -393,9 +396,10 @@ watch(
 
     <template v-else-if="info">
       <n-alert v-if="snap?.deduplication?.length" :type="snap.deduplication.some(d => d.status === 'conflict') ? 'error' : 'info'" :bordered="false" style="margin-bottom:16px">
-        <strong>对账流水重复核查</strong>
-        <p>去重统计覆盖本店已上传的对账表；待核对提示按实际受影响账期列出。重复流水只计一次，不同流水号的后续到账仍保留；原文件不修改。争议行不计入账目，核对后才能结账。</p>
+        <strong>原始流水与费用表核查</strong>
+        <p>去重统计覆盖本店已上传的来源表；待核对提示按实际受影响账期列出。重复来源只计一次，不同流水号的后续到账仍保留；原文件不修改。争议行不计入账目，核对后才能结账。</p>
         <div v-for="(item, index) in snap.deduplication" :key="index" style="margin-top:6px;overflow-wrap:anywhere">{{ item.message }}</div>
+        <n-button v-if="snap.deduplication.some(d=>d.status==='conflict')" style="margin-top:12px" @click="reviewingStatement=true">核对流水关联</n-button>
       </n-alert>
       <n-alert v-if="snap?.file_errors?.length" type="error" :bordered="false" style="margin-bottom:16px">
         <strong>{{ snap.file_errors.length }} 张源表未进入核算，需要核对</strong>
@@ -410,6 +414,7 @@ watch(
       >
         <template #actions>
           <n-button size="small" @click="fixing = true">核对金额</n-button>
+          <n-button v-if="snap?.run_id" size="small" @click="reviewingStatement=true">流水关联核对</n-button>
           <n-button v-if="app.ingestMode !== 'nas'" size="small" :loading="!!app.busy" :disabled="loading" @click="recompute">重算</n-button>
           <n-tag v-else size="small" :type="refreshFailed?'warning':'info'" :bordered="false">{{refreshFailed?'更新失败，请刷新重试':'结果自动更新'}}</n-tag>
           <n-button v-if="!closed && snap?.run_id && !snap?.cost_review?.requires_human" size="small" :disabled="loading || !!app.busy" @click="openManualClose">人工确认金额</n-button>
@@ -532,7 +537,7 @@ watch(
                 :role="row.drillable?'button':undefined" :tabindex="row.drillable?0:undefined" :aria-label="row.drillable?`查看${row.name}明细`:undefined" @keydown.enter="openDrill(row)" @keydown.space.prevent="openDrill(row)" @click="openDrill(row)"
               >
                 <span>{{ row.name }}</span>
-                <span v-if="!row.available" class="na" :title="row.unavailable_reason || ''">{{ row.unavailable_reason?.includes('待核对') ? '待核对' : row.unavailable_reason && !snap.cost_coverage?.passed && row.missing_sources?.length === 0 ? '可人工确认' : '资料未齐' }}</span>
+                <span v-if="!row.available" class="na" :title="row.unavailable_reason || ''"><template v-if="row.verified_partial!=null">已入账 {{ money(row.verified_partial) }} · </template>{{ row.unavailable_reason?.includes('待核对') ? '待核对' : row.unavailable_reason && !snap.cost_coverage?.passed && row.missing_sources?.length === 0 ? '可人工确认' : '资料未齐' }}</span>
                 <span v-else class="amt" :class="{ neg: row.value < 0 }">
                   {{ row.display === 'percent' ? percent(row.value) : money(row.value) }}
                 </span>
@@ -908,6 +913,7 @@ watch(
       @recompute="recompute"
     />
 
+    <StatementReview v-if="reviewingStatement && snap?.run_id" :store-id="props.id" :period="period" :run-id="snap.run_id" @close="reviewingStatement=false" @updated="statementUpdated" />
     <DrillDrawer
       v-if="drill"
       :run-id="drill.runId"

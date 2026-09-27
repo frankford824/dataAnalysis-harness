@@ -54,6 +54,7 @@ const terms = computed(() => [
 const diff = computed(() => {
   const d = data.value
   if (!d || d.value === null || d.value === undefined) return null
+  if (only.value !== 'counted') return null
   return d.source_total - d.value
 })
 
@@ -176,7 +177,7 @@ function close() {
               <div class="value" :class="{ neg: data.value < 0 }">{{ money(data.value) }}</div>
             </div>
             <div class="kpi">
-              <div class="label">加起来</div>
+              <div class="label">{{ only === 'allocated' ? '分摊内原始费用（非新增）' : only === 'uncounted' ? '未入账原始金额' : only === 'all' ? '原始金额（非入账合计）' : '已入账合计' }}</div>
               <div class="value" :class="{ neg: data.source_total < 0 }">
                 {{ money(data.source_total) }}
               </div>
@@ -210,6 +211,7 @@ function close() {
                 </span>
               </n-radio-button>
               <n-radio-button value="all">全部</n-radio-button>
+              <n-radio-button v-if="data.allocated?.rows" value="allocated">已含分摊 {{ count(data.allocated.rows) }}</n-radio-button>
             </n-radio-group>
             <n-select
               v-model:value="order"
@@ -247,6 +249,7 @@ function close() {
               </span>
             </div>
             <p v-for="note in indexResult.notes" :key="note" class="xs muted">{{ note }}</p>
+            <p class="xs muted">原文件搜索会保留已去重的副本，不代表命中行都已入账；是否计入以本页账目明细和入账路径为准。</p>
             <n-table v-if="indexResult.hits.length" size="small" :bordered="false">
               <tbody>
                 <tr v-for="hit in indexResult.hits.slice(0, 30)" :key="`${hit.sha256}:${hit.sheet}:${hit.row_no}`">
@@ -278,6 +281,10 @@ function close() {
             切到「没进账」查看逐行原因；不能把这些金额直接加到看板。
           </n-alert>
 
+          <n-alert v-if="data.allocated?.rows" type="info" :bordered="false" style="margin-bottom:var(--s4)">
+            {{ count(data.allocated.rows) }} 行推广费未直接匹配原商品订单，但已包含在全店分摊中，不是漏记。
+            「已含分摊」查看原始费用和控制依据；金额不可再次加总。个人商品归属与店铺费用总额须分别核对。
+          </n-alert>
           <n-table v-if="data.by_subject?.length" size="small" :bordered="false">
             <thead>
               <tr>
@@ -365,7 +372,7 @@ function close() {
                 </td>
                 <td class="right num nowrap" :class="{ neg: r.amount < 0 }">{{ money(r.amount) }}</td>
                 <td class="right num nowrap" :class="{ neg: r.contribution < 0 }">
-                  {{ r.counted ? money(r.contribution) : '—' }}
+                  {{ r.counted ? money(r.contribution) : r.booking_status === 'allocated' ? '已含分摊' : '—' }}
                 </td>
                 <td class="xs num">
                   {{ r.file_name }}<template v-if="r.sheet"> · {{ r.sheet }}</template> ·

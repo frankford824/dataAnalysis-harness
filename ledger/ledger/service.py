@@ -389,6 +389,8 @@ def _recompute_locked(
         except order_feed.OrderFeedError as exc:
             out.failure = {"store": store.name, "why": f"订单台证据未就绪：{exc}"}
             return out
+    from .statement_review import apply as apply_statement_reviews
+    apply_statement_reviews(ing,ws,store.id)
     out.unknown_tables = unknown_tables(ing, store)
     registry = Registry(ws.root) if (ws.root / "commission" / "registry.db").exists() else None
     reuse_signature = recompute_reuse.fingerprint(ws, model, store, ing, registry)
@@ -556,6 +558,8 @@ def simulate(ws: Workspace, model: Model, store: Store) -> list[dict[str, Any]]:
     ing = ingest(files, model, [store.name, *store.aliases], default_store=store.name)
     if order_feed.enabled():
         order_feed.OrderFeed(ws.root).append_to(ing, store)
+    from .statement_review import apply as apply_statement_reviews
+    apply_statement_reviews(ing,ws,store.id)
     result = run(ing, store.platform)
     out = []
     for (_s, _period), sl in sorted(result.slices.items(), key=lambda kv: kv[0][1] or ""):
