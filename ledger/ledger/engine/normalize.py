@@ -232,7 +232,7 @@ def _store_wide_residual(
     """
     if "spend" not in kept.columns or "product_id" not in kept.columns:
         return None
-    if template.source != "promotion":
+    if template.source != "promotion" or template.promotion_total_policy == 'check_only':
         return None
     declared = total_rows.select(_number_expr("spend", total_rows.schema["spend"]).sum()).item()
     detail = kept.select(_number_expr("spend", kept.schema["spend"]).sum()).item()

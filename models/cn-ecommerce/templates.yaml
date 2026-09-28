@@ -806,6 +806,20 @@
     总成本那一列不参与算账。表头批注写着「公式：总成本=成本价*数量」，指标就照这个
     式子自己乘，实测 70,954 行两者一分不差。这样 K 表就算没带总成本列也能算。
 
+- id: promotion_1688_v1
+  source: promotion
+  name: 1688 推广商品消耗报表
+  match_columns: [商品ID, 消耗量, 曝光量, 点击量]
+  parse: {header_row: 0}
+  promotion_total_policy: check_only
+  time_slots: {spend_date: spend_time}
+  bindings:
+    - {role: product_id, columns: [商品ID]}
+    - {role: product_name, columns: [offer标题], required: false}
+    - {role: spend, columns: [消耗量], kind: number}
+    - {role: spend_time, columns: [日期], required: false, kind: time}
+  note: 消耗量作为推广金额；商品ID对应1688订单明细的Offer_ID。按原表日期或明确的单月文件范围归属；合计行只校验，不生成全店托管控制额。
+
 - id: promotion_taobao_v1
   source: promotion
   name: 淘宝推广商品报表

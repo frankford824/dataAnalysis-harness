@@ -371,8 +371,14 @@
         spine_where: [{field: order_type, op: not_in, value: [补发订单], include_null: true}]
     - platform: douyin
       allocate: {mode: even, unmatched: store_wide}
-    # 1688 那张订单明细表的推广费用列写着「无公式，数值全补成 0」——这个店没有投放数据。
-    - {platform: alibaba1688, disabled: true}
+    - platform: alibaba1688
+      allocate: {mode: even, unmatched: pending}
+      link:
+        key: product_id
+        to: order.product_id
+        grain: product
+        spine_where: [{field: __spine_origin__, op: eq, value: order_detail_file}]
+      note: 按商品ID汇总推广表消耗量，除以本店当月原始订单明细该商品ID行数；不按件数或收入比例，不以订单台补入行扩大分母，不将未匹配费用全店分摊。
     # 京东按跟单 SKU ID、拼多多按商品ID，两家的公式都是除以 countifs(商品ID)，
     # 和缺省的按商品行数均分是同一件事。
     - {platform: jd, allocate: {mode: even}}

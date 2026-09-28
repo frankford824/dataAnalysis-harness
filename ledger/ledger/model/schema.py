@@ -442,6 +442,8 @@ class Template(Base):
     #: 表底合计行的特征：这个角色为空则整行是合计行，必须丢掉。
     #: 实测订单明细表底有一行合计，不丢会让每一列金额刚好翻倍。
     total_row_marker: str | None = None
+    #: 推广合计行可作为全店控制额，或仅核对而不参与商品SUMIFS分摊。
+    promotion_total_policy: Literal['control','check_only'] = 'control'
     note: str = ""
 
     @model_validator(mode="after")

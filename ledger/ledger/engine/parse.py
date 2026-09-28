@@ -452,7 +452,8 @@ def _read_with_openpyxl(path: Path, data: bytes, options: ParseOptions) -> list[
         out = []
         for ws in sheets:
             # 关键：不重置维度，声明为 A1 的文件会被读成只有 1 行。
-            ws.reset_dimensions = options.reset_xlsx_dimension
+            if options.reset_xlsx_dimension:
+                ws.reset_dimensions()
             out.append((ws.title, [list(r) for r in ws.iter_rows(values_only=True)]))
         return out
     finally:
