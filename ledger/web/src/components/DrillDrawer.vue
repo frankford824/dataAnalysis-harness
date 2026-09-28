@@ -172,9 +172,10 @@ function close() {
           <div class="board-kpis" style="grid-template-columns: repeat(2, 1fr)">
             <div class="kpi">
               <div class="label">
-                {{ data.kind === 'statement' ? '报表上这个数' : '这些行的合计' }}
+                {{ data.statement_available === false ? '完整核定金额' : data.kind === 'statement' ? '报表上这个数' : '这些行的合计' }}
               </div>
-              <div class="value" :class="{ neg: data.value < 0 }">{{ money(data.value) }}</div>
+              <div class="value" :class="{ neg: data.value < 0 }">{{ data.statement_available === false ? '待核对' : money(data.value) }}</div>
+              <div v-if="data.statement_available === false && data.verified_partial!=null" class="foot">已入账部分 {{ money(data.verified_partial) }}，不是完整核定金额</div>
             </div>
             <div class="kpi">
               <div class="label">{{ only === 'allocated' ? '分摊内原始费用（非新增）' : only === 'uncounted' ? '未入账原始金额' : only === 'all' ? '原始金额（非入账合计）' : '已入账合计' }}</div>
@@ -189,6 +190,21 @@ function close() {
               </div>
             </div>
           </div>
+
+          <n-alert v-if="data.statement_available === false" type="warning" :bordered="false" style="margin-top:var(--s3)">
+            {{ data.unavailable_reason || '本项尚有资料待核对，不能把已识别部分作为完整核定金额。' }}
+            <div>已入账金额不会丢失；未入账来源保留原始证据。请核对文件账期、替代关系及逐行原因，不要直接删除旧文件或把未入账金额再次相加。</div>
+          </n-alert>
+
+          <details v-if="data.unposted_reasons?.length" style="margin-top:var(--s3)">
+            <summary>未入账原因（{{ count(data.uncounted.rows) }} 行）</summary>
+            <p v-for="(issue,i) in data.unposted_reasons" :key="i" class="xs">
+              <b>{{ issue.file_name }}</b> · {{ count(issue.rows) }} 行 · {{ money(issue.amount) }}
+              <br>{{ issue.source_note || '未计入本店本期；请核对原始归属和入账条件。' }}
+              <n-button size="tiny" @click="only='uncounted';file=issue.file_name;subject='';page=0">查看该文件未入账行</n-button>
+            </p>
+            <p v-if="data.unposted_reason_groups>20" class="xs muted">仅列前20组原因，其余请在“没进账”逐行核对。</p>
+          </details>
 
           <n-alert
             v-if="!data.graded"

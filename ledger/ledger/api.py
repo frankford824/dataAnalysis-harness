@@ -1592,10 +1592,16 @@ def drill(run_id: int, node_id: str, limit: int = view.DRILL_LIMIT,
                 raise WorkspaceError('未归类明细的原始依据暂时无法读取，请核对留档；原账未改动，不需要反结账') from exc
         if frozen_costs.COST_METRICS.intersection(metrics):
             facts=frozen_costs.for_run(workspace(),run_id,facts,model,metrics=metrics)
-        return view.drill(facts, model, node_id, limit=min(limit, 2000),
+        response = view.drill(facts, model, node_id, limit=min(limit, 2000),
                           value=_node_value(run_id, node_id), offset=offset,
                           subject=subject or None, file=file or None,
                           q=q or None, order=order, only=only)
+        state=workspace().state_by_run(run_id)
+        line=next((n for n in ((state.result or {}).get('statement') or []) if n.get('id')==node_id),{}) if state else {}
+        response['statement_available']=line.get('available')
+        response['unavailable_reason']=line.get('unavailable_reason','')
+        response['verified_partial']=line.get('verified_partial')
+        return response
     except WorkspaceError as exc:
         raise HTTPException(409,str(exc)) from exc
     except Exception as exc:

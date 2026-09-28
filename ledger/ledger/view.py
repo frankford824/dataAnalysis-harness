@@ -250,17 +250,24 @@ def _statement(sl: Slice, model: Model) -> list[dict[str, Any]]:
     而且顺序是求值顺序不是报表顺序。
     """
     out = []
+    facts=getattr(sl,'facts',None)
+    reasons=getattr(getattr(sl,'completeness',None),'reasons',{})
     for node in statement_order(model):
         nv = sl.nodes.get(node.id)
         if nv is None or not nv.applicable:
             continue
+        mids=node_metrics(model,node.id)
+        partial=None
+        if (not nv.available and nv.display=='amount' and not nv.is_total and (len(mids)==1 or node.id=='n_receipt')
+                and facts is not None and {'counted','contribution'}<=set(facts.columns)):
+            evidence=facts.filter(_claimed_by(model,mids) & pl.col('counted'))
+            if evidence.height:
+                partial=money_float(evidence['contribution'].sum())
         out.append({
             "id": nv.id, "name": nv.name, "level": nv.level,
             "value": nv.value, "available": nv.available, "display": nv.display,
-            "verified_partial": (money_float(sum(sl.calculation_inputs.get('metric_totals',{}).get(mid,0.)
-                for mid in node_metrics(model,node.id))) if node.id=='n_receipt' and not nv.available
-                and '流水身份待核对' in nv.unavailable_reason else None),
-            "unavailable_reason": nv.unavailable_reason,
+            "verified_partial": partial,
+            "unavailable_reason": nv.unavailable_reason or ('；'.join(reasons.get(s,'') for s in nv.missing_sources).strip('；') if not nv.available else ''),
             "missing_sources": [source_name(model, s) for s in nv.missing_sources
                                 if not (nv.unavailable_reason and s == "order_cost")],
             "is_total": nv.is_total,
@@ -639,6 +646,11 @@ def drill(facts: pl.DataFrame | str | Path, model: Model, node_id: str,
     actual_unposted = facts.filter(~pl.col('counted') & ~allocated)
     allocation_summary = {'rows':allocated_rows.height,'amount':money_float(allocated_rows['amount'].sum() or 0.)}
     out_rows,out_amount=actual_unposted.height,float(actual_unposted['amount'].sum() or 0.)
+    reasons=[]
+    if not actual_unposted.is_empty() and {'source_note','file_name'}<=set(actual_unposted.columns):
+        reasons=actual_unposted.group_by('file_name','source_note').agg(
+            pl.len().alias('rows'),pl.col('amount').sum().alias('amount')).sort('file_name','source_note').to_dicts()
+    reason_summary={'unposted_reasons':reasons[:20],'unposted_reason_groups':len(reasons)}
 
     scope = {
         "counted": facts.filter(pl.col("counted")),
@@ -647,7 +659,7 @@ def drill(facts: pl.DataFrame | str | Path, model: Model, node_id: str,
     }.get(only, facts)
     if scope.is_empty():
         return {**empty, "graded": graded,
-                "uncounted": _uncounted(out_rows, out_amount), 'allocated':allocation_summary}
+                "uncounted": _uncounted(out_rows, out_amount), 'allocated':allocation_summary,**reason_summary}
 
     # 进了账的那部分要按实际算进去的金额报，否则跟报表差一个分摊比例。
     money = pl.col("contribution") if only == "counted" else pl.col("amount")
@@ -719,6 +731,7 @@ def drill(facts: pl.DataFrame | str | Path, model: Model, node_id: str,
         #: 它们不进这家店的账，但删掉就没法回答「这笔钱去哪了」。
         "uncounted": _uncounted(out_rows, out_amount),
         "allocated": allocation_summary,
+        **reason_summary,
         "by_subject": [
             {"subject": r["shown"], "raw": r["shown"],
              "count": r["count"], "amount": r["amount"]}

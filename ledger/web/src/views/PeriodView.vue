@@ -537,7 +537,10 @@ watch(
                 :role="row.drillable?'button':undefined" :tabindex="row.drillable?0:undefined" :aria-label="row.drillable?`查看${row.name}明细`:undefined" @keydown.enter="openDrill(row)" @keydown.space.prevent="openDrill(row)" @click="openDrill(row)"
               >
                 <span>{{ row.name }}</span>
-                <span v-if="!row.available" class="na" :title="row.unavailable_reason || ''"><template v-if="row.verified_partial!=null">已入账 {{ money(row.verified_partial) }} · </template>{{ row.unavailable_reason?.includes('待核对') ? '待核对' : row.unavailable_reason && !snap.cost_coverage?.passed && row.missing_sources?.length === 0 ? '可人工确认' : '资料未齐' }}</span>
+                <span v-if="!row.available" class="na" :title="row.unavailable_reason || ''" style="max-width:65%;text-align:right;white-space:normal">
+                  <template v-if="row.verified_partial!=null"><span class="num">已入账 {{ money(row.verified_partial) }}</span><br><span class="xs">完整金额待核对 · 点击查看原因</span></template>
+                  <template v-else>{{ row.unavailable_reason?.includes('待核对') ? '待核对 · 点击查看原因' : row.unavailable_reason && !snap.cost_coverage?.passed && row.missing_sources?.length === 0 ? '可人工确认' : '资料未齐' }}</template>
+                </span>
                 <span v-else class="amt" :class="{ neg: row.value < 0 }">
                   {{ row.display === 'percent' ? percent(row.value) : money(row.value) }}
                 </span>

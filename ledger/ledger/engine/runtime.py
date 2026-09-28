@@ -830,9 +830,10 @@ def run(ingestion: Ingestion, platform: str = "*") -> RunResult:
         owners=multi.filter(pl.col('__months')>1)[SPINE_STORE].to_list()
         unknown=(pl.col('source_id')=='promotion') & pl.col('source_period').is_null() & (pl.col('link_key')!=STORE_WIDE_PRODUCT) & pl.col('store').is_in(owners)
         if facts.filter(unknown).height:
-            message='推广证据待核对：原表及文件范围没有可验证月份，禁止跟随首个商品订单跨月入账'
-            facts=facts.with_columns(pl.when(unknown).then(pl.lit(message)).otherwise(pl.col('source_note')).alias('source_note'))
-            eval_errors.setdefault('promotion',[]).append(message)
+            message=pl.concat_str(pl.lit('推广证据待核对：'),pl.col('file_name'),pl.lit(' · '),pl.col('sheet').fill_null(''),
+                pl.lit('：原表及文件范围没有可验证月份，禁止跟随首个商品订单跨月入账；请补齐原始日期或核对该文件的账期/替代关系'))
+            facts=facts.with_columns(pl.when(unknown).then(message).otherwise(pl.col('source_note')).alias('source_note'))
+            eval_errors.setdefault('promotion',[]).extend(facts.filter(unknown)['source_note'].unique().sort().to_list())
     projectable = facts.filter((pl.col("store") != "(未知店铺)") & ~_statement_pending(facts) & ~_promotion_pending(facts))
     for metric in metrics:
         if not (metric.link and metric.link.to) or metric.posting_basis in {"transaction", "order_number"}:
@@ -850,6 +851,11 @@ def run(ingestion: Ingestion, platform: str = "*") -> RunResult:
     )
     facts = _mark_counted(facts, spine_facts, metrics)
     facts = _promotion_booking_evidence(facts)
+    unexplained=(pl.col('source_id')=='promotion') & ~pl.col('counted') & (pl.col('booking_status')!='allocated') & pl.col('source_note').is_null()
+    facts=facts.with_columns(pl.when(unexplained).then(
+        pl.when(pl.col('linked')).then(pl.lit('商品编号已匹配，但本店本月没有可承接该费用的有效订单分摊结果；请核对本月订单明细或店铺级费用归属，不跨月猜分'))
+        .otherwise(pl.lit('未匹配商品订单；请核对商品ID、本月订单明细及店铺归属，不得直接忽略或重复加入全店分摊'))
+    ).otherwise(pl.col('source_note')).alias('source_note'))
     _assert_reconciled(facts, spine_facts)
     classify_report = merge_reports(classify_reports)
 
@@ -1345,6 +1351,19 @@ def _build_slice(
         {key: value for key, value in (eval_errors or {}).items() if key != "cost_return"},
     )
 
+    # A readable upload and a partial projection are not a complete expense.
+    # Keep the known contribution, but never certify missing product allocations
+    # merely because another file (or another row) contributed a nonzero amount.
+    promotion_unposted=scoped.filter((pl.col('source_id')=='promotion') & ~pl.col('counted')
+        & (pl.col('booking_status')!='allocated') & (pl.col('amount')!=0))
+    integrity=[v for v in (eval_errors or {}).get('promotion',[]) if v.startswith('推广证据待核对：')]
+    if promotion_unposted.height:
+        for block in promotion_unposted.partition_by('file_name',maintain_order=True):
+            integrity.append(f"推广费用待核对：{block['file_name'][0]} 有 {block.height} 行尚未入账；请在推广费明细的‘没进账’核对逐行原因；已含全店分摊行不在此列")
+        if 'promotion' not in completeness.missing:completeness.missing.append('promotion')
+        completeness.arrived=[s for s in completeness.arrived if s!='promotion']
+        completeness.reasons['promotion']='；'.join(integrity)
+
     own_gaps = (pricing_gaps.filter((pl.col("store") == store) & pl.col("period").is_in([period, "(未知账期)"]))
                 if pricing_gaps is not None and not pricing_gaps.is_empty() else pl.DataFrame())
     if not own_gaps.is_empty() and not (eval_errors or {}).get("order_cost"):
@@ -1387,6 +1406,9 @@ def _build_slice(
     totals = calc.totals_by_metric(scoped_spine, only_linked=False)
     inapplicable = {m.id for m in model.metrics if m.for_platform(platform) is None}
     nodes = calc.evaluate_statement(model, totals, unavailable, inapplicable)
+    for node in nodes.values():
+        if not node.available and 'promotion' in node.missing_sources:
+            node.unavailable_reason=completeness.reasons.get('promotion') or '推广费用待核对，尚不能核定完整金额'
     if pending_statement.height:
         for node in nodes.values():
             if not node.available and 'settlement' in node.missing_sources:
@@ -1397,7 +1419,6 @@ def _build_slice(
                 node.value = None
                 node.unavailable_reason = "已算现有成本，支持人工确认金额"
     result = audit(model, scoped, scoped_reports, own, completeness, nodes)
-    integrity=[v for v in (eval_errors or {}).get('promotion',[]) if v.startswith('推广证据待核对：')]
     if integrity:
         from .types import Finding
         result.findings.append(Finding('promotion_integrity','推广原始证据待核对',passed=False,blocking=True,message='；'.join(integrity)))
