@@ -358,7 +358,7 @@
   time_basis: spend_date
   link: {key: product_id, to: order.product_id, grain: product}
   allocate: {mode: even}
-  note: 商品级按该商品订单行数均分；抖音和淘宝的明确当月未匹配商品推广费，进入本店当月全店分摊，不跨月、不重复覆盖控制总额。
+  note: 商品级按该商品订单行数均分；抖音、淘宝及1688的明确当月未匹配商品推广费，进入本店当月全店分摊，不跨月、不重复覆盖控制总额。
 
   by_platform:
     - platform: taobao
@@ -372,13 +372,13 @@
     - platform: douyin
       allocate: {mode: even, unmatched: store_wide}
     - platform: alibaba1688
-      allocate: {mode: even, unmatched: pending}
+      allocate: {mode: even, unmatched: store_wide}
       link:
         key: product_id
         to: order.product_id
         grain: product
         spine_where: [{field: __spine_origin__, op: eq, value: order_detail_file}]
-      note: 按商品ID汇总推广表消耗量，除以本店当月原始订单明细该商品ID行数；不按件数或收入比例，不以订单台补入行扩大分母，不将未匹配费用全店分摊。
+      note: 商品匹配部分按原始订单明细同商品ID行数均分；明确本店当月但未匹配商品ID的消耗按当月原始订单明细全店均分，不以订单台补入行扩大分母，不跨月。
     # 京东按跟单 SKU ID、拼多多按商品ID，两家的公式都是除以 countifs(商品ID)，
     # 和缺省的按商品行数均分是同一件事。
     - {platform: jd, allocate: {mode: even}}

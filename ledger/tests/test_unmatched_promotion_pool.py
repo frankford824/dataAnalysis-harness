@@ -16,6 +16,7 @@ def test_only_authorized_platforms_enable_store_pool():
     m=load_model(MODELS/'cn-ecommerce').metric('ad_cost')
     assert m.for_platform('taobao').allocate.unmatched=='store_wide'
     assert m.for_platform('douyin').allocate.unmatched=='store_wide'
+    assert m.for_platform('alibaba1688').allocate.unmatched=='store_wide'
     assert m.for_platform('pdd').allocate.unmatched=='pending'
     assert m.for_platform('jd').allocate.unmatched=='pending'
     with pytest.raises(ValueError):Allocation(mode='ratio',by='alloc_ratio',unmatched='store_wide')

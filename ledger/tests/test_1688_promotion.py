@@ -57,13 +57,32 @@ def test_monthly_file_without_date_uses_explicit_period():
     assert result.facts.filter(pl.col('metric_id')=='ad_cost')['source_period'].unique().to_list()==['2026-07']
 
 
-def test_unmatched_spend_is_not_automatically_store_wide_or_hidden_by_footer():
+def test_unmatched_spend_enters_original_order_pool_without_double_counting_footer():
     result=scenario([['P1','a',1,1,30,'2026-07-01'],['UNKNOWN','x',1,1,7,'2026-07-01'],['合计','合计',1,1,37,'总计']])
     sl=result.slice('shop','2026-07')
     row=view._statement(sl,result.model)[0]
-    assert row['verified_partial']==-30 and not row['available']
+    assert row['value']==-37 and row['available'] and row['verified_partial'] is None
     orphan=sl.facts.filter(pl.col('link_key')=='UNKNOWN')
-    assert orphan['contribution'].item()==0 and orphan['booking_status'].item()=='unposted'
+    assert orphan['contribution'].item()==-7 and orphan['booking_status'].item()=='store_wide'
+    pool=result.spine_facts.filter((pl.col('metric_id')=='ad_cost') & (pl.col('link_key')=='__store_wide__'))
+    assert pool.height==4 and pool['amount'].to_list()==[-1.75]*4
+    assert pool['period'].unique().to_list()==['2026-07']
+    assert not sl.facts.filter(pl.col('link_key')=='__store_wide__').height
+
+
+def test_unmatched_month_without_original_orders_does_not_borrow_other_months():
+    result=scenario([['UNKNOWN','x',1,1,7,'2026-08-01']])
+    facts=result.facts.filter(pl.col('metric_id')=='ad_cost')
+    assert not facts['counted'].any() and facts['contribution'].sum()==0
+
+
+def test_1688_pool_does_not_fall_back_to_live_only_orders():
+    result=scenario([['UNKNOWN','x',1,1,7,'2026-07-01']])
+    ing=result.ingestion
+    ing.items=[i for i in ing.items if not (i.recognition.source_id=='order_detail' and not i.template.id.startswith('order_console_'))]
+    result=run(ing,'alibaba1688')
+    facts=result.facts.filter(pl.col('metric_id')=='ad_cost')
+    assert not facts['counted'].any() and facts['contribution'].sum()==0
 
 
 def test_promotion_template_recognizes_actual_header_and_numeric_spend(tmp_path):
