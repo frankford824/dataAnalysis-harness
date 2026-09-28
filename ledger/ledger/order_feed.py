@@ -1213,9 +1213,8 @@ class OrderFeed:
             pl.col("order_id").cast(pl.Utf8).is_in(order_ids)
         ).collect()
         items = self._overlay(items, deltas, "order_item", "sub_order_id", lambda p: [p.get("order_item") or {}])
-        if "order_flag" not in items.columns:
-            items = items.with_columns(pl.col("order_id").cast(pl.Utf8).replace_strict(
-                fallback_flags or {}, default=None, return_dtype=pl.Utf8).alias("order_flag"))
+        from .order_flags import fill_missing
+        items=fill_missing(items,'order_id',fallback_flags or {})
         costs = pl.scan_parquet(path("order_costs.parquet")).filter(
             pl.col("order_id").cast(pl.Utf8).is_in(order_ids)
         ).collect()
@@ -1606,6 +1605,8 @@ class OrderFeed:
         flags = items.select(
             pl.col("order_id", "sub_order_id").cast(pl.Utf8),
             (pl.col("order_flag").cast(pl.Utf8) if "order_flag" in items.columns else pl.lit(None, dtype=pl.Utf8).alias("order_flag")),
+            (pl.col('__flag_from_upload').fill_null(False) if '__flag_from_upload' in items.columns
+             else pl.lit(False)).alias('__flag_from_upload'),
             *(
                 pl.col(name).cast(pl.Boolean, strict=False) if name in items.columns
                 else pl.lit(False).alias(name)
@@ -1712,6 +1713,7 @@ class OrderFeed:
             pl.when(pl.col("item_status_raw").is_in(["Cancelled", "已取消", "取消"]))
             .then(pl.col("item_status_raw")).otherwise(pl.col("order_status_raw")).cast(pl.Utf8).alias("order_state"),
             pl.col("order_flag").cast(pl.Utf8),
+            pl.col('__flag_from_upload'),
             *([
                 (pl.col(name).cast(pl.Utf8) if name in certified.columns else pl.lit(None, dtype=pl.Utf8)).alias(name)
                 for name in ("cost_source", "cost_status", "cost_as_of", "failure_reason", "reference_unit_cost", "pricing_evidence")
@@ -1737,6 +1739,10 @@ class OrderFeed:
                     pl.lit("补发商品；原订单："), pl.col("__reship_original"), pl.lit("；实际发货单："), pl.col("internal_order_id")
                 ])).otherwise(pl.lit(None, dtype=pl.Utf8)).alias("source_note"),
             ).drop("__reship_original")
+        note=pl.col('source_note') if 'source_note' in frame.columns else pl.lit(None,dtype=pl.Utf8)
+        frame=frame.with_columns(pl.when(pl.col('__flag_from_upload')).then(pl.concat_str([
+            note,pl.lit('订单台旗帜缺失；依据同店原始聚水潭表内部订单 '),pl.col('internal_order_id'),pl.lit(' 的一致旗帜补全')
+        ],ignore_nulls=True)).otherwise(note).alias('source_note'))
         return self._anchors(frame, fingerprint, "订单台日期时点成本")
 
     def _after_frame(

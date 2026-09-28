@@ -114,7 +114,7 @@ def test_zero_price_blue_order_is_valid_only_for_brushing(tmp_path,remark,pendin
 
 
 def test_mixed_flags_do_not_exempt_the_entire_merged_order():
-    original=SimpleNamespace(frame=pl.DataFrame({'internal_order_id':['I1','I2'],'order_flag':['蓝色旗帜','红色旗帜']}))
+    original=SimpleNamespace(frame=pl.DataFrame({'internal_order_id':['I1','I2'],'order_flag':['蓝色旗帜','红色旗帜'],'store_name':['shop','shop']}))
     ing=SimpleNamespace(frames_of=lambda source:[original])
     cost=SimpleNamespace(frame=pl.DataFrame({'internal_order_id':['I1','I2'],'order_id':['MAIN','MAIN'],'unit_cost':[4,7]}),notes=[])
     orders=SimpleNamespace(frame=pl.DataFrame({'order_id':['MAIN']}))
@@ -124,7 +124,7 @@ def test_mixed_flags_do_not_exempt_the_entire_merged_order():
 
 
 def test_conflicting_flag_evidence_is_not_used_to_zero_cost():
-    original=SimpleNamespace(frame=pl.DataFrame({'internal_order_id':['I','I'],'order_flag':['蓝色旗帜','红色旗帜']}))
+    original=SimpleNamespace(frame=pl.DataFrame({'internal_order_id':['I','I'],'order_flag':['蓝色旗帜','红色旗帜'],'store_name':['shop','shop']}))
     cost=SimpleNamespace(frame=pl.DataFrame({'internal_order_id':['I'],'order_id':['MAIN']}),notes=[])
     orders=SimpleNamespace(frame=pl.DataFrame({'order_id':['MAIN']}))
     apply(SimpleNamespace(frames_of=lambda source:[original]),SimpleNamespace(platform='pdd',name='shop',aliases=[]),cost,orders)
