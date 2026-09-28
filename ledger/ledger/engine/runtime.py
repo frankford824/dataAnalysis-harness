@@ -851,6 +851,8 @@ def run(ingestion: Ingestion, platform: str = "*") -> RunResult:
     )
     facts = _mark_counted(facts, spine_facts, metrics)
     facts = _promotion_booking_evidence(facts)
+    from .promotion_allocation import annotate as annotate_promotion_allocation
+    facts = annotate_promotion_allocation(facts, projections)
     unexplained=(pl.col('source_id')=='promotion') & ~pl.col('counted') & (pl.col('booking_status')!='allocated') & pl.col('source_note').is_null()
     facts=facts.with_columns(pl.when(unexplained).then(
         pl.when(pl.col('linked')).then(pl.lit('商品编号已匹配，但本店本月没有可承接该费用的有效订单分摊结果；请核对本月订单明细或店铺级费用归属，不跨月猜分'))
@@ -1012,7 +1014,14 @@ def _project_scoped_live(
         scoped_spine = projection_spine.filter(
             (pl.col(SPINE_STORE) == store) & (pl.col(SPINE_PERIOD) == period)
         )
-        parts.append(project(scoped_source, metric, Spine(scoped_spine)))
+        part=project(scoped_source, metric, Spine(scoped_spine))
+        from .promotion_allocation import allocate as allocate_unmatched_promotion
+        # A real monthly control already includes unmatched spend. Unknown
+        # controls must be resolved before a second allocation pool is added.
+        controls=wide.filter(pl.col('store')==store)
+        covered=any(not (months:=_promotion_periods(row)) or period in months
+                    for row in controls.select([c for c in ('file_name','sheet','period','promotion_scope') if c in controls.columns]).unique().to_dicts())
+        parts.append(allocate_unmatched_promotion(scoped_source,metric,Spine(scoped_spine),part,covered))
     if not wide.is_empty():
         calculated_parts = [part.facts for part in parts if not part.facts.is_empty()]
         calculated = (
@@ -1048,6 +1057,7 @@ def _project_scoped_live(
             )
             parts.append(part)
     frames = [part.facts for part in parts if not part.facts.is_empty()]
+    evidence=[part.store_wide_evidence for part in parts if not part.store_wide_evidence.is_empty()]
     return Projection(
         facts=pl.concat(frames, how="diagonal_relaxed") if frames else parts[0].facts,
         orphan_amount=money_float(sum(decimal_amount(part.orphan_amount) for part in parts)),
@@ -1055,6 +1065,7 @@ def _project_scoped_live(
         uncovered_rows=sum(part.uncovered_rows for part in parts),
         notes=[note for part in parts for note in part.notes],
         allocation_pending=[item for part in parts for item in part.allocation_pending],
+        store_wide_evidence=pl.concat(evidence,how='vertical_relaxed') if evidence else pl.DataFrame(),
     )
 
 

@@ -45,6 +45,7 @@ class Projection:
     uncovered_rows: int = 0
     notes: list[str] = field(default_factory=list)
     allocation_pending: list[dict] = field(default_factory=list)
+    store_wide_evidence: pl.DataFrame = field(default_factory=pl.DataFrame)
 
 
 def claims(metric: Metric) -> pl.Expr:

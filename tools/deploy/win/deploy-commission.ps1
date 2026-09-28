@@ -3,7 +3,8 @@ param(
   [Parameter(Mandatory=$true)][string]$ExpectedVersion,
   [Parameter(Mandatory=$true)][string]$Version,
   [switch]$AllowTemplateUpdate,
-  [switch]$AllowSourceUpdate
+  [switch]$AllowSourceUpdate,
+  [switch]$AllowMetricUpdate
 )
 $ErrorActionPreference = 'Stop'
 [Console]::OutputEncoding = [Text.Encoding]::UTF8
@@ -22,7 +23,8 @@ try {
     if ($Name -eq 'manifest.json') { continue }
     if ($Name -ne 'VERSION' -and -not $Name.StartsWith('ledger/ledger/') -and
         -not ($AllowTemplateUpdate -and $Name -eq 'models/cn-ecommerce/templates.yaml') -and
-        -not ($AllowSourceUpdate -and $Name -eq 'models/cn-ecommerce/sources.yaml')) { throw "Unexpected file: $Name" }
+        -not ($AllowSourceUpdate -and $Name -eq 'models/cn-ecommerce/sources.yaml') -and
+        -not ($AllowMetricUpdate -and $Name -eq 'models/cn-ecommerce/metrics.yaml')) { throw "Unexpected file: $Name" }
     $Destination = [IO.Path]::GetFullPath((Join-Path $AppRoot $Name))
     if (-not $Destination.StartsWith($AppRoot + '\',[StringComparison]::OrdinalIgnoreCase)) { throw "Unsafe destination: $Name" }
   }
@@ -114,6 +116,8 @@ try {
     if ($AllowTemplateUpdate -and $Name -eq 'templates.yaml' -and $TemplatePayload.Count -eq 1) { $ExpectedHash = $TemplatePayload[0].sha256 }
     $SourcePayload = @($Manifest.files | Where-Object { $_.path -eq 'models/cn-ecommerce/sources.yaml' })
     if ($AllowSourceUpdate -and $Name -eq 'sources.yaml' -and $SourcePayload.Count -eq 1) { $ExpectedHash = $SourcePayload[0].sha256 }
+    $MetricPayload = @($Manifest.files | Where-Object { $_.path -eq 'models/cn-ecommerce/metrics.yaml' })
+    if ($AllowMetricUpdate -and $Name -eq 'metrics.yaml' -and $MetricPayload.Count -eq 1) { $ExpectedHash = $MetricPayload[0].sha256 }
     if ((Get-FileHash -LiteralPath (Join-Path $AppRoot ('models\cn-ecommerce\'+$Name)) -Algorithm SHA256).Hash -ne $ExpectedHash) { throw "Model changed during code release: $Name" }
   }
   # Warm immutable read projections while background writers are stopped.

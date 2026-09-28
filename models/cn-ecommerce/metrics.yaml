@@ -358,16 +358,19 @@
   time_basis: spend_date
   link: {key: product_id, to: order.product_id, grain: product}
   allocate: {mode: even}
-  note: 商品级，按该商品的订单行数均分。实测与人工表逐行完全一致。
+  note: 商品级按该商品订单行数均分；抖音和淘宝的明确当月未匹配商品推广费，进入本店当月全店分摊，不跨月、不重复覆盖控制总额。
 
   by_platform:
     - platform: taobao
+      allocate: {mode: even, unmatched: store_wide}
       link:
         key: product_id
         to: order.product_id
         grain: product
         prefer_exported_orders: true
         spine_where: [{field: order_type, op: not_in, value: [补发订单], include_null: true}]
+    - platform: douyin
+      allocate: {mode: even, unmatched: store_wide}
     # 1688 那张订单明细表的推广费用列写着「无公式，数值全补成 0」——这个店没有投放数据。
     - {platform: alibaba1688, disabled: true}
     # 京东按跟单 SKU ID、拼多多按商品ID，两家的公式都是除以 countifs(商品ID)，

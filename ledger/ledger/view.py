@@ -641,7 +641,7 @@ def drill(facts: pl.DataFrame | str | Path, model: Model, node_id: str,
 
     out_rows = int(facts.filter(~pl.col("counted")).height)
     out_amount = float(facts.filter(~pl.col("counted")).get_column("amount").sum() or 0.0)
-    allocated = (pl.col('booking_status')=='allocated').fill_null(False) if 'booking_status' in facts.columns else pl.lit(False)
+    allocated = pl.col('booking_status').is_in(['allocated','store_wide']).fill_null(False) if 'booking_status' in facts.columns else pl.lit(False)
     allocated_rows = facts.filter(allocated)
     actual_unposted = facts.filter(~pl.col('counted') & ~allocated)
     allocation_summary = {'rows':allocated_rows.height,'amount':money_float(allocated_rows['amount'].sum() or 0.)}
@@ -1023,7 +1023,7 @@ def fees_csv(facts: Path | pl.DataFrame, model: Model, *, review_status: str = "
         )) + (("," + csv_cell(row.get("source_note"))) if with_notes else "")
            + (','+','.join(csv_cell(row.get(k)) for k in ('record_type','closing_run_id','closing_at','closing_by')) if frozen else '')
            + (','+','.join(csv_cell(v) for v in (
-               {'direct':'直接入账','allocated':'已含全店分摊','unposted':'未入账'}.get(row.get('booking_status'),'待核对'),
+               {'direct':'直接入账','allocated':'已含全店分摊','store_wide':'全店分摊入账','unposted':'未入账'}.get(row.get('booking_status'),'待核对'),
                row.get('allocation_control'),row.get('source_period'))) if routing else ''))
     if review_status:
         lines = [lines[0] + ",核对状态"] + [line + "," + csv_cell(review_status) for line in lines[1:]]

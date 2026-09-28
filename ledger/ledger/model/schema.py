@@ -580,11 +580,15 @@ class Allocation(Base):
     mode: Literal["ratio", "even"]
     #: ratio 模式：比例所在的字段角色，取自脊柱。
     by: str | None = None
+    #: 商品推广未匹配本月订单时，仅有明确店铺和发生月才能全店分摊。
+    unmatched: Literal['pending','store_wide'] = 'pending'
 
     @model_validator(mode="after")
     def _check(self) -> Allocation:
         if self.mode == "ratio" and not self.by:
             raise ValueError("ratio 分摊必须声明 by（比例字段角色）")
+        if self.unmatched=='store_wide' and self.mode!='even':
+            raise ValueError('未匹配推广全店分摊只支持 even，不能替代收入比例依据')
         return self
 
 
@@ -710,6 +714,16 @@ class Metric(Base):
     #: 各平台的差异写法。没列到的平台走上面的缺省算法。
     by_platform: tuple[PlatformRule, ...] = ()
     note: str = ""
+
+    @model_validator(mode='after')
+    def _check_unmatched_policy(self) -> Metric:
+        for rule in (self,*self.by_platform):
+            allocation=rule.allocate or self.allocate
+            link_rule=rule.link or self.link
+            if allocation and allocation.unmatched=='store_wide':
+                if self.source!='promotion' or not link_rule or link_rule.grain!='product':
+                    raise ValueError('未匹配全店分摊仅限商品级推广费，不能用于收入或成本身份不明的记录')
+        return self
 
     def for_platform(self, platform: str) -> Metric | None:
         """取这条指标在某个平台上的实际算法。该平台不算这条时返回 None。"""

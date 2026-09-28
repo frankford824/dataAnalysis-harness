@@ -15,7 +15,7 @@ def git(*args):
 
 for ref in (base, version):
     git('rev-parse', '--verify', ref + '^{commit}')
-paths = ('ledger/ledger', 'models/cn-ecommerce/templates.yaml', 'models/cn-ecommerce/sources.yaml')
+paths = ('ledger/ledger', 'models/cn-ecommerce/templates.yaml', 'models/cn-ecommerce/sources.yaml', 'models/cn-ecommerce/metrics.yaml')
 files = git('diff', '--no-renames', '--name-only', '--diff-filter=AM', base, version,
             '--', *paths).decode().splitlines()
 manifest = []

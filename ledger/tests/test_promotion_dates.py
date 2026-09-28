@@ -21,13 +21,15 @@ def ingested(template, headers, rows):
                                             template_id=template.id))
 
 
-def calculate(rows, *, live=False, dated=True, platform="douyin"):
+def calculate(rows, *, live=False, dated=True, platform="douyin", unmatched="pending"):
     builtin = load_model(MODELS / "cn-ecommerce")
+    metric=builtin.metric('ad_cost').for_platform(platform)
+    metric=metric.model_copy(update={'allocate':metric.allocate.model_copy(update={'unmatched':unmatched}),'by_platform':()})
     model = Model(id="test", name="test", stores=(Store(id="s", name="shop", platform=platform),),
                   sources=(SourceContract(id="order_detail", name="订单", is_spine=True,
                                           owner_role="shop_owner", cadence="monthly"),
                            SourceContract(id="promotion", name="推广", owner_role="shop_owner", cadence="monthly", required_for_close=False)),
-                  metrics=(builtin.metric("ad_cost"), Metric(id="order_amount", name="订单金额", source="order_detail",
+                  metrics=(metric, Metric(id="order_amount", name="订单金额", source="order_detail",
                            value={"op": "sum", "of": ["buyer_paid"]}, time_basis="order_date")),
                   statement=(StatementNode(id="ad", name="推广", formula={"op": "add", "of": ["ad_cost"]}),))
     fields = ["order_id", "product_id", "store_name", "order_time", "buyer_paid"]
