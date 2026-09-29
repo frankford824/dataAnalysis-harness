@@ -30,6 +30,7 @@ from .model.propose import Draft, role_facts
 from .model.schema import Model, Store
 from .model.config import csv_cell
 from .money import money_float
+from .fee_display import describe as _fee_description
 
 if TYPE_CHECKING:  # 只为类型标注；运行时导入会让 view 依赖向导层，方向反了
     from .commission import Commission
@@ -745,6 +746,7 @@ def drill(facts: pl.DataFrame | str | Path, model: Model, node_id: str,
         "sample": [
             {
                 **r,
+                **_fee_description(r, graded=graded),
                 "metric": metric_name(model, r.pop("metric_id")),
                 "classify_via": humanize_via(r.get("classify_via") or "", model),
             }
@@ -991,39 +993,38 @@ def fees_csv(facts: Path | pl.DataFrame, model: Model, *, review_status: str = "
         )
         if c in facts.columns
     ]
-    if not cols or facts.is_empty():
-        return "订单号,科目,金额,进账,是否进账,文件,行号\n"
-    with_notes = "source_note" in facts.columns and facts["source_note"].drop_nulls().len() > 0
+    from .fee_display import SOURCE_AMOUNT,BOOKED_AMOUNT,IDENTIFIER
+    headers=[IDENTIFIER,'科目','原始科目',SOURCE_AMOUNT,BOOKED_AMOUNT,'核算状态','核算说明',
+             '文件','工作表','原表行号','原订单号','商品编码','聚水潭订单号','订单资料匹配（非入账依据）']
     frozen = 'record_type' in facts.columns
     precision = 10 if frozen else 4
     frame = facts.select(cols)
-    lines = ["订单号,科目,原始科目,金额,进账,是否进账,已挂钩,文件,工作表,行号,原订单号,商品编码,聚水潭订单号"]
-    if with_notes:
-        lines[0] += ",计算说明"
+    lines = [','.join(headers)]
     if frozen:
         lines[0] += ',记录类型,结账核算记录,结账确认时间,结账确认人'
     routing = 'booking_status' in frame.columns
     if routing:
-        lines[0] += ',入账路径,分摊依据,原表账期'
+        lines[0] += ',分摊依据,原表账期'
     for row in frame.iter_rows(named=True):
+        presentation=_fee_description(row)
         lines.append(",".join((
-            _excel_identifier_cell(row.get("link_key")),
+            _excel_identifier_cell(presentation['display_identifier']),
             csv_cell(names.get(row.get("metric_id") or "", row.get("metric_id"))),
             csv_cell(row.get("subject")),
-            csv_cell(f"{float(row.get('amount') or 0):.{precision}f}"),
-            csv_cell(f"{float(row.get('contribution') or 0):.{precision}f}"),
-            csv_cell("是" if row.get("counted") else "否"),
-            csv_cell("是" if row.get("linked") else "否"),
+            csv_cell(f"{float(row['amount'] or 0):.{precision}f}" if row.get('amount') is not None else ''),
+            csv_cell(f"{float(row['contribution'] or 0):.{precision}f}" if row.get('contribution') is not None else ''),
+            csv_cell(presentation['accounting_status']),
+            csv_cell(presentation['accounting_explanation']),
             csv_cell(row.get("file_name")),
             csv_cell(row.get("sheet")),
             csv_cell(row.get("row_no")),
             _excel_identifier_cell(row.get("order_id")),
             _excel_identifier_cell(row.get("sku")),
             _excel_identifier_cell(row.get("internal_order_id")),
-        )) + (("," + csv_cell(row.get("source_note"))) if with_notes else "")
+            csv_cell(presentation['order_match_status']),
+        ))
            + (','+','.join(csv_cell(row.get(k)) for k in ('record_type','closing_run_id','closing_at','closing_by')) if frozen else '')
            + (','+','.join(csv_cell(v) for v in (
-               {'direct':'直接入账','allocated':'已含全店分摊','store_wide':'全店分摊入账','unposted':'未入账'}.get(row.get('booking_status'),'待核对'),
                row.get('allocation_control'),row.get('source_period'))) if routing else ''))
     if review_status:
         lines = [lines[0] + ",核对状态"] + [line + "," + csv_cell(review_status) for line in lines[1:]]

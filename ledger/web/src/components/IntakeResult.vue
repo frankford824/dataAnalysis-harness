@@ -60,7 +60,7 @@ function onboard(t) {
     <p class="small muted" style="margin-bottom: var(--s4)">{{ it?.summary }}</p>
 
     <section v-if="rejected.length" class="stack" style="margin-bottom: var(--s4)">
-      <h3 class="warn">{{ rejected.length }} 份没进账</h3>
+      <h3 class="warn">{{ rejected.length }} 份未进入核算</h3>
       <div v-for="r in rejected" :key="r.file" class="line">
         <span class="small strong">{{ r.file }}</span>
         <span class="xs muted">{{ r.why }}</span>
@@ -79,7 +79,7 @@ function onboard(t) {
 
     <section v-if="unknown.length" class="stack" style="margin-bottom: var(--s4)">
       <h3 class="warn">{{ unknown.length }} 张表没人认识</h3>
-      <p class="xs muted">文件收下了，但这几张表不在任何模板里，里面的钱没进账。</p>
+      <p class="xs muted">文件已收到，但这几张表尚未识别，金额还没有进入核算；请先确认表头和列对应关系。</p>
       <div v-for="t in unknown" :key="`${t.sha}${t.sheet}`" class="line">
         <span class="small">{{ t.file }} · {{ t.sheet }}</span>
         <n-button size="tiny" @click="onboard(t)">去接这张表</n-button>

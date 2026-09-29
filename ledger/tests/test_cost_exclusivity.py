@@ -107,7 +107,7 @@ def test_cost_export_keeps_original_order_and_product_identity():
     from ledger.view import fees_csv
     result=calculate()
     rows=list(csv.DictReader(io.StringIO(fees_csv(result.facts,result.model))))
-    assert rows[0]['订单号']=='SUB'
+    assert rows[0]['订单号/商品ID']=='SUB'
     assert rows[0]['原订单号']=='MAIN'
     assert rows[0]['商品编码']=='SKU'
     assert rows[0]['聚水潭订单号']=='1'

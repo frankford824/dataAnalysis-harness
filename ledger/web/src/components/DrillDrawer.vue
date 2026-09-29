@@ -46,6 +46,9 @@ const file = ref('')
 const term = ref('')
 const appliedTerm = ref('')
 const order = ref('amount')
+const summaryAmountLabel = computed(() => only.value === 'counted' ? '本行计入金额合计'
+  : only.value === 'uncounted' ? '未计入来源金额'
+  : only.value === 'allocated' ? '分摊来源金额（已计入）' : '来源金额（勿合计）')
 
 const terms = computed(() => [
   ...new Set(term.value.trim().split(/[\s,，;；]+/).filter(Boolean)),
@@ -65,7 +68,11 @@ async function load() {
   loading.value=true;failed.value=''
   try{
     const result=await drillRequest.run(signal=>api.drill(props.runId,props.node,{limit:size,offset:page.value*size,only:only.value,subject:subject.value,file:file.value,q:appliedTerm.value,order:order.value},{signal}))
-    if(result)data.value=result.value
+    if(result){
+      data.value=result.value
+      // Old archives cannot truthfully offer a posted-money filter.
+      if(result.value.graded===false && only.value!=='all')only.value='all'
+    }
   }catch(e){if(serial===drillSerial)failed.value=e.message}
   finally{if(serial===drillSerial)loading.value=false}
 }
@@ -172,15 +179,15 @@ function close() {
           <div class="board-kpis" style="grid-template-columns: repeat(2, 1fr)">
             <div class="kpi">
               <div class="label">
-                {{ data.statement_available === false ? '完整核定金额' : data.kind === 'statement' ? '报表上这个数' : '这些行的合计' }}
+                {{ data.statement_available === false ? '完整核算金额' : data.kind === 'statement' ? '账期核算金额' : '本类记录合计' }}
               </div>
               <div class="value" :class="{ neg: data.value < 0 }">{{ data.statement_available === false ? '待核对' : money(data.value) }}</div>
-              <div v-if="data.statement_available === false && data.verified_partial!=null" class="foot">已入账部分 {{ money(data.verified_partial) }}，不是完整核定金额</div>
+              <div v-if="data.statement_available === false && data.verified_partial!=null" class="foot">已计入部分 {{ money(data.verified_partial) }}，完整核算金额仍待核对</div>
             </div>
             <div class="kpi">
-              <div class="label">{{ only === 'allocated' ? '分摊内原始费用（非新增）' : only === 'uncounted' ? '未入账原始金额' : only === 'all' ? '原始金额（非入账合计）' : '已入账合计' }}</div>
-              <div class="value" :class="{ neg: data.source_total < 0 }">
-                {{ money(data.source_total) }}
+              <div class="label">{{ only === 'allocated' ? '已计入的分摊来源金额（勿重复相加）' : only === 'uncounted' ? '未计入来源金额（非应补金额）' : only === 'all' ? '全部来源记录（不作金额合计）' : '本行计入金额合计' }}</div>
+              <div class="value" :class="{ neg: only !== 'all' && data.source_total < 0 }">
+                {{ only === 'all' ? count(data.rows) + ' 条' : money(data.source_total) }}
               </div>
               <div class="foot">
                 {{ count(data.rows) }} 行
@@ -190,6 +197,12 @@ function close() {
               </div>
             </div>
           </div>
+
+          <p class="xs muted" style="margin-top:var(--s3)">
+            对账请按科目合计“本行计入金额”。“来源金额”含原始明细与汇总，不能直接相加。
+            “汇总分摊已计入”的明细行显示0，是因为费用已在汇总行计入，不是漏记。
+            “计入”指纳入核算，不表示实际收付款。
+          </p>
 
           <n-alert v-if="data.statement_available === false" type="warning" :bordered="false" style="margin-top:var(--s3)">
             {{ data.unavailable_reason || '本项尚有资料待核对，不能把已识别部分作为完整核定金额。' }}
@@ -203,7 +216,7 @@ function close() {
               <br>{{ issue.source_note || '未计入本店本期；请核对原始归属和入账条件。' }}
               <n-button size="tiny" @click="only='uncounted';file=issue.file_name;subject='';page=0">查看该文件未入账行</n-button>
             </p>
-            <p v-if="data.unposted_reason_groups>20" class="xs muted">仅列前20组原因，其余请在“没进账”逐行核对。</p>
+            <p v-if="data.unposted_reason_groups>20" class="xs muted">仅列前20组原因，其余请在“未计入”逐行核对。</p>
           </details>
 
           <n-alert
@@ -219,15 +232,15 @@ function close() {
 
           <div class="row wrap" style="margin: var(--s4) 0; gap: var(--s2)">
             <n-radio-group v-if="data.kind === 'statement' || data.kind === 'metric'" v-model:value="only" size="small">
-              <n-radio-button value="counted">进了账</n-radio-button>
-              <n-radio-button value="uncounted">
-                没进账
+              <n-radio-button value="counted" :disabled="!data.graded">计入金额（可汇总）</n-radio-button>
+              <n-radio-button value="uncounted" :disabled="!data.graded">
+                未计入
                 <span v-if="data.uncounted?.rows" class="xs">
                   {{ count(data.uncounted.rows) }}
                 </span>
               </n-radio-button>
-              <n-radio-button value="all">全部</n-radio-button>
-              <n-radio-button v-if="data.allocated?.rows" value="allocated">已含分摊 {{ count(data.allocated.rows) }}</n-radio-button>
+              <n-radio-button value="all">全部来源记录</n-radio-button>
+              <n-radio-button v-if="data.allocated?.rows" value="allocated">全店分摊明细 {{ count(data.allocated.rows) }}</n-radio-button>
             </n-radio-group>
             <n-select
               v-model:value="order"
@@ -265,7 +278,7 @@ function close() {
               </span>
             </div>
             <p v-for="note in indexResult.notes" :key="note" class="xs muted">{{ note }}</p>
-            <p class="xs muted">原文件搜索会保留已去重的副本，不代表命中行都已入账；是否计入以本页账目明细和入账路径为准。</p>
+            <p class="xs muted">原文件搜索保留原始副本，不代表每条命中记录都计入账目；请以核算状态和本行计入金额为准。</p>
             <n-table v-if="indexResult.hits.length" size="small" :bordered="false">
               <tbody>
                 <tr v-for="hit in indexResult.hits.slice(0, 30)" :key="`${hit.sha256}:${hit.sheet}:${hit.row_no}`">
@@ -294,19 +307,19 @@ function close() {
             另有 {{ count(data.uncounted.rows) }} 行、合计
             <span class="num">{{ money(data.uncounted.amount) }}</span>
             未计入当前店铺本月账目，可能涉及其他店铺、其他账期、未匹配订单或流水待核对。
-            切到「没进账」查看逐行原因；不能把这些金额直接加到看板。
+            切到「未计入」查看逐行原因；不能把这些金额直接加到看板。
           </n-alert>
 
           <n-alert v-if="data.allocated?.rows" type="info" :bordered="false" style="margin-bottom:var(--s4)">
             {{ count(data.allocated.rows) }} 行推广费未直接匹配原商品订单，但已包含在全店分摊中，不是漏记。
-            「已含分摊」查看原始费用和控制依据；金额不可再次加总。个人商品归属与店铺费用总额须分别核对。
+            「全店分摊明细」查看来源及分摊依据；这些费用已计入，不可再加到本期合计上。
           </n-alert>
           <n-table v-if="data.by_subject?.length" size="small" :bordered="false">
             <thead>
               <tr>
                 <th>科目</th>
                 <th class="right">行数</th>
-                <th class="right">金额</th>
+                <th v-if="only !== 'all'" class="right">{{ summaryAmountLabel }}</th>
               </tr>
             </thead>
             <tbody>
@@ -319,13 +332,14 @@ function close() {
               >
                 <td>{{ s.subject || '未分类' }}</td>
                 <td class="right num">{{ count(s.count) }}</td>
-                <td class="right num" :class="{ neg: s.amount < 0 }">{{ money(s.amount) }}</td>
+                <td v-if="only !== 'all'" class="right num" :class="{ neg: s.amount < 0 }">{{ money(s.amount) }}</td>
               </tr>
             </tbody>
           </n-table>
 
           <h3 style="margin: var(--s5) 0 var(--s2)">来源文件</h3>
           <n-table size="small" :bordered="false">
+            <thead><tr><th>文件／工作表</th><th class="right">记录行数</th><th v-if="only !== 'all'" class="right">{{ summaryAmountLabel }}</th></tr></thead>
             <tbody>
               <tr
                 v-for="(f, i) in data.by_file || []"
@@ -336,7 +350,7 @@ function close() {
               >
                 <td class="xs">{{ f.file }}<template v-if="f.sheet"> · {{ f.sheet }}</template></td>
                 <td class="right num">{{ count(f.count) }}</td>
-                <td class="right num" :class="{ neg: f.amount < 0 }">{{ money(f.amount) }}</td>
+                <td v-if="only !== 'all'" class="right num" :class="{ neg: f.amount < 0 }">{{ money(f.amount) }}</td>
               </tr>
             </tbody>
           </n-table>
@@ -344,7 +358,7 @@ function close() {
           <div class="spread" style="margin: var(--s5) 0 var(--s2)">
             <h3>原始行</h3>
             <span class="xs muted">
-              第 {{ (data.selection?.offset || 0) + 1 }}–{{
+              第 {{ data.sample?.length ? (data.selection?.offset || 0) + 1 : 0 }}–{{
                 (data.selection?.offset || 0) + (data.sample?.length || 0)
               }}
               行，共 {{ count(data.selection?.rows || 0) }}
@@ -355,22 +369,23 @@ function close() {
           <p class="xs muted" style="margin-bottom: var(--s2)">
             最后一列是它在源文件里的位置，照着行号能翻回原表核对。
             核对下来确实不对的话，改的是表本身或者认表的口径，不是这里的数字——
-            账期页右上角「数字不对？」写了怎么改。
+            可通过账期页的「核对金额」查看处理方式。
           </p>
           <n-table size="small" :bordered="false">
             <thead>
               <tr>
                 <th>{{ data.key_label || '订单号' }}</th>
                 <th>科目</th>
-                <th class="right nowrap">金额</th>
-                <th class="right nowrap">进账</th>
+                <th class="right nowrap">来源金额</th>
+                <th class="right nowrap">本行计入金额</th>
+                <th>核算状态与说明</th>
                 <th>在哪一行</th>
               </tr>
             </thead>
             <tbody>
               <tr v-for="(r, i) in data.sample || []" :key="i">
-                <td class="xs num">
-                  {{ r.link_key || '—' }}
+                <td class="xs num nowrap">
+                  {{ r.display_identifier || r.link_key || '—' }}
                   <a
                     v-if="orderFact(r)"
                     class="link"
@@ -382,13 +397,20 @@ function close() {
                 <td class="xs">
                   {{ r.minor || r.subject || r.metric }}
                   <div v-if="r.classify_via" class="xs muted">{{ r.classify_via }}</div>
-                  <div v-if="r.source_note" class="xs" :class="r.source_note.startsWith('对账流水待核对：') ? 'neg' : 'muted'">
-                    {{ r.source_note }}
-                  </div>
                 </td>
                 <td class="right num nowrap" :class="{ neg: r.amount < 0 }">{{ money(r.amount) }}</td>
                 <td class="right num nowrap" :class="{ neg: r.contribution < 0 }">
-                  {{ r.counted ? money(r.contribution) : r.booking_status === 'allocated' ? '已含分摊' : '—' }}
+                  {{ data.graded ? money(r.contribution) : '待核对' }}
+                </td>
+                <td class="xs" style="min-width:170px">
+                  <strong>{{ r.accounting_status || '待核对（请刷新）' }}</strong>
+                  <div>{{ r.accounting_hint }}</div>
+                  <details>
+                    <summary>查看依据</summary>
+                    <div>{{ r.accounting_explanation }}</div>
+                    <div v-if="r.allocation_control" class="muted">分摊依据：{{ r.allocation_control }}</div>
+                    <div class="muted">资料关联：{{ r.order_match_status || '未记录' }}</div>
+                  </details>
                 </td>
                 <td class="xs num">
                   {{ r.file_name }}<template v-if="r.sheet"> · {{ r.sheet }}</template> ·
@@ -400,6 +422,8 @@ function close() {
               </tr>
             </tbody>
           </n-table>
+
+          <n-empty v-if="!data.sample?.length" description="当前筛选没有原始记录" style="padding:var(--s4)" />
 
           <div class="row" style="margin-top: var(--s4); justify-content: center">
             <n-button size="small" :disabled="page === 0" @click="page -= 1">上一页</n-button>

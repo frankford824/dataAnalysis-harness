@@ -407,14 +407,15 @@ def test_fee_drill_still_says_order_id(real):
 
 def test_fees_csv_keeps_uncounted_rows(real):
     """没进账的行也要在导出里，否则对不上的那一截只能再回系统点。"""
-    text = fees_csv(_facts([
+    facts = _facts([
         {"metric_id": "software_fee", "link_key": "O1", "amount": -1.0,
          "contribution": -1.0, "counted": True, "file_name": "对账.csv", "row_no": 2},
         {"metric_id": "software_fee", "link_key": "O2", "amount": -2.0,
          "contribution": 0.0, "counted": False, "file_name": "对账.csv", "row_no": 3},
-    ]), real)
+    ]).with_columns(pl.Series('counted',[True,False]),pl.Series('contribution',[-1.,0.]))
+    text = fees_csv(facts, real)
     assert "O1" in text and "O2" in text
-    assert "否" in text and "是" in text
+    assert "本行已计入" in text and "本行未计入" in text
     assert "平台服务费" in text
 
 

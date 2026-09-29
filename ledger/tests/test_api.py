@@ -565,8 +565,9 @@ class TestDrill:
         monkeypatch.setattr(api, "workspace", lambda: FakeWorkspace())
         response = client.get("/api/runs/1/fees.csv")
         assert response.status_code == 200
+        assert response.headers['X-Ledger-Export-Schema']=='fees-v2'
         assert response.content.startswith(b"\xef\xbb\xbf")
-        assert response.content.decode("utf-8-sig").startswith("订单号,科目,")
+        assert response.content.decode("utf-8-sig").startswith("订单号/商品ID,科目,")
         if pending:
             assert "2条成本未覆盖" in response.content.decode("utf-8-sig")
             assert "现有源行金额需人工确认" in response.content.decode("utf-8-sig")

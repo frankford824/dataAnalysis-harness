@@ -9,6 +9,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from ledger import frozen_costs, manual_cost, view
+from ledger.fee_display import SOURCE_AMOUNT,BOOKED_AMOUNT,IDENTIFIER
 from ledger.commission_registry import Registry
 from ledger.workspace import Workspace, WorkspaceError
 from test_manual_cost import model, result
@@ -40,13 +41,13 @@ def test_frozen_113_lines_reconcile_export_and_drill_without_changing_sources():
     exported=list(csv.DictReader(io.StringIO(view.fees_csv(projected,m))))
     supplements=[r for r in exported if r['记录类型']=='结账人工补录']
     assert len(supplements)==113
-    assert sum(Decimal(r['进账']) for r in supplements)==Decimal('-23369.72')
+    assert sum(Decimal(r[BOOKED_AMOUNT]) for r in supplements)==Decimal('-23369.72')
     assert all(r['结账核算记录']=='197429' for r in exported)
     goods=[r for r in exported if r['科目']=='商品成本']
-    assert sum(Decimal(r['进账']) for r in goods)==Decimal('-65602.5100000000')
-    assert any(r['是否进账']=='否' and Decimal(r['金额'])==-99 and Decimal(r['进账'])==0 for r in goods)
+    assert sum(Decimal(r[BOOKED_AMOUNT]) for r in goods)==Decimal('-65602.5100000000')
+    assert any(r['核算状态']=='本行未计入' and Decimal(r[SOURCE_AMOUNT])==-99 and Decimal(r[BOOKED_AMOUNT])==0 for r in goods)
     assert any(r['记录类型']=='结账舍入调整' for r in goods)
-    assert supplements[0]['订单号']=='="5120605334958025518"'
+    assert supplements[0][IDENTIFIER]=='="5120605334958025518"'
     drilled=view.drill(projected,m,'n_goods',value=-65602.51)
     assert drilled['source_total']==drilled['value']==-65602.51
     assert any(r['file']=='结账人工成本（冻结快照）' for r in drilled['by_file'])
@@ -112,7 +113,7 @@ def test_api_uses_closed_snapshot_not_later_supplements_or_new_run(tmp_path,monk
     response=client.get(f'/api/runs/{run}/fees.csv')
     assert response.status_code==200,response.text
     rows=list(csv.DictReader(io.StringIO(response.content.decode('utf-8-sig'))))
-    assert sum(Decimal(r['进账']) for r in rows)==-700
+    assert sum(Decimal(r[BOOKED_AMOUNT]) for r in rows)==-700
     assert sum(r['记录类型']=='结账人工补录' for r in rows)==1
     assert '9999' not in response.text
     assert '已含本次结账冻结的人工成本' in response.text

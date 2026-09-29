@@ -38,4 +38,4 @@ def test_jd_unmatched_daily_or_monthly_spend_joins_only_current_month_pool(day,t
     path=tmp_path/'facts.parquet';sl.facts.write_parquet(path)
     d=view.drill(path,model,'ad',only='allocated')
     assert d['rows']==2 and d['uncounted']['rows']==0 and d['source_total']==-6.02
-    assert '全店分摊入账' in view.fees_csv(path,model)
+    assert '全店分摊已计入' in view.fees_csv(path,model)

@@ -83,7 +83,7 @@ def test_indirect_rows_are_disclosed_without_being_counted_twice(tmp_path):
     assert shown['rows']==1 and shown['allocated']['amount']==-20.
     assert shown['uncounted']['rows']==0
     assert shown['sample'][0]['allocation_control']
-    assert '已含全店分摊' in fees_csv(facts,result.model)
+    assert '汇总分摊已计入' in fees_csv(facts,result.model)
     path=tmp_path/'archived-facts.parquet'
     facts.write_parquet(path)
     for mode in ('counted','allocated','uncounted','all'):

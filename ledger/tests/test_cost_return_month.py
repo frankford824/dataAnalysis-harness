@@ -97,7 +97,7 @@ def test_export_has_actual_date_quantity_and_original_unit_cost(tmp_path):
     r=calculate(tmp_path,[("A1","卖家已收到退货",3,1,"2026-07-09")])
     rows=list(csv.DictReader(io.StringIO(fees_csv(r.facts,r.model))))
     row=next(row for row in rows if row['科目']=='退货成本冲回')
-    assert row['进账']=='4.0000'
-    assert '2026-07-09' in row['计算说明']
-    assert '本次冲回数量：1' in row['计算说明']
-    assert '原成本单价：4' in row['计算说明']
+    assert row['本行计入金额（合计此列）']=='4.0000'
+    assert '2026-07-09' in row['核算说明']
+    assert '本次冲回数量：1' in row['核算说明']
+    assert '原成本单价：4' in row['核算说明']

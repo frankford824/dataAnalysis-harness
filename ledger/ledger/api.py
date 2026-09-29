@@ -1599,7 +1599,8 @@ def drill(run_id: int, node_id: str, limit: int = view.DRILL_LIMIT,
         state=workspace().state_by_run(run_id)
         line=next((n for n in ((state.result or {}).get('statement') or []) if n.get('id')==node_id),{}) if state else {}
         response['statement_available']=line.get('available')
-        response['unavailable_reason']=line.get('unavailable_reason','')
+        from .fee_display import current_terms
+        response['unavailable_reason']=current_terms(line.get('unavailable_reason',''))
         response['verified_partial']=line.get('verified_partial')
         return response
     except WorkspaceError as exc:
@@ -1680,16 +1681,17 @@ def fees_export(run_id: int) -> PlainTextResponse:
             facts=frozen_costs.for_run(workspace(),run_id,facts,_model(),required=True)
         except WorkspaceError as exc:
             raise HTTPException(409,str(exc)) from exc
-    review_status = ("已含本次结账冻结的人工成本；按进账列核对，未进账行不计入看板；不包含后续补录修改" if manual
+    review_status = ("已含本次结账冻结的人工成本；合计本行计入金额列核对，勿重复加分摊来源金额；不包含后续补录修改" if manual
                      else f"{gap_count}条成本未覆盖，现有源行金额需人工确认" if gap_count else "")
     body = "\ufeff" + view.fees_csv(facts, _model(), review_status=review_status)
     suffix = "结账费项明细-含冻结人工成本" if manual else "费项明细-成本需确认" if gap_count else "费项明细"
-    filename = f"{store}-{period}-{suffix}.csv"
-    ascii_name = f"{store}-{period}-fees.csv"
+    filename = f"{store}-{period}-{suffix}-核算状态版.csv"
+    ascii_name = f"{store}-{period}-fees-v2.csv"
     return PlainTextResponse(
         body,
         media_type="text/csv; charset=utf-8",
         headers={
+            "X-Ledger-Export-Schema": "fees-v2",
             "Content-Disposition": (
                 f'attachment; filename="{ascii_name}"; '
                 f"filename*=UTF-8''{quote(filename)}"

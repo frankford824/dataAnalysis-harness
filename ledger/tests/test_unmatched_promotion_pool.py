@@ -45,8 +45,8 @@ def test_unmatched_product_stays_in_its_spend_month_and_pool(live,tmp_path):
     d=view.drill(path,result.model,'ad',only='allocated')
     assert d['rows']==1 and d['uncounted']['rows']==0 and d['source_total']==-.02
     rows=list(csv.DictReader(io.StringIO(view.fees_csv(path,result.model))))
-    row=next(r for r in rows if r.get('入账路径')=='全店分摊入账')
-    assert row['入账路径']=='全店分摊入账' and float(row['进账'])==-.02
+    row=next(r for r in rows if r.get('核算状态')=='全店分摊已计入')
+    assert float(row['本行计入金额（合计此列）'])==-.02
 
 
 def test_independent_monthly_control_already_includes_orphans():
