@@ -18,7 +18,7 @@ def test_only_authorized_platforms_enable_store_pool():
     assert m.for_platform('douyin').allocate.unmatched=='store_wide'
     assert m.for_platform('alibaba1688').allocate.unmatched=='store_wide'
     assert m.for_platform('pdd').allocate.unmatched=='pending'
-    assert m.for_platform('jd').allocate.unmatched=='pending'
+    assert m.for_platform('jd').allocate.unmatched=='store_wide'
     with pytest.raises(ValueError):Allocation(mode='ratio',by='alloc_ratio',unmatched='store_wide')
     with pytest.raises(ValueError):Metric(id='revenue',name='收入',source='settlement',value={'op':'sum','of':['amount']},
         link=LinkRule(key='product_id',to='order.product_id',grain='product'),allocate=Allocation(mode='even',unmatched='store_wide'))

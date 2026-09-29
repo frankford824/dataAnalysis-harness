@@ -358,7 +358,7 @@
   time_basis: spend_date
   link: {key: product_id, to: order.product_id, grain: product}
   allocate: {mode: even}
-  note: 商品级按该商品订单行数均分；抖音、淘宝及1688的明确当月未匹配商品推广费，进入本店当月全店分摊，不跨月、不重复覆盖控制总额。
+  note: 商品级按该商品订单行数均分；抖音、淘宝、1688及京东的明确当月未匹配商品推广费，进入本店当月全店分摊，不跨月、不重复覆盖控制总额。
 
   by_platform:
     - platform: taobao
@@ -381,7 +381,7 @@
       note: 商品匹配部分按原始订单明细同商品ID行数均分；明确本店当月但未匹配商品ID的消耗按当月原始订单明细全店均分，不以订单台补入行扩大分母，不跨月。
     # 京东按跟单 SKU ID、拼多多按商品ID，两家的公式都是除以 countifs(商品ID)，
     # 和缺省的按商品行数均分是同一件事。
-    - {platform: jd, allocate: {mode: even}}
+    - {platform: jd, allocate: {mode: even, unmatched: store_wide}}
     - {platform: pdd, allocate: {mode: even}}
 
 - id: small_payment_cost
