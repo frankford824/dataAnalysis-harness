@@ -23,6 +23,7 @@ import GapList from '../components/GapList.vue'
 import PageHead from '../components/PageHead.vue'
 import PeriodStrip from '../components/PeriodStrip.vue'
 import PricingPending from '../components/PricingPending.vue'
+import OrderIssuesDrawer from '../components/OrderIssuesDrawer.vue'
 import { suggestedManualPayout } from '../commissionPayout'
 import { periodDrillTarget } from '../periodDrill'
 import { count, money, percent, stamp } from '../format'
@@ -44,6 +45,7 @@ const loading = ref(false)
 const failed = ref('')
 const refreshFailed = ref(false)
 const drill = ref(null)
+const orderIssue = ref(null)
 const pricingPanel = ref(null)
 const checksPanel = ref(null)
 
@@ -98,7 +100,7 @@ async function load(force=false, quiet=false) {
   }catch(e){if(serial===loadSerial){if(quiet)refreshFailed.value=true;else failed.value=e.message}}
   finally{if(serial===loadSerial&&!quiet)loading.value=false}
 }
-watch(()=>[props.id,period.value],()=>{drill.value=null;load()}, {immediate:true})
+watch(()=>[props.id,period.value],()=>{drill.value=null;orderIssue.value=null;load()}, {immediate:true})
 watch(()=>app.uiRefresh,()=>load(true))
 
 let refreshTimer, refreshing=false
@@ -339,6 +341,10 @@ const unlinkedNeedsWork = computed(() => ({
 
 /** 点一条缺口，落到它的来源行。没有损益表节点的（挂不上订单、认不出的费项）走专用入口。 */
 function openGap(gap) {
+  if (gap.orders && snap.value?.run_id) {
+    orderIssue.value = { runId: snap.value.run_id, issueId: gap.orders, title: gap.title }
+    return
+  }
   if (gap.node === '__sources__') {
     rail.value = 'sources'
     return
@@ -359,6 +365,10 @@ function openGap(gap) {
 }
 
 function openFinding(f) {
+  if (f.orders && snap.value?.run_id) {
+    orderIssue.value = { runId: snap.value.run_id, issueId: f.orders, title: f.name }
+    return
+  }
   if (f.tab) {
     rail.value = f.tab
     return
@@ -606,9 +616,9 @@ watch(
                   <ul v-else-if="f.lines?.length" class="bullets">
                     <li v-for="(line, i) in f.lines" :key="i">{{ line }}</li>
                   </ul>
-                  <div v-if="f.drill || f.tab" class="row" style="margin-top: var(--s2)">
+                  <div v-if="f.drill || f.tab || f.orders" class="row" style="margin-top: var(--s2)">
                     <n-button size="tiny" type="primary" @click="openFinding(f)">
-                      {{ f.tab === 'sources' ? '去看所需资料' : '看这些行' }}
+                      {{ f.orders ? '查看订单明细' : f.tab === 'sources' ? '去看所需资料' : '看这些行' }}
                     </n-button>
                   </div>
                 </n-alert>
@@ -917,6 +927,7 @@ watch(
     />
 
     <StatementReview v-if="reviewingStatement && snap?.run_id" :store-id="props.id" :period="period" :run-id="snap.run_id" @close="reviewingStatement=false" @updated="statementUpdated" />
+    <OrderIssuesDrawer v-if="orderIssue" :run-id="orderIssue.runId" :issue-id="orderIssue.issueId" :title="orderIssue.title" @close="orderIssue = null" />
     <DrillDrawer
       v-if="drill"
       :run-id="drill.runId"

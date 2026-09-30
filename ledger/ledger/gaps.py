@@ -46,7 +46,8 @@ def _gap(kind: str, severity: str, title: str, detail: str, **rest: Any) -> dict
     return {"kind": kind, "severity": severity, "title": title, "detail": detail,
             "node": rest.get("node", ""), "metric": rest.get("metric", ""),
             "source": rest.get("source", ""), "amount": rest.get("amount"),
-            "only": rest.get("only", "counted")}
+            "only": rest.get("only", "counted"),
+            **({'orders': rest['orders']} if rest.get('orders') else {})}
 
 
 def gaps(payload: dict[str, Any], model: Model,
@@ -120,6 +121,7 @@ def _blocking(payload: dict[str, Any], model: Model) -> list[dict[str, Any]]:
         out.append(_gap(
             "blocking", "blocking", hit.get("name") or f["name"], hit.get("message") or "",
             node=node, only=hit.get("only") or "counted",
+            orders=hit.get('orders'),
         ))
     return out
 

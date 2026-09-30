@@ -116,8 +116,10 @@ def remember(ws, store, signature, registry, periods):
             return
         if original.get("pricing_pending_count") and not main.with_suffix(".pricing.parquet").is_file():
             return
+        if original.get('order_issue_counts') and not main.with_suffix('.order-issues.parquet').is_file():
+            return
         paths = tuple(path for path in [main, *[main.with_suffix(suffix) for suffix in
-                      (".pricing.parquet", ".coverage.parquet", ".allocation.parquet")]] if path.is_file())
+                      (".pricing.parquet", ".coverage.parquet", ".allocation.parquet", ".order-issues.parquet")]] if path.is_file())
         runs.append((period, run_id, _run_signature(row), paths))
     with _lock:
         _entries[_key(ws, store)] = (signature, runs)

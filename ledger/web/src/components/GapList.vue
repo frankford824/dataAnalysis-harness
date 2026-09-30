@@ -37,7 +37,7 @@ function tone(g) {
 }
 
 function can(g) {
-  return props.clickable && Boolean(g.node || g.metric)
+  return props.clickable && Boolean(g.node || g.metric || g.orders)
 }
 </script>
 
@@ -68,7 +68,7 @@ function can(g) {
         </div>
         <div class="detail">{{ item.detail }}</div>
         <div v-if="can(item)" class="go">
-          {{ item.node === '__sources__' ? '查看所需资料' : '查看明细' }}
+          {{ item.orders ? '查看订单明细' : item.node === '__sources__' ? '查看所需资料' : '查看明细' }}
         </div>
       </div>
     </section>

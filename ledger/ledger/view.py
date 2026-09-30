@@ -103,6 +103,7 @@ def platform_options(model: Model) -> list[dict[str, str]]:
 def slice_dict(sl: Slice, store: Store, model: Model) -> dict[str, Any]:
     """一个账期的完整对外结构。快照存的就是这个，所以字段只增不改语义。"""
     from .manual_cost import observed
+    from .order_issues import counts as order_issue_counts
     return {
         "store": store.name,
         "store_id": store.id,
@@ -116,6 +117,7 @@ def slice_dict(sl: Slice, store: Store, model: Model) -> dict[str, Any]:
                         "requires_human": not sl.cost_coverage.get("passed", False)},
         "calculation_inputs": sl.calculation_inputs,
         "deduplication": sl.deduplication,
+        "order_issue_counts": order_issue_counts(sl.order_issue_rows) if sl.order_issue_rows.height else {},
         "allocation_pending": sl.allocation_pending[:50],
         "allocation_pending_count": len(sl.allocation_pending),
         "has_allocation_evidence": not sl.allocation_evidence.is_empty(),
@@ -441,6 +443,8 @@ def finding_action(finding: dict[str, Any], model: Model,
             drill = f"{METRIC_PREFIX}{mid}"
             only = "uncounted"
     out = {**finding, "kind": kind, "drill": drill, "only": only, "tab": tab}
+    if finding.get('id') in ('dropship_scope_evidence', 'dropship_cost_evidence'):
+        out['orders'] = finding['id']
     if finding.get("id") == "chk_goods_coverage":
         for field in ("message", "head"):
             if out.get(field):

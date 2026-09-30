@@ -47,6 +47,7 @@ export const api = {
   }),
   pricingStatus: (id, period, init) => call(`/api/stores/${encodeURIComponent(id)}/pricing-status${query({period})}`, init),
   pricingGaps: (runId, params, options = {}) => call(`/api/runs/${runId}/pricing-gaps${query(params)}`, options),
+  orderIssues: (runId, issueId, params, options = {}) => call(`/api/runs/${runId}/order-issues/${encodeURIComponent(issueId)}${query(params)}`, options),
   coverageGaps: (runId, params, options = {}) => call(`/api/runs/${runId}/coverage-gaps${query(params)}`, options),
   saveCostLine: (storeId, period, body) =>
     call(`/api/stores/${encodeURIComponent(storeId)}/periods/${encodeURIComponent(period)}/cost-lines`, {

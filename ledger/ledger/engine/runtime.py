@@ -144,6 +144,7 @@ class Slice:
     allocation_pending: list[dict] = field(default_factory=list)
     allocation_evidence: pl.DataFrame = field(default_factory=pl.DataFrame)
     deduplication: list[dict] = field(default_factory=list)
+    order_issue_rows: pl.DataFrame = field(default_factory=pl.DataFrame)
 
     @property
     def can_close(self) -> bool:
@@ -1503,9 +1504,11 @@ def _build_slice(
         from .types import Finding
         result.findings.append(Finding("source_sync_pending", "订单数据仍在同步", passed=False, blocking=True,
             message="当前结果按已同步数据试算，暂不能结账；来源追平后会自动重新核算。"))
+    order_issue_rows = pl.DataFrame()
     if any(m.id == "dropship_cost" for m in model.metrics):
         from .cost_policy import missing_supplier_costs
         supplier_gaps = missing_supplier_costs(scoped, scoped_spine)
+        uncertain = scoped.head(0)
         if "source_note" in scoped.columns:
             uncertain = scoped.filter(pl.col("counted") & pl.col("source_note").str.contains("代发范围待确认：",literal=True).fill_null(False))
             if not uncertain.is_empty():
@@ -1518,6 +1521,8 @@ def _build_slice(
             result.findings.append(Finding("dropship_cost_evidence", "代发支出待核对", passed=False, blocking=True,
                 message=f"{supplier_gaps['order_id'].n_unique()} 笔代发订单未找到已入账的代发支出。聚水潭成本已计零，请补齐代发表并核对订单号。",
                 detail={"count": supplier_gaps.height, "items": supplier_gaps.head(100).to_dicts()}))
+        from ..order_issues import build as build_order_issues
+        order_issue_rows = build_order_issues(scoped, uncertain, supplier_gaps, ingestion.known)
 
     if not own_gaps.is_empty():
         from .types import Finding
@@ -1544,6 +1549,7 @@ def _build_slice(
         completeness=completeness, audit=result,
         link_reports=scoped_reports, classify_report=own,
         pricing_gaps=own_gaps, cost_coverage=cost_coverage,
+        order_issue_rows=order_issue_rows,
         coverage_gap_rows=_goods_coverage_rows(model, own_spine, platform, scoped_reports),
         allocation_pending=own_pending,
         allocation_evidence=allocation_evidence,

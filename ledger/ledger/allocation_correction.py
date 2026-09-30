@@ -174,7 +174,7 @@ def publish(ws,registry,old_run_id,summary,details,audit,*,expected_calculation_
                          model_revision=old['model_revision'] or '',input_fingerprint=fingerprint)
         new_meta=dict(meta);new_meta.update(id=cid,summary_json=json_text(updated))
         persist(registry,new_id,details,new_meta)
-        for suffix in ('.parquet','.pricing.parquet','.coverage.parquet'):
+        for suffix in ('.parquet','.pricing.parquet','.coverage.parquet','.order-issues.parquet'):
             src=source_facts.with_suffix(suffix);dst=ws.facts_path(new_id).with_suffix(suffix)
             if src.exists():shutil.copyfile(src,dst);seal(dst)
         proof=pl.DataFrame(audit['evidence']).with_columns(pl.lit('trade_receipt').alias('metric_id'),

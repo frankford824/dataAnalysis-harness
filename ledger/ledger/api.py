@@ -1618,6 +1618,29 @@ def pricing_gaps_page(run_id: int, q: str = "", offset: int = 0, limit: int = 10
     return pricing_gaps.page(path, q=q, offset=offset, limit=limit)
 
 
+@app.get('/api/runs/{run_id}/order-issues/{issue_id}')
+def order_issue_page(run_id: int, issue_id: str, q: str = '', offset: int = 0,
+                     limit: int = 50) -> dict:
+    from . import order_issues
+    try:
+        return order_issues.page(workspace(), run_id, issue_id, q=q, offset=offset, limit=limit)
+    except WorkspaceError as exc:
+        raise HTTPException(409, str(exc)) from exc
+
+
+@app.get('/api/runs/{run_id}/order-issues/{issue_id}/export.csv')
+def order_issue_export(run_id: int, issue_id: str, q: str = '') -> PlainTextResponse:
+    from . import order_issues
+    try:
+        content = order_issues.export_csv(workspace(), run_id, issue_id, q)
+    except WorkspaceError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    filename = quote(f'{order_issues.TITLES[issue_id]}-核算{run_id}.csv')
+    return PlainTextResponse('\ufeff' + content, media_type='text/csv; charset=utf-8', headers={
+        'Content-Disposition': f"attachment; filename=order-issues-{run_id}.csv; filename*=UTF-8''{filename}",
+    })
+
+
 @app.get('/api/runs/{run_id}/allocation.csv')
 def allocation_export(run_id:int):
     from .storage_integrity import verified

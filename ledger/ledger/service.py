@@ -510,6 +510,9 @@ def _recompute_locked(
                 reusable = reusable and verified(ws.pricing_gaps_path(previous_id))
             if not getattr(sl, "coverage_gap_rows", pl.DataFrame()).is_empty():
                 reusable = reusable and verified(ws.coverage_gaps_path(previous_id))
+            if not getattr(sl, "order_issue_rows", pl.DataFrame()).is_empty():
+                from .order_issues import path_for
+                reusable = reusable and verified(path_for(ws, previous_id))
             if allocation:
                 previous_calc=(previous_payload.get('commission') or {}).get('calculation_id')
                 with registry.connect() as conn:
@@ -581,7 +584,14 @@ def _keep_facts(ws: Workspace, run_id: int, sl: Slice) -> None:
     pricing_path = ws.pricing_gaps_path(run_id)
     coverage_path = ws.coverage_gaps_path(run_id)
     allocation_path = path.with_suffix('.allocation.parquet')
+    from .order_issues import path_for
+    issues_path = path_for(ws, run_id)
     try:
+        issues = getattr(sl, 'order_issue_rows', pl.DataFrame())
+        if not issues.is_empty():
+            issues.write_parquet(issues_path)
+            from .storage_integrity import seal
+            seal(issues_path)
         allocation_evidence=getattr(sl,'allocation_evidence',pl.DataFrame())
         if not allocation_evidence.is_empty():
             allocation_evidence.write_parquet(allocation_path,row_group_size=100_000)
@@ -620,6 +630,7 @@ def _keep_facts(ws: Workspace, run_id: int, sl: Slice) -> None:
         pricing_path.unlink(missing_ok=True)
         coverage_path.unlink(missing_ok=True)
         allocation_path.unlink(missing_ok=True)
+        issues_path.unlink(missing_ok=True)
         ws.mark_evidence(run_id, ready=False, error=str(exc))
 
 
