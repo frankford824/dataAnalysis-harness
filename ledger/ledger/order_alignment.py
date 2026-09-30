@@ -10,6 +10,7 @@ from typing import Any
 ORDER_FIELDS = (
     'seller_flag_code', 'seller_flag_name', 'seller_flag_source', 'seller_flag_scope',
     'source_evidence_version',
+    'seller_evidence_hash', 'seller_evidence_captured_at', 'order_remark_source', 'order_remark_scope',
     'platform_seller_evidence_json', 'platform_seller_evidence_complete', 'platform_seller_evidence_version',
     'platform_order_ids', 'platform_order_identity_complete', 'platform_order_identity_scope',
     'payable_amount', 'collected_amount', 'freight_amount', 'discount_amount',
@@ -21,6 +22,7 @@ ITEM_FIELDS = ('item_pay_amount', 'line_amount', 'outer_oi_id', 'i_id',
                'sku_type', 'item_labels', 'properties_value',
                'seller_flag_code', 'seller_flag_name', 'seller_flag_source', 'seller_flag_scope',
                'source_evidence_version',
+               'seller_evidence_hash', 'seller_evidence_captured_at', 'order_remark_source', 'order_remark_scope',
                'platform_seller_evidence_json', 'platform_seller_evidence_complete', 'platform_seller_evidence_version',
                'order_store_id', 'order_remark')
 

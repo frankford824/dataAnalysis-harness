@@ -229,3 +229,41 @@ def test_snapshot_delta_preserves_new_fields_and_false_completeness():
     assert overlaid['seller_flag_name'].item() == '蓝色旗帜'
     assert overlaid['source_evidence_version'].item() == 'jst-header-evidence.v1'
     assert capture(overlaid, seller_flags(pl.DataFrame({'order_id': ['15617602']}), overlaid), STORE).is_empty()
+
+
+def test_documented_fresh_header_observation_source_is_supported():
+    proof = evidence([header(parents=('A',), remark='by陈慨', seller_flag_source='jst.order_list.seller_flag')])
+    result = calculate(proof, costs=[missing_cost()])
+    assert set(result.slices[(STORE.name, '2026-07')].coverage_gap_rows['order_id']) == {'B'}
+
+
+@pytest.mark.parametrize('changed', [
+    {'seller_flag_code': '5', 'seller_flag_name': '紫色旗帜'},
+    {'order_remark': 'by陈慨买家秀'},
+    {'order_remark': '普通发货'},
+])
+def test_metadata_only_delta_revokes_old_brushing_zero(changed):
+    base = pl.DataFrame([header(parents=('A',), remark='by陈慨')])
+    old = calculate(evidence(base.to_dicts()), costs=[missing_cost()])
+    assert set(old.slices[(STORE.name, '2026-07')].coverage_gap_rows['order_id']) == {'B'}
+    incoming = header(parents=('A',), seller_flag_source='jst.order_list.seller_flag',
+        seller_evidence_hash='f' * 64, seller_evidence_captured_at='2026-09-30T10:00:00Z',
+        order_remark_source='jst.order_list.remark', **changed)
+    delta = {'entity_type': 'order', 'entity_id': '15617602', 'operation': 'upsert',
+             'payload_json': json.dumps({'order': incoming}), 'order_id': '15617602'}
+    overlaid = OrderFeed._overlay(base, [delta], 'order', 'order_id', lambda p: [p['order']])
+    assert overlaid['seller_evidence_hash'].item() == 'f' * 64
+    updated = calculate(evidence(overlaid.to_dicts()), costs=[missing_cost()])
+    assert set(updated.slices[(STORE.name, '2026-07')].coverage_gap_rows['order_id']) == {'A', 'B'}
+
+
+def test_changed_merge_delta_clears_stale_independent_member_proof():
+    base = pl.DataFrame([member_header([member('A'), member('B')])])
+    incoming = header(platform_seller_evidence_json=None, platform_seller_evidence_version=None,
+                      platform_seller_evidence_complete=False, seller_flag_source='jst.order_list.seller_flag')
+    delta = {'entity_type': 'order', 'entity_id': '15617602', 'operation': 'upsert',
+             'payload_json': json.dumps({'order': incoming}), 'order_id': '15617602'}
+    overlaid = OrderFeed._overlay(base, [delta], 'order', 'order_id', lambda p: [p['order']])
+    assert overlaid['platform_seller_evidence_json'].item() is None
+    updated = calculate(evidence(overlaid.to_dicts()), costs=[missing_cost()])
+    assert set(updated.slices[(STORE.name, '2026-07')].coverage_gap_rows['order_id']) == {'A', 'B'}

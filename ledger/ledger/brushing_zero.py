@@ -77,7 +77,8 @@ def capture(orders, items, store):
     conflict = pl.col('__seller_flag_conflict').fill_null(False) if '__seller_flag_conflict' in items.columns else pl.lit(False)
     item_groups = {str(row['order_id']): row['eligible'] for row in items.group_by('order_id').agg(
         ((pl.col('order_flag') == '蓝色旗帜').fill_null(False) & ~conflict).all().alias('eligible')).to_dicts()}
-    columns = sorted(required | {c for c in ('platform_seller_evidence_json', 'platform_seller_evidence_version') if c in orders.columns})
+    columns = sorted(required | {c for c in ('platform_seller_evidence_json', 'platform_seller_evidence_version',
+        'seller_evidence_hash', 'seller_evidence_captured_at', 'order_remark_source', 'order_remark_scope') if c in orders.columns})
     headers = orders.select(columns).to_dicts()
     candidates = set()
     checked = []
@@ -89,7 +90,7 @@ def capture(orders, items, store):
         internal = str(header['order_id'])
         eligible = not (bad or flag != '蓝色旗帜' or not parents or not _true(header['platform_order_identity_complete'])
                 or header['platform_order_identity_scope'] != 'same_store_header_membership'
-                or header['seller_flag_source'] != 'jst_order.extra.seller_flag'
+                or header['seller_flag_source'] not in ('jst_order.extra.seller_flag', 'jst.order_list.seller_flag')
                 or header['seller_flag_scope'] != 'internal_order_header'
                 or header['source_evidence_version'] != 'jst-header-evidence.v1'
                 or not re.search(BRUSHING_REMARK_PATTERN, remark) or '买家秀' in remark
