@@ -8,13 +8,21 @@ from typing import Any
 
 
 ORDER_FIELDS = (
+    'seller_flag_code', 'seller_flag_name', 'seller_flag_source', 'seller_flag_scope',
+    'source_evidence_version',
+    'platform_seller_evidence_json', 'platform_seller_evidence_complete', 'platform_seller_evidence_version',
+    'platform_order_ids', 'platform_order_identity_complete', 'platform_order_identity_scope',
     'payable_amount', 'collected_amount', 'freight_amount', 'discount_amount',
     'after_sale_payable_amount', 'outer_pay_id', 'online_order_keys',
     'raw_so_id', 'merge_so_id', 'outer_so_id', 'pre_so_id',
     'is_paid', 'is_cod', 'is_refund', 'order_type',
 )
 ITEM_FIELDS = ('item_pay_amount', 'line_amount', 'outer_oi_id', 'i_id',
-               'sku_type', 'item_labels', 'properties_value')
+               'sku_type', 'item_labels', 'properties_value',
+               'seller_flag_code', 'seller_flag_name', 'seller_flag_source', 'seller_flag_scope',
+               'source_evidence_version',
+               'platform_seller_evidence_json', 'platform_seller_evidence_complete', 'platform_seller_evidence_version',
+               'order_store_id', 'order_remark')
 
 
 def keys(value: Any) -> set[str]:

@@ -105,13 +105,14 @@ def export_csv(ws, run_id: int, store_id: str, period: str) -> str:
               ('manual_amount','人工补录总成本'),('manual_reason','确认依据'),
               ('editable','可直接补录'),
               ('coverage_key','清单键'),('context_sha','核对版本'),
-              ('line_revision','修改版本')]
+              ('line_revision','修改版本'), ('brushing_review','刷单依据核对说明'),
+              ('brushing_evidence_internal_id','相关聚水潭内部订单号')]
     output = io.StringIO()
     writer = csv.writer(output)
     writer.writerow([label for _, label in fields])
     for row in current(ws, run_id, store_id, period)['items']:
         writer.writerow([identifier(row.get(key)) if key in {
-                            'order_id','sub_order_id','coverage_key','context_sha'}
+                            'order_id','sub_order_id','coverage_key','context_sha','brushing_evidence_internal_id'}
                          else row.get(key) if row.get(key) is not None else ''
                          for key, _ in fields])
     return output.getvalue()
@@ -125,7 +126,8 @@ def export_xlsx(ws, run_id: int, store_id: str, period: str) -> bytes:
               ('product_ids','商品链接'),('quantities','数量'),('order_date','下单日期'),
               ('manual_amount','人工补录总成本'),('manual_reason','确认依据'),
               ('editable','可直接补录'),('coverage_key','清单键'),
-              ('context_sha','核对版本'),('line_revision','修改版本')]
+              ('context_sha','核对版本'),('line_revision','修改版本'),
+              ('brushing_review','刷单依据核对说明'), ('brushing_evidence_internal_id','相关聚水潭内部订单号')]
     workbook = openpyxl.Workbook()
     sheet = workbook.active
     sheet.title = '未覆盖订单成本'
@@ -135,7 +137,7 @@ def export_xlsx(ws, run_id: int, store_id: str, period: str) -> bytes:
     for cell in sheet[1]:
         cell.font = Font(bold=True)
         cell.fill = header_fill
-    text_fields = {'order_id','sub_order_id','product_ids','coverage_key','context_sha'}
+    text_fields = {'order_id','sub_order_id','product_ids','coverage_key','context_sha','brushing_evidence_internal_id'}
     for source in current(ws, run_id, store_id, period)['items']:
         values = []
         for key, _ in fields:
@@ -152,7 +154,7 @@ def export_xlsx(ws, run_id: int, store_id: str, period: str) -> bytes:
                 cell.fill = input_fill
     sheet.freeze_panes = 'A2'
     sheet.auto_filter.ref = sheet.dimensions
-    widths = [24,24,20,12,13,16,28,12,24,68,12]
+    widths = [24,24,20,12,13,16,28,12,24,68,12,58,25]
     for index, width in enumerate(widths, 1):
         sheet.column_dimensions[openpyxl.utils.get_column_letter(index)].width = width
     for column in ('I','J','K'):

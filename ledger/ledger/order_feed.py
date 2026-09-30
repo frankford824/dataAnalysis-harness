@@ -894,11 +894,17 @@ class OrderFeed:
                     exported.setdefault(child, set()).add(parent)
         from .order_flags import collect as collect_order_flags
         fallback_flags, _ = collect_order_flags(ingestion, store)
+        goods_metric = next((m.for_platform(store.platform) for m in ingestion.model.metrics if m.id == 'goods_cost'), None) if ingestion.model else None
         frames = self._frames(store, json.loads(state["manifest_json"]),
                               {child: next(iter(parents)) if len(parents) == 1 else None for child, parents in exported.items()},
                               fallback_flags,
                               any(p.id == store.platform and p.cost_pricing == "historical" for p in ingestion.model.platforms) if ingestion.model else False,
-                              any(p.id == store.platform and p.cost_pricing in {"required", "historical"} for p in ingestion.model.platforms) if ingestion.model else False)
+                              any(p.id == store.platform and p.cost_pricing in {"required", "historical"} for p in ingestion.model.platforms) if ingestion.model else False,
+                              getattr(goods_metric, 'brushing_scope', 'platform_order'))
+        evidence = getattr(self, '_brushing_evidence', pl.DataFrame())
+        if not evidence.is_empty():
+            prior = getattr(ingestion, 'brushing_evidence', pl.DataFrame())
+            ingestion.brushing_evidence = pl.concat([prior, evidence], how='diagonal_relaxed')
         after = self.state()
         ingestion.source_sync_pending = (
             int(getattr(self, "_captured_seq", state.get("consumed_seq") or 0)) < int(after.get("source_latest_seq") or 0)
@@ -1059,6 +1065,7 @@ class OrderFeed:
         candidates = {
             "refund_status": "text", "tracking_no": "text", "order_state": "text",
             "order_flag": "text",
+            "order_remark": "text", "internal_order_id": "text",
             "order_time": "time", "pay_time": "time", "order_date": "time", "pay_date": "time",
         }
         for item in ingestion.frames_of("order_detail"):
@@ -1179,7 +1186,8 @@ class OrderFeed:
 
     def _frames(self, store: Store, manifest: dict[str, Any], exported_orders: dict[str, str | None] | None = None,
                 fallback_flags: dict[str, str] | None = None, require_history: bool = False,
-                require_pricing: bool = False) -> list[Ingested]:
+                require_pricing: bool = False, brushing_scope: str = 'platform_order') -> list[Ingested]:
+        self._brushing_evidence = pl.DataFrame()
         with self._connect() as conn:
             conn.execute("BEGIN")
             captured = conn.execute("SELECT snapshot_id,consumed_seq FROM feed_state WHERE id=1").fetchone()
@@ -1213,8 +1221,12 @@ class OrderFeed:
             pl.col("order_id").cast(pl.Utf8).is_in(order_ids)
         ).collect()
         items = self._overlay(items, deltas, "order_item", "sub_order_id", lambda p: [p.get("order_item") or {}])
-        from .order_flags import fill_missing
+        from .order_flags import fill_missing, seller_flags, member_cost_flags
+        items = seller_flags(items, orders)
         items=fill_missing(items,'order_id',fallback_flags or {})
+        items = member_cost_flags(items, orders, store, exported_orders, scope=brushing_scope)
+        from .brushing_zero import capture
+        self._brushing_evidence = capture(orders, items, store)
         costs = pl.scan_parquet(path("order_costs.parquet")).filter(
             pl.col("order_id").cast(pl.Utf8).is_in(order_ids)
         ).collect()
@@ -1507,7 +1519,10 @@ class OrderFeed:
             pl.col("refund_status").cast(pl.Utf8).fill_null("没有申请退款"),
             pl.col("tracking_no").fill_null(pl.col("tracking_no_order")).cast(pl.Utf8),
             pl.col("order_status_raw").cast(pl.Utf8).alias("order_state"),
-            *([pl.col("order_flag").cast(pl.Utf8)] if store.platform == "pdd" else []),
+            (pl.col('order_flag').cast(pl.Utf8) if 'order_flag' in items.columns else pl.lit(None, dtype=pl.Utf8)).alias('order_flag'),
+            (pl.col('order_remark_order' if 'order_remark' in items.columns else 'order_remark').cast(pl.Utf8)
+             if 'order_remark' in orders.columns else pl.lit(None, dtype=pl.Utf8)).alias('order_remark'),
+            pl.col('order_id').cast(pl.Utf8).alias('internal_order_id'),
             pl.when(is_reship)
             .then(pl.lit("补发订单")).otherwise(pl.lit("销售订单")).alias("order_type"),
             self._dt("order_time").alias("order_time"),
@@ -1523,8 +1538,11 @@ class OrderFeed:
             pl.col("refund_status").drop_nulls().last(),
             pl.col("tracking_no").drop_nulls().first(),
             pl.col("order_state").drop_nulls().first(),
-            *([pl.when((pl.col("order_flag") == "蓝色旗帜").fill_null(False).all()).then(pl.lit("蓝色旗帜"))
-               .otherwise(pl.lit(None, dtype=pl.Utf8)).alias("order_flag")] if store.platform == "pdd" else []),
+            pl.when(pl.col('order_flag').is_not_null().all() & (pl.col('order_flag').n_unique() == 1))
+              .then(pl.col('order_flag').first()).otherwise(None).alias('order_flag'),
+            pl.when(pl.col('order_remark').drop_nulls().n_unique() == 1)
+              .then(pl.col('order_remark').drop_nulls().first()).otherwise(None).alias('order_remark'),
+            pl.col('internal_order_id').drop_nulls().first(),
             pl.when((pl.col("order_type") == "销售订单").any())
             .then(pl.lit("销售订单")).otherwise(pl.lit("补发订单")).alias("order_type"),
             pl.col("order_time").drop_nulls().first(),
@@ -1607,6 +1625,11 @@ class OrderFeed:
             (pl.col("order_flag").cast(pl.Utf8) if "order_flag" in items.columns else pl.lit(None, dtype=pl.Utf8).alias("order_flag")),
             (pl.col('__flag_from_upload').fill_null(False) if '__flag_from_upload' in items.columns
              else pl.lit(False)).alias('__flag_from_upload'),
+            (pl.col('__seller_flag_conflict').fill_null(False) if '__seller_flag_conflict' in items.columns
+             else pl.lit(False)).alias('__seller_flag_conflict'),
+            *[(pl.col(c) if c in items.columns else pl.lit(None, dtype=pl.String)).alias(c)
+              for c in ('__member_order_remark', '__member_brushing_note')],
+            (pl.col('__brushing_member_pending').fill_null(False) if '__brushing_member_pending' in items.columns else pl.lit(False)).alias('__brushing_member_pending'),
             *(
                 pl.col(name).cast(pl.Boolean, strict=False) if name in items.columns
                 else pl.lit(False).alias(name)
@@ -1624,6 +1647,7 @@ class OrderFeed:
         certified = certified.with_columns(pl.col("order_id", "sub_order_id").cast(pl.Utf8)).join(
             flags, on=["order_id", "sub_order_id"], how="left",
         ).with_columns(pl.col("is_gift", "is_suspect").fill_null(False))
+        certified = certified.with_columns(pl.coalesce('__member_order_remark', 'order_remark').alias('order_remark'))
         # 订单台的 is_suspect 是「源数据留着、金额和件数不可信、不进排名和毛利」：
         # 单价 9999 起的占位价，以及 2026-09-03 起数量是 2043 整数倍的那批。成本 = 单价 × 件数，
         # 件数不可信成本就不可信，整行不计。
@@ -1683,7 +1707,7 @@ class OrderFeed:
         )
         frame = certified.join(
             orders.select("order_id", "online_order_no", "order_time", "order_status_raw", "tracking_no",
-                          pl.col("order_remark").cast(pl.Utf8) if "order_remark" in orders.columns else pl.lit(None, dtype=pl.Utf8).alias("order_remark"),
+                          (pl.col("order_remark").cast(pl.Utf8) if "order_remark" in orders.columns else pl.lit(None, dtype=pl.Utf8)).alias('__header_order_remark'),
                           pl.col("ship_time") if "ship_time" in orders.columns else pl.lit(None).alias("ship_time"),
                           pl.col("link_order_id") if "link_order_id" in orders.columns else pl.lit(None).alias("link_order_id")),
             on="order_id", how="left",
@@ -1714,6 +1738,9 @@ class OrderFeed:
             .then(pl.col("item_status_raw")).otherwise(pl.col("order_status_raw")).cast(pl.Utf8).alias("order_state"),
             pl.col("order_flag").cast(pl.Utf8),
             pl.col('__flag_from_upload'),
+            pl.col('__seller_flag_conflict'),
+            pl.col('__brushing_member_pending'),
+            pl.col('__member_brushing_note'),
             *([
                 (pl.col(name).cast(pl.Utf8) if name in certified.columns else pl.lit(None, dtype=pl.Utf8)).alias(name)
                 for name in ("cost_source", "cost_status", "cost_as_of", "failure_reason", "reference_unit_cost", "pricing_evidence")
@@ -1740,6 +1767,7 @@ class OrderFeed:
                 ])).otherwise(pl.lit(None, dtype=pl.Utf8)).alias("source_note"),
             ).drop("__reship_original")
         note=pl.col('source_note') if 'source_note' in frame.columns else pl.lit(None,dtype=pl.Utf8)
+        note = pl.concat_str([note, pl.col('__member_brushing_note')], separator='；', ignore_nulls=True)
         frame=frame.with_columns(pl.when(pl.col('__flag_from_upload')).then(pl.concat_str([
             note,pl.lit('订单台旗帜缺失；依据同店原始聚水潭表内部订单 '),pl.col('internal_order_id'),pl.lit(' 的一致旗帜补全')
         ],ignore_nulls=True)).otherwise(note).alias('source_note'))
@@ -1795,6 +1823,7 @@ class OrderFeed:
             ("refund_amount", "number"), ("alloc_ratio", "number"),
             ("refund_status", "text"), ("tracking_no", "text"),
             ("order_state", "text"), ("order_type", "text"),
+            ("order_flag", "text"), ("order_remark", "text"), ("internal_order_id", "text"),
             ("order_time", "time"), ("pay_time", "time"),
             ("store_name", "text"),
         ])

@@ -705,6 +705,9 @@ class Metric(Base):
     orderless_time_basis: TimeSlot | None = None
     #: 保留真实的零金额原始记录，供逐单核对；缺失金额不视为零。
     keep_zero_rows: bool = False
+    #: Scope of the accepted brushing-cost rule. A merged header's mark does
+    #: not stand in for each platform member unless that business rule is explicit.
+    brushing_scope: Literal['platform_order', 'internal_order_header'] = 'platform_order'
     #: 该科目是否天然无订单号。为真时挂不上订单不算异常。
     naturally_unlinked: bool = False
     #: 分摊方式。为空表示源金额直接落到脊柱行，不拆。

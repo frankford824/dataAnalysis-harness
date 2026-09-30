@@ -49,6 +49,9 @@ def fingerprint(ws, model, store, ingestion, registry):
                             ensure_ascii=False, default=str, sort_keys=True).encode())
         if item.frame is not None:
             update_frame(h, item.frame)
+    evidence = getattr(ingestion, 'brushing_evidence', None)
+    if evidence is not None and not evidence.is_empty():
+        update_frame(h, evidence)
     return h.hexdigest(), state
 
 

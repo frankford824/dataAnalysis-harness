@@ -427,9 +427,13 @@ def _recompute_locked(
         return out
     shas = [i.ref.sha256 for i in ing.items]
     model_revision = hashlib.sha256(model.model_dump_json().encode("utf-8")).hexdigest()
-    fingerprint = hashlib.sha256(
+    input_digest = hashlib.sha256(
         (model_revision + "\0" + engine_version() + "\0" + "\0".join(sorted(shas))).encode("utf-8")
-    ).hexdigest()
+    )
+    if not ing.brushing_evidence.is_empty():
+        from .content_fingerprint import update_frame
+        update_frame(input_digest, ing.brushing_evidence)
+    fingerprint = input_digest.hexdigest()
     slices = sorted(own_slices.items(), key=lambda kv: (kv[0][1] or ""))
     if registry:
         commission_catalog.observe(registry, store, result.spine)

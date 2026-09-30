@@ -127,6 +127,7 @@ const coverageColumns=[
   {title:'平台订单 / 子订单',key:'order_id',minWidth:230,render:row=>h('div',[h('strong',row.order_id||'订单号未提供'),h('small',{class:'coverage-secondary'},row.sub_order_id||'—')])},
   {title:'商品链接 / 数量',key:'product_ids',minWidth:195,render:row=>h('div',[h('span',row.product_ids||'—'),h('small',{class:'coverage-secondary'},`数量 ${row.quantities||'未提供'}`)])},
   {title:'下单日',key:'order_date',width:112},
+  {title:'核对说明',key:'brushing_review',minWidth:240,render:row=>row.brushing_review||'商品成本未覆盖，需核对来源成本'},
   {title:'人工补录总成本',key:'manual_amount',width:140,render:row=>row.manual_amount==null?'—':`${Number(row.manual_amount).toFixed(2)} 元`},
   {title:'操作',key:'action',width:120,render:row=>row.editable?h(NButton,{size:'small',type:'primary',text:true,onClick:()=>editLine(row)},()=>row.manual_amount==null?'添加金额':'修改金额'):'订单归属不唯一'},
 ]
@@ -136,6 +137,7 @@ const coverageColumns=[
   <div class="pricing-notice" :class="{passed:thresholdMet || manualDecision}">
     <div><strong>{{ manualDecision ? '本期成本已由人工确认' : coverageTitle }}</strong><p v-if="manualDecision">原始覆盖率 {{ percentage(coverage.coverage) }}，人工确认金额与原因已和结账记录一起冻结。</p><p v-else-if="thresholdMet">还有 {{ integer(uncoveredOrders) }} 笔订单未覆盖商品成本，当前只计入已识别金额。</p><p v-else>还有 {{ integer(uncoveredOrders) }} 笔订单未覆盖；系统已完成现有资料的计算，人工可确认或修改金额后结账。自动放行还差 {{ integer(needed) }} 笔覆盖。</p>
       <p v-if="observed && Object.hasOwn(observed,'goods') && !manualDecision" class="pricing-help">现有资料识别：商品成本 {{ Number(observed.goods).toLocaleString('zh-CN',{minimumFractionDigits:2}) }} 元 · 代发 {{ Number(observed.dropship).toLocaleString('zh-CN',{minimumFractionDigits:2}) }} 元 · 补发 {{ Number(observed.reshipment).toLocaleString('zh-CN',{minimumFractionDigits:2}) }} 元<template v-if="lineSummary?.line_count"> · 已人工补录 {{ integer(lineSummary.line_count) }} 笔、{{ Number(lineSummary.line_total).toLocaleString('zh-CN',{minimumFractionDigits:2}) }} 元（预览时另计）</template></p>
+      <p v-if="coverage.brushing_zero_covered" class="pricing-help">其中 {{ integer(coverage.brushing_zero_covered) }} 笔已按“蓝色旗帜＋by”刷单规则确认商品成本为 0，不需要补成本，也不在缺口清单中。</p>
       <p v-if="progress" aria-live="polite">{{ progress.message }}</p>
       <div v-if="['running','queued'].includes(progress?.state)" class="pricing-work-bar" role="progressbar" :aria-valuenow="progress.percent ?? 0" aria-valuemin="0" aria-valuemax="100" aria-label="本店后台核算进度"><span :style="{width:`${progress.percent ?? 0}%`}" /></div>
       <p v-if="calculatedAt" class="pricing-help">最近核算（北京时间）：{{ calculatedAt }}。上方数量属于已保存的核算结果。</p>
@@ -169,13 +171,14 @@ const coverageColumns=[
         <n-button v-if="batchPreview?.valid" size="small" type="primary" :loading="batchBusy" :disabled="batchBusy || !!batchPreview.issue_count" @click="applyBatch">确认批量补录</n-button>
       </div>
       <n-alert v-if="coverageError" type="warning" style="margin-bottom:12px">{{ coverageError }} <n-button size="small" @click="emit('request-recompute')">重算后显示全部缺口</n-button></n-alert>
-      <n-data-table class="pricing-desktop" :columns="coverageColumns" :data="coverageData.items" :loading="coverageBusy" :scroll-x="870" :max-height="480" size="small" />
+      <n-data-table class="pricing-desktop" :columns="coverageColumns" :data="coverageData.items" :loading="coverageBusy" :scroll-x="1110" :max-height="480" size="small" />
       <div class="pricing-mobile" :aria-busy="coverageBusy">
         <p v-if="coverageBusy">正在加载订单缺口…</p>
         <article v-for="row in coverageData.items" :key="row.coverage_key">
           <strong>{{ row.order_id || '订单号未提供' }}</strong><span>{{ row.order_date || '日期未提供' }}</span>
           <p>子订单 {{ row.sub_order_id || '—' }} · 商品链接 {{ row.product_ids || '—' }} · 数量 {{ row.quantities || '未提供' }}</p>
           <p>人工总成本 {{ row.manual_amount == null ? '尚未补录' : `${Number(row.manual_amount).toFixed(2)} 元` }}</p>
+          <p v-if="row.brushing_review" class="pricing-reason">{{ row.brushing_review }}</p>
           <n-button v-if="row.editable" size="small" @click="editLine(row)">{{ row.manual_amount == null ? '添加金额' : '修改金额' }}</n-button><span v-else class="pricing-reason">此键对应多个订单，需先确认归属</span>
         </article>
       </div>

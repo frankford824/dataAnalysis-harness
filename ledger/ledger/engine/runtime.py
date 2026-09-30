@@ -101,6 +101,7 @@ class Ingestion:
     validation_errors: dict[str, list[str]] = field(default_factory=dict)
     deduplication: list[dict] = field(default_factory=list)
     statement_decisions: dict = field(default_factory=dict)
+    brushing_evidence: pl.DataFrame = field(default_factory=pl.DataFrame)
 
     @property
     def known(self) -> list[Ingested]:
@@ -815,6 +816,22 @@ def run(ingestion: Ingestion, platform: str = "*") -> RunResult:
             )
 
     facts = pl.concat(fact_parts, how="vertical_relaxed") if fact_parts else calc._empty_facts()
+    goods_metric = next((m for m in metrics if m.id == 'goods_cost'), None)
+    if goods_metric is not None:
+        from ..brushing_zero import supplement
+        policy_zero = supplement(ingestion.brushing_evidence, spine.frame, goods_metric, facts)
+        if not policy_zero.is_empty():
+            facts = pl.concat([facts.drop([c for c in ('counted', 'contribution') if c in facts.columns]), policy_zero],
+                              how='vertical_relaxed')
+            targets = spine.eligible(goods_metric.link)
+            role = target_role(goods_metric.link.to)
+            expected = targets.keys_where(role, goods_metric.expect)
+            _merge_link(link_reports, 'goods_cost', LinkReport(
+                metric_id='goods_cost', key_role=goods_metric.link.key, grain=goods_metric.link.grain,
+                total_rows=policy_zero.height, linked_rows=policy_zero.height,
+                spine_keys=len(expected), spine_keys_total=len(targets.keys(role)),
+                covered_keys=set(policy_zero['link_key'].to_list()) & expected))
+            notes.append(f'原始蓝色旗帜与 by 标记已核实：补齐 {policy_zero.height:,} 条刷单规则零成本依据，不再作为成本缺口')
     from ..statement_review import bind_scopes, apply_to_facts
     facts=bind_scopes(facts,metrics)
     facts=apply_to_facts(facts,ingestion.statement_decisions)
@@ -1396,6 +1413,12 @@ def _build_slice(
         if live_feed else link_reports
     )
     cost_coverage = _cost_coverage(model, scoped_reports)
+    zero_keys = scoped.filter((pl.col('metric_id') == 'goods_cost') & pl.col('counted') &
+        (pl.col('contribution') == 0) & pl.col('source_note').str.contains(
+            '蓝色旗帜且卖家备注含 by', literal=True).fill_null(False))['link_key'].drop_nulls().unique().to_list()
+    zero_covered = len(set(zero_keys) & scoped_reports.get('goods_cost', LinkReport('', '', '')).covered_keys)
+    if zero_covered:
+        cost_coverage['brushing_zero_covered'] = zero_covered
     pricing_blocks = (cost_coverage["expected"] > 0 or not own_gaps.is_empty()) and not cost_coverage["passed"]
     unavailable = {
         m.id for m in model.metrics if m.source in completeness.missing
@@ -1544,13 +1567,18 @@ def _build_slice(
             detail={"items": return_issues},
         ))
     from ..unclassified_evidence import attach
+    coverage_rows = _goods_coverage_rows(model, own_spine, platform, scoped_reports)
+    goods_metric = next((m.for_platform(platform) for m in model.metrics if m.id == 'goods_cost'), None)
+    if goods_metric is not None:
+        from ..brushing_zero import annotate_pending
+        coverage_rows = annotate_pending(coverage_rows, ingestion.brushing_evidence, store, goods_metric)
     return Slice(
         store=store, period=period, nodes=nodes, facts=attach(scoped, own),
         completeness=completeness, audit=result,
         link_reports=scoped_reports, classify_report=own,
         pricing_gaps=own_gaps, cost_coverage=cost_coverage,
         order_issue_rows=order_issue_rows,
-        coverage_gap_rows=_goods_coverage_rows(model, own_spine, platform, scoped_reports),
+        coverage_gap_rows=coverage_rows,
         allocation_pending=own_pending,
         allocation_evidence=allocation_evidence,
         calculation_inputs={

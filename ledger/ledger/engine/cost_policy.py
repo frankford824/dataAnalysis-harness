@@ -27,7 +27,11 @@ def is_brushing(frame):
     ).fill_null(False)
     # ``买家秀`` is an explicit cost-bearing instruction.  Give it precedence
     # if a future malformed remark happens to contain both markers.
-    return blue & marked & ~buyer_show
+    conflict = (pl.col('__seller_flag_conflict').fill_null(False)
+                if '__seller_flag_conflict' in frame.columns else pl.lit(False))
+    member_pending = (pl.col('__brushing_member_pending').fill_null(False)
+                      if '__brushing_member_pending' in frame.columns else pl.lit(False))
+    return blue & marked & ~buyer_show & ~conflict & ~member_pending
 
 
 @lru_cache(maxsize=32768)

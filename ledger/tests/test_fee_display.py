@@ -32,6 +32,15 @@ def test_old_missing_markers_and_legitimate_zero_are_distinct():
     assert describe({'counted':True,'contribution':0})['accounting_status']=='本行已计入（金额为0）'
 
 
+def test_rule_zero_cost_is_explicit_without_certifying_missing_evidence():
+    row = {'metric_id':'goods_cost','counted':True,'contribution':0,
+           'source_note':'蓝色旗帜且卖家备注含 by，按刷单规则不计商品成本'}
+    assert describe(row)['accounting_status'] == '刷单规则确认零成本'
+    assert '无需补录' in describe(row)['accounting_hint']
+    assert describe(row, graded=False)['accounting_status'].startswith('待核对')
+    assert describe({**row, 'contribution':None})['accounting_status'].startswith('待核对')
+
+
 def test_export_and_drill_share_labels_and_keep_money_unchanged(tmp_path):
     m=load_model(MODELS/'cn-ecommerce')
     rows=[]
