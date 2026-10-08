@@ -153,6 +153,7 @@
   name: 淘宝美食专家
   platform: taobao
   commission_on_loss: deduct
+  aliases: [美食专家]
 - id: douyin_mt9s1onx
   name: 蔡果-得物气球
   platform: douyin

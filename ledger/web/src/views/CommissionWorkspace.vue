@@ -27,6 +27,7 @@ const pages = ref([])
 const busy = ref(false)
 const showEditor = ref(false)
 const selected = ref(null)
+const existingSetting = ref(null)
 const dutyOptions = DUTY_OPTIONS.map(option => ({...option, label:dutyLabel(option.value)}))
 const managedTeamOptions = computed(() => people.value.filter(p => (!p.archived && !p.parent_id) || p.id===form.value.managed_team_id).map(p => ({value:p.id,label:p.alias || p.name})))
 function managedLabel(segment) {
@@ -154,6 +155,7 @@ watch(params, reset)
 async function edit(row = {}) {
   editorController?.abort();editorController=new AbortController()
   const ticket=++editorSerial;editorRow.value=row;editorError.value='';editorLoading.value=true;busy.value=true;showEditor.value=true
+  existingSetting.value=null
   form.value={store_id:row.store_id||'',product_id:row.product_id||'',product_name:row.product_name||'',allocations:[]}
   try {
     const fetched=row.scheme_id?await call(`/schemes/${row.scheme_id}`,{signal:editorController.signal}):null
@@ -170,6 +172,7 @@ async function edit(row = {}) {
     const segments=version?.body?.segments||[]
     const stamp=now()
     const current=selected.value?.editor_context?.setting||segments.find(p=>p.valid_from<=stamp&&(!p.valid_to||stamp<p.valid_to))||segments.find(p=>p.valid_from>stamp)||row.setting||{}
+    existingSetting.value=current
     const grouped=new Map()
     const allocDuty={},allocSource={}
     for(const p of current.allocations||[]){grouped.set(p.person_id,(grouped.get(p.person_id)||0)+Number(p.rate));if(p.duty)allocDuty[p.person_id]=p.duty;if(p.source)allocSource[p.person_id]=p.source}
@@ -337,7 +340,8 @@ defineExpose({edit,menu,busy,reload:load})
         <p class="duty-hint">做货：归属产出；抽点：只计提成。身份及比例只影响本商品；组织默认抽成需点击上方按钮补入，不自动覆盖已存设置。</p>
         <p v-if="form.allocations.some(p=>!p.duty)" class="duty-hint">存在未指定身份：没有商品身份或生效的店铺默认身份。保持未指定保存不会自动设为做货，历史核算口径不因此改变。</p>
       </template>
-      <details class="dates"><summary>生效时间 <span>{{ form.valid_from?.replace('T',' ') }}起{{ form.valid_to ? '，至'+form.valid_to.replace('T',' ') : '' }}</span></summary><div class="fields"><label>开始时间<input v-model="form.valid_from" type="datetime-local" step="1" aria-label="开始时间" /></label><label>结束时间（可留空）<input v-model="form.valid_to" type="datetime-local" step="1" aria-label="结束时间" /></label></div><small>北京时间；此前设置会保留。</small></details>
+      <p v-if="selected && existingSetting?.valid_from" class="duty-hint">已保存配置：{{ existingSetting.valid_from.replace('T',' ') }}起，{{ existingSetting.valid_to ? '至'+existingSetting.valid_to.replace('T',' ') : '未设置结束时间（持续有效）' }}。</p>
+      <details class="dates"><summary>本次修改生效时间 <span>{{ form.valid_from?.replace('T',' ') }}起{{ form.valid_to ? '，至'+form.valid_to.replace('T',' ') : '，持续有效' }}</span></summary><div class="fields"><label>本次修改开始时间<input v-model="form.valid_from" type="datetime-local" step="1" aria-label="开始时间" /></label><label>结束时间（留空持续有效）<input v-model="form.valid_to" type="datetime-local" step="1" aria-label="结束时间" /></label></div><small>北京时间。打开窗口不会改变已保存配置；保存后按这里的时间生效。若需调整历史月份，请选择覆盖该月份的开始时间。</small></details>
       <details v-if="selected?.versions?.length" class="history"><summary>查看修改记录</summary><div v-for="v in selected.versions" :key="v.id" class="history-item"><small><b :class="v.id===selected.active_version?'current-version':'old-version'">{{v.id===selected.active_version?'当前版本':'历史版本'}}</b> · {{ new Date(v.recorded_at).toLocaleString('zh-CN',{timeZone:'Asia/Shanghai'}) }} · {{v.actor}} · {{v.reason}}</small><p v-for="s in v.body.segments" :key="s.valid_from">{{ s.valid_from.replace('T',' ') }}起：{{ managedLabel(s) }}；{{ s.mode==='distribute' ? historicalPeople(s) : s.mode==='exclude' ? '不提成' : '暂不设置' }}{{ s.valid_to ? '（至'+s.valid_to.replace('T',' ')+ '）' : '' }}</p></div></details>
       </template><template #footer><n-space justify="end"><n-button :disabled="busy&&!editorLoading" @click="closeEditor(false)">取消</n-button><n-button type="primary" :disabled="editorLoading||!!editorError" :loading="busy&&!editorLoading" @click="save">保存</n-button></n-space></template>
     </n-drawer-content></n-drawer>

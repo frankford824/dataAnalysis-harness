@@ -132,7 +132,7 @@ def test_attributed_profit_gives_all_to_producers(tmp_path):
          'allocated_sales': 200, 'allocated_gross': 100,
          'allocated_profit': 100, 'amount': 5},
     ])
-    result = attributed_profit(commission, 400, 0, reg, duties=duties)
+    result = attributed_profit(commission, 400, 0, reg, duties=duties, production=True)
 
     assert result[alice['id']] == 400
     assert result[bob['id']] == 0.0

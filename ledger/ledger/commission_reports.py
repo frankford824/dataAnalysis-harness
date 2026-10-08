@@ -108,8 +108,8 @@ def suggested_payouts(commission, labor_cut, *, operating=None, registry=None, d
     order trial by the labor keep would ignore cost supplements and unassigned
     losses that already reduced the store profit the page shows.
 
-    When duties are provided, each person's payout = producer_profit_after_labor
-    × their own share rate (not total_rate).
+    Payouts use the original rate-allocated profit, including cut participants.
+    Production ownership is a separate display basis and cannot zero their pay.
     """
     people = commission.get('people') or []
     profits = (attributed_profit(commission, operating, labor_cut, registry, duties=duties)
@@ -263,7 +263,7 @@ def attributed_profit(commission, operating, labor, registry, *, store_id='', ma
     Manual cost changes the store profit, not the ownership split. The
     allocated-to-operating residual already absorbs that gap.
 
-    When duties are provided and there are producers among the people,
+    Only for production output, when duties are provided and there are producers,
     profit goes 100% to producers; cut-only members get 0. A person who
     also has 做货 product IDs is a producer even if the store default is 抽点.
     """
@@ -279,7 +279,7 @@ def attributed_profit(commission, operating, labor, registry, *, store_id='', ma
     if len(people) == 1 and production_split is None:
         return {ids[0]: money_float(decimal(labor or 0)) if _labor_only else profit_after_labor(operating, labor)}
     # duty-based: producers get all profit, cut members get 0
-    if duties and len(people) > 1 and production_split is None:
+    if production and duties and len(people) > 1 and production_split is None:
         producers = [p for p in people if duties.get(p['person_id'], {}).get('duty', 'produce') == 'produce']
         if producers and len(producers) < len(people):
             producer_result = attributed_profit(

@@ -272,9 +272,19 @@ def evaluate_metric(
         needs_owner_review = invalid | conflict
         if metric.source in {"dropship", "brushing", "small_payment"}:
             needs_owner_review = needs_owner_review | store.is_null()
+        linked_store = pl.col("__spine_store__") if "__spine_store__" in frame.columns else pl.lit(None,dtype=pl.String)
+        reason = pl.when(conflict).then(pl.concat_str([
+            pl.lit("原表店铺「"),written,pl.lit("」与关联订单店铺「"),linked_store,
+            pl.lit("」不一致，请核对店铺或订单号。")
+        ])).when(invalid).then(pl.concat_str([
+            pl.lit("原表店铺名「"),written,pl.lit("」未识别为已登记店铺或别名。"),
+            pl.when(linked_store.is_not_null()).then(pl.concat_str([
+                pl.lit("关联订单属于「"),linked_store,pl.lit("」，请核对店铺简称。")
+            ])).otherwise(pl.lit("请核对原表店铺名和订单号。"))
+        ])).otherwise(pl.lit("原表未提供可识别店铺，订单关联也未能确定店铺；请补齐店铺名或核对订单号。"))
         source_note = pl.when(needs_owner_review).then(pl.concat_str([
-            source_note, pl.lit("共享表店铺归属待核对：未用当前店铺兜底")
-        ], separator="；", ignore_nulls=True)).otherwise(source_note)
+            source_note,pl.concat_str([pl.lit("共享表店铺归属待核对："),reason])
+        ],separator="；",ignore_nulls=True)).otherwise(source_note)
     if metric.posting_basis == "order_number":
         period_label = pl.lit("下单月份：")
         if metric.orderless_time_basis:

@@ -28,6 +28,43 @@ def fixture(tmp_path):
     return ws, registry, people, TestClient(app)
 
 
+@pytest.mark.parametrize('profit,allocated,expected', [
+    (35079.82, (28063.86,7015.96), (1403.19,350.80)),
+    (26882.33, (21505.86,5376.47), (1075.29,268.82)),
+])
+def test_cut_payout_survives_producer_only_performance_attribution(tmp_path, profit, allocated, expected):
+    ws=Workspace(tmp_path);registry=Registry(tmp_path)
+    model=_model(stores=(Store(id='s1',name='测试店',platform='taobao'),))
+    model=model.model_copy(update={'statement':(*model.statement,
+        StatementNode(id='net_profit',name='利润',level=1,is_total=True,headline='profit',
+                      formula={'op':'add','of':['gross']}))})
+    owner=registry.person_save({'name':'做货人'},'test','登记')
+    cut=registry.person_save({'name':'抽点人'},'test','登记')
+    commission={'engine':'commission-v2','base_node':'net_profit','on_loss':'deduct',
+        'base_total':profit,'total':profit*.05,'amount_complete':True,
+        'people':[{'person_id':p['id'],'person':p['name'],'duty':duty,'amount':amount,
+                   'allocated_sales':sales,'allocated_gross':basis,'allocated_profit':basis,
+                   'sales':1000,'gross':profit,'profit':profit,'base':profit}
+                  for p,duty,sales,basis,amount in [(owner,'produce',800,allocated[0],expected[0]),
+                                                   (cut,'cut',200,allocated[1],expected[1])]],
+        'products':[{'product_id':'p','total_rate':.05,'people':[{'person_id':owner['id'],'duty':'produce'},{'person_id':cut['id'],'duty':'cut'}]}]}
+    run_id=ws.record('s1','2026-07',{'can_close':True,'commission':commission,
+        'statement':[{'id':'net_profit','value':profit,'available':True}]},[])
+    app=FastAPI();install(app,lambda:ws,lambda:model);client=TestClient(app)
+    for view in ['breakdown','store_people']:
+        response=client.post('/api/commission-v2/reports/query',json={
+            'start':'2026-07','end':'2026-07','store_ids':['s1'],'view':view})
+        assert response.status_code==200,response.text
+        people={p['person_id']:p for p in response.json()['items'] if p.get('person_id')}
+        assert (people[owner['id']]['amount'],people[cut['id']]['amount'])==expected
+        assert people[owner['id']]['profit_after_labor']==profit
+        assert people[cut['id']]['profit_after_labor']==0
+    from ledger.commission_reports import suggested_payouts
+    suggestions=suggested_payouts(commission,0,operating=profit,registry=registry,
+        duties={owner['id']:{'duty':'produce'},cut['id']:{'duty':'cut'}})
+    assert (suggestions[owner['id']],suggestions[cut['id']])==expected
+
+
 def record(ws, people, store, period, amounts, *, complete=True, legacy=False):
     rows = [{'person_id': p['id'], 'person': p['name'], 'amount': amount, 'base': 100}
             for p, amount in zip(people, amounts)]

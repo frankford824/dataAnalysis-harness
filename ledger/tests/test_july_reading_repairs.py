@@ -13,6 +13,29 @@ from test_reship_period_and_cost_drill import item
 from test_promotion_control_months import sample
 
 
+@pytest.mark.parametrize('alias_known', [False,True])
+def test_shared_small_refund_requires_exact_shop_alias_even_when_order_is_linked(alias_known):
+    source_model=load_model(MODELS/'cn-ecommerce')
+    store=source_model.store('taobao_mt8egr48').model_copy(update={'aliases':('美食专家',) if alias_known else ()})
+    metric=source_model.metric('small_payment_cost').for_platform('taobao')
+    model=Model(id='refund-owner',name='refund-owner',stores=(store,),sources=(
+        SourceContract(id='order_detail',name='orders',is_spine=True,owner_role='shop_owner',cadence='monthly'),
+        SourceContract(id='small_payment',name='payments',company_wide=True,owner_role='shop_owner',cadence='monthly')),
+        metrics=(metric,),statement=(StatementNode(id='payment',name='payment',formula={'op':'add','of':[metric.id]}),))
+    orders=[dict(order_id='3312639806397022793',sub_order_id='child',product_id='p',alloc_ratio=1.,
+        buyer_paid=10.,store_name=store.name,order_time=datetime(2026,7,19))]
+    payments=[dict(order_id='3312639806397022793',store_name='美食专家',total_cost=5.66,order_time=datetime(2026,7,26))]
+    result=run(Ingestion(model=model,items=[item('order_detail',orders,orders[0].keys()),
+        item('small_payment',payments,payments[0].keys())]),'taobao')
+    row=result.facts.filter(pl.col('metric_id')==metric.id).row(0,named=True)
+    assert row['linked'] is True and row['period']=='2026-07'
+    assert row['counted'] is alias_known
+    assert row['contribution']==pytest.approx(-5.66 if alias_known else 0)
+    if not alias_known:
+        assert '原表店铺名「美食专家」未识别' in row['source_note']
+        assert '关联订单属于「淘宝美食专家」' in row['source_note']
+
+
 @pytest.mark.parametrize("hint", ["shop-a", "shop-b"])
 def test_shared_bad_shop_never_falls_back_to_each_current_shop(hint):
     metric = load_model(MODELS / "cn-ecommerce").metric("dropship_cost").for_platform("pdd")
