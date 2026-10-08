@@ -267,6 +267,7 @@ def test_existing_pending_queue_migrates_without_losing_work(tmp_path):
         assert row["revision"] == 4 and row["source_seq"] == 50
         assert row["source_fingerprint"] == "order-feed:snapshot:50"
         assert row["files_revision"] == 0
+        assert row["files_applied_revision"] == 0
 
 
 def test_missing_file_never_holds_catalog_writer_during_compute_and_requires_fresh_scan(tmp_path, monkeypatch):

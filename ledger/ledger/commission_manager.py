@@ -82,7 +82,8 @@ class Manager:
             return
         claimed_at = int(time.time())
         with registry.transaction() as conn:
-            pending = conn.execute("SELECT * FROM pending WHERE next_attempt<=? ORDER BY next_attempt,revision LIMIT 1",
+            pending = conn.execute("SELECT * FROM pending WHERE next_attempt<=? "
+                                   "ORDER BY (next_attempt=0) DESC,(files_revision>files_applied_revision) DESC,next_attempt,revision,store_id LIMIT 1",
                                    (claimed_at,)).fetchone()
             if pending:
                 conn.execute("UPDATE pending SET next_attempt=? WHERE store_id=? AND revision=? AND source_seq=? AND source_fingerprint=? AND files_revision=?",
@@ -114,7 +115,8 @@ class Manager:
                                      (int(time.time())+300,error,store_id,revision,pending['source_seq'],pending['source_fingerprint'],pending['files_revision']))
                     return
             ws.note_external_version(store_id, "__commission_rules__", f"commission:{revision}")
-            note = ("原文件更新" if pending["source_fingerprint"].startswith("nas:") else
+            file_work = pending['files_revision'] > pending['files_applied_revision']
+            note = ("原文件更新" if file_work else
                     "订单数据更新" if pending["source_seq"] else "提成设置更新")
             result = service.recompute(ws, self.model(), self.model().store(store_id), note=note)
             if result.failure:
@@ -125,6 +127,14 @@ class Manager:
                 # listing/store. Its next source revision will enqueue it again.
             provisional = any(p.get("source_sync_pending") for p in result.periods)
             with registry.transaction() as conn:
+                # A published trial has consumed the captured file generation
+                # even if newer ERP events still require another pass. Newer
+                # uploaded files retain their own priority and cannot be acked
+                # by this older calculation.
+                if result.periods and not result.failure:
+                    conn.execute("UPDATE pending SET files_applied_revision=max(files_applied_revision,?) "
+                                 "WHERE store_id=? AND files_revision>=?",
+                                 (pending['files_revision'],store_id,pending['files_revision']))
                 if provisional:
                     retry_at = int(time.time()) + 60
                     changed = conn.execute("UPDATE pending SET next_attempt=? WHERE store_id=? AND revision<=? AND source_seq<=? AND source_fingerprint=? AND files_revision=?",
@@ -142,7 +152,10 @@ class Manager:
                              (__import__("uuid").uuid4().hex, "recompute", "system",
                               __import__("datetime").datetime.now().isoformat(), "done",
                               json_text({"store_id": store_id}), json_text({"store_id": store_id,
-                              "periods": len(result.periods), "waiting_for_orders": bool(result.failure), "provisional": provisional}), ""))
+                              "periods": len(result.periods), "waiting_for_orders": bool(result.failure), "provisional": provisional,
+                              "file_work":file_work,"files_revision":pending['files_revision'],
+                              "source_seq":pending['source_seq'],
+                              "run_ids":[p.get('run_id') for p in result.periods if p.get('run_id')]}), ""))
             return
         if order_feed.enabled() and time.time() - self.last_catalog > 12 * 3600:
             self.last_catalog = time.time()

@@ -149,7 +149,7 @@ CREATE TABLE IF NOT EXISTS session (digest TEXT PRIMARY KEY, operator_id TEXT NO
 CREATE TABLE IF NOT EXISTS pending (store_id TEXT PRIMARY KEY, revision INTEGER NOT NULL,
  next_attempt INTEGER NOT NULL DEFAULT 0, error TEXT NOT NULL DEFAULT '',
  source_seq INTEGER NOT NULL DEFAULT 0, source_fingerprint TEXT NOT NULL DEFAULT '',
- files_revision INTEGER NOT NULL DEFAULT 0);
+ files_revision INTEGER NOT NULL DEFAULT 0, files_applied_revision INTEGER NOT NULL DEFAULT 0);
 CREATE TABLE IF NOT EXISTS job (
  id TEXT PRIMARY KEY, kind TEXT NOT NULL, actor TEXT NOT NULL, at TEXT NOT NULL,
  status TEXT NOT NULL, payload TEXT NOT NULL, result TEXT NOT NULL DEFAULT '{}', error TEXT NOT NULL DEFAULT ''
@@ -446,7 +446,8 @@ class Registry:
                     fields = {r["name"] for r in conn.execute("PRAGMA table_info(pending)")}
                     for column, definition in [("next_attempt", "INTEGER NOT NULL DEFAULT 0"), ("error", "TEXT NOT NULL DEFAULT ''"),
                                                ("source_seq", "INTEGER NOT NULL DEFAULT 0"), ("source_fingerprint", "TEXT NOT NULL DEFAULT ''"),
-                                               ("files_revision", "INTEGER NOT NULL DEFAULT 0")]:
+                                               ("files_revision", "INTEGER NOT NULL DEFAULT 0"),
+                                               ("files_applied_revision", "INTEGER NOT NULL DEFAULT 0")]:
                         if column not in fields:
                             conn.execute(f"ALTER TABLE pending ADD COLUMN {column} {definition}")
                     _migrate_store_member(conn)
@@ -1203,10 +1204,9 @@ class Registry:
         with self.transaction() as conn:
             revision = conn.execute("SELECT revision FROM meta WHERE id=1").fetchone()[0]
             conn.executemany(
-                "INSERT INTO pending(store_id,revision,source_fingerprint,files_revision) VALUES(?,?,?,1) "
+                "INSERT INTO pending(store_id,revision,source_fingerprint,files_revision,next_attempt) VALUES(?,?,?,1,?) "
                 "ON CONFLICT(store_id) DO UPDATE SET revision=max(revision,excluded.revision),"
-                "source_fingerprint=excluded.source_fingerprint,files_revision=files_revision+1,"
-                "next_attempt=max(next_attempt,?),error=''",
+                "source_fingerprint=excluded.source_fingerprint,files_revision=files_revision+1,error=''",
                 [(sid, revision, fingerprint, int(time.time())) for sid in stores],
             )
 
@@ -1218,13 +1218,12 @@ class Registry:
         with self.transaction() as conn:
             revision = conn.execute("SELECT revision FROM meta WHERE id=1").fetchone()[0]
             conn.executemany(
-                "INSERT INTO pending(store_id,revision,source_seq,source_fingerprint) VALUES(?,?,?,?) "
+                "INSERT INTO pending(store_id,revision,source_seq,source_fingerprint,next_attempt) VALUES(?,?,?,?,?) "
                 "ON CONFLICT(store_id) DO UPDATE SET revision=max(revision,excluded.revision),"
                 "source_seq=max(source_seq,excluded.source_seq),source_fingerprint=excluded.source_fingerprint,"
-                # Preserve an active worker lease/backoff. A new event makes an
-                # idle row due now, but must not let one noisy store jump ahead
-                # again while its current recomputation is still running.
-                "next_attempt=max(next_attempt,?),error=''",
+                # Keep the original due time, active lease and retry backoff.
+                # Advancing it on every event starves busy stores indefinitely.
+                "error=''",
                 [(sid, revision, seq, fingerprint, int(time.time())) for sid in stores],
             )
 
