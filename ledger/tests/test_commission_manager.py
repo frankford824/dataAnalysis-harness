@@ -24,6 +24,25 @@ def test_new_source_while_calculating_remains_in_durable_queue(tmp_path, monkeyp
     assert registry.revision() == 0
 
 
+def test_file_receipt_cannot_be_erased_when_feed_repeats_same_prefix(tmp_path, monkeypatch):
+    monkeypatch.setenv("LEDGER_ORDER_FEED_ENABLED", "0")
+    ws = Workspace(tmp_path)
+    registry = Registry(tmp_path)
+    registry.enqueue_source({"s1"}, "order-feed:snapshot:10")
+    def compute(*args, **kwargs):
+        registry.enqueue_files({"s1"}, "nas:" + "a" * 64)
+        # Same feed prefix arriving again must not undo the independent file generation.
+        registry.enqueue_source({"s1"}, "order-feed:snapshot:10")
+        return SimpleNamespace(failure=None, periods=[])
+    monkeypatch.setattr("ledger.commission_manager.service.recompute", compute)
+    Manager(lambda: ws, _model).once()
+    with registry.connect() as conn:
+        row = conn.execute("SELECT * FROM pending WHERE store_id='s1'").fetchone()
+        assert row["source_seq"] == 10
+        assert row["files_revision"] == 1
+    assert registry.revision() == 0
+
+
 def test_component_fingerprint_does_not_replace_the_numeric_sequence(tmp_path, monkeypatch):
     monkeypatch.setenv('LEDGER_ORDER_FEED_ENABLED','0')
     ws=Workspace(tmp_path);registry=Registry(tmp_path)

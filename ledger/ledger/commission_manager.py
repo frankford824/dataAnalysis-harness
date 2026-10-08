@@ -20,6 +20,7 @@ class Manager:
         self.thread = None
         self.last_catalog = 0.0
         self.current_pending = None
+        self.current_file_revision = 0
         self.last_error = ""
         self.last_error_store = None
         self._yield_fee = False
@@ -39,6 +40,7 @@ class Manager:
 
     def once(self):
         self.current_pending = None
+        self.current_file_revision = 0
         ws = self.workspace()
         registry = Registry(ws.root)
         fee_jobs.recover(ws, self.model)
@@ -83,9 +85,9 @@ class Manager:
             pending = conn.execute("SELECT * FROM pending WHERE next_attempt<=? ORDER BY next_attempt,revision LIMIT 1",
                                    (claimed_at,)).fetchone()
             if pending:
-                conn.execute("UPDATE pending SET next_attempt=? WHERE store_id=? AND revision=? AND source_seq=? AND source_fingerprint=?",
+                conn.execute("UPDATE pending SET next_attempt=? WHERE store_id=? AND revision=? AND source_seq=? AND source_fingerprint=? AND files_revision=?",
                              (claimed_at + 180, pending["store_id"], pending["revision"],
-                              pending["source_seq"], pending["source_fingerprint"]))
+                              pending["source_seq"], pending["source_fingerprint"], pending["files_revision"]))
         if pending:
             if order_feed.enabled():
                 feed_path = ws.root / "order-feed.db"
@@ -99,6 +101,7 @@ class Manager:
                     return
             store_id, revision = pending["store_id"], pending["revision"]
             self.current_pending = (store_id, revision)
+            self.current_file_revision = pending["files_revision"]
             if order_feed.enabled():
                 with closing(sqlite3.connect(f"file:{(ws.root / 'order-feed.db').as_posix()}?mode=ro", uri=True)) as source:
                     mapped = source.execute("SELECT 1 FROM feed_store WHERE ledger_store_id=? AND mapping_status='confirmed' LIMIT 1", (store_id,)).fetchone()
@@ -107,8 +110,8 @@ class Manager:
                     # source files. Retain the durable work with a clear cause.
                     error = f"订单台没有 {self.model().store(store_id).name} 的已确认店铺映射；确认映射后自动重试"
                     with registry.transaction() as conn:
-                        conn.execute("UPDATE pending SET next_attempt=?,error=? WHERE store_id=? AND revision=? AND source_seq=? AND source_fingerprint=?",
-                                     (int(time.time())+300,error,store_id,revision,pending['source_seq'],pending['source_fingerprint']))
+                        conn.execute("UPDATE pending SET next_attempt=?,error=? WHERE store_id=? AND revision=? AND source_seq=? AND source_fingerprint=? AND files_revision=?",
+                                     (int(time.time())+300,error,store_id,revision,pending['source_seq'],pending['source_fingerprint'],pending['files_revision']))
                     return
             ws.note_external_version(store_id, "__commission_rules__", f"commission:{revision}")
             note = ("原文件更新" if pending["source_fingerprint"].startswith("nas:") else
@@ -124,14 +127,14 @@ class Manager:
             with registry.transaction() as conn:
                 if provisional:
                     retry_at = int(time.time()) + 60
-                    changed = conn.execute("UPDATE pending SET next_attempt=? WHERE store_id=? AND revision<=? AND source_seq<=? AND source_fingerprint=?",
-                                           (retry_at, store_id, revision, pending["source_seq"], pending["source_fingerprint"]))
+                    changed = conn.execute("UPDATE pending SET next_attempt=? WHERE store_id=? AND revision<=? AND source_seq<=? AND source_fingerprint=? AND files_revision=?",
+                                           (retry_at, store_id, revision, pending["source_seq"], pending["source_fingerprint"], pending["files_revision"]))
                     if not changed.rowcount:
                         conn.execute("UPDATE pending SET next_attempt=min(next_attempt,?) WHERE store_id=?",
                                      (retry_at, store_id))
                 else:
-                    removed = conn.execute("DELETE FROM pending WHERE store_id=? AND revision<=? AND source_seq<=? AND source_fingerprint=?",
-                                          (store_id, revision, pending["source_seq"], pending["source_fingerprint"]))
+                    removed = conn.execute("DELETE FROM pending WHERE store_id=? AND revision<=? AND source_seq<=? AND source_fingerprint=? AND files_revision=?",
+                                          (store_id, revision, pending["source_seq"], pending["source_fingerprint"], pending["files_revision"]))
                     if not removed.rowcount:
                         conn.execute("UPDATE pending SET next_attempt=min(next_attempt,?) WHERE store_id=?",
                                      (int(time.time()) + 10, store_id))
@@ -161,8 +164,8 @@ class Manager:
                     registry = Registry(self.workspace().root)
                     with registry.transaction() as conn:
                         if self.current_pending:
-                            conn.execute("UPDATE pending SET next_attempt=?,error=? WHERE store_id=? AND revision<=?",
-                                         (int(time.time()) + 120, str(exc)[:2000], *self.current_pending))
+                            conn.execute("UPDATE pending SET next_attempt=?,error=? WHERE store_id=? AND revision<=? AND files_revision=?",
+                                         (int(time.time()) + 120, str(exc)[:2000], *self.current_pending, self.current_file_revision))
                         conn.execute("INSERT INTO job VALUES(?,?,?,?,?,?,?,?)",
                                      (__import__("uuid").uuid4().hex, "recompute", "system",
                                       __import__("datetime").datetime.now().isoformat(), "failed", "{}", "{}", str(exc)[:2000]))

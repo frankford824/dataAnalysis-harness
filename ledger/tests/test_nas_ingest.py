@@ -255,6 +255,20 @@ def test_file_queue_preserves_source_watermark_and_invalidates_inflight_guard(tm
         assert removed.rowcount == 0
 
 
+def test_existing_pending_queue_migrates_without_losing_work(tmp_path):
+    directory = tmp_path / "commission"
+    directory.mkdir()
+    with sqlite3.connect(directory / "registry.db") as conn:
+        conn.execute("CREATE TABLE pending (store_id TEXT PRIMARY KEY, revision INTEGER NOT NULL, next_attempt INTEGER NOT NULL DEFAULT 0, error TEXT NOT NULL DEFAULT '', source_seq INTEGER NOT NULL DEFAULT 0, source_fingerprint TEXT NOT NULL DEFAULT '')")
+        conn.execute("INSERT INTO pending(store_id,revision,source_seq,source_fingerprint) VALUES('s',4,50,'order-feed:snapshot:50')")
+    registry = Registry(tmp_path)
+    with registry.connect() as conn:
+        row = conn.execute("SELECT * FROM pending WHERE store_id='s'").fetchone()
+        assert row["revision"] == 4 and row["source_seq"] == 50
+        assert row["source_fingerprint"] == "order-feed:snapshot:50"
+        assert row["files_revision"] == 0
+
+
 def test_missing_requires_guard_then_forgets(tmp_path):
     root = tmp_path / "台账系统"
     file = root / "10_已接收" / "淘宝天猫" / "store" / "运费" / "运费-淘宝喜必顺.csv"
