@@ -1522,12 +1522,8 @@ def _build_slice(
         from .types import Finding
         from collections import Counter
         counts = Counter(x.get('reason') or 'unknown' for x in own_pending)
-        labels = {'missing_payment_basis':'实付或退款资料不完整',
-                  'zero_net_payment':'净实付为 0，需确认分配口径',
-                  'invalid_or_incomplete_ratio':'原分配率不完整或不合法',
-                  'missing_or_duplicate_child':'子单编号缺失或重复',
-                  'cross_store_or_period':'关联跨店铺或账期'}
-        explanation = '；'.join(f'{count}项{labels.get(reason,"依据待核对")}' for reason,count in sorted(counts.items()))
+        from .allocation import REASON_LABELS
+        explanation = '；'.join(f'{count}项{REASON_LABELS.get(reason,"依据待核对")}' for reason,count in sorted(counts.items()))
         orders = len({x.get('order_id') for x in own_pending if x.get('order_id')})
         result.findings.append(Finding('allocation_basis','主子订单分配依据待核对',passed=False,blocking=True,
             message=f'{len(own_pending)} 个金额项目（涉及 {orders} 个主订单）已计入店铺、尚未分配到商品：{explanation}。请核对对应子单的实付、退款或原始分配率。',

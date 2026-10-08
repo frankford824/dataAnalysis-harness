@@ -84,6 +84,23 @@ def test_allocation_export_preserves_ids_and_explains_repeated_control(client):
     assert row['商品ID']=="'1033349629267"
     assert row['分配依据']=='历史冻结流水与核对后比例'
     assert '不可直接相加' in row['汇总说明']
+    assert row['待核对原因']==''
+
+
+def test_allocation_export_distinguishes_missing_fields_from_zero_net(client):
+    import csv
+    from ledger.storage_integrity import seal
+    ws=api.workspace();rid=ws.record('taobao_mt9scjag','2026-07',{'can_close':False},[])
+    path=ws.facts_path(rid).with_suffix('.allocation.parquet')
+    pl.DataFrame({'metric_id':['trade_receipt']*3,'link_key':['A','B','C'],
+        'spine_row':[None]*3,'source_amount':[10.,20.,30.],'amount':[10.,20.,30.],
+        'allocation_reason':['missing_payment_basis','zero_net_payment','invalid_or_incomplete_ratio']}).write_parquet(path)
+    seal(path)
+    response=client.get(f'/api/runs/{rid}/allocation.csv')
+    assert response.status_code==200
+    rows=list(csv.DictReader(io.StringIO(response.text.lstrip('\ufeff'))))
+    assert [r['待核对原因'] for r in rows]==['实付或退款资料不完整','净实付为 0，需确认分配口径','原分配率不完整或不合法']
+    assert all(r['状态']=='未分配到商品' and r['分配依据']=='店铺级保留金额' for r in rows)
 
 
 class TestBootstrap:

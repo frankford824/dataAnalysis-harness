@@ -282,9 +282,9 @@ class TestDerivedRatioFollowsTheManualDefinition:
         assert any("扣退款后" in n for n in proj.notes)
 
     def test_no_refund_filed_reads_as_zero_not_as_a_hole(self):
-        """退款金额那格常填「无退款申请」，转数值后是空，得落回买家实付。
+        """明确的「无退款申请」表示退款为 0，净实付等于实付。
 
-        人工公式是 IFERROR 回买家实付金额，按空值当 0 减就是同一个结果。
+        真正空白退款仍是未知；读表到分配的完整链路另由导出模板回归覆盖。
         """
         spine = _spine([
             {"order_id": "A", "buyer_paid": 70.0, "refund_amount": '无退款申请',
@@ -316,7 +316,7 @@ class TestDerivedRatioFollowsTheManualDefinition:
         assert got == [60.0]
 
     def test_an_all_refunded_order_keeps_its_fee_on_the_books(self):
-        """一单全退到没有可比收入了，退回笔数均摊——钱不能丢。
+        """一单全退到没有可比收入，金额保留在店铺，不能编造子单比例。
 
         人工表这里分配率算成 0，挂在这单上的费用整块消失（实测天猫皇莉诗
         2026-06 有 3 单、5.45 元）。但佣金是真扣走了的，账上得留着，

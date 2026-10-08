@@ -8,6 +8,13 @@ import polars as pl
 
 ORIGIN='__spine_origin__'
 NO_REFUND_MARKERS = ('无退款申请', '没有申请退款', '未退款', '无')
+REASON_LABELS = {
+    'missing_payment_basis':'实付或退款资料不完整',
+    'zero_net_payment':'净实付为 0，需确认分配口径',
+    'invalid_or_incomplete_ratio':'原分配率不完整或不合法',
+    'missing_or_duplicate_child':'子单编号缺失或重复',
+    'cross_store_or_period':'关联跨店铺或账期',
+}
 
 
 def refund_values(frame):
