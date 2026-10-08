@@ -293,6 +293,7 @@ fn init_data_dir(data: &Path) -> Result<()> {
         fs::create_dir_all(data.join(name))?;
     }
     let conn = Connection::open(data.join("catalog.db"))?;
+    conn.busy_timeout(Duration::from_secs(30))?;
     conn.execute_batch(CATALOG_SCHEMA)?;
     // Forward-compatible for catalogs created by an earlier pre-release build.
     let _ = conn.execute(

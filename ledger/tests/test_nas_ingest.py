@@ -94,7 +94,7 @@ create table scan_meta (
  id integer primary key, generation integer, last_started text, last_completed text,
  root_reachable integer, last_error text
 );
-insert into scan_meta values(1,1,'now','now',1,'');
+insert into scan_meta values(1,1,'now',strftime('%Y-%m-%dT%H:%M:%SZ','now'),1,'');
 """
 
 
@@ -267,6 +267,60 @@ def test_existing_pending_queue_migrates_without_losing_work(tmp_path):
         assert row["revision"] == 4 and row["source_seq"] == 50
         assert row["source_fingerprint"] == "order-feed:snapshot:50"
         assert row["files_revision"] == 0
+
+
+def test_missing_file_never_holds_catalog_writer_during_compute_and_requires_fresh_scan(tmp_path, monkeypatch):
+    root = tmp_path / 'nas'
+    original = root / '10_已接收' / 's' / 'missing.csv'
+    original.parent.mkdir(parents=True)
+    original.write_text('A,1\n')
+    catalog = tmp_path / 'catalog.db'
+    sqlite3.connect(catalog).executescript(CATALOG + APPLY_SCHEMA).connection.close()
+    sha = add_catalog(catalog, original, missing=3, missing_since=int(time.time())-700)
+    ws = Workspace(tmp_path / 'workspace')
+    ws.keep(original.name, original, 'taobao_xibishun')
+    with sqlite3.connect(catalog) as conn:
+        conn.execute('INSERT INTO ledger_apply(path,sha256,store_id,name,state) VALUES(?,?,?,?,?)',
+            (str(original),sha,'taobao_xibishun',original.name,'applied'))
+        conn.execute("UPDATE scan_meta SET last_completed='2020-01-01T00:00:00Z'")
+    original.unlink()
+    assert reconcile_missing(ws,load_model(MODEL),catalog)['removed']==0
+    assert ws.submissions('taobao_xibishun')
+    with sqlite3.connect(catalog) as conn:
+        conn.execute("UPDATE scan_meta SET last_completed=strftime('%Y-%m-%dT%H:%M:%SZ','now')")
+    def compute(*args,**kwargs):
+        with sqlite3.connect(catalog,timeout=.05) as writer:
+            writer.execute('UPDATE scan_meta SET generation=generation+1')
+    monkeypatch.setattr(service,'recompute',compute)
+    assert reconcile_missing(ws,load_model(MODEL),catalog)['removed']==1
+
+
+def test_withdrawal_queue_failure_is_retryable_and_restored_source_is_received(tmp_path, monkeypatch):
+    root = tmp_path/'nas'
+    original=root/'10_已接收'/'淘宝天猫'/'汪学成-天猫喜必顺旗舰店 [taobao_xibishun]'/'运费'/'运费-淘宝喜必顺.csv'
+    original.parent.mkdir(parents=True)
+    raw='运单号,金额\nA1,1\n'
+    original.write_text(raw,encoding='utf-8')
+    catalog=tmp_path/'catalog.db'
+    sqlite3.connect(catalog).executescript(CATALOG+APPLY_SCHEMA).connection.close()
+    sha=add_catalog(catalog,original,missing=3,missing_since=int(time.time())-700)
+    ws=Workspace(tmp_path/'workspace');ws.keep(original.name,original,'taobao_xibishun')
+    with sqlite3.connect(catalog) as conn:
+        conn.execute('INSERT INTO ledger_apply(path,sha256,store_id,name,state) VALUES(?,?,?,?,?)',
+            (str(original),sha,'taobao_xibishun',original.name,'applied'))
+    original.unlink()
+    def fail(*args):raise RuntimeError('queue offline')
+    assert reconcile_missing(ws,load_model(MODEL),catalog,enqueue=fail)['errors']
+    assert application_errors(catalog)[0]['state']=='removal_pending'
+    assert not ws.submissions('taobao_xibishun')
+    original.write_text(raw,encoding='utf-8')
+    with sqlite3.connect(catalog) as conn:
+        conn.execute('UPDATE file_catalog SET missing_scans=0,missing_since=NULL')
+    monkeypatch.setattr(service,'recompute',lambda *a,**kw: (_ for _ in ()).throw(AssertionError('sync')))
+    registry=Registry(ws.root)
+    assert not reconcile_ready(ws,load_model(MODEL),catalog,root,enqueue=registry.enqueue_files)['errors']
+    assert ws.submissions('taobao_xibishun')
+    assert apply_states(catalog)[original.name]=='applied'
 
 
 def test_missing_requires_guard_then_forgets(tmp_path):

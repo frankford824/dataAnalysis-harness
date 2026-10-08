@@ -454,7 +454,8 @@ def _validate_owner(model: Model, row: sqlite3.Row) -> str:
 def _pending_rows(connection: sqlite3.Connection) -> list[sqlite3.Row]:
     fresh = connection.execute(
         "select f.* from file_catalog f left join ledger_apply a on a.path=f.path and a.sha256=f.sha256 "
-        "where f.state in ('ready','finance_only') and f.sha256<>'' and a.path is null "
+        "where f.state in ('ready','finance_only') and f.sha256<>'' "
+        "and (a.path is null or (a.state='removal_pending' and f.missing_scans=0)) "
         "order by f.indexed_at,f.path"
     ).fetchall()
     quarantined = connection.execute(
@@ -483,7 +484,7 @@ def application_errors(catalog: Path) -> list[dict]:
         return [dict(r) for r in conn.execute(
             "select a.path,a.sha256,a.store_id,a.name,a.state,a.applied_at,a.error,'finance_intake' as stage "
             "from ledger_apply a join file_catalog f on f.path=a.path and f.sha256=a.sha256 "
-            "where a.state in ('error','quarantined') and (f.missing_scans=0 or a.state='quarantined') "
+            "where a.state in ('error','quarantined','removal_pending') and (f.missing_scans=0 or a.state in ('quarantined','removal_pending')) "
             "order by a.applied_at desc limit 200")]
 
 
@@ -524,6 +525,7 @@ def reconcile_ready(
             continue
         if row["authority"] == "search_only":
             _record(connection, row, "search_only")
+            connection.commit()
             search_only += 1
             continue
         decision = _decide_owner(model, row, model_dir=model_dir, feed_db=feed_db)
@@ -539,6 +541,7 @@ def reconcile_ready(
             else:
                 _record(connection, row, "error", decision.reason)
                 errors.append(f"{live.name}：{decision.reason}")
+            connection.commit()
             continue
         if decision.audit:
             audits.append(f"{live.name}：{decision.audit}")
@@ -618,7 +621,8 @@ def reconcile_ready(
     return {"applied": applied, "search_only": search_only, "errors": errors, "audits": audits}
 
 
-def reconcile_missing(ws: Workspace, model: Model, catalog: Path) -> dict:
+def reconcile_missing(ws: Workspace, model: Model, catalog: Path,
+                      enqueue: Callable[[set[str], str], None] | None = None) -> dict:
     connection = sqlite3.connect(catalog, timeout=30)
     connection.row_factory = sqlite3.Row
     connection.executescript(APPLY_SCHEMA)
@@ -628,11 +632,19 @@ def reconcile_missing(ws: Workspace, model: Model, catalog: Path) -> dict:
     if not meta or not meta["root_reachable"] or not meta["last_completed"]:
         connection.close()
         return {"removed": 0, "errors": []}
+    try:
+        completed = datetime.fromisoformat(meta["last_completed"].replace('Z', '+00:00'))
+        age = (datetime.now(timezone.utc) - completed).total_seconds()
+    except (ValueError, TypeError):
+        age = float('inf')
+    if age < 0 or age > 120:
+        connection.close()
+        return {"removed": 0, "errors": []}
     cutoff = int(time()) - 600
     rows = connection.execute(
         "select f.path,f.sha256,f.missing_scans,f.missing_since,a.store_id,a.name "
         "from file_catalog f join ledger_apply a on a.path=f.path and a.sha256=f.sha256 "
-        "where a.state='applied' and a.removed_at='' and f.missing_scans>=3 and f.missing_since<=?",
+        "where a.state in ('applied','removal_pending') and a.removed_at='' and f.missing_scans>=3 and f.missing_since<=?",
         (cutoff,),
     ).fetchall()
     # 同一份内容换了文件名再传：旧路径 missing，新路径 ready、哈希相同。
@@ -648,6 +660,7 @@ def reconcile_missing(ws: Workspace, model: Model, catalog: Path) -> dict:
     touched: set[str] = set()
     shared = False
     errors: list[str] = []
+    removed_rows = []
     for row in rows:
         try:
             ws.forget(row["store_id"], row["name"])
@@ -655,20 +668,34 @@ def reconcile_missing(ws: Workspace, model: Model, catalog: Path) -> dict:
                 shared = True
             else:
                 touched.add(row["store_id"])
-            connection.execute(
-                "update ledger_apply set state='removed',removed_at=? where path=?",
-                (_now(), row["path"]),
-            )
+            removed_rows.append(row)
         except Exception as exc:
             errors.append(f"{row['name']}：{exc}")
     if shared:
         active = {store.id for store in model.active_stores()}
         touched.update(store_id for store_id in ws.store_ids() if store_id in active)
-    for store_id in sorted(touched):
-        service.recompute(ws, model, model.store(store_id))
+    if enqueue is not None and touched:
+        signature = 'nas:' + hashlib.sha256(('withdraw:' + '\n'.join(sorted(row['path'] + ':' + row['sha256'] for row in removed_rows))).encode()).hexdigest()
+        try:
+            enqueue(touched, signature)
+        except Exception as exc:
+            for row in removed_rows:
+                connection.execute("UPDATE ledger_apply SET state='removal_pending',error=? WHERE path=?",
+                                   (f'撤表已留档，但核算排队失败：{exc}', row['path']))
+            connection.commit()
+            connection.close()
+            return {'removed':0,'errors':errors + [str(exc)]}
+    for row in removed_rows:
+        connection.execute("UPDATE ledger_apply SET state='removed',removed_at=?,error='' WHERE path=?",
+                           (_now(),row['path']))
     connection.commit()
     connection.close()
-    return {"removed": len(rows), "errors": errors}
+    # Never hold a catalog writer transaction across accounting. The indexer
+    # must continue publishing scans while a missing file affects many stores.
+    if enqueue is None:
+        for store_id in sorted(touched):
+            service.recompute(ws, model, model.store(store_id))
+    return {"removed": len(removed_rows), "errors": errors}
 
 
 class NasIngestWorker:
@@ -708,7 +735,7 @@ class NasIngestWorker:
                     ws, model = self.workspace_fn(), self.model_fn()
                     operations = (
                         lambda: reconcile_ready(ws, model, self.catalog, self.root, model_dir=self.model_dir, enqueue=self.enqueue),
-                        lambda: reconcile_missing(ws, model, self.catalog),
+                        lambda: reconcile_missing(ws, model, self.catalog, enqueue=self.enqueue),
                     )
                     for operation in operations:
                         outcome = operation()
