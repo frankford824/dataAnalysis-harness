@@ -7,6 +7,8 @@ import time
 from pathlib import Path
 
 from ledger.model import load_model
+from ledger import service
+from ledger.commission_registry import Registry
 from ledger.nas_ingest import (
     APPLY_SCHEMA,
     _extract_store_name,
@@ -180,6 +182,77 @@ def test_ready_file_is_applied_and_search_only_is_not(tmp_path):
     states = apply_states(catalog)
     assert states[active.name] == "applied"
     assert states[manual.name] == "search_only"
+
+
+def test_shared_receipt_queues_durably_without_waiting_for_all_stores(tmp_path, monkeypatch):
+    root = tmp_path / "nas"
+    uploaded = root / "00_上传区" / "00_全公司共享" / "代发" / "代发-全店铺-7-8月.csv"
+    uploaded.parent.mkdir(parents=True)
+    uploaded.write_text("订单号,金额\nA1,10\n", encoding="utf-8")
+    catalog = tmp_path / "catalog.db"
+    sqlite3.connect(catalog).executescript(CATALOG).connection.close()
+    add_catalog(catalog, uploaded, store_id="__shared__", source="代发")
+    ws = Workspace(tmp_path / "workspace")
+    ws.keep("seed.csv", uploaded, "taobao_xibishun")
+    registry = Registry(ws.root)
+    calls = []
+    def enqueue(stores, signature):
+        assert uploaded.exists()  # Queue commit precedes acknowledgment/move.
+        assert ws.submissions("__shared__")
+        registry.enqueue_files(stores, signature)
+        calls.append(stores)
+    def no_sync_recompute(*args, **kwargs):
+        raise AssertionError("NAS receipt must not wait for computation")
+    monkeypatch.setattr(service, "recompute", no_sync_recompute)
+    result = reconcile_ready(ws, load_model(MODEL), catalog, root, enqueue=enqueue)
+    assert not result["errors"]
+    accepted = root / "10_已接收" / "00_全公司共享" / "代发" / uploaded.name
+    assert accepted.exists() and not uploaded.exists()
+    assert calls == [{"taobao_xibishun"}]
+    with registry.connect() as conn:
+        assert conn.execute("SELECT source_fingerprint FROM pending WHERE store_id='taobao_xibishun'").fetchone()[0].startswith("nas:")
+    assert not reconcile_ready(ws, load_model(MODEL), catalog, root, enqueue=enqueue)["errors"]
+    assert len(calls) == 1
+
+
+def test_queue_failure_then_unchanged_file_retry_cannot_lose_accounting(tmp_path, monkeypatch):
+    root = tmp_path / "nas"
+    uploaded = root / "00_上传区" / "淘宝天猫" / "汪学成-天猫喜必顺旗舰店 [taobao_xibishun]" / "运费" / "运费-淘宝喜必顺.csv"
+    uploaded.parent.mkdir(parents=True)
+    uploaded.write_text("运单号,金额\nA1,1\n", encoding="utf-8")
+    catalog = tmp_path / "catalog.db"
+    sqlite3.connect(catalog).executescript(CATALOG).connection.close()
+    add_catalog(catalog, uploaded)
+    ws = Workspace(tmp_path / "workspace")
+    monkeypatch.setattr(service, "recompute", lambda *a, **kw: (_ for _ in ()).throw(AssertionError("sync recompute")))
+    def failed(stores, signature):
+        raise RuntimeError("queue offline")
+    result = reconcile_ready(ws, load_model(MODEL), catalog, root, enqueue=failed)
+    assert result["errors"] and uploaded.exists()
+    assert apply_states(catalog)[uploaded.name] == "error"
+    assert ws.submissions("taobao_xibishun")
+    with sqlite3.connect(catalog) as conn:
+        conn.execute("UPDATE ledger_apply SET applied_at='2020-01-01T00:00:00+00:00'")
+    registry = Registry(ws.root)
+    assert not reconcile_ready(ws, load_model(MODEL), catalog, root, enqueue=registry.enqueue_files)["errors"]
+    assert not uploaded.exists()
+    with registry.connect() as conn:
+        assert conn.execute("SELECT COUNT(*) FROM pending WHERE store_id='taobao_xibishun'").fetchone()[0] == 1
+
+
+def test_file_queue_preserves_source_watermark_and_invalidates_inflight_guard(tmp_path):
+    registry = Registry(tmp_path)
+    registry.enqueue_source({"s"}, "order-feed:snapshot:50")
+    with registry.connect() as conn:
+        previous = dict(conn.execute("SELECT * FROM pending WHERE store_id='s'").fetchone())
+    registry.enqueue_files({"s"}, "nas:" + "a" * 64)
+    with registry.transaction() as conn:
+        updated = conn.execute("SELECT * FROM pending WHERE store_id='s'").fetchone()
+        assert updated["source_seq"] == 50
+        assert updated["source_fingerprint"] == "nas:" + "a" * 64
+        removed = conn.execute("DELETE FROM pending WHERE store_id=? AND revision<=? AND source_seq<=? AND source_fingerprint=?",
+            ("s",previous["revision"],previous["source_seq"],previous["source_fingerprint"]))
+        assert removed.rowcount == 0
 
 
 def test_missing_requires_guard_then_forgets(tmp_path):

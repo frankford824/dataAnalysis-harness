@@ -111,7 +111,8 @@ class Manager:
                                      (int(time.time())+300,error,store_id,revision,pending['source_seq'],pending['source_fingerprint']))
                     return
             ws.note_external_version(store_id, "__commission_rules__", f"commission:{revision}")
-            note = "订单数据更新" if pending["source_seq"] else "提成设置更新"
+            note = ("原文件更新" if pending["source_fingerprint"].startswith("nas:") else
+                    "订单数据更新" if pending["source_seq"] else "提成设置更新")
             result = service.recompute(ws, self.model(), self.model().store(store_id), note=note)
             if result.failure:
                 why = result.failure.get("why") or str(result.failure)

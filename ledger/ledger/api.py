@@ -79,6 +79,7 @@ async def lifespan(_app: FastAPI):
         catalog = Path(os.environ.get("LEDGER_INDEX_CATALOG", r"D:\ledger\index\catalog.db"))
         _nas_worker = nas_ingest.NasIngestWorker(
             workspace, lambda: _snapshot().model, catalog, nas_status.nas_root(),
+            enqueue=_apply_nas_files,
         )
         _nas_worker.start()
     if order_feed.enabled():
@@ -269,6 +270,12 @@ async def protect_migrated_commission(request: Request, call_next):
                 from fastapi.responses import JSONResponse
                 return JSONResponse(status_code=409, content={"detail": "提成已使用版本化关系，请在提成管理中调整；旧配置仅供回查"})
     return await call_next(request)
+
+
+def _apply_nas_files(store_ids: set[str], fingerprint: str) -> None:
+    """File receipt and accounting are separate, crash-recoverable steps."""
+    from .commission_registry import Registry
+    Registry(workspace().root).enqueue_files(store_ids, fingerprint)
 
 
 def _apply_order_feed(store_ids: set[str], fingerprint: str) -> None:

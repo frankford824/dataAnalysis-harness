@@ -1195,6 +1195,18 @@ class Registry:
                          (job_id, kind, actor, now(), "queued", json_text(payload)))
         return {"job_id": job_id, "status": "queued"}
 
+    def enqueue_files(self, stores: set[str], fingerprint: str) -> None:
+        if not re.fullmatch(r"nas:[0-9a-f]{64}", fingerprint):
+            raise RegistryError("原文件来源版本格式不正确")
+        with self.transaction() as conn:
+            revision = conn.execute("SELECT revision FROM meta WHERE id=1").fetchone()[0]
+            conn.executemany(
+                "INSERT INTO pending(store_id,revision,source_fingerprint) VALUES(?,?,?) "
+                "ON CONFLICT(store_id) DO UPDATE SET revision=max(revision,excluded.revision),"
+                "source_fingerprint=excluded.source_fingerprint,next_attempt=max(next_attempt,?),error=''",
+                [(sid, revision, fingerprint, int(time.time())) for sid in stores],
+            )
+
     def enqueue_source(self, stores: set[str], fingerprint: str) -> None:
         match = re.fullmatch(r"order-feed:[^:]+:(\d+)(?::components:[0-9a-f]{64})?", fingerprint)
         if match is None:

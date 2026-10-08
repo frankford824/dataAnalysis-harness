@@ -503,6 +503,7 @@ def reconcile_ready(
     catalog: Path,
     nas_root: Path,
     model_dir: Path | None = None,
+    enqueue: Callable[[set[str], str], None] | None = None,
 ) -> dict:
     if not nas_root.is_dir():
         return {"applied": 0, "search_only": 0, "errors": ["NAS 根目录不可达"]}
@@ -565,9 +566,29 @@ def reconcile_ready(
         result = service.intake_assigned(
             ws, model, assigned,
             by="NAS自动接收",
+            defer_recompute=enqueue is not None,
         )
         kept = {(item.store_id, item.name) for item in result.kept}
         rejected = {item.file: item.why for item in result.rejected}
+        if enqueue is not None:
+            received = [row for row in assigned_rows if (row["store_id"], Path(row["path"]).name) in kept]
+            affected = {row["store_id"] for row in received if row["store_id"] != SHARED_STORE_ID}
+            if any(row["store_id"] == SHARED_STORE_ID for row in received):
+                affected.update(set(ws.store_ids()) & {store.id for store in model.active_stores()})
+            # Include unchanged files on retry: a crash may follow keep() but
+            # precede queue commit. No acknowledgment until the queue persists.
+            signature = "nas:" + hashlib.sha256("\n".join(sorted({row["sha256"] for row in received})).encode()).hexdigest()
+            try:
+                if affected:
+                    enqueue(affected, signature)
+            except Exception as exc:
+                for row in received:
+                    reason = f"文件已留档，但核算排队失败：{exc}"
+                    _record(connection, row, "error", reason)
+                    errors.append(f"{Path(row['path']).name}：{reason}")
+                connection.commit()
+                connection.close()
+                return {"applied": 0, "search_only": search_only, "errors": errors, "audits": audits}
         for row in assigned_rows:
             live = live_paths[row["path"]]
             name = live.name
@@ -658,12 +679,14 @@ class NasIngestWorker:
         catalog: Path,
         root: Path,
         model_dir: Path | None = None,
+        enqueue: Callable[[set[str], str], None] | None = None,
     ) -> None:
         self.workspace_fn = workspace_fn
         self.model_fn = model_fn
         self.catalog = catalog
         self.root = root
         self.model_dir = Path(model_dir) if model_dir is not None else _DEFAULT_MODEL
+        self.enqueue = enqueue
         self.stop_event = threading.Event()
         self.thread: threading.Thread | None = None
 
@@ -684,7 +707,7 @@ class NasIngestWorker:
                 if self.catalog.is_file() and self.root.is_dir():
                     ws, model = self.workspace_fn(), self.model_fn()
                     operations = (
-                        lambda: reconcile_ready(ws, model, self.catalog, self.root, model_dir=self.model_dir),
+                        lambda: reconcile_ready(ws, model, self.catalog, self.root, model_dir=self.model_dir, enqueue=self.enqueue),
                         lambda: reconcile_missing(ws, model, self.catalog),
                     )
                     for operation in operations:

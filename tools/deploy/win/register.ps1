@@ -43,7 +43,9 @@ Write-Output ('  已注册 ' + $Task + '（开机启动，身份 SYSTEM，无运
 $indexAction = New-ScheduledTaskAction -Execute 'powershell.exe' `
   -Argument ('-NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -File "' +
              (Join-Path $Root 'bin\indexer.ps1') + '"')
-Register-ScheduledTask -TaskName $IndexTask -Action $indexAction -Trigger $trigger `
+$indexRecoveryTrigger = New-ScheduledTaskTrigger -Once -At ((Get-Date).AddMinutes(1)) `
+  -RepetitionInterval (New-TimeSpan -Minutes 5) -RepetitionDuration (New-TimeSpan -Days 3650)
+Register-ScheduledTask -TaskName $IndexTask -Action $indexAction -Trigger @($trigger,$indexRecoveryTrigger) `
   -Principal $principal -Settings $settings `
   -Description 'NAS Excel 流式解析、Parquet 与 Tantivy 索引服务。' -Force | Out-Null
 Write-Output ('  已注册 ' + $IndexTask + '（开机启动，身份 SYSTEM）')

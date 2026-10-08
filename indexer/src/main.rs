@@ -4,7 +4,7 @@ use std::io::{BufReader, Read, Write};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::process::Command as ProcessCommand;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, anyhow, bail};
@@ -155,6 +155,33 @@ struct AppState {
     root: PathBuf,
     data: PathBuf,
     search: Arc<SearchRuntime>,
+    scan_health: Arc<Mutex<ScanHealth>>,
+}
+
+#[derive(Default)]
+struct ScanHealth {
+    active: bool,
+    progress: Option<Instant>,
+    completed: Option<Instant>,
+    failures: u32,
+    error: Option<String>,
+}
+
+impl ScanHealth {
+    fn report(&self, root_reachable: bool, catalog_present: bool) -> Value {
+        let progress_age = self.progress.map(|at| at.elapsed().as_secs());
+        let completed_age = self.completed.map(|at| at.elapsed().as_secs());
+        let stalled = self.active && progress_age.is_some_and(|age| age > 1800);
+        let idle_stalled = root_reachable && !self.active && progress_age.is_some_and(|age| age > 120);
+        let scanner_failed = root_reachable && self.failures >= 3;
+        let server_alive = !stalled && !idle_stalled && !scanner_failed;
+        let fresh = completed_age.is_some_and(|age| age <= 120) || self.active;
+        json!({"ok": root_reachable && catalog_present && server_alive && fresh && self.error.is_none(),
+            "server_alive":server_alive,"pid":std::process::id(),"root_reachable":root_reachable,
+            "scan_active":self.active,"scan_stalled":stalled || idle_stalled,"scan_completed_age_seconds":completed_age,
+            "scan_progress_age_seconds":progress_age,"consecutive_scan_failures":self.failures,
+            "scan_error":self.error})
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -215,8 +242,20 @@ struct CellMatch {
     value: String,
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
+fn main() -> Result<()> {
+    // Do not create one worker per host CPU or an unbounded blocking pool.
+    // Runtime creation failure returns to the supervisor instead of panicking.
+    tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .max_blocking_threads(4)
+        .thread_stack_size(1024 * 1024)
+        .enable_all()
+        .build()
+        .context("create bounded indexer runtime")?
+        .block_on(run_cli())
+}
+
+async fn run_cli() -> Result<()> {
     match Cli::parse().command {
         Command::Init { data } => {
             init_data_dir(&data)?;
@@ -724,7 +763,7 @@ fn index_file(
         ArrowWriter::try_new(File::create(&temporary.path)?, arrow_schema(), Some(props))?;
     let index = open_or_create_index(&data.join(INDEX_DIR))?;
     let fields = IndexFields::from_schema(&index.schema())?;
-    let mut index_writer = index.writer_with_num_threads(4, 256_000_000)?;
+    let mut index_writer = index.writer_with_num_threads(2, 64_000_000)?;
     index_writer.delete_term(Term::from_field_text(fields.file_sha, &sha));
     let mut buffered = Vec::with_capacity(4096);
     let mut row_count = 0u64;
@@ -975,6 +1014,10 @@ fn infer_scope(root: &Path, path: &Path) -> (String, String, String, String) {
 }
 
 fn scan_once(root: &Path, data: &Path) -> Result<Value> {
+    scan_once_with_progress(root, data, None)
+}
+
+fn scan_once_with_progress(root: &Path, data: &Path, health: Option<&Mutex<ScanHealth>>) -> Result<Value> {
     init_data_dir(data)?;
     if !root.exists() {
         bail!("NAS root not reachable: {}", root.display());
@@ -1022,6 +1065,9 @@ fn scan_once(root: &Path, data: &Path) -> Result<Value> {
             )
         })
     {
+        if let Some(health) = health {
+            health.lock().unwrap_or_else(|e| e.into_inner()).progress = Some(Instant::now());
+        }
         let entry = match entry {
             Ok(e) => e,
             Err(e) => {
@@ -1435,18 +1481,46 @@ fn make_snippet(text: &str, query: &str) -> String {
 async fn serve(root: PathBuf, data: PathBuf, bind: SocketAddr) -> Result<()> {
     init_data_dir(&data)?;
     let search = Arc::new(open_search_runtime(&data)?);
-    let state = AppState { root, data, search };
+    let scan_health = Arc::new(Mutex::new(ScanHealth { progress: Some(Instant::now()), ..Default::default() }));
+    let state = AppState { root, data, search, scan_health };
     let scan_state = state.clone();
     tokio::spawn(async move {
         let mut ticker = time::interval(Duration::from_secs(30));
+        ticker.set_missed_tick_behavior(time::MissedTickBehavior::Skip);
         loop {
             ticker.tick().await;
             let root = scan_state.root.clone();
             let data = scan_state.data.clone();
-            let result = tokio::task::spawn_blocking(move || scan_once(&root, &data)).await;
-            if result.is_ok() {
-                let _ = scan_state.search.reader.reload();
+            let health = scan_state.scan_health.clone();
+            {
+                let mut status = health.lock().unwrap_or_else(|e| e.into_inner());
+                status.active = true;
+                status.progress = Some(Instant::now());
             }
+            let result = tokio::task::spawn_blocking(move || scan_once_with_progress(&root, &data, Some(&health))).await;
+            let error = match result {
+                Ok(Ok(value)) => {
+                    if let Err(error) = scan_state.search.reader.reload() {
+                        eprintln!("search reload failed: {error:#}");
+                    }
+                    let mut status = scan_state.scan_health.lock().unwrap_or_else(|e| e.into_inner());
+                    status.completed = Some(Instant::now());
+                    status.failures = 0;
+                    value.get("errors").and_then(Value::as_array).and_then(|errors| errors.first())
+                        .and_then(Value::as_str).map(str::to_string)
+                        .or_else(|| value.get("reason").and_then(Value::as_str).map(str::to_string))
+                }
+                Ok(Err(error)) => Some(format!("scan failed: {error:#}")),
+                Err(error) => Some(format!("scan worker failed: {error}")),
+            };
+            let mut status = scan_state.scan_health.lock().unwrap_or_else(|e| e.into_inner());
+            status.active = false;
+            status.progress = Some(Instant::now());
+            if let Some(error) = &error {
+                eprintln!("{error}");
+                status.failures = status.failures.saturating_add(1);
+            }
+            status.error = error;
         }
     });
     let app = Router::new()
@@ -1464,9 +1538,9 @@ async fn serve(root: PathBuf, data: PathBuf, bind: SocketAddr) -> Result<()> {
 }
 
 async fn health_handler(State(state): State<AppState>) -> Json<Value> {
-    Json(
-        json!({"ok": state.root.exists() && state.data.join("catalog.db").exists(), "root_reachable": state.root.exists()}),
-    )
+    let root_reachable = state.root.exists();
+    let catalog_present = state.data.join("catalog.db").exists();
+    Json(state.scan_health.lock().unwrap_or_else(|e| e.into_inner()).report(root_reachable, catalog_present))
 }
 
 async fn status_handler(State(state): State<AppState>) -> Json<Value> {
@@ -1599,6 +1673,42 @@ async fn storage_handler(State(state): State<AppState>) -> Json<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn no_scan_yet_is_not_claimed_healthy() {
+        let report = ScanHealth::default().report(true, true);
+        assert_eq!(report["ok"], false);
+        assert_eq!(report["server_alive"], true);
+    }
+    #[test]
+    fn scan_failure_does_not_disappear_behind_existing_files() {
+        let report = ScanHealth { failures: 3, error: Some("catalog failed".into()),
+            completed: Some(Instant::now()), ..Default::default() }.report(true, true);
+        assert_eq!(report["ok"], false);
+        assert_eq!(report["server_alive"], false);
+    }
+    #[test]
+    fn nas_loss_is_visible_but_not_a_dead_process() {
+        let report = ScanHealth { failures: 8, error: Some("NAS unavailable".into()),
+            ..Default::default() }.report(false, true);
+        assert_eq!(report["ok"], false);
+        assert_eq!(report["server_alive"], true);
+    }
+    #[test]
+    fn actively_progressing_scan_is_not_restarted_for_old_completion() {
+        let report = ScanHealth { active: true, progress: Some(Instant::now()),
+            completed: Some(Instant::now() - Duration::from_secs(600)), ..Default::default() }.report(true, true);
+        assert_eq!(report["ok"], true);
+        assert_eq!(report["server_alive"], true);
+    }
+    #[test]
+    fn stalled_worker_or_missing_scan_loop_is_unhealthy() {
+        for active in [true, false] {
+            let report = ScanHealth { active, progress: Some(Instant::now() - Duration::from_secs(1801)),
+                completed: Some(Instant::now()), ..Default::default() }.report(true, true);
+            assert_eq!(report["server_alive"], false);
+            assert_eq!(report["scan_stalled"], true);
+        }
+    }
     #[test]
     fn scope_uses_directory_store_id() {
         let root = Path::new(r"X:\台账系统\10_已接收");

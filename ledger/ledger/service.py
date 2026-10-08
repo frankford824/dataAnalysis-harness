@@ -211,6 +211,8 @@ def intake_assigned(
     uploads: Iterable[tuple[str, IO[bytes] | Path, str, str]],
     by: str = "",
     report: progress.Reporter = progress.SILENT,
+    *,
+    defer_recompute: bool = False,
 ) -> Intake:
     """Receive files whose store/source authority has already been validated from NAS paths.
 
@@ -250,6 +252,10 @@ def intake_assigned(
                     touched.append(candidate)
 
     out.stores = touched
+    if defer_recompute:
+        # The NAS receiver persists a durable queue before acknowledging files.
+        # Receiving a shared workbook must not wait for every store to compute.
+        return out
     for i, store_id in enumerate(touched, 1):
         store = model.store(store_id)
         done = recompute(
