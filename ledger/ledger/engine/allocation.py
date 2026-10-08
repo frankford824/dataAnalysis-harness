@@ -7,12 +7,13 @@ to the allocation denominator.
 import polars as pl
 
 ORIGIN='__spine_origin__'
+NO_REFUND_MARKERS = ('无退款申请', '没有申请退款', '未退款', '无')
 
 
 def refund_values(frame):
     if 'refund_amount' not in frame.columns:return frame
     text=pl.col('refund_amount').cast(pl.Utf8).str.strip_chars()
-    absent=text.is_in(['无退款申请','没有申请退款','未退款','无']).fill_null(False)
+    absent=text.is_in(NO_REFUND_MARKERS).fill_null(False)
     if 'refund_status' in frame.columns:
         absent |= pl.col('refund_amount').is_null() & pl.col('refund_status').is_in(['没有申请退款','无退款申请','未退款']).fill_null(False)
     return frame.with_columns(pl.when(absent).then(pl.lit(0.)).otherwise(pl.col('refund_amount').cast(pl.Float64,strict=False)).alias('refund_amount'))

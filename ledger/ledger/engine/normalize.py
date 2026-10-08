@@ -430,6 +430,16 @@ def _number_expr(role: str, dtype: pl.DataType) -> pl.Expr:
 
 
 def _normalize_amounts(frame: pl.DataFrame, template: Template, notes: list[str]) -> pl.DataFrame:
+    # Preserve the semantic evidence before generic numeric conversion erases
+    # it. Missing/invalid refund cells remain unknown; an explicit no-refund
+    # statement is a known zero only in the refund_amount role.
+    if 'refund_amount' in frame.columns and frame.schema['refund_amount'] == pl.String:
+        from .allocation import NO_REFUND_MARKERS
+        known_zero = pl.col('refund_amount').str.strip_chars().is_in(NO_REFUND_MARKERS).fill_null(False)
+        count = frame.select(known_zero.sum()).item()
+        if count:
+            frame = frame.with_columns(pl.when(known_zero).then(pl.lit('0')).otherwise(pl.col('refund_amount')).alias('refund_amount'))
+            notes.append(f'退款金额中 {count} 格明确表示无退款，按 0 计算；原始单元格保留在源文件。')
     roles = [r for r in _numeric_roles(template) if r in frame.columns]
     if roles:
         source = {r: frame.get_column(r) for r in roles}
