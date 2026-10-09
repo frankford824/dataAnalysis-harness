@@ -10,9 +10,10 @@ defineProps({snapshot:{type:Object,required:true}})
       <span v-if="snapshot.allocation_correction.pending_orders?.length">另有 {{snapshot.allocation_correction.pending_orders.length}} 个主订单仍待补充依据，原分配保留待复核，不代表全店个人金额已重新确认。</span>
     </NAlert>
     <NAlert v-if="snapshot.allocation_pending_count" type="warning" :bordered="false">
-      有 {{snapshot.allocation_pending_count}} 项主订单金额缺少有效分配依据。金额保留在店铺，但不按笔数均摊到商品或个人。请核对完整子单实付、退款或原始分配率。
+      有 {{snapshot.allocation_pending_count}} 个金额项目已计入店铺核算，尚未分配到具体商品，不代表漏记，也不代表这些订单没有收入。
+      请下载下方明细，按“待核对原因”和“核对方式”处理；这些金额不要重复录入。
     </NAlert>
-    <a v-if="snapshot.has_allocation_evidence && snapshot.run_id" :href="`/api/runs/${snapshot.run_id}/allocation.csv`" download>下载本次分配依据（原金额、比例、分摊结果）</a>
+    <a v-if="snapshot.has_allocation_evidence && snapshot.run_id" :href="`/api/runs/${snapshot.run_id}/allocation.csv`" download>下载分配明细（订单号、金额、未分配原因及核对方式）</a>
   </section>
 </template>
 <style scoped>.allocation-notice{display:grid;gap:8px;margin:12px 0}.allocation-notice a{font-size:13px;color:#3560d6;text-decoration:underline}</style>

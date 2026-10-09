@@ -176,7 +176,7 @@ class TestRatioAllocation:
         ])
         metric = _metric(Allocation(mode="ratio", by="alloc_ratio"))
         proj = project(_facts([("A", 100.0)]), metric, spine)
-        assert proj.allocation_pending[0]['reason']=='invalid_or_incomplete_ratio'
+        assert proj.allocation_pending[0]['reason']=='ratio_missing'
         assert proj.facts['spine_row'].to_list()==[None]
 
     def test_out_of_range_ratio_is_reported(self):
@@ -191,7 +191,7 @@ class TestRatioAllocation:
         ])
         metric = _metric(Allocation(mode="ratio", by="alloc_ratio"))
         proj = project(_facts([("A", 100.0)]), metric, spine)
-        assert proj.allocation_pending[0]['reason']=='invalid_or_incomplete_ratio'
+        assert proj.allocation_pending[0]['reason']=='ratio_invalid_value'
         assert proj.facts['amount'].sum()==100
 
     def test_missing_ratio_column_keeps_unassigned_store_amount(self):

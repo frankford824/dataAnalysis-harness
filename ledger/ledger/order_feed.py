@@ -1543,6 +1543,10 @@ class OrderFeed:
             pl.when(pl.col('order_remark').drop_nulls().n_unique() == 1)
               .then(pl.col('order_remark').drop_nulls().first()).otherwise(None).alias('order_remark'),
             pl.col('internal_order_id').drop_nulls().first(),
+            # Do not turn a grouped/merged item into apparently unique freight
+            # evidence. Only a single raw replacement item can certify this path.
+            pl.when((pl.len()==1) & (pl.col('order_type')=='补发订单').all())
+              .then(pl.lit('single_reship_item')).otherwise(None).alias('freight_attribution_evidence'),
             pl.when((pl.col("order_type") == "销售订单").any())
             .then(pl.lit("销售订单")).otherwise(pl.lit("补发订单")).alias("order_type"),
             pl.col("order_time").drop_nulls().first(),
@@ -1824,6 +1828,7 @@ class OrderFeed:
             ("refund_status", "text"), ("tracking_no", "text"),
             ("order_state", "text"), ("order_type", "text"),
             ("order_flag", "text"), ("order_remark", "text"), ("internal_order_id", "text"),
+            ("freight_attribution_evidence", "text"),
             ("order_time", "time"), ("pay_time", "time"),
             ("store_name", "text"),
         ])

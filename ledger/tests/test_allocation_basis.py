@@ -103,3 +103,60 @@ def test_offset_source_keeps_counted_zero_without_inventing_child_ownership():
     assert not result.allocation_pending
     assert result.facts['amount'].to_list()==[0.]
     assert result.facts['spine_row'].to_list()==[None]
+
+
+def reship_spine(count=1):
+    return spine([0.]*count,[0.]*count).with_columns(
+        pl.lit('order_console').alias('__spine_origin__'),
+        pl.lit('补发订单').alias('order_type'),
+        pl.lit('15743105').alias('internal_order_id'),
+        pl.lit('single_reship_item').alias('freight_attribution_evidence'),
+        pl.lit('tracking-1').alias('tracking_no'))
+
+
+def freight_metric():
+    return metric().model_copy(update={'id':'freight_cost','source':'freight',
+        'link':LinkRule(key='tracking_no',to='order.order_id',grain='order')})
+
+
+def freight_source():
+    return source(-1.48).with_columns(pl.lit('freight_cost').alias('metric_id'))
+
+
+def test_single_identified_reship_freight_is_direct_not_payment_ratio():
+    result=project(freight_source(),freight_metric(),Spine(reship_spine()))
+    assert not result.allocation_pending
+    assert result.facts['spine_row'].to_list()==[0]
+    assert result.facts['amount'].to_list()==[-1.48]
+    assert result.facts['factor'].to_list()==[1.]
+
+
+@pytest.mark.parametrize('change',['multiple','missing_product','blank_product','missing_tracking','missing_internal','untrusted','merged'])
+def test_ambiguous_reship_keeps_freight_without_inventing_ratio(change):
+    frame=reship_spine(2 if change=='multiple' else 1)
+    if change=='missing_product':frame=frame.with_columns(pl.lit(None,dtype=pl.Utf8).alias('product_id'))
+    if change=='blank_product':frame=frame.with_columns(pl.lit(' ').alias('product_id'))
+    if change=='missing_tracking':frame=frame.drop('tracking_no')
+    if change=='missing_internal':frame=frame.drop('internal_order_id')
+    if change=='untrusted':frame=frame.with_columns(pl.lit('order_detail_file').alias('__spine_origin__'))
+    if change=='merged':frame=frame.with_columns(pl.lit(None,dtype=pl.Utf8).alias('freight_attribution_evidence'))
+    result=project(freight_source(),freight_metric(),Spine(frame))
+    assert result.facts['amount'].sum()==-1.48
+    assert result.facts['spine_row'].to_list()==[None]
+    assert result.allocation_pending[0]['reason']=='reship_freight_basis'
+
+
+def test_reship_does_not_take_sales_receipt_or_other_fees():
+    result=project(source(),metric(),Spine(reship_spine()))
+    assert result.facts['spine_row'].to_list()==[None]
+    assert result.allocation_pending[0]['reason']=='reship_nonfreight_basis'
+
+
+@pytest.mark.parametrize('ratios,reason',[
+    ([1.,None],'ratio_missing'),([1.2,-.2],'ratio_invalid_value'),
+    (['bad','1'],'ratio_invalid_value'),([.4,.4],'ratio_total_not_one'),
+])
+def test_ratio_diagnostics_explain_exact_failure(ratios,reason):
+    result=project(source(),metric(),Spine(spine([70.,30.],ratios)))
+    assert result.allocation_pending[0]['reason']==reason
+    assert result.facts['amount'].sum()==101.76

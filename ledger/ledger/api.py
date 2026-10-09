@@ -1653,25 +1653,32 @@ def allocation_export(run_id:int):
     from .storage_integrity import verified
     import polars as pl
     from .commission_api import csv_response
-    from .engine.allocation import REASON_LABELS
+    from .engine.allocation import REASON_LABELS, REASON_ACTIONS
     path=workspace().facts_path(run_id).with_suffix('.allocation.parquet')
     if not path.exists():raise HTTPException(404,'本次核算尚无分配依据留档；历史账目不会因此自动重算')
     if not verified(path):raise HTTPException(409,'分配依据留档校验失败，请核对证据文件')
     frame=pl.read_parquet(path)
     names={m.id:m.name for m in _model().metrics}
-    columns=['核算记录','科目','主订单号','子订单号','商品ID','主单进账总额','子单实付','子单退款','原表分配率','实际分配率','分摊金额','分配依据','状态','汇总说明','待核对原因']
+    columns=['核算记录','科目','主订单号','子订单号','商品ID','主单进账总额','子单实付','子单退款','原表分配率','实际分配率','分摊金额','分配依据','状态','汇总说明','待核对原因','核对方式','订单台内部订单号','物流单号']
     def rows():
         for row in frame.iter_rows(named=True):
-            basis=('历史冻结流水与核对后比例' if row.get('allocation_basis_source')=='历史冻结流水与核对后比例' else
+            allocated=row.get('spine_row') is not None
+            direct_reship=(allocated and row.get('source_id')=='freight' and row.get('order_type')=='补发订单'
+                           and row.get('__spine_origin__')=='order_console' and row.get('factor')==1)
+            basis=('补发运费直接归属唯一补发商品（不是按收入比例分摊）' if direct_reship else
+                   '历史冻结流水与核对后比例' if row.get('allocation_basis_source')=='历史冻结流水与核对后比例' else
                    '原表完整分配率' if row.get('alloc_ratio') is not None else
                    '单一平台子单（主子编号相同）' if row.get('sub_order_id')==row.get('link_key') and row.get('__spine_origin__')=='order_detail_file' and row.get('factor')==1 else
                    '订单台精确匹配金额' if row.get('allocation_basis_source')=='exact_order_feed_match' else '原始实付扣退款后的净额')
             yield dict(zip(columns,[run_id,names.get(row['metric_id'],row['metric_id']),row.get('link_key'),
                 row.get('sub_order_id'),row.get('product_id'),row.get('source_amount'),row.get('buyer_paid'),row.get('refund_amount'),
-                row.get('alloc_ratio'),row.get('factor'),row.get('amount'),basis if row.get('spine_row') is not None else '店铺级保留金额',
-                '已分配' if row.get('spine_row') is not None else '未分配到商品',
-                '按科目汇总分摊金额；主单进账总额在子单行重复展示，不可直接相加',
-                REASON_LABELS.get(row.get('allocation_reason'),'分配依据待核对') if row.get('allocation_reason') else '']))
+                None if direct_reship else row.get('alloc_ratio'),row.get('factor') if allocated else None,row.get('amount'),basis if allocated else '已计入店铺，尚未分配到商品',
+                '已分配' if allocated else '未分配到商品',
+                ('按科目汇总分摊金额；主单进账总额在子单行重复展示，不可直接相加' if allocated else
+                 '本行金额已计入店铺核算，未分配到商品；实际分配率留空，不代表漏记，不要重复录入'),
+                REASON_LABELS.get(row.get('allocation_reason'),'商品归属待核对') if row.get('allocation_reason') else '',
+                REASON_ACTIONS.get(row.get('allocation_reason'),'') if not allocated else '',
+                row.get('internal_order_id'),row.get('tracking_no')]))
     return csv_response(f'allocation-{run_id}.csv',columns,rows())
 
 

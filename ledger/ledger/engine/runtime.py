@@ -1510,7 +1510,7 @@ def _build_slice(
     ratio_facts=scoped_spine.filter(pl.col('metric_id').is_in(ratio_metrics)) if not scoped_spine.is_empty() else scoped_spine
     if not ratio_facts.is_empty():
         context=spine if 'spine_row' in spine.columns else spine.with_row_index('spine_row')
-        columns=[x for x in ('spine_row','order_id','sub_order_id','product_id','buyer_paid','refund_amount','alloc_ratio','allocation_basis_source','__spine_origin__') if x in context.columns]
+        columns=[x for x in ('spine_row','order_id','sub_order_id','product_id','buyer_paid','refund_amount','alloc_ratio','allocation_basis_source','__spine_origin__','order_type','internal_order_id','tracking_no') if x in context.columns]
         allocation_evidence=ratio_facts.join(context.select(columns),on='spine_row',how='left')
         if not scoped.is_empty():
             control=scoped.filter(pl.col('counted')).group_by('metric_id','link_key').agg(pl.col('contribution').sum().alias('source_amount'))
@@ -1525,8 +1525,8 @@ def _build_slice(
         from .allocation import REASON_LABELS
         explanation = '；'.join(f'{count}项{REASON_LABELS.get(reason,"依据待核对")}' for reason,count in sorted(counts.items()))
         orders = len({x.get('order_id') for x in own_pending if x.get('order_id')})
-        result.findings.append(Finding('allocation_basis','主子订单分配依据待核对',passed=False,blocking=True,
-            message=f'{len(own_pending)} 个金额项目（涉及 {orders} 个主订单）已计入店铺、尚未分配到商品：{explanation}。请核对对应子单的实付、退款或原始分配率。',
+        result.findings.append(Finding('allocation_basis','已入店铺账，商品归属待核对',passed=False,blocking=True,
+            message=f'{len(own_pending)} 个金额项目（涉及 {orders} 个主订单）已计入店铺、尚未分配到商品：{explanation}。请下载分配明细，按“待核对原因”和“核对方式”逐项处理；不要重复录入这些金额。',
             detail={'items':own_pending[:20],'count':len(own_pending),'orders':orders,'reasons':dict(counts)}))
     if ingestion.source_sync_pending:
         from .types import Finding

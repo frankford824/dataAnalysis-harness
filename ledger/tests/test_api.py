@@ -99,8 +99,28 @@ def test_allocation_export_distinguishes_missing_fields_from_zero_net(client):
     response=client.get(f'/api/runs/{rid}/allocation.csv')
     assert response.status_code==200
     rows=list(csv.DictReader(io.StringIO(response.text.lstrip('\ufeff'))))
-    assert [r['待核对原因'] for r in rows]==['实付或退款资料不完整','净实付为 0，需确认分配口径','原分配率不完整或不合法']
-    assert all(r['状态']=='未分配到商品' and r['分配依据']=='店铺级保留金额' for r in rows)
+    assert [r['待核对原因'] for r in rows]==['子订单实付或退款金额有缺失，暂不能计算商品分配比例','订单明细中的实付扣退款后为 0，不能据此计算商品分配比例','子订单比例有缺失、超出 0%—100%，或合计不是 100%']
+    assert all(r['状态']=='未分配到商品' and r['分配依据']=='已计入店铺，尚未分配到商品' for r in rows)
+    assert all(r['实际分配率']=='' and r['核对方式'] for r in rows)
+    assert all('不要重复录入' in r['汇总说明'] for r in rows)
+
+
+def test_allocation_export_explains_direct_reship_freight(client):
+    import csv
+    from ledger.storage_integrity import seal
+    ws=api.workspace();rid=ws.record('taobao_mt9scjag','2026-07',{'can_close':False},[])
+    path=ws.facts_path(rid).with_suffix('.allocation.parquet')
+    pl.DataFrame({'metric_id':['freight_cost'],'source_id':['freight'],'link_key':['master'],
+        'spine_row':[0],'amount':[-1.48],'factor':[1.],'alloc_ratio':[0.],
+        'order_type':['补发订单'],'__spine_origin__':['order_console'],
+        'internal_order_id':['15743105'],'tracking_no':['tracking-1']}).write_parquet(path)
+    seal(path)
+    response=client.get(f'/api/runs/{rid}/allocation.csv')
+    row=list(csv.DictReader(io.StringIO(response.text.lstrip('\ufeff'))))[0]
+    assert row['分配依据']=='补发运费直接归属唯一补发商品（不是按收入比例分摊）'
+    assert row['状态']=='已分配' and row['原表分配率']=='' and row['实际分配率']=='1.0'
+    assert row['待核对原因']=='' and row['核对方式']==''
+    assert row['订单台内部订单号']=='15743105' and row['物流单号']=='tracking-1'
 
 
 class TestBootstrap:

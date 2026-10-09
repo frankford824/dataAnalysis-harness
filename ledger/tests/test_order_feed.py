@@ -1050,6 +1050,9 @@ def test_reship_cost_requires_original_sale_period_instead_of_reship_date(tmp_pa
         orders, items, after, relations, store, "fingerprint",
     )
     assert order_frame.get_column("order_type").to_list() == ["补发订单"]
+    assert order_frame['freight_attribution_evidence'].to_list()==['single_reship_item']
+    merged = feed._order_frame(orders,pl.concat([items,items]),after,relations,store,'fingerprint')
+    assert merged['freight_attribution_evidence'].to_list()==[None]
 
     spine = Spine(_spine_frame(order_frame, feed._order_template()))  # noqa: SLF001
     model = ModelRepository(
@@ -1105,6 +1108,7 @@ def test_a_real_sale_wins_when_a_reship_reuses_the_same_online_and_suborder(tmp_
     )
     assert frame.height == 1
     assert frame.get_column("order_type").item() == "销售订单"
+    assert frame['freight_attribution_evidence'].item() is None
 
 
 def test_live_rows_without_accounting_date_never_create_a_null_period():
