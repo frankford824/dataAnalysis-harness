@@ -160,3 +160,49 @@ def test_ratio_diagnostics_explain_exact_failure(ratios,reason):
     result=project(source(),metric(),Spine(spine([70.,30.],ratios)))
     assert result.allocation_pending[0]['reason']==reason
     assert result.facts['amount'].sum()==101.76
+
+
+@pytest.mark.parametrize('ratios',[None,[0.,0.,0.]])
+def test_proven_zero_net_fees_equal_share_only_within_master(ratios):
+    frame=spine([10.,20.,0.],ratios,[10.,20.,0.])
+    result=project(freight_source(),freight_metric(),Spine(frame))
+    assert not result.allocation_pending
+    assert result.facts['amount'].to_list()==[-.493334,-.493333,-.493333]
+    assert result.facts['allocation_method'].to_list()==['zero_net_equal_children']*3
+    assert result.facts['allocation_child_count'].to_list()==[3]*3
+    assert result.facts['spine_row'].null_count()==0
+
+
+@pytest.mark.parametrize('change',['missing_paid','missing_refund','missing_product','duplicate_child','partial_ratio','invalid_ratio','income','reship'])
+def test_zero_net_equal_share_never_fills_unknowns_or_changes_income(change):
+    frame=spine([10.,20.],refunds=[10.,20.]);m=freight_metric();s=freight_source()
+    if change=='missing_paid':frame=frame.with_columns(pl.lit(None,dtype=pl.Float64).alias('buyer_paid'))
+    if change=='missing_refund':frame=frame.with_columns(pl.lit(None,dtype=pl.Float64).alias('refund_amount'))
+    if change=='missing_product':frame=frame.with_columns(pl.lit(None,dtype=pl.Utf8).alias('product_id'))
+    if change=='duplicate_child':frame=frame.with_columns(pl.lit('same').alias('sub_order_id'))
+    if change=='partial_ratio':frame=frame.with_columns(pl.Series('alloc_ratio',[0.,None]))
+    if change=='invalid_ratio':frame=frame.with_columns(pl.Series('alloc_ratio',[-1.,1.]))
+    if change=='income':m=metric();s=source()
+    if change=='reship':frame=reship_spine(2)
+    result=project(s,m,Spine(frame))
+    assert result.allocation_pending
+    assert result.facts['spine_row'].null_count()==result.facts.height
+    assert result.facts['amount'].sum()==s['amount'].sum()
+    if change=='missing_product':assert result.allocation_pending[0]['reason']=='zero_net_missing_identity'
+
+
+def test_zero_net_fee_does_not_mix_other_orders_or_override_valid_ratio():
+    zero=spine([10.,20.],refunds=[10.,20.])
+    paid=spine([10.,20.],[.25,.75]).with_columns(pl.lit('other').alias('order_id'))
+    sources=pl.concat([freight_source(),freight_source().with_columns(pl.lit('other').alias('link_key'))])
+    result=project(sources,freight_metric(),Spine(pl.concat([zero,paid],how='vertical_relaxed')))
+    assert result.facts.filter(pl.col('link_key')=='master')['amount'].to_list()==[-.74,-.74]
+    assert result.facts.filter(pl.col('link_key')=='other')['amount'].to_list()==[-.37,-1.11]
+
+
+def test_zero_net_valid_declared_ratio_still_takes_precedence():
+    frame=spine([10.,20.],[.25,.75],[10.,20.])
+    result=project(freight_source(),freight_metric(),Spine(frame))
+    assert not result.allocation_pending
+    assert result.facts['amount'].to_list()==[-.37,-1.11]
+    assert result.facts['allocation_method'].null_count()==2

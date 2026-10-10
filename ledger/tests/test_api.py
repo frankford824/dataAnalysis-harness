@@ -123,6 +123,21 @@ def test_allocation_export_explains_direct_reship_freight(client):
     assert row['订单台内部订单号']=='15743105' and row['物流单号']=='tracking-1'
 
 
+def test_allocation_export_labels_zero_net_equal_share_as_business_rule(client):
+    import csv
+    from ledger.storage_integrity import seal
+    ws=api.workspace();rid=ws.record('taobao_mt9scjag','2026-07',{'can_close':False},[])
+    path=ws.facts_path(rid).with_suffix('.allocation.parquet')
+    pl.DataFrame({'metric_id':['software_fee'],'source_id':['settlement'],'link_key':['master'],
+        'spine_row':[0],'amount':[-.24],'factor':[.5],'alloc_ratio':[None],
+        'allocation_method':['zero_net_equal_children'],'allocation_child_count':[2]}).write_parquet(path)
+    seal(path)
+    response=client.get(f'/api/runs/{rid}/allocation.csv')
+    row=list(csv.DictReader(io.StringIO(response.text.lstrip('\ufeff'))))[0]
+    assert row['分配依据']=='本主订单净实付为 0，费用在本单 2 个有效子单间等额分摊'
+    assert row['实际分配率']=='0.5' and row['原表分配率']==''
+
+
 class TestBootstrap:
     def test_gives_the_ui_everything_it_needs_at_once(self, client):
         """分开取的话，中间有人改了配置，界面会拿半新半旧的结构去渲染。"""

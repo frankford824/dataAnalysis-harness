@@ -37,6 +37,19 @@ def _frame(*subjects: str) -> pl.DataFrame:
 
 
 class TestOverlay:
+    def test_explicit_transfer_receipt_must_precede_broad_transfer_exclusion(self):
+        from ledger.engine.classify import COL_EXCLUDED
+        broad=FeeRule(platform='taobao',field='remark',how='contains',value='店铺过户资金调拨/万相台/ 转账/过户',exclude=True,stage='before')
+        receipt=FeeRule(platform='taobao',field='subject',how='contains',value='0010003|交易收款-店铺主体变更',major='trade_receipt',stage='before')
+        frame=pl.DataFrame({'subject':['0010003|交易收款-店铺主体变更','资金调拨'],
+            'remark':['店铺过户订单收款','店铺过户资金调拨'],'amount':[15.22,100.]})
+        dictionary=(DictionaryEntry(platform='taobao',raw='其他交易收款',minor='交易收款',major='trade_receipt'),)
+        before,_=classify(frame,_model(dictionary=dictionary,fee_rules=(broad,receipt)),'taobao','amount')
+        assert before[COL_EXCLUDED].to_list()==[True,True]
+        after,_=classify(frame,_model(dictionary=dictionary,fee_rules=(receipt,broad)),'taobao','amount')
+        assert after[COL_MAJOR].to_list()==['trade_receipt',None]
+        assert after[COL_EXCLUDED].to_list()==[False,True]
+
     def test_after_catches_what_the_dictionary_missed(self):
         model = _model(fee_rules=(
             FeeRule(value="新费项", major="software_fee", minor="跨境增值费"),

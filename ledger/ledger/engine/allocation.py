@@ -8,9 +8,14 @@ import polars as pl
 
 ORIGIN='__spine_origin__'
 NO_REFUND_MARKERS = ('无退款申请', '没有申请退款', '未退款', '无')
+# Business rule confirmed 2026-10-10: only fees on a proven zero-net order
+# may be shared equally within its children. Missing evidence is never zero.
+ZERO_NET_FEE_MAJORS = frozenset({'software_fee','logistics_fee','cross_border_fee','trade_compensation','marketing_fee'})
 REASON_LABELS = {
     'missing_payment_basis':'子订单实付或退款金额有缺失，暂不能计算商品分配比例',
     'zero_net_payment':'订单明细中的实付扣退款后为 0，不能据此计算商品分配比例',
+    'zero_net_missing_identity':'本单可按零净实付均摊费用，但子订单号、商品ID或店铺月份资料不完整',
+    'zero_net_mixed_shipments':'同一订单号混有销售与补发明细，暂不能确定费用应在哪些子单间均摊',
     'invalid_or_incomplete_ratio':'子订单比例有缺失、超出 0%—100%，或合计不是 100%',
     'ratio_missing':'同一主订单中，部分子订单没有填写分配比例',
     'ratio_invalid_value':'子订单分配比例不是有效数字，或超出 0%—100%',
@@ -23,6 +28,8 @@ REASON_LABELS = {
 REASON_ACTIONS = {
     'missing_payment_basis':'核对订单明细中同一主订单下所有子订单的买家实付金额、退款金额；空白不代表 0。',
     'zero_net_payment':'结合对账单核对收款、退款；另核对费用对应的子订单或商品。无需把已计入店铺的金额再录入一次。',
+    'zero_net_missing_identity':'补齐同一主订单下各子订单的编号、商品ID及所属店铺月份；金额已入店铺账，不要重复录入。',
+    'zero_net_mixed_shipments':'结合原始费用流水和物流单号，核对对应销售单还是补发单，不把两次发货混在一起均摊。',
     'invalid_or_incomplete_ratio':'核对分配比例来源及同一主订单下的全部子订单；不要仅为通过校验而补成 100%。',
     'ratio_missing':'补齐同一主订单下全部子订单的分配比例，并核对合计是否为 100%。',
     'ratio_invalid_value':'核对原始分配比例的数值和百分比格式；比例必须在 0%—100% 之间。',
@@ -140,16 +147,34 @@ def prepare(keyed, metric):
         direct_reship &= (pl.col('freight_attribution_evidence')=='single_reship_item').fill_null(False)
         for col in ('product_id','tracking_no','internal_order_id','sub_order_id','store','period'):
             direct_reship &= pl.col(col).cast(pl.Utf8).str.strip_chars().is_not_null() & (pl.col(col).cast(pl.Utf8).str.strip_chars()!='')
+    fee=metric.major in ZERO_NET_FEE_MAJORS or metric.source in {'freight','small_payment'}
+    valid_children=pl.lit(False)
+    if {'sub_order_id','product_id','store','period'}<=set(keyed.columns):
+        valid_children=pl.lit(True)
+        for col in ('sub_order_id','product_id','store','period'):
+            valid_children &= (pl.col(col).is_not_null() & (pl.col(col).cast(pl.Utf8).str.strip_chars()!='')).all().over('link_key')
+    sales_only=((pl.col('order_type')!='补发订单').fill_null(True).all().over('link_key')
+                if 'order_type' in keyed.columns else pl.lit(True))
+    # A complete explicit all-zero ratio is also zero-net evidence, but a
+    # partial/invalid ratio must not be repaired by inventing missing children.
+    ratio_zero=(~ratio_missing & ~ratio_invalid & (ratio_value==0).all().over('link_key'))
+    zero_candidate=pl.lit(fee) & amount_ok & (denominator==0) & (~declared | ratio_zero)
+    equal_zero=zero_candidate & valid_children & sales_only
     reason=(pl.when(context_bad).then(pl.lit('cross_store_or_period'))
         .when(duplicate).then(pl.lit('missing_or_duplicate_child'))
         .when(direct_reship).then(pl.lit(''))
         .when(all_reship).then(pl.lit('reship_freight_basis' if freight else 'reship_nonfreight_basis'))
+        .when(equal_zero).then(pl.lit(''))
+        .when(zero_candidate & ~valid_children).then(pl.lit('zero_net_missing_identity'))
+        .when(zero_candidate & ~sales_only).then(pl.lit('zero_net_mixed_shipments'))
         .when(declared & ratio_missing).then(pl.lit('ratio_missing'))
         .when(declared & ratio_invalid).then(pl.lit('ratio_invalid_value'))
         .when(declared & ~ratio_ok).then(pl.lit('ratio_total_not_one'))
         .when(~declared & ~amount_ok & ~single).then(pl.lit('missing_payment_basis'))
         .when(~declared & (denominator<=0) & ~single).then(pl.lit('zero_net_payment'))
         .otherwise(pl.lit('')))
-    factor=pl.when(direct_reship).then(1.).when(declared).then(ratio_value/ratio_sum).when(single).then(1.).otherwise(net/denominator)
+    factor=pl.when(direct_reship).then(1.).when(equal_zero).then(1./pl.len().over('link_key')).when(declared).then(ratio_value/ratio_sum).when(single).then(1.).otherwise(net/denominator)
     return keyed.with_columns(reason.alias('__allocation_reason'),
-        pl.when(reason=='').then(factor).otherwise(None).alias('__allocation_factor'))
+        pl.when(reason=='').then(factor).otherwise(None).alias('__allocation_factor'),
+        pl.when((reason=='') & equal_zero).then(pl.lit('zero_net_equal_children')).otherwise(None).alias('allocation_method'),
+        pl.when((reason=='') & equal_zero).then(pl.len().over('link_key')).otherwise(None).alias('allocation_child_count'))

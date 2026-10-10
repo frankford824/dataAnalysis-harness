@@ -251,6 +251,8 @@ def project(
     if not hosted.is_empty():
         out = pl.concat([out, hosted], how="diagonal_relaxed")
 
+    if strict_ratio:
+        out=out.join(keyed.select('spine_row','allocation_method','allocation_child_count'),on='spine_row',how='left',maintain_order='left')
     proj = Projection(
         facts=out,
         notes=([f'{metric.name}：{len(pending)} 个主订单缺少有效分配依据，金额保留在店铺待分配，不计个人业绩'] if pending else []) if strict_ratio else ratio_health(keyed, metric) + _ratio_fallback_notes(keyed, metric),
@@ -259,7 +261,9 @@ def project(
         uncovered_rows=keyed.height - covered,
         allocation_pending=pending,
     )
-    if strict_ratio and keyed.filter(pl.col(metric.allocate.by).is_null() & (pl.col('__allocation_reason')=='')).height:
+    if strict_ratio and keyed.filter(pl.col('allocation_method')=='zero_net_equal_children').height:
+        proj.notes.append(f'{metric.name}：净实付为 0 且资料完整的主订单，费用已在本主订单的有效子单间等额分摊，不跨订单')
+    if strict_ratio and keyed.filter(pl.col(metric.allocate.by).is_null() & (pl.col('__allocation_reason')=='') & pl.col('allocation_method').is_null()).height:
         proj.notes.append(f'{metric.name}：没有收入分配率的订单，已按完整买家实付扣退款后占比分摊')
     if orphan_keys and metric.posting_basis not in {"transaction", "order_number"}:
         proj.notes.append(
@@ -304,7 +308,7 @@ def project_transactions(source_facts: pl.DataFrame, metric: Metric, spine: Spin
                 pl.col("amount").sum()
             ).with_columns(pl.lit(1.0).alias("factor"), pl.lit(None, dtype=pl.UInt32).alias("spine_row"))
             parts.append(direct.select(SPINE_FACT_COLUMNS))
-    return Projection(facts=pl.concat(parts, how="vertical_relaxed") if parts else _empty(), notes=notes,allocation_pending=pending)
+    return Projection(facts=pl.concat(parts, how="diagonal_relaxed") if parts else _empty(), notes=notes,allocation_pending=pending)
 
 
 def _orderless_keys(source_facts: pl.DataFrame, metric: Metric) -> set[str]:

@@ -316,11 +316,11 @@ class TestDerivedRatioFollowsTheManualDefinition:
         assert got == [60.0]
 
     def test_an_all_refunded_order_keeps_its_fee_on_the_books(self):
-        """一单全退到没有可比收入，金额保留在店铺，不能编造子单比例。
+        """全退订单仍缺子单和商品编号时，保留店铺金额，不编造均摊对象。
 
         人工表这里分配率算成 0，挂在这单上的费用整块消失（实测天猫皇莉诗
         2026-06 有 3 单、5.45 元）。但佣金是真扣走了的，账上得留着，
-        只是没法说清该摊给哪个子订单。
+        2026-10-10 已允许零净实付费用按有效子单均摊，但本例没有完整子单身份。
         """
         spine = _spine([
             {"order_id": "A", "buyer_paid": 39.6, "refund_amount": 39.6,
@@ -332,7 +332,7 @@ class TestDerivedRatioFollowsTheManualDefinition:
         got = proj.facts.get_column("amount").to_list()
         assert got == [-5.45]
         assert proj.facts['spine_row'].to_list()==[None]
-        assert proj.allocation_pending[0]['reason']=='zero_net_payment'
+        assert proj.allocation_pending[0]['reason']=='zero_net_missing_identity'
         assert round(sum(got), 2) == -5.45
 
 

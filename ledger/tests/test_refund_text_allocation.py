@@ -58,8 +58,13 @@ def test_missing_or_unrecognized_refund_stays_pending(tmp_path, unknown):
     assert got.facts['amount'].sum()==100.
 
 
-def test_all_refunded_is_still_zero_net_and_generic_money_parser_is_unchanged(tmp_path):
+def test_all_refunded_fee_shares_equally_but_income_and_generic_parser_do_not_change(tmp_path):
     frame,_=parsed(tmp_path,[5.,10.],[5.,10.])
     got=project(_facts([('A',3.)]),_metric(Allocation(mode='ratio',by='alloc_ratio')),Spine(frame))
-    assert got.allocation_pending[0]['reason']=='zero_net_payment'
+    assert not got.allocation_pending
+    assert got.facts['amount'].to_list()==[1.5,1.5]
+    assert got.facts['allocation_method'].to_list()==['zero_net_equal_children']*2
+    income=project(_facts([('A',3.)],metric_id='trade_receipt').with_columns(pl.lit('trade_receipt').alias('major')),
+        _metric(Allocation(mode='ratio',by='alloc_ratio'),id='trade_receipt',source='settlement',major='trade_receipt'),Spine(frame))
+    assert income.allocation_pending[0]['reason']=='zero_net_payment'
     assert to_number('无退款申请') is None
