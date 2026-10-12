@@ -33,6 +33,8 @@ def test_person_managed_subset_preserves_costs_and_payouts(tmp_path):
     people={r['person_id']:r for r in root['children']}
     assert people[a]['sales']==100 and people[b]['sales']==0
     assert people[a]['gross']==55 and people[a]['profit_after_labor']==40
+    assert people[a]['managed_cost']==45 and people[b]['managed_cost']==0
+    assert root['managed_cost']==45
     assert people[b]['gross']==0 and people[b]['profit_after_labor']==0
     assert people[a]['trial_amount']==.8 and people[b]['trial_amount']==1.2
     assert root['sales']==100 and root['gross']==55 and root['profit_after_labor']==40 and root['trial_amount']==2
@@ -45,7 +47,7 @@ def test_person_managed_subset_preserves_costs_and_payouts(tmp_path):
     assert len(out)==5
     assert [r['层级'] for r in out]==[1,2,3,2,3]
     assert [r['行类型'] for r in out]==['团队合计','个人小计','商品明细','个人小计','商品明细']
-    for field,key in [('托管销售额','sales'),('托管毛利额','gross'),('托管利润额（分摊后）','profit_after_labor'),('托管系统应发','trial_amount')]:
+    for field,key in [('托管销售额','sales'),('托管商品做货成本','managed_cost'),('托管毛利额','gross'),('托管利润额（分摊后）','profit_after_labor'),('托管系统应发','trial_amount')]:
         for level in (1,2,3):
             assert sum(Decimal(str(r[field])) for r in out if r['层级']==level)==Decimal(str(root[key]))
     assert all('不可重复相加' in r['说明'] for r in out)
@@ -78,6 +80,7 @@ def test_missing_or_inconsistent_evidence_never_invents_person_money(tmp_path,ca
     assert root['children'][0]['person']=='待分配'
     assert root['sales']==kw['managed'][b]
     assert root['gross'] is None and root['profit_after_labor'] is None and root['trial_amount'] is None
+    assert root['managed_cost'] is None
 
 
 def test_negative_refunds_keep_signed_values(tmp_path):
@@ -89,6 +92,7 @@ def test_negative_refunds_keep_signed_values(tmp_path):
               payout_profits={a:-40,b:-60},trials={a:-2,b:-3},keep=Decimal(1))
     root=scope(reg,c,**kw)[0]
     assert root['sales']==-100 and root['gross']==-60 and root['profit_after_labor']==-50 and root['trial_amount']==-2.5
+    assert root['managed_cost']==-40
 
 
 def test_unknown_duties_keep_sales_in_unassigned_bucket(tmp_path):
@@ -99,6 +103,7 @@ def test_unknown_duties_keep_sales_in_unassigned_bucket(tmp_path):
     unassigned=next(r for r in root['children'] if not r['person_id'])
     assert unassigned['sales']==100
     assert all(r['sales'] is None for r in root['children'] if r['person_id'])
+    assert root['managed_cost'] is None
 
 
 def test_half_cent_rounding_never_creates_fake_unassigned_people(tmp_path):
@@ -112,6 +117,8 @@ def test_half_cent_rounding_never_creates_fake_unassigned_people(tmp_path):
     assert all(p['person_id'] for p in root['children'])
     assert sum(Decimal(str(p['sales'])) for p in root['children'])==Decimal('78.44')
     assert root['profit_after_labor'] is not None
+    for row in [root,*root['children'],*[p for r in root['children'] for p in r['children']]]:
+        assert Decimal(str(row['managed_cost']))==Decimal(str(row['sales']))-Decimal(str(row['gross']))
 
 
 def test_report_query_and_export_use_same_managed_tree(tmp_path):
@@ -132,10 +139,12 @@ def test_report_query_and_export_use_same_managed_tree(tmp_path):
     body=response.json()
     assert body['count']==1 and body['items'][0]['children'][0]['sales']==100
     assert body['items'][0]['trial_amount']==2.5
+    assert body['items'][0]['managed_cost']==40
     exported=client.post('/api/commission-v2/export/reports/managed',json={**selected,'run_ids':body['run_ids'],'fingerprint':body['fingerprint'],'presentation':True})
     assert exported.status_code==200,exported.text
     lines=list(csv.DictReader(io.StringIO(exported.text.lstrip('\ufeff'))))
     assert len(lines)==3 and all(Decimal(r['托管销售额'])==Decimal('100') for r in lines)
+    assert all(Decimal(r['托管商品做货成本'])==Decimal('40') for r in lines)
     assert [r['层级'] for r in lines]==['1','2','3']
     team_filtered=client.post('/api/commission-v2/reports/query',json={**selected,'managed_team_ids':[pid]}).json()
     assert team_filtered['count']==1 and team_filtered['selection']['managed_team_ids']==[pid]
@@ -152,6 +161,7 @@ def test_filtered_export_labels_subtotal_and_matches_selected_person(tmp_path):
     exported=list(rows)
     assert [r['行类型'] for r in exported]==['团队小计（筛选人员）','个人小计','商品明细']
     assert all(r['托管系统应发']==.8 for r in exported)
+    assert all(r['托管商品做货成本']==45 for r in exported)
     assert all('不代表完整团队' in r['说明'] for r in exported)
 
 
@@ -163,3 +173,4 @@ def test_unknown_values_and_unassigned_subtotal_remain_explicit(tmp_path):
     assert [r['行类型'] for r in exported]==['团队合计','待分配小计','商品明细']
     assert all(r['托管毛利额'] is None and r['托管利润额（分摊后）'] is None and r['托管系统应发'] is None for r in exported)
     assert all(r['托管销售额']==100 for r in exported)
+    assert all(r['托管商品做货成本'] is None for r in exported)

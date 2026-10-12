@@ -69,7 +69,7 @@ function explanation(row) {
   return row.status==='已结账'?'本月已结账':''
 }
 const columns = computed(() => ({
-  managed:[['subject','托管团队 → 人员 → 商品'],['store','店铺'],['period','月份'],['sales','托管销售额'],['gross','托管毛利额'],['profit_after_labor','托管利润（分摊后）'],['trial_amount','托管系统应发'],['status','口径 / 状态']],
+  managed:[['subject','托管团队 → 人员 → 商品'],['store','店铺'],['period','月份'],['sales','托管销售额'],['managed_cost','托管商品做货成本'],['gross','托管毛利额'],['profit_after_labor','托管利润（分摊后）'],['trial_amount','托管系统应发'],['status','口径 / 状态']],
   teams:[['team','团队 / 团队长'],['sales','团队销售额'],['creator_gross','做货创造毛利'],['creator_profit','做货创造利润'],['managed_sales','托管类销售额'],['labor_cost','兼职额'],['profit_after_labor',AFTER_LABOR_LABEL],['trial_amount','系统应发'],['amount','实发提成'],['diff_amount','调整差额'],['members_count','团队人数'],['stores','涉及店铺'],['periods','月份'],['status','状态']],
   people:[['person','人员'],['team','所属团队'],['employee_no','工号'],['sales','个人销售额'],['creator_gross','做货创造毛利'],['creator_profit','做货创造利润'],['managed_sales','托管类销售额'],['labor_cost','兼职额'],['profit_after_labor',AFTER_LABOR_LABEL],['trial_amount','系统应发'],['amount','实发提成'],['diff_amount','调整差额'],['stores','店铺'],['periods','月份'],['status','状态']],
   store_people:[['store','店铺'],['person','分配人'],['team','所属团队'],['period','月份'],['sales','销售额'],['creator_cost','做货成本'],['creator_gross','做货创造毛利'],['creator_profit','做货创造利润'],['managed_sales','托管类销售额'],
@@ -79,6 +79,7 @@ const columns = computed(() => ({
   coverage:[['store','店铺'],['period','月份'],['selected_amount','提成金额'],['status','状态'],['explanation','待办']],
 }[state.reportView]))
 function cell(row,key) {
+  if(key==='managed_cost')return row[key]==null?'待核对':money(row[key])
   if(['creator_cost','creator_gross','creator_profit'].includes(key))return row.creator_pending&&row.creator_active?'归属待确认':money(row[key])
   if(['managed_sales','labor_cost','profit_after_labor'].includes(key))return reportMetricText(row,key,money)
   if(['amount','selected_amount','labor_cost','sales','gross','profit_after_labor','base','store_amount','trial_amount','actual_amount','diff_amount'].includes(key))return money(row[key])
@@ -306,10 +307,11 @@ const tableColumns=computed(()=>{
   const composition=state.reportView==='store_people'
   const list=columns.value.map(([key,title],index)=>({title,key,
     width:composition?(key==='store'?170:key==='person'?120:key==='team'?100:key==='period'?82:key==='status'?90:135):
-      ['amount','selected_amount','labor_cost','sales','creator_cost','creator_gross','creator_profit','gross','profit_after_labor','base','store_amount','trial_amount','diff_amount'].includes(key)?135:key==='team'?120:key==='employee_no'?90:key==='period'?95:index===0?undefined:key==='store'?220:120,
+      key==='managed_cost'?170:['amount','selected_amount','labor_cost','sales','creator_cost','creator_gross','creator_profit','gross','profit_after_labor','base','store_amount','trial_amount','diff_amount'].includes(key)?135:key==='team'?120:key==='employee_no'?90:key==='period'?95:index===0?undefined:key==='store'?220:120,
     minWidth:index===0?170:undefined,mobileWidth:['amount','selected_amount','labor_cost','sales','creator_cost','creator_gross','creator_profit','gross','profit_after_labor','base','store_amount','trial_amount','diff_amount'].includes(key)?115:key==='period'?84:index===0?135:undefined,
-    mobile:index===0||['amount','selected_amount','trial_amount','diff_amount','sales','creator_profit','labor_cost','profit_after_labor','period','person','team'].includes(key),align:['amount','selected_amount','labor_cost','sales','creator_cost','creator_gross','creator_profit','gross','profit_after_labor','base','store_amount','trial_amount','diff_amount'].includes(key)?'right':'left',
+    mobile:index===0||['managed_cost','amount','selected_amount','trial_amount','diff_amount','sales','creator_profit','labor_cost','profit_after_labor','period','person','team'].includes(key),align:['managed_cost','amount','selected_amount','labor_cost','sales','creator_cost','creator_gross','creator_profit','gross','profit_after_labor','base','store_amount','trial_amount','diff_amount'].includes(key)?'right':'left',
     render:row=>{
+      if(key==='managed_cost')return h('span',{class:'table-money',title:'托管销售额减托管毛利额；已在原核算中扣除，不再扣减。缺少依据时显示待核对。'},cell(row,key))
       if(key==='sales'&&state.reportView==='store_people'&&row.kind==='person'&&!row.sales_pending&&!row.sales_pending_products?.length)return h('div',{class:'table-money',title:'个人非托管销售额；托管销售额在托管明细单独列出，两者不是重复金额'},[cell(row,key),h('small',{class:'table-secondary',style:'display:block'},'非托管')])
       if(key==='subject')return h('span',{class:'table-product',style:'display:inline-block;vertical-align:middle;max-width:calc(100% - 32px)',title:row.product_id||row.notes},[row.subject,row.product_id?h('span',{class:'table-secondary',style:'display:block'},row.product_id):null])
       if(key==='sales'&&(row.sales_pending||row.sales_pending_products?.length))return h('span',{style:'color:#a16207'},'归属待确认')
@@ -420,7 +422,7 @@ defineExpose({reload:load})
     <n-alert v-if="report?.creator_pending_scopes?.length" type="warning" :bordered="false">当前有 {{report.creator_pending_scopes.length}} 项人员店铺月份的做货成本、毛利或商品利润缺少完整归属依据；相关创造业绩显示“归属待确认”，请到商品明细核对。</n-alert>
     <p v-if="state.reportView==='store_people'" class="report-grain-note"><template v-if="state.personIds.length">当前仅显示所选人员；请清空人员筛选后再核对店铺合计。 </template>非托管商品的销售额、做货成本、创造毛利及商品利润按明确生效的做货身份归属；单人做货归全额，多人仅在做货人员间按点数分摊，抽点不分走创造业绩。身份依据不足时显示待确认。利润额（扣兼职）在本表展示，旧核算毛利仍在导出中单列；提成仍按原规则。</p>
 
-    <n-alert v-if="state.reportView==='managed'" type="info" :bordered="false">展开团队查看个人，再展开个人查看商品。以下均为原核算中的「其中托管部分」，不能与人员或店铺合计重复相加。利润已按原销售基数拆分原有费用；销售额不并入个人普通业绩；实发未按比例拆分。筛选人员时仅显示所选人员小计；「—」表示证据不足，待核对。</n-alert>
+    <n-alert v-if="state.reportView==='managed'" type="info" :bordered="false">展开团队查看个人，再展开个人查看商品。以下均为原核算中的「其中托管部分」，不能与人员或店铺合计重复相加。托管商品做货成本＝托管销售额－托管毛利额，已在原核算中扣除，不再扣减。利润已按原销售基数拆分原有费用；销售额不并入个人普通业绩；实发未按比例拆分。筛选人员时仅显示所选人员小计；「—」或「待核对」表示依据不足，不代表零。</n-alert>
     <p v-if="state.reportView==='managed'&&managedTeam" class="report-grain-note">当前托管团队：{{managedTeam.name}} <button class="text-button" @click="managedTeam=null">查看全部团队</button></p>
     <div v-if="loading" class="commission-loading-line"/>
     <LedgerTable :rows="rows" :columns="tableColumns" :row-key="rowKey" :loading="loading" :max-height="440" empty="没有找到提成记录，可调整店铺、人员或月份" />

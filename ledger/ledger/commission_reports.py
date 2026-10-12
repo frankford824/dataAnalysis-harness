@@ -1129,7 +1129,7 @@ def build(workspace, registry, model, start, end, store_ids=None, person_ids=Non
 
 
 COLUMNS={
- 'managed':['层级','行类型','托管团队','店铺','月份','人员','宝贝ID','商品','托管销售额','托管毛利额','托管利润额（分摊后）','托管系统应发','说明'],
+ 'managed':['层级','行类型','托管团队','店铺','月份','人员','宝贝ID','商品','托管销售额','托管商品做货成本','托管毛利额','托管利润额（分摊后）','托管系统应发','说明'],
  'teams':['团队/团队长','系统应发','实发提成','调整差额','团队人数','店铺数','账期数','计算状态','做货创造毛利','做货创造利润','托管类销售额','兼职额','利润额（扣兼职）'],
  'people':['人员','工号','提成金额','店铺数','账期数','计算状态','人员ID','做货创造毛利','做货创造利润','托管类销售额','兼职额','利润额（扣兼职）'],
  'stores':['店铺','提成金额','兼职分摊','提成设置人数','已出金额人数','已计算账期数','未计算账期数','计算状态','托管类销售额','利润额（扣兼职）'],
@@ -1169,7 +1169,7 @@ def business_export(report, kind):
             note+='；'+item.get('notes','')+'；'+item.get('status','')
             return dict(zip(COLUMNS['managed'],[level,kind,item['team'],item['store'],item['period'],
                 item.get('person','') if level>1 else '',item.get('product_id','') if level==3 else '',
-                item.get('subject','') if level==3 else '',item.get('sales'),item.get('gross'),
+                item.get('subject','') if level==3 else '',item.get('sales'),item.get('managed_cost'),item.get('gross'),
                 item.get('profit_after_labor'),item.get('trial_amount'),note]))
         def managed_lines():
             for team in report.get('managed',[]):

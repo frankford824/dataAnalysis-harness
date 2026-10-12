@@ -18,7 +18,7 @@ from .read_cache import cached
 
 _cache = OrderedDict()
 _code = None
-FIELDS = ('sales','gross','profit_after_labor','trial_amount')
+FIELDS = ('sales','managed_cost','gross','profit_after_labor','trial_amount')
 
 
 def evidence(registry, commission):
@@ -122,7 +122,7 @@ def scope(registry, commission, *, managed, outputs, profits, payout_profits, ra
     common={'store_id':store_id,'store':store,'period':period,'finance_run':run_id,
             'evidence_available':raw is not None,
             'amount':None,'confirmed_amount':None,'kind':'managed_detail',
-            'notes':'其中托管部分，不与人员/店铺合计重复相加；不拆分实发'}
+            'notes':'其中托管部分，不与人员/店铺合计重复相加；不拆分实发；托管商品做货成本＝托管销售额－托管毛利额，已包含在原核算中，不再扣减'}
     leaves=[]
     if raw is not None:
         people={}
@@ -179,6 +179,12 @@ def scope(registry, commission, *, managed, outputs, profits, payout_profits, ra
             members['']=[{**common,'team_id':tid,'person_id':'','person':'待分配','subject':'缺少可核对的托管明细',
                           'product_id':'','sales':total,'gross':None,'profit_after_labor':None,'trial_amount':None}]
         children=[]
+        # Derive after sales-cent reconciliation, then sum the same leaves at
+        # every level. Unknown ownership must not become zero cost.
+        for products in members.values():
+            for item in products:
+                item['managed_cost']=(money_float(Decimal(str(item['sales']))-Decimal(str(item['gross'])))
+                                      if item.get('sales') is not None and item.get('gross') is not None else None)
         def summed(rows):
             return {field:money_float(sum((Decimal(str(r[field])) for r in rows),Decimal(0))) if all(r.get(field) is not None for r in rows) else None for field in FIELDS}
         for pid,products in sorted(members.items()):
