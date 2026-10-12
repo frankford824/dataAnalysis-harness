@@ -5,6 +5,19 @@ import polars as pl
 
 
 BRUSHING_REMARK_PATTERN = r"(?i)(^|[^a-z])by([^a-z]|$)"
+FREIGHT_SURCHARGE_SKU = 'HQT00365'
+FREIGHT_SURCHARGE_NOTE = '邮费补差价（HQT00365）：商品成本按规则计 0，运费按运费表单独核算，不重复扣成本'
+
+
+def is_freight_surcharge(frame, sku_column='sku'):
+    """User-confirmed zero goods cost, by exact SKU, never by product name."""
+    if sku_column not in frame.columns:
+        return pl.lit(False)
+    matched=(pl.col(sku_column).cast(pl.Utf8).str.strip_chars().str.to_uppercase()==FREIGHT_SURCHARGE_SKU).fill_null(False)
+    for flag in ('pricing_identity_changed','__identity_changed'):
+        if flag in frame.columns:
+            matched &= ~pl.col(flag).cast(pl.Boolean,strict=False).fill_null(False)
+    return matched
 
 
 def is_brushing(frame):
@@ -82,7 +95,7 @@ def is_dropship(frame):
 def is_exempt(frame):
     after_sale = (pl.col('__cost_exempt_reason').is_not_null()
                   if '__cost_exempt_reason' in frame.columns else pl.lit(False))
-    return is_dropship(frame) | is_cancelled(frame) | after_sale
+    return is_dropship(frame) | is_cancelled(frame) | after_sale | is_freight_surcharge(frame)
 
 
 def is_cancelled(frame):

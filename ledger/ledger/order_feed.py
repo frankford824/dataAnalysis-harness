@@ -1591,6 +1591,7 @@ class OrderFeed:
         require_pricing: bool = False,
     ) -> pl.DataFrame:
         review_pricing = require_history or require_pricing
+        from .engine.cost_policy import is_freight_surcharge
         self._retired_cost_rows = 0
         if review_pricing:
             keys = ["order_id", "sub_order_id"]
@@ -1606,7 +1607,7 @@ class OrderFeed:
             missing = items.with_columns(pl.col(*keys).cast(pl.Utf8)).join(
                 costs.select(pl.col(*keys).cast(pl.Utf8)).unique(), on=keys, how="anti")
             if "is_virtual" in missing.columns:
-                missing = missing.filter(~pl.col("is_virtual").cast(pl.Boolean, strict=False).fill_null(False))
+                missing = missing.filter(~pl.col("is_virtual").cast(pl.Boolean, strict=False).fill_null(False) | is_freight_surcharge(missing,'sku_id'))
             if not missing.is_empty():
                 pending = missing.select(pl.col("order_id", "sub_order_id", "sku_id", "quantity")).with_columns(
                     pl.lit(None, dtype=pl.Float64).alias("unit_cost"),
@@ -1616,10 +1617,17 @@ class OrderFeed:
                     pl.lit("awaiting_cost_capture").alias("failure_reason"),
                 )
                 costs = pl.concat([costs, pending], how="diagonal_relaxed")
+        else:
+            missing=items.filter(is_freight_surcharge(items,'sku_id')).with_columns(pl.col('order_id','sub_order_id').cast(pl.Utf8)).join(
+                costs.select(pl.col('order_id','sub_order_id').cast(pl.Utf8)).unique(),on=['order_id','sub_order_id'],how='anti')
+            if not missing.is_empty():
+                pending=missing.select('order_id','sub_order_id','sku_id','quantity').with_columns(
+                    pl.lit(None,dtype=pl.Float64).alias('unit_cost'),pl.lit(None,dtype=pl.Float64).alias('cost_amount'),
+                    pl.lit(None,dtype=pl.String).alias('cost_source'),pl.lit('pending').alias('cost_status'))
+                costs=pl.concat([costs.with_columns(pl.col('order_id','sub_order_id').cast(pl.Utf8)),pending],how='diagonal_relaxed')
         certified = costs if review_pricing else costs.filter(
-            (pl.col("cost_status") == "priced")
-            & pl.col("cost_source").is_in(CAPTURED_COST_SOURCES)
-        )
+            ((pl.col("cost_status") == "priced") & pl.col("cost_source").is_in(CAPTURED_COST_SOURCES))
+            | is_freight_surcharge(costs,'sku_id'))
         # ERP 把「没价」写成 0，移动平均被退货打穿会出负数；两者都不是成交成本。
         # 订单台 2026-09-03 起已把 ≤0 改判缺价，这里再守一道：关账月冻结的旧行、
         # 以及任何后续回归都不能把负成本算进利润。明确的赠品 0 价保留。
@@ -1660,10 +1668,10 @@ class OrderFeed:
         if review_pricing:
             certified=certified.with_columns(suspect.alias('__source_pricing_suspect'))
         else:
-            certified = certified.filter(~suspect)
+            certified = certified.filter(~suspect | is_freight_surcharge(certified,'sku_id'))
         from .engine.cost_policy import is_brushing
         brushing = is_brushing(certified)
-        unpriced = ((unit <= 0) | unit.is_null()) & ~((unit == 0) & (pl.col("is_gift") | brushing))
+        unpriced = ((unit <= 0) | unit.is_null()) & ~((unit == 0) & (pl.col("is_gift") | brushing)) & ~is_freight_surcharge(certified,'sku_id')
         self._unpriced_cost_rows = int(certified.select(unpriced.sum()).item() or 0)
         if not review_pricing:
             certified = certified.filter(~unpriced)
@@ -1690,7 +1698,7 @@ class OrderFeed:
             _amount(orders, ["order_id"], "paid_amount").rename({"paid_amount": "order_paid"}), on="order_id", how="left",
         )
         price = pl.max_horizontal(pl.col("line_amount").fill_null(0.0), pl.col("order_paid").fill_null(0.0))
-        implausible = (
+        implausible = ~is_freight_surcharge(certified,'sku_id') & (
             (total > IMPLAUSIBLE_COST_FLOOR)
             & (price > 0)
             & (total > IMPLAUSIBLE_COST_TO_PRICE * price)

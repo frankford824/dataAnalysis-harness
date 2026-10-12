@@ -38,6 +38,9 @@ def describe(row, *, graded=True):
     elif counted and str(row.get('record_type') or '').startswith('结账'):
         status='冻结金额已计入'
         explanation='本行采用结账时保存的核定记录，未按后来更新的源数据覆盖。'
+    elif counted and row.get('contribution') == 0 and row.get('metric_id') in ('goods_cost','reshipment_cost') and '邮费补差价（HQT00365）' in str(row.get('source_note') or ''):
+        status='邮费补差价：商品成本为0'
+        explanation='运费按运费表核算，本商品不再重复计成本，无需补录成本。'
     elif counted and row.get('contribution') == 0 and row.get('metric_id') in ('goods_cost', 'reshipment_cost') and '蓝色旗帜且卖家备注含 by' in str(row.get('source_note') or ''):
         status='刷单规则确认零成本'
         explanation='该单符合蓝色旗帜＋by 刷单规则，商品成本确认为0，无需补录成本。'

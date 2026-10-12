@@ -7,7 +7,7 @@ from ledger.engine.runtime import ingest, run
 from test_after_sales_cost import ORDER_HEADER, COST_HEADER, AFTER_HEADER
 
 
-def calculate(tmp_path, returns, *, quantity=3, unit=4, policy="transaction", pricing="provided"):
+def calculate(tmp_path, returns, *, quantity=3, unit=4, policy="transaction", pricing="provided", sku="SKU1"):
     model=load_model(MODELS/"cn-ecommerce")
     stores=tuple(s.model_copy(update={"cost_return_posting":policy}) if s.id=="taobao_xibishun" else s for s in model.stores)
     model=model.model_copy(update={"stores":stores,'platforms':tuple(p.model_copy(update={'cost_pricing':pricing})
@@ -15,9 +15,9 @@ def calculate(tmp_path, returns, *, quantity=3, unit=4, policy="transaction", pr
     orders=write_xlsx(tmp_path/"淘宝喜必顺-订单明细.xlsx",[["说明"],ORDER_HEADER,
         ["S1","O1",100,0,"P1","T1","2026-06-01","2026-06-01",""]])
     costs=write_xlsx(tmp_path/"淘宝喜必顺-聚水潭成本.xlsx",[["说明"],COST_HEADER,
-        ["I1","O1","淘宝喜必顺","2026-06-01","Sent","销售订单","S1","O1","SKU1","SKU1",quantity,unit,quantity*unit]])
+        ["I1","O1","淘宝喜必顺","2026-06-01","Sent","销售订单","S1","O1",sku,sku,quantity,unit,quantity*unit]])
     after=write_xlsx(tmp_path/"售后单_月份.xlsx",[AFTER_HEADER+["实退数量","进仓时间"],*[
-        [event,"I1","淘宝喜必顺","O1","已确认","退款成功",goods,"SKU1","S1",requested,actual,when]
+        [event,"I1","淘宝喜必顺","O1","已确认","退款成功",goods,sku,"S1",requested,actual,when]
         for event,goods,requested,actual,when in returns]])
     return run(ingest([orders,costs,after],model,["淘宝喜必顺"]),"taobao")
 
@@ -36,6 +36,13 @@ def test_july_return_keeps_june_sale_and_reverses_original_cost_in_july(tmp_path
     assert source["file_name"].to_list()==["售后单_月份.xlsx"]
     assert source["row_no"].to_list()==[2]
     assert all(not sl.classify_report.unmatched_rows for sl in r.slices.values())
+
+
+def test_postage_rule_does_not_create_a_goods_cost_refund_credit(tmp_path):
+    r=calculate(tmp_path,[("A1","卖家已收到退货",3,3,"2026/7/9")],sku='HQT00365')
+    assert totals(r,'goods_cost')=={'2026-06':0.0}
+    assert totals(r,'goods_return_cost')=={}
+    assert r.pricing_gaps.is_empty()
 
 
 def test_unverified_original_price_cannot_create_a_later_month_refund_credit(tmp_path):
