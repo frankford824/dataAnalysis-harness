@@ -1666,6 +1666,7 @@ def allocation_export(run_id:int):
             direct_reship=(allocated and row.get('source_id')=='freight' and row.get('order_type')=='补发订单'
                            and row.get('__spine_origin__')=='order_console' and row.get('factor')==1)
             basis=(f'本主订单净实付为 0，费用在本单 {row.get("allocation_child_count")} 个有效子单间等额分摊' if row.get('allocation_method')=='zero_net_equal_children' else
+                   '按唯一订单明细直接计入一次' if row.get('allocation_method')=='direct_single_target' else
                    '补发运费直接归属唯一补发商品（不是按收入比例分摊）' if direct_reship else
                    '历史冻结流水与核对后比例' if row.get('allocation_basis_source')=='历史冻结流水与核对后比例' else
                    '原表完整分配率' if row.get('alloc_ratio') is not None else

@@ -133,9 +133,15 @@ def project(
     pending=[]
     pending_frame=_empty()
     strict_ratio=metric.allocate is not None and metric.allocate.mode=='ratio'
-    if strict_ratio:
-        from .allocation import prepare
-        keyed=prepare(keyed,metric)
+    direct=metric.allocate is None
+    checked_basis=strict_ratio or direct
+    if checked_basis:
+        if direct:
+            from .order_identity import prepare_direct
+            keyed=prepare_direct(keyed)
+        else:
+            from .allocation import prepare
+            keyed=prepare(keyed,metric)
         unresolved=keyed.filter(pl.col('__allocation_reason')!='').group_by('link_key').agg(
             *[pl.col(c).first() for c in ('store','period') if c in keyed.columns],
             pl.col('__allocation_reason').first()).join(by_key,on='link_key',how='inner')
@@ -152,7 +158,7 @@ def project(
         factor=pl.col('__allocation_factor')
     else:
         factor = _factor(keyed, metric)
-    if not strict_ratio and metric.posting_basis in {"transaction", "order_number"}:
+    if not checked_basis and metric.posting_basis in {"transaction", "order_number"}:
         # 退款金额已由流水确认。保留有效比例的相对关系，但不能因残留比例少计退款。
         keyed = keyed.with_columns(factor.fill_null(0.0).clip(lower_bound=0.0).alias("__factor"))
         total = pl.col("__factor").sum().over("link_key")
@@ -251,11 +257,18 @@ def project(
     if not hosted.is_empty():
         out = pl.concat([out, hosted], how="diagonal_relaxed")
 
-    if strict_ratio:
+    if checked_basis:
         out=out.join(keyed.select('spine_row','allocation_method','allocation_child_count'),on='spine_row',how='left',maintain_order='left')
+    if direct and not out.is_empty():
+        # Check the final result, including evidence joins: both the money and
+        # the source-row accounting weight must be conserved per direct key.
+        control=out.group_by('link_key').agg(pl.col('factor').sum(),pl.col('amount').sum()).join(
+            by_key.rename({'amount':'__source_amount'}),on='link_key',how='inner')
+        if control.filter(((pl.col('factor')-1.).abs()>1e-6) | ((pl.col('amount')-pl.col('__source_amount')).abs()>1e-6)).height:
+            raise ValueError(f'{metric.name} 的同一笔来源金额被重复关联，已停止本次核算，请核对订单明细')
     proj = Projection(
         facts=out,
-        notes=([f'{metric.name}：{len(pending)} 个主订单缺少有效分配依据，金额保留在店铺待分配，不计个人业绩'] if pending else []) if strict_ratio else ratio_health(keyed, metric) + _ratio_fallback_notes(keyed, metric),
+        notes=([f'{metric.name}：{len(pending)} 个订单的商品归属待核对，金额仅计入店铺一次，暂不分配到个人'] if pending else []) if checked_basis else ratio_health(keyed, metric) + _ratio_fallback_notes(keyed, metric),
         orphan_amount=money_float(orphan_amount),
         orphan_keys=len(orphan_keys),
         uncovered_rows=keyed.height - covered,

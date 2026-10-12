@@ -12,6 +12,7 @@ NO_REFUND_MARKERS = ('无退款申请', '没有申请退款', '未退款', '无'
 # may be shared equally within its children. Missing evidence is never zero.
 ZERO_NET_FEE_MAJORS = frozenset({'software_fee','logistics_fee','cross_border_fee','trade_compensation','marketing_fee'})
 REASON_LABELS = {
+    'direct_order_identity_conflict':'同一订单对应多条不一致明细，金额已计入店铺一次，商品归属待核对',
     'missing_payment_basis':'子订单实付或退款金额有缺失，暂不能计算商品分配比例',
     'zero_net_payment':'订单明细中的实付扣退款后为 0，不能据此计算商品分配比例',
     'zero_net_missing_identity':'本单可按零净实付均摊费用，但子订单号、商品ID或店铺月份资料不完整',
@@ -26,6 +27,7 @@ REASON_LABELS = {
     'cross_store_or_period':'关联跨店铺或账期',
 }
 REASON_ACTIONS = {
+    'direct_order_identity_conflict':'核对重叠订单表中的子订单号、商品和下单日期；确认冲突后重新核算，不重复录入费用。',
     'missing_payment_basis':'核对订单明细中同一主订单下所有子订单的买家实付金额、退款金额；空白不代表 0。',
     'zero_net_payment':'结合对账单核对收款、退款；另核对费用对应的子订单或商品。无需把已计入店铺的金额再录入一次。',
     'zero_net_missing_identity':'补齐同一主订单下各子订单的编号、商品ID及所属店铺月份；金额已入店铺账，不要重复录入。',

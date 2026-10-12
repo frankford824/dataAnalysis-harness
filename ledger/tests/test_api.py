@@ -138,6 +138,23 @@ def test_allocation_export_labels_zero_net_equal_share_as_business_rule(client):
     assert row['实际分配率']=='0.5' and row['原表分配率']==''
 
 
+def test_direct_export_distinguishes_unique_target_from_conflicting_orders(client):
+    import csv
+    from ledger.storage_integrity import seal
+    ws=api.workspace();rid=ws.record('taobao_mt9scjag','2026-07',{'can_close':False},[])
+    path=ws.facts_path(rid).with_suffix('.allocation.parquet')
+    pl.DataFrame({'metric_id':['freight_cost']*2,'source_id':['freight']*2,'link_key':['A','B'],
+        'spine_row':[0,None],'amount':[-10.,-20.],'factor':[1.,1.],
+        'allocation_method':['direct_single_target',None],
+        'allocation_reason':[None,'direct_order_identity_conflict']}).write_parquet(path)
+    seal(path)
+    response=client.get(f'/api/runs/{rid}/allocation.csv')
+    rows=list(csv.DictReader(io.StringIO(response.text.lstrip('\ufeff'))))
+    assert rows[0]['分配依据']=='按唯一订单明细直接计入一次'
+    assert rows[1]['实际分配率']==''
+    assert '不一致明细' in rows[1]['待核对原因'] and '重叠订单表' in rows[1]['核对方式']
+
+
 class TestBootstrap:
     def test_gives_the_ui_everything_it_needs_at_once(self, client):
         """分开取的话，中间有人改了配置，界面会拿半新半旧的结构去渲染。"""

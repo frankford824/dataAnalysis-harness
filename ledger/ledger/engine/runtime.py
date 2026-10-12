@@ -1506,7 +1506,8 @@ def _build_slice(
         scoped = pl.concat([scoped, shared_pending], how="vertical_relaxed")
     own_pending=[x for x in allocation_pending or [] if x.get('store')==store and x.get('period')==period]
     allocation_evidence=pl.DataFrame()
-    ratio_metrics=[m.id for original in model.metrics if (m:=original.for_platform(platform)) is not None and m.allocate and m.allocate.mode=='ratio']
+    ratio_metrics=[m.id for original in model.metrics if (m:=original.for_platform(platform)) is not None and m.link
+                   and (m.allocate is None or m.allocate.mode=='ratio')]
     ratio_facts=scoped_spine.filter(pl.col('metric_id').is_in(ratio_metrics)) if not scoped_spine.is_empty() else scoped_spine
     if not ratio_facts.is_empty():
         context=spine if 'spine_row' in spine.columns else spine.with_row_index('spine_row')
@@ -1857,6 +1858,12 @@ def _build_spine(
         return Spine.empty()
 
     frame = pl.concat(parts, how="diagonal_relaxed")
+    from .order_identity import canonical_exports
+    frame,removed=canonical_exports(frame)
+    if removed:
+        message=f'本次订单明细中 {removed} 条子订单的核算字段完全重复，核算只关联一次；原始文件和真实费用明细均保留。'
+        notes.append(message)
+        ingestion.deduplication.append({'source':'order_detail','status':'deduplicated','events':removed,'message':message})
     return Spine(frame=frame)
 
 
