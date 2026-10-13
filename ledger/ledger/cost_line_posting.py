@@ -46,7 +46,7 @@ def apply(ws, result, store):
                 'order_id': item['order_id'], 'linked': True, 'counted': True,
                 'count_without_order': False, 'amount': float(-amount), 'contribution': float(-amount),
                 'major': metric.major, 'subject': '人工补录商品成本', 'minor': '人工补录商品成本',
-                'file_sha': item['context_sha'], 'file_name': '人工补录订单成本', 'sheet': '补录记录',
+                'file_sha': None, 'file_name': '人工补录订单成本', 'sheet': '补录记录（行号为记录编号）',
                 'row_no': saved['id'], 'record_type': '人工补录商品成本',
                 'source_note': f"已计入本店本月商品成本；补录版本 {saved['id']}；依据：{saved['reason']}"})
         if not rows:

@@ -143,5 +143,7 @@ def test_service_persists_supplement_in_same_statement_and_drill(tmp_path,monkey
     assert state.result['cost_line_posting']['total']==8
     assert state.result['statement'][0]['value']==-103
     assert view.drill(service.facts_of(ws,state.run_id),m,'cost')['source_total']==-103
+    supplement=view.drill(service.facts_of(ws,state.run_id),m,'cost',file='人工补录订单成本')['sample']
+    assert len(supplement)==1 and supplement[0]['file_sha'] is None
     third=service.recompute(ws,m,store)
     assert not third.failure and ws.state('s','2026-07').run_id==state.run_id

@@ -414,8 +414,8 @@ function close() {
                 </td>
                 <td class="xs num">
                   {{ r.file_name }}<template v-if="r.sheet"> · {{ r.sheet }}</template> ·
-                  第 {{ r.row_no }} 行
-                  <button v-if="liveIndex && r.file_sha" class="link" @click="previewFact(r)">
+                  <template v-if="r.file_name==='人工补录订单成本'">补录记录 #{{ r.row_no }}</template><template v-else>第 {{ r.row_no }} 行</template>
+                  <button v-if="liveIndex && r.file_sha && r.file_name!=='人工补录订单成本'" class="link" @click="previewFact(r)">
                     预览 →
                   </button>
                 </td>

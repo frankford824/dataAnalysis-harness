@@ -603,6 +603,11 @@ def drill(facts: pl.DataFrame | str | Path, model: Model, node_id: str,
             ]
             lazy = lazy.select(keep)
         facts = lazy.collect()
+    # A saved decision is not an uploaded workbook. Also handle earlier runs
+    # that used its context hash as an anchor: it cannot open a file preview.
+    if {'file_sha','file_name'} <= set(facts.columns):
+        facts = facts.with_columns(pl.when(pl.col('file_name') == '人工补录订单成本')
+            .then(None).otherwise(pl.col('file_sha')).alias('file_sha'))
     special = _special_drill(facts, model, node_id)
     if special is not None:
         facts, name, bucket_value, kind = special
