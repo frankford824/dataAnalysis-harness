@@ -977,6 +977,9 @@ def _build_period_detail(
                 review.update(line_revision=lines['line_revision'],
                               line_count=lines['reviewed_count'],
                               line_total=lines['supplement_total'],
+                              posted_line_total=(st.result.get('cost_line_posting') or {}).get('total', 0),
+                              posted_line_count=(st.result.get('cost_line_posting') or {}).get('count', 0),
+                              line_posting_pending=not st.closed and lines['line_revision'] != (st.result.get('cost_line_posting') or {}).get('line_revision', 0),
                               coverage_lines=lines['total'],
                               suggested_goods=money_float(decimal_amount(
                                   (review.get('observed') or {}).get('goods') or 0)
@@ -1224,10 +1227,13 @@ def coverage_gaps_xlsx(run_id: int) -> Response:
 def cost_line_save(store_id: str, period: str, change: CostLineChange) -> dict:
     _store(_model(), store_id)
     try:
-        return cost_lines.save(workspace(), store_id, period, change.run_id,
+        saved = cost_lines.save(workspace(), store_id, period, change.run_id,
                                coverage_key=change.coverage_key, context_sha=change.context_sha,
                                amount=change.amount, reason=change.reason, action=change.action,
                                expected_line_revision=change.expected_line_revision)
+        from .commission_registry import Registry
+        Registry(workspace().root).enqueue_cost_lines(store_id, period, saved['line_revision'])
+        return saved
     except WorkspaceError as exc:
         raise HTTPException(409, str(exc)) from exc
 
@@ -1270,11 +1276,14 @@ async def cost_line_batch_apply(store_id: str, period: str,
         raise HTTPException(422, '请上传本页导出并编辑的Excel或CSV成本表')
     content = await file.read(20_000_001)
     try:
-        return cost_lines.batch_apply(
+        saved = cost_lines.batch_apply(
             workspace(), store_id, period, run_id, content,
             expected_file_sha=expected_file_sha,
             expected_line_revision=expected_line_revision,
             default_reason=default_reason)
+        from .commission_registry import Registry
+        Registry(workspace().root).enqueue_cost_lines(store_id, period, saved['line_revision'])
+        return saved
     except WorkspaceError as exc:
         raise HTTPException(409, str(exc)) from exc
 

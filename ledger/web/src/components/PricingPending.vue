@@ -97,7 +97,7 @@ async function applyBatch(){
   batchBusy.value=true;batchError.value=''
   try{
     const saved=await api.applyCostBatch(props.storeId,props.period,props.runId,batchFile.value,batchReason.value,batchPreview.value)
-    batchResult.value=`已批量保存 ${saved.saved} 笔、${Number(saved.amount_total).toFixed(2)} 元`
+    batchResult.value=`已批量保存 ${saved.saved} 笔、${Number(saved.amount_total).toFixed(2)} 元，已安排自动核算更新看板`
     batchPreview.value=null;batchFile.value=null
     if(batchInput.value)batchInput.value.value=''
     await loadCoverage();emit('line-saved')
@@ -136,7 +136,7 @@ const coverageColumns=[
 <template>
   <div class="pricing-notice" :class="{passed:thresholdMet || manualDecision}">
     <div><strong>{{ manualDecision ? '本期成本已由人工确认' : coverageTitle }}</strong><p v-if="manualDecision">原始覆盖率 {{ percentage(coverage.coverage) }}，人工确认金额与原因已和结账记录一起冻结。</p><p v-else-if="thresholdMet">还有 {{ integer(uncoveredOrders) }} 笔订单未覆盖商品成本，当前只计入已识别金额。</p><p v-else>还有 {{ integer(uncoveredOrders) }} 笔订单未覆盖；系统已完成现有资料的计算，人工可确认或修改金额后结账。自动放行还差 {{ integer(needed) }} 笔覆盖。</p>
-      <p v-if="observed && Object.hasOwn(observed,'goods') && !manualDecision" class="pricing-help">现有资料识别：商品成本 {{ Number(observed.goods).toLocaleString('zh-CN',{minimumFractionDigits:2}) }} 元 · 代发 {{ Number(observed.dropship).toLocaleString('zh-CN',{minimumFractionDigits:2}) }} 元 · 补发 {{ Number(observed.reshipment).toLocaleString('zh-CN',{minimumFractionDigits:2}) }} 元<template v-if="lineSummary?.line_count"> · 已人工补录 {{ integer(lineSummary.line_count) }} 笔、{{ Number(lineSummary.line_total).toLocaleString('zh-CN',{minimumFractionDigits:2}) }} 元（预览时另计）</template></p>
+      <p v-if="observed && Object.hasOwn(observed,'goods') && !manualDecision" class="pricing-help">来源表成本：商品 {{ Number(observed.goods).toLocaleString('zh-CN',{minimumFractionDigits:2}) }} 元 · 代发 {{ Number(observed.dropship).toLocaleString('zh-CN',{minimumFractionDigits:2}) }} 元 · 补发 {{ Number(observed.reshipment).toLocaleString('zh-CN',{minimumFractionDigits:2}) }} 元<template v-if="lineSummary?.line_count"> · 已人工补录 {{ integer(lineSummary.line_count) }} 笔、{{ Number(lineSummary.line_total).toLocaleString('zh-CN',{minimumFractionDigits:2}) }} 元；本次看板已计入补录 {{ Number(lineSummary.posted_line_total || 0).toLocaleString('zh-CN',{minimumFractionDigits:2}) }} 元</template><template v-if="lineSummary?.line_posting_pending">；最新补录待自动核算，当前看板尚未更新。</template></p>
       <p v-if="coverage.brushing_zero_covered" class="pricing-help">其中 {{ integer(coverage.brushing_zero_covered) }} 笔已按“蓝色旗帜＋by”刷单规则确认商品成本为 0，不需要补成本，也不在缺口清单中。</p>
       <p v-if="progress" aria-live="polite">{{ progress.message }}</p>
       <div v-if="['running','queued'].includes(progress?.state)" class="pricing-work-bar" role="progressbar" :aria-valuenow="progress.percent ?? 0" aria-valuemin="0" aria-valuemax="100" aria-label="本店后台核算进度"><span :style="{width:`${progress.percent ?? 0}%`}" /></div>

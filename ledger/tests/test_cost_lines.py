@@ -267,6 +267,9 @@ def test_http_edit_is_visible_in_all_missing_orders_and_store_preview(tmp_path,m
     })
     assert saved.status_code==200,saved.text
     assert saved.json()['supplement_total']==12
+    from ledger.commission_registry import Registry
+    with Registry(tmp_path).connect() as conn:
+        assert conn.execute('SELECT files_revision FROM pending WHERE store_id=?',(raw['store_id'],)).fetchone()[0]>0
     endpoint=f"/api/stores/{raw['store_id']}/periods/{raw['period']}/manual-cost-preview"
     body={'run_id':run,'line_revision':saved.json()['line_revision'],
           'costs':{'goods':'600.00','dropship':'0.00','reshipment':'0.00'}}
@@ -329,6 +332,9 @@ def test_http_batch_preview_then_apply_preserves_audited_cost_rows(tmp_path, mon
         'expected_line_revision': preview.json()['line_revision']}, files=uploaded)
     assert saved.status_code == 200, saved.text
     assert saved.json()['saved'] == 2
+    from ledger.commission_registry import Registry
+    with Registry(tmp_path).connect() as conn:
+        assert conn.execute('SELECT files_revision FROM pending WHERE store_id=?',(raw['store_id'],)).fetchone()[0]>0
     assert client.get(f'/api/runs/{run}/coverage-gaps').json()['reviewed_count'] == 2
     assert ws.conn.execute('SELECT count(*) FROM cost_line_log').fetchone()[0] == 2
     ws.close()

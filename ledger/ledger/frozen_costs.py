@@ -89,6 +89,15 @@ def append(facts,model,decision,manual,*,run_id,at='',by='',store='',period='',m
                 if amount!=amount.quantize(Decimal('.01')):raise ValueError('补录金额精度无效')
             except (KeyError,TypeError,ValueError) as exc:
                 raise WorkspaceError('冻结补录金额无效，不能导出') from exc
+            booked = facts.filter((pl.col('source_id') == '__manual_order_cost__') &
+                                  (pl.col('link_key') == key) & pl.col('counted')) if 'source_id' in facts.columns else facts.head(0)
+            if not booked.is_empty():
+                previous = sum((decimal_amount(v) for v in booked['contribution']), Decimal(0))
+                delta = -amount-previous
+                if delta:
+                    add('goods_cost',delta,'结账补录调整',key=key,order=str(line.get('order_id') or ''),
+                        revision=line.get('revision'),note='结账时补录金额变化，按新旧差额调整；'+str(line.get('reason','')))
+                continue
             add('goods_cost',-amount,'结账人工补录',key=key,order=str(line.get('order_id') or ''),
                 revision=line.get('revision'),note=f"冻结补录版本 {line.get('revision','')}；依据：{line.get('reason','')}；不读取后续修改")
     for mid,value in target.items():

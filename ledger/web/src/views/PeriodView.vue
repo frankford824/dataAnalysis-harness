@@ -864,7 +864,7 @@ watch(
         <template v-if="manualCostEnabled">
           <n-alert v-if="!snap?.calculation_inputs" type="info" :bordered="false">这次保存的计算记录尚无人工预览依据。<n-button size="small" @click="refreshManualBasis">重算后再确认</n-button></n-alert>
           <p class="small muted manual-section-note">以下为系统从现有资料识别的金额。修改后请预览；未覆盖的订单不会被暗记为零。</p>
-          <p v-if="snap?.cost_review?.line_count" class="small muted">{{ snap.cost_review.line_count }} 笔订单已在明细里补录 {{ money(snap.cost_review.line_total) }} 元；预览时自动加到下面输入的商品成本金额，不要手工重复加。</p>
+          <p v-if="snap?.cost_review?.line_count" class="small muted">{{ snap.cost_review.line_count }} 笔订单已补录 {{ money(snap.cost_review.line_total) }} 元；本次看板已计入 {{ money(snap.cost_review.posted_line_total || 0) }} 元。下面输入框仍是来源表成本，不含补录；预览会合并最新补录一次，不要手工再加。<template v-if="snap.cost_review.line_posting_pending">最新补录正在等待自动核算，看板尚未更新。</template></p>
           <div class="manual-cost-grid">
             <label v-for="[key, label] in manualCostRows" :key="key">
               <span>{{ label }}</span><small>系统已识别 {{ snap?.cost_review?.observed?.[key] == null ? '尚无记录' : money(snap.cost_review.observed[key]) }}</small>

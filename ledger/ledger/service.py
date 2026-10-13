@@ -410,6 +410,8 @@ def _recompute_locked(
     report(f"归类核算 · {where}")
     try:
         result = run(ing, store.platform)
+        from .cost_line_posting import apply as apply_cost_lines
+        apply_cost_lines(ws, result, store)
     except Exception as exc:  # noqa: BLE001 — 交表接口不能 500，原因写进回执
         out.failure = {
             "store": store.name,
@@ -575,6 +577,8 @@ def simulate(ws: Workspace, model: Model, store: Store) -> list[dict[str, Any]]:
     apply_statement_reviews(ing,ws,store.id)
     result = run(ing, store.platform)
     out = []
+    from .cost_line_posting import apply as apply_cost_lines
+    apply_cost_lines(ws, result, store)
     for (_s, _period), sl in sorted(result.slices.items(), key=lambda kv: kv[0][1] or ""):
         if _s != store.name:
             continue

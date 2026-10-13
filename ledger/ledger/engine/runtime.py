@@ -146,6 +146,7 @@ class Slice:
     allocation_evidence: pl.DataFrame = field(default_factory=pl.DataFrame)
     deduplication: list[dict] = field(default_factory=list)
     order_issue_rows: pl.DataFrame = field(default_factory=pl.DataFrame)
+    cost_line_posting: dict = field(default_factory=dict)
 
     @property
     def can_close(self) -> bool:

@@ -31,14 +31,14 @@ def revision(ws, store_id: str, period: str) -> int:
     return int(row[0])
 
 
-def _latest(ws, store_id: str, period: str, run_id: int) -> dict[str, dict]:
+def _latest(ws, store_id: str, period: str, run_id: int, *, max_revision: int = 2**63-1) -> dict[str, dict]:
     rows = ws.conn.execute('''
         SELECT l.* FROM cost_line_log l JOIN (
           SELECT coverage_key,max(id) id FROM cost_line_log
-          WHERE store_id=? AND period=? AND source_run_id<=? GROUP BY coverage_key
+          WHERE store_id=? AND period=? AND source_run_id<=? AND id<=? GROUP BY coverage_key
         ) current ON current.id=l.id
         WHERE l.store_id=? AND l.period=?
-    ''', (store_id, period, run_id, store_id, period)).fetchall()
+    ''', (store_id, period, run_id, max_revision, store_id, period)).fetchall()
     return {row['coverage_key']: dict(row) for row in rows}
 
 

@@ -1201,6 +1201,15 @@ class Registry:
     def enqueue_files(self, stores: set[str], fingerprint: str) -> None:
         if not re.fullmatch(r"nas:[0-9a-f]{64}", fingerprint):
             raise RegistryError("原文件来源版本格式不正确")
+        self._enqueue_changed_inputs(stores, fingerprint)
+
+    def enqueue_cost_lines(self, store_id: str, period: str, revision: int) -> None:
+        """Cost decisions reuse the durable input queue, not a new worker."""
+        if not re.fullmatch(r'\d{4}-\d{2}', period) or revision < 0:
+            raise RegistryError('人工补录版本格式不正确')
+        self._enqueue_changed_inputs({store_id}, f'cost-lines:{period}:{revision}')
+
+    def _enqueue_changed_inputs(self, stores: set[str], fingerprint: str) -> None:
         with self.transaction() as conn:
             revision = conn.execute("SELECT revision FROM meta WHERE id=1").fetchone()[0]
             conn.executemany(
