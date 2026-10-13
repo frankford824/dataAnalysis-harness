@@ -13,6 +13,7 @@ from .engine import calculate
 from .engine.link import Spine
 from .engine.project import project
 from .money import money_float
+from .goods_cost_scope import sales_only, VERSION
 
 SOURCE = '__manual_order_cost__'
 
@@ -38,6 +39,8 @@ def apply(ws, result, store):
             saved = latest.get(item['coverage_key'])
             if not saved or saved['action'] != 'save' or saved['context_sha'] != item['context_sha'] or item['order_count'] != 1:
                 continue
+            if item.get('goods_scope_version') != VERSION:
+                raise ValueError('补录成本缺少已排除补发订单的清单依据，已停止核算')
             amount = manual_cost._cents(saved['amount'])
             reviews.append({'coverage_key': item['coverage_key'], 'context_sha': item['context_sha'],
                             'revision': saved['id'], 'amount': float(amount)})
@@ -57,7 +60,7 @@ def apply(ws, result, store):
         if getattr(sl, 'cost_line_posting', None):
             raise ValueError('人工补录成本不能在同一次核算中重复计入')
         facts = pl.DataFrame(rows, infer_schema_length=None)
-        spine = Spine(result.spine).indexed().frame.filter((pl.col('store') == name) & (pl.col('period') == period))
+        spine = sales_only(Spine(result.spine).indexed().frame).filter((pl.col('store') == name) & (pl.col('period') == period))
         projected = project(facts, metric, Spine(spine)).facts
         actual = dict(projected.group_by('link_key').agg(pl.col('amount').sum()).iter_rows())
         for row in rows:

@@ -617,7 +617,7 @@ def _keep_facts(ws: Workspace, run_id: int, sl: Slice) -> None:
             from .storage_integrity import seal
             seal(pricing_path)
         coverage = getattr(sl, "coverage_gap_rows", pl.DataFrame())
-        if not coverage.is_empty():
+        if not coverage.is_empty() or 'goods_scope_version' in coverage.columns:
             coverage.write_parquet(coverage_path)
             from .storage_integrity import seal
             seal(coverage_path)

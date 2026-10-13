@@ -47,6 +47,7 @@ def archive(ws, run, keys=('S2','S3'), *, undated=False):
         'order_count':[1 for _ in keys],
         'product_count':[1 for _ in keys],
         'editable':[not (undated and key=='S2') for key in keys],
+        'goods_scope_version':[1 for _ in keys],
     })
     path=ws.coverage_gaps_path(run);frame.write_parquet(path);seal(path)
     return frame

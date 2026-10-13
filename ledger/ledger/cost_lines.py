@@ -16,11 +16,16 @@ from .storage_integrity import verified
 from .workspace import WorkspaceError
 
 
-def _source_rows(ws, run_id: int) -> list[dict]:
+def _source_rows(ws, run_id: int, *, for_edit: bool = False) -> list[dict]:
     path = ws.coverage_gaps_path(run_id)
     if not path.exists() or not verified(path):
         raise WorkspaceError("这次计算尚无完整的未覆盖订单明细，请先重算本店")
-    return pl.read_parquet(path).to_dicts()
+    frame = pl.read_parquet(path)
+    from .goods_cost_scope import VERSION
+    if for_edit and ('goods_scope_version' not in frame.columns or
+                     any(v != VERSION for v in frame['goods_scope_version'].to_list())):
+        raise WorkspaceError('旧版缺口清单尚未排除补发订单，请先重算本店再补录或确认成本，避免重复计入')
+    return frame.to_dicts()
 
 
 def revision(ws, store_id: str, period: str) -> int:
@@ -58,7 +63,7 @@ def current(ws, run_id: int, store_id: str, period: str) -> dict:
     total = Decimal(0)
     reviewed = []
     for item in items:
-        item['editable'] = item['order_count'] == 1
+        item['editable'] = item['order_count'] == 1 and item.get('goods_scope_version') == 1
         saved = latest.get(item['coverage_key'])
         item['line_revision'] = saved['id'] if saved else 0
         item['manual_amount'] = None
@@ -193,6 +198,7 @@ def _batch_table(content: bytes):
 def _batch_rows(ws, store_id: str, period: str, run_id: int,
                 content: bytes, default_reason: str = '') -> dict:
     """Match edited export rows to the sealed current order gap list."""
+    _source_rows(ws, run_id, for_edit=True)
     if len(content) > 20_000_000:
         raise WorkspaceError('批量成本表过大，请按店铺月份拆分后导入')
     fieldnames, rows = _batch_table(content)
@@ -333,7 +339,7 @@ def save(ws, store_id: str, period: str, run_id: int, *, coverage_key: str,
         amount = _cents(amount)
     else:
         amount = None
-    source = next((row for row in _source_rows(ws, run_id)
+    source = next((row for row in _source_rows(ws, run_id, for_edit=True)
                    if row['coverage_key'] == coverage_key), None)
     if source is None or source['order_count'] != 1 or source['context_sha'] != context_sha:
         raise WorkspaceError("订单对应关系已变化或存在歧义，请刷新明细后再修改")

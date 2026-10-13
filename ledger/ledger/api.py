@@ -1313,6 +1313,8 @@ def _line_snapshot(ws: Workspace, run_id: int, store_id: str, period: str,
     if expected_revision not in (None, lines['line_revision']) or (
         expected_revision is None and lines['reviewed_count']):
         raise WorkspaceError('人工补录明细已有新修改，请刷新金额后再确认')
+    if lines['reviewed_count']:
+        cost_lines._source_rows(ws, run_id, for_edit=True)
     return lines
 
 

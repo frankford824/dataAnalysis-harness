@@ -1413,6 +1413,9 @@ def _build_slice(
         _scoped_link_reports(model, scoped, own_spine, platform, link_reports)
         if live_feed else link_reports
     )
+    if not live_feed and 'goods_cost' in link_reports:
+        scoped_reports = {**scoped_reports, 'goods_cost':
+            _scoped_link_reports(model, scoped, own_spine, platform, link_reports)['goods_cost']}
     cost_coverage = _cost_coverage(model, scoped_reports)
     zero_keys = scoped.filter((pl.col('metric_id') == 'goods_cost') & pl.col('counted') &
         (pl.col('contribution') == 0) & pl.col('source_note').str.contains(
@@ -1599,18 +1602,20 @@ def _build_slice(
 def _goods_coverage_rows(model: Model, spine_frame: pl.DataFrame, platform: str,
                          reports: dict[str, LinkReport]) -> pl.DataFrame:
     """List every expected order key without posted goods cost, including absent feed rows."""
+    from ..goods_cost_scope import sales_only, VERSION
     empty = pl.DataFrame(schema={
         "coverage_key": pl.Utf8, "context_sha": pl.Utf8, "order_id": pl.Utf8,
         "sub_order_id": pl.Utf8, "product_ids": pl.Utf8, "order_date": pl.Utf8,
         "quantities": pl.Utf8, "order_state": pl.Utf8,
         "order_count": pl.Int64, "product_count": pl.Int64, "editable": pl.Boolean,
+        "goods_scope_version": pl.Int64,
     })
     report = reports.get("goods_cost")
     raw = next((metric for metric in model.metrics if metric.id == "goods_cost"), None)
     metric = raw.for_platform(platform) if raw else None
     if report is None or metric is None or metric.link is None or spine_frame.is_empty():
         return empty
-    eligible = Spine(spine_frame).eligible(metric.link)
+    eligible = Spine(sales_only(spine_frame)).eligible(metric.link)
     role = target_role(metric.link.to)
     if not role or role not in eligible.frame.columns:
         return empty
@@ -1647,6 +1652,7 @@ def _goods_coverage_rows(model: Model, spine_frame: pl.DataFrame, platform: str,
             # A missing original day remains visible and in the context hash;
             # only a reused key across different orders makes this ambiguous.
             "editable": len(orders) == 1,
+            "goods_scope_version": VERSION,
         })
     return pl.DataFrame(data, schema=empty.schema).sort("coverage_key") if data else empty
 
@@ -1702,7 +1708,11 @@ def _scoped_link_reports(
         )
         role = target_role(metric.link.to) if metric.link else ""
         if role:
-            eligible = local_spine.eligible(metric.link)
+            if metric.id == 'goods_cost':
+                from ..goods_cost_scope import sales_only
+                eligible = Spine(sales_only(spine_frame)).eligible(metric.link)
+            else:
+                eligible = local_spine.eligible(metric.link)
             known = eligible.keys(role)
             expected = eligible.keys_where(role, metric.expect)
             report.spine_keys_total = len(known)
