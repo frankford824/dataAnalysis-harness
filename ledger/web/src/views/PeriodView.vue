@@ -23,6 +23,7 @@ import GapList from '../components/GapList.vue'
 import PageHead from '../components/PageHead.vue'
 import PeriodStrip from '../components/PeriodStrip.vue'
 import PricingPending from '../components/PricingPending.vue'
+import PeriodReviewSummary from '../components/PeriodReviewSummary.vue'
 import OrderIssuesDrawer from '../components/OrderIssuesDrawer.vue'
 import { suggestedManualPayout } from '../commissionPayout'
 import { periodDrillTarget } from '../periodDrill'
@@ -31,6 +32,7 @@ import { useApp } from '../store'
 
 const props = defineProps({ id: { type: String, required: true } })
 const reviewingStatement=ref(false)
+const reviewingPeriod=ref(false)
 async function statementUpdated(){reviewingStatement.value=false;app.invalidate();await load(true)}
 
 const app = useApp()
@@ -100,7 +102,7 @@ async function load(force=false, quiet=false) {
   }catch(e){if(serial===loadSerial){if(quiet)refreshFailed.value=true;else failed.value=e.message}}
   finally{if(serial===loadSerial&&!quiet)loading.value=false}
 }
-watch(()=>[props.id,period.value],()=>{drill.value=null;orderIssue.value=null;load()}, {immediate:true})
+watch(()=>[props.id,period.value],()=>{reviewingPeriod.value=false;drill.value=null;orderIssue.value=null;load()}, {immediate:true})
 watch(()=>app.uiRefresh,()=>load(true))
 
 let refreshTimer, refreshing=false
@@ -169,6 +171,7 @@ const manualCloseBlockers = computed(() => manualBlockers.value.filter(f =>
 const centsInput = value => /^-?\d+(?:\.\d{1,2})?$/.test(String(value ?? '').trim())
 
 function openManualClose() {
+  reviewingPeriod.value=false
   ignoredBlockers.value = []
   manualCloseNote.value = ''
   manualCostEnabled.value = !!snap.value?.cost_review &&
@@ -386,6 +389,7 @@ function openFinding(f) {
 // 右栏默认停在最需要人处理的那一块：有缺口就停在缺口，有没交的表就停在所需资料，
 // 都没有才停在质量。默认永远停在第一个标签的话，真正要人处理的那条就藏在后面。
 const rail = ref('gaps')
+watch([rail, fixing, reviewingStatement],()=>{reviewingPeriod.value=false})
 watch(
   () => snap.value,
   () => {
@@ -405,17 +409,6 @@ watch(
     <n-alert v-if="failed" type="error" :bordered="false">{{ failed }}</n-alert>
 
     <template v-else-if="info">
-      <n-alert v-if="snap?.deduplication?.length" :type="snap.deduplication.some(d => d.status === 'conflict') ? 'error' : 'info'" :bordered="false" style="margin-bottom:16px">
-        <strong>原始流水与费用表核查</strong>
-        <p>去重统计覆盖本店已上传的来源表；待核对提示按实际受影响账期列出。重复来源只计一次，不同流水号的后续到账仍保留；原文件不修改。争议行不计入账目，核对后才能结账。</p>
-        <div v-for="(item, index) in snap.deduplication" :key="index" style="margin-top:6px;overflow-wrap:anywhere">{{ item.message }}</div>
-        <n-button v-if="snap.deduplication.some(d=>d.status==='conflict')" style="margin-top:12px" @click="reviewingStatement=true">核对流水关联</n-button>
-      </n-alert>
-      <n-alert v-if="snap?.file_errors?.length" type="error" :bordered="false" style="margin-bottom:16px">
-        <strong>{{ snap.file_errors.length }} 张源表未进入核算，需要核对</strong>
-        <p>这些工作表尚未生成核算流水，因此不会出现在金额明细的「未计入」列表。同一文件中其他已成功解析的工作表不受此提示影响。</p>
-        <div v-for="item in snap.file_errors" :key="`${item.file}:${item.sheet}`" style="margin-top:8px;overflow-wrap:anywhere">{{ item.file }}<template v-if="item.sheet"> · {{ item.sheet }}</template>：{{ item.reason }}</div>
-      </n-alert>
       <PageHead
         kicker="店铺账期"
         :title="info.store?.name || ''"
@@ -448,6 +441,18 @@ watch(
       />
 
       <template v-if="snap">
+        <PeriodReviewSummary v-model:show="reviewingPeriod" :snapshot="snap" :blockers="blockers">
+      <n-alert v-if="snap?.deduplication?.length" :type="snap.deduplication.some(d => d.status === 'conflict') ? 'error' : 'info'" :bordered="false" style="margin-bottom:16px">
+        <strong>原始流水与费用表核查</strong>
+        <p>去重统计覆盖本店已上传的来源表；待核对提示按实际受影响账期列出。重复来源只计一次，不同流水号的后续到账仍保留；原文件不修改。争议行不计入账目，核对后才能结账。</p>
+        <div v-for="(item, index) in snap.deduplication" :key="index" style="margin-top:6px;overflow-wrap:anywhere">{{ item.message }}</div>
+        <n-button v-if="snap.deduplication.some(d=>d.status==='conflict')" style="margin-top:12px" @click="reviewingStatement=true">核对流水关联</n-button>
+      </n-alert>
+      <n-alert v-if="snap?.file_errors?.length" type="error" :bordered="false" style="margin-bottom:16px">
+        <strong>{{ snap.file_errors.length }} 张源表未进入核算，需要核对</strong>
+        <p>这些工作表尚未生成核算流水，因此不会出现在金额明细的「未计入」列表。同一文件中其他已成功解析的工作表不受此提示影响。</p>
+        <div v-for="item in snap.file_errors" :key="`${item.file}:${item.sheet}`" style="margin-top:8px;overflow-wrap:anywhere">{{ item.file }}<template v-if="item.sheet"> · {{ item.sheet }}</template>：{{ item.reason }}</div>
+      </n-alert>
         <details v-if="snap.period_actions?.length" class="small muted" style="margin-bottom: var(--s3)">
           <summary>查看反结账记录</summary>
           <p v-for="(action, index) in snap.period_actions" :key="index" style="margin-top: 6px">
@@ -511,7 +516,7 @@ watch(
             {{ f.name }}：{{ f.head || f.message }}
           </div>
           <div class="row" style="margin-top: var(--s3)">
-            <n-button size="tiny" @click="rail = 'checks'">查看核对结果</n-button>
+            <n-button size="tiny" @click="reviewingPeriod=false; rail = 'checks'">查看核对结果</n-button>
             <n-button size="tiny" @click="fixing = true">怎么改</n-button>
             <n-button
               v-if="snap.run_id && !hardBlockers.length && (manualBlockers.length || profitUnavailable)"
@@ -523,6 +528,7 @@ watch(
         </n-alert>
 
         <AllocationNotice :snapshot="snap" />
+        </PeriodReviewSummary>
         <div class="cols">
           <div class="card" style="margin-top: 0">
             <header>
@@ -537,7 +543,7 @@ watch(
                 @click.stop
               >导出订单费项</a>
             </header>
-            <PricingPending v-if="snap.run_id && (snap.pricing_pending_count || snap.cost_review?.coverage_lines || (snap.cost_coverage?.expected && !snap.cost_coverage?.passed))" ref="pricingPanel" :key="`${props.id}:${period}`" :run-id="snap.run_id" :count="snap.pricing_pending_count || 0" :coverage-rows="snap.cost_review?.coverage_lines || 0" :coverage="snap.cost_coverage" :observed="snap.cost_review?.observed" :line-summary="snap.cost_review" :manual-decision="snap.manual_cost" :store-id="props.id" :period="period" @show-quality="rail = 'quality'" @request-manual="openManualClose" @line-saved="load(true,true);app.invalidate([props.id])" @request-recompute="refreshManualBasis" />
+            <PricingPending v-if="snap.run_id" :closed="closed" ref="pricingPanel" :key="`${props.id}:${period}`" :run-id="snap.run_id" :count="snap.pricing_pending_count || 0" :coverage-rows="snap.cost_review?.coverage_lines || 0" :coverage="snap.cost_coverage" :observed="snap.cost_review?.observed" :line-summary="snap.cost_review" :manual-decision="snap.manual_cost" :store-id="props.id" :period="period" @show-quality="rail = 'quality'" @request-manual="openManualClose" @line-saved="load(true,true);app.invalidate([props.id])" @request-recompute="refreshManualBasis" />
             <div class="statement">
               <div
                 v-for="row in snap.statement || []"
@@ -942,3 +948,10 @@ watch(
     />
   </n-spin>
 </template>
+
+<style scoped>
+@media(max-width:600px){
+  :deep(.page-head){flex-direction:column}
+  :deep(.page-head-actions){width:100%;min-width:0;justify-content:flex-start}
+}
+</style>

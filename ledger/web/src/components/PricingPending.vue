@@ -3,14 +3,16 @@ import { computed, h, onMounted, onUnmounted, ref, watch } from 'vue'
 import { NDrawer, NDrawerContent, NInput, NButton, NDataTable, NPagination, NAlert } from 'naive-ui'
 import { api } from '../api'
 import { useLatest } from './ui/useLatest'
+import { costCoverageView } from '../costCoverageView'
 
-const props = defineProps({ runId: { type: Number, required: true }, count: { type: Number, required: true }, coverageRows: {type:Number,default:0}, coverage: { type: Object, default: () => ({}) }, observed: {type:Object,default:()=>({})}, lineSummary: {type:Object,default:()=>({})}, manualDecision: {type:Object,default:null}, storeId: String, period: String })
+const props = defineProps({ runId: { type: Number, required: true }, count: { type: Number, required: true }, coverageRows: {type:Number,default:0}, coverage: { type: Object, default: () => ({}) }, observed: {type:Object,default:()=>({})}, lineSummary: {type:Object,default:()=>({})}, manualDecision: {type:Object,default:null}, closed: Boolean, storeId: String, period: String })
+const overview = ref(false)
+const summary = computed(() => costCoverageView(props.coverage, props.coverageRows, props.count, props.closed))
+function openGaps() { overview.value=false; show.value=true }
+function requestManual() { overview.value=false; show.value=false; emit('request-manual') }
 const emit = defineEmits(['show-quality','request-manual','line-saved','request-recompute'])
 const percentage = value => value == null ? '—' : `${(Number(value) * 100).toFixed(1)}%`
 const thresholdMet = computed(() => !!props.coverage?.passed)
-const coverageTitle = computed(() => props.coverage?.expected
-  ? `商品成本覆盖 ${percentage(props.coverage.coverage)} · 自动放行参考 ${percentage(props.coverage.threshold)}`
-  : `${props.count} 条商品成本未覆盖`)
 const needed = computed(() => Math.max(0, Math.ceil((props.coverage?.expected || 0) * (props.coverage?.threshold || 0)) - (props.coverage?.covered || 0)))
 const uncoveredOrders = computed(() => props.coverage?.uncovered ?? props.count)
 const reasonName = value => ({
@@ -38,7 +40,7 @@ watch(() => props.runId, loadProgress)
 const show = ref(false), query = ref(''), search = ref(''), page = ref(1)
 const data = ref({ total: 0, reference_count: 0, reason_counts: [], items: [] }), busy = ref(false), error = ref('')
 const request = useLatest()
-defineExpose({ open: () => { if (props.count || props.coverageRows) show.value = true; else emit('show-quality') } })
+defineExpose({ open: () => { if (props.count || props.coverageRows) openGaps(); else overview.value=true } })
 let serial = 0
 const columns = [
   { title: '平台订单号', key: 'order_id', width: 230 },
@@ -65,7 +67,7 @@ function submit() { search.value = query.value.trim(); page.value = 1; coverageP
 watch(page, () => load())
 watch(show, value => { if (value) { if(props.count)load(); loadCoverage() } else { request.cancel(); ++serial; busy.value = false; coverageRequest.cancel(); editor.value=null } })
 watch(() => props.runId, () => { if(show.value)load(true) })
-const coveragePage=ref(1), coverageData=ref({total:0,matching:0,reviewed_count:0,supplement_total:0,items:[]})
+const coveragePage=ref(1), coverageData=ref({total:null,matching:null,reviewed_count:0,supplement_total:0,items:[]})
 const coverageBusy=ref(false), coverageError=ref(''), coverageRequest=useLatest()
 async function loadCoverage() {
   coverageBusy.value=true;coverageError.value=''
@@ -86,14 +88,14 @@ const batchInput=ref(null)
 watch(batchReason,()=>{batchPreview.value=null})
 function chooseBatch(event){batchFile.value=event.target.files?.[0]||null;batchPreview.value=null;batchError.value='';batchResult.value=''}
 async function previewBatch(){
-  if(!batchFile.value||!props.storeId||!props.period)return
+  if(props.closed||!batchFile.value||!props.storeId||!props.period)return
   batchBusy.value=true;batchError.value='';batchResult.value=''
   try{batchPreview.value=await api.previewCostBatch(props.storeId,props.period,props.runId,batchFile.value,batchReason.value)}
   catch(error){batchPreview.value=null;batchError.value=error.message}
   finally{batchBusy.value=false}
 }
 async function applyBatch(){
-  if(!batchFile.value||!batchPreview.value?.valid||batchPreview.value?.issue_count||batchBusy.value)return
+  if(props.closed||!batchFile.value||!batchPreview.value?.valid||batchPreview.value?.issue_count||batchBusy.value)return
   batchBusy.value=true;batchError.value=''
   try{
     const saved=await api.applyCostBatch(props.storeId,props.period,props.runId,batchFile.value,batchReason.value,batchPreview.value)
@@ -106,12 +108,12 @@ async function applyBatch(){
 }
 const validCents=value=>/^-?\d+(?:\.\d{1,2})?$/.test(String(value||'').trim())
 function editLine(row){
-  if(!row.editable)return
+  if(props.closed || !row.editable)return
   editor.value=row;editorAmount.value=row.manual_amount==null?'':Number(row.manual_amount).toFixed(2)
   editorReason.value=row.manual_reason||'';editorAction.value='save';saveError.value=''
 }
 async function saveLine(){
-  if(!editor.value||!editorReason.value.trim()||(editorAction.value==='save'&&!validCents(editorAmount.value)))return false
+  if(props.closed||!editor.value||!editorReason.value.trim()||(editorAction.value==='save'&&!validCents(editorAmount.value)))return false
   savingLine.value=true;saveError.value=''
   try{
     await api.saveCostLine(props.storeId,props.period,{
@@ -129,13 +131,27 @@ const coverageColumns=[
   {title:'下单日',key:'order_date',width:112},
   {title:'核对说明',key:'brushing_review',minWidth:240,render:row=>row.brushing_review||'商品成本未覆盖，需核对来源成本'},
   {title:'人工补录总成本',key:'manual_amount',width:140,render:row=>row.manual_amount==null?'—':`${Number(row.manual_amount).toFixed(2)} 元`},
-  {title:'操作',key:'action',width:120,render:row=>row.editable?h(NButton,{size:'small',type:'primary',text:true,onClick:()=>editLine(row)},()=>row.manual_amount==null?'添加金额':'修改金额'):'订单归属不唯一'},
+  {title:'操作',key:'action',width:120,render:row=>props.closed?'已结账 · 只读':row.editable?h(NButton,{size:'small',type:'primary',text:true,onClick:()=>editLine(row)},()=>row.manual_amount==null?'添加金额':'修改金额'):'订单归属不唯一'},
 ]
 </script>
 
 <template>
-  <div class="pricing-notice" :class="{passed:thresholdMet || manualDecision}">
-    <div><strong>{{ manualDecision ? '本期成本已由人工确认' : coverageTitle }}</strong><p v-if="manualDecision">原始覆盖率 {{ percentage(coverage.coverage) }}，人工确认金额与原因已和结账记录一起冻结。</p><p v-else-if="thresholdMet">还有 {{ integer(uncoveredOrders) }} 笔订单未覆盖商品成本，当前只计入已识别金额。</p><p v-else>还有 {{ integer(uncoveredOrders) }} 笔订单未覆盖；系统已完成现有资料的计算，人工可确认或修改金额后结账。自动放行还差 {{ integer(needed) }} 笔覆盖。</p>
+  <section class="cost-summary" aria-label="成本覆盖摘要">
+    <div class="cost-summary-heading"><strong>{{ summary.title }}</strong><span v-if="closed" class="cost-scope">已结账 · 只读</span><span v-else-if="lineSummary?.line_posting_pending" class="cost-scope">补录待计入</span></div>
+    <div class="cost-summary-main">
+      <div class="cost-stat"><span>覆盖率</span><b :class="{attention:!summary.known}">{{ summary.percentage }}</b></div>
+      <div class="cost-stat"><span>{{ closed ? '原始缺口' : '订单缺口' }}</span><b :class="{attention:summary.attention}">{{ summary.gapLabel }}</b></div>
+      <n-button class="cost-detail-button" size="small" @click="overview=true">成本详情</n-button>
+    </div>
+    <p>{{ summary.description }}</p>
+  </section>
+  <n-drawer v-model:show="overview" :width="600" :z-index="3950" style="max-width:100vw">
+    <n-drawer-content title="成本覆盖与核算详情" closable>
+      <p class="pricing-help">{{ period }} · {{ summary.title }}。覆盖率说明订单是否有成本依据，不代表全部资料已齐或已满足结账条件。</p>
+      <p v-if="closed && manualDecision" class="pricing-help">已确认金额：商品成本 {{ Number(manualDecision.confirmed?.goods || 0).toFixed(2) }} 元 · 代发 {{ Number(manualDecision.confirmed?.dropship || 0).toFixed(2) }} 元 · 补发 {{ Number(manualDecision.confirmed?.reshipment || 0).toFixed(2) }} 元。确认依据：{{ manualDecision.reason }}</p>
+      <dl class="cost-details"><div><dt>已覆盖 / 应覆盖订单</dt><dd>{{ summary.known ? `${integer(coverage.covered)} / ${integer(coverage.expected)} 笔` : '尚未形成统计范围' }}</dd></div><div><dt>覆盖率</dt><dd>{{ summary.percentage }}</dd></div><div><dt>{{ closed ? '结账时原始缺口' : '原始成本缺口' }}</dt><dd>{{ summary.gapLabel }}</dd></div><div><dt>来源成本待核对</dt><dd>{{ integer(count) }} 条</dd></div></dl>
+      <div class="pricing-notice" :class="{passed:!summary.attention}">
+    <div><strong>{{ manualDecision ? '本期成本已由人工确认' : summary.title }}</strong><p>{{ summary.description }}</p><p v-if="manualDecision">人工确认金额与原因已和结账记录一起保存，原始缺口仍保留供回查。</p><p v-else-if="summary.known && !closed">成本覆盖自动放行参考 {{ percentage(coverage.threshold) }}；{{ thresholdMet ? '覆盖率已达到参考值，但仍需核对其他结账条件。' : `还差 ${integer(needed)} 笔覆盖达到参考值。` }}</p>
       <p v-if="observed && Object.hasOwn(observed,'goods') && !manualDecision" class="pricing-help">来源表成本：商品 {{ Number(observed.goods).toLocaleString('zh-CN',{minimumFractionDigits:2}) }} 元 · 代发 {{ Number(observed.dropship).toLocaleString('zh-CN',{minimumFractionDigits:2}) }} 元 · 补发 {{ Number(observed.reshipment).toLocaleString('zh-CN',{minimumFractionDigits:2}) }} 元<template v-if="lineSummary?.line_count"> · 已人工补录 {{ integer(lineSummary.line_count) }} 笔、{{ Number(lineSummary.line_total).toLocaleString('zh-CN',{minimumFractionDigits:2}) }} 元；本次看板已计入补录 {{ Number(lineSummary.posted_line_total || 0).toLocaleString('zh-CN',{minimumFractionDigits:2}) }} 元</template><template v-if="lineSummary?.line_posting_pending">；最新补录待自动核算，当前看板尚未更新。</template></p>
       <p v-if="coverage.brushing_zero_covered" class="pricing-help">其中 {{ integer(coverage.brushing_zero_covered) }} 笔已按“蓝色旗帜＋by”刷单规则确认商品成本为 0，不需要补成本，也不在缺口清单中。</p>
       <p v-if="progress" aria-live="polite">{{ progress.message }}</p>
@@ -143,19 +159,22 @@ const coverageColumns=[
       <p v-if="calculatedAt" class="pricing-help">最近核算（北京时间）：{{ calculatedAt }}。上方数量属于已保存的核算结果。</p>
       <p v-if="progressError" role="status">{{ progressError }}</p>
     </div>
-    <div class="pricing-actions"><n-button v-if="count || coverageRows" size="small" @click="show = true">查看全部 {{ integer(coverageRows || uncoveredOrders) }} 笔缺口</n-button><n-button v-else size="small" @click="emit('show-quality')">查看成本覆盖</n-button><n-button v-if="!manualDecision" size="small" type="primary" @click="emit('request-manual')">人工确认成本</n-button></div>
-  </div>
-  <n-drawer v-model:show="show" :width="920" style="max-width: 100vw">
-    <n-drawer-content title="未覆盖订单成本" closable>
-      <p class="pricing-help">按本店本月应有商品成本的订单键列出全部缺口。可给唯一对应的子订单补录总成本金额；原始文件与人工修改历史都保留。</p>
-      <div class="coverage-summary"><span>缺口 <b>{{ integer(coverageData.total || coverageRows || uncoveredOrders) }}</b> 笔</span><span>已补录 <b>{{ integer(coverageData.reviewed_count) }}</b> 笔</span><span>人工金额 <b>{{ Number(coverageData.supplement_total || 0).toLocaleString('zh-CN',{minimumFractionDigits:2}) }}</b> 元</span></div>
+      </div>
+      <p v-if="closed" class="pricing-help">仅回查结账时的依据，不需要在此重复补录。若要更正历史账，请按反结账流程处理。</p>
+      <template #footer><div class="pricing-actions"><n-button v-if="count || coverageRows || summary.gaps" @click="openGaps">{{ closed ? '回查原始缺口与来源' : summary.gaps ? '查看缺口与补录记录' : '核对来源成本记录' }}</n-button><n-button v-if="!closed && !manualDecision" @click="requestManual">人工确认成本</n-button><n-button @click="overview=false">关闭</n-button></div></template>
+    </n-drawer-content>
+  </n-drawer>
+  <n-drawer v-model:show="show" :width="920" :z-index="3950" style="max-width: 100vw">
+    <n-drawer-content :title="closed ? '结账时原始成本缺口（只读）' : '订单成本缺口与补录记录'" closable>
+      <p class="pricing-help">{{ closed ? '以下为结账时保留的原始缺口，仅供回查，不代表需要再次补录。' : '按本店本月应有商品成本的订单列出原始缺口；已补录金额与计入情况单独保留，不要重复添加。' }}</p>
+      <div class="coverage-summary"><span>原始缺口 <b>{{ coverageBusy ? '加载中' : integer(coverageData.total ?? summary.gaps) }}</b> 笔</span><span>已补录 <b>{{ coverageBusy ? '—' : integer(coverageData.reviewed_count) }}</b> 笔</span><span>人工金额 <b>{{ coverageBusy ? '—' : Number(coverageData.supplement_total || 0).toLocaleString('zh-CN',{minimumFractionDigits:2}) }}</b> 元</span></div>
       <form class="pricing-search" @submit.prevent="submit">
         <n-input v-model:value="query" clearable placeholder="搜索订单号、子订单号或商品链接" aria-label="搜索未覆盖成本明细" />
         <n-button attr-type="submit" :loading="busy">搜索</n-button>
         <a v-if="count" :href="download" download>导出来源异常行</a>
         <a :href="`/api/runs/${runId}/coverage-gaps.xlsx`" download>导出全部订单缺口（Excel）</a>
       </form>
-      <div class="pricing-batch">
+      <div v-if="!closed && summary.gaps" class="pricing-batch">
         <strong>批量补录成本</strong>
         <p>下载 Excel 模板，只在“人工补录总成本”列填金额后直接保存并上传；订单号和核对列已固定为文本，不会变成科学计数法。旧 CSV 仍可上传。可在这里填写一条统一依据，逐行依据优先。</p>
         <div class="pricing-batch-actions">
@@ -179,10 +198,10 @@ const coverageColumns=[
           <p>子订单 {{ row.sub_order_id || '—' }} · 商品链接 {{ row.product_ids || '—' }} · 数量 {{ row.quantities || '未提供' }}</p>
           <p>人工总成本 {{ row.manual_amount == null ? '尚未补录' : `${Number(row.manual_amount).toFixed(2)} 元` }}</p>
           <p v-if="row.brushing_review" class="pricing-reason">{{ row.brushing_review }}</p>
-          <n-button v-if="row.editable" size="small" @click="editLine(row)">{{ row.manual_amount == null ? '添加金额' : '修改金额' }}</n-button><span v-else class="pricing-reason">此键对应多个订单，需先确认归属</span>
+          <span v-if="closed" class="pricing-reason">已结账 · 只读</span><n-button v-else-if="row.editable" size="small" @click="editLine(row)">{{ row.manual_amount == null ? '添加金额' : '修改金额' }}</n-button><span v-else class="pricing-reason">此键对应多个订单，需先确认归属</span>
         </article>
       </div>
-      <div class="pricing-pages"><span>共 {{ coverageData.matching ?? coverageData.total ?? coverageRows }} 笔</span><n-pagination v-model:page="coveragePage" :item-count="coverageData.matching" :page-size="50" :disabled="coverageBusy" simple /></div>
+      <div class="pricing-pages"><span>{{ coverageBusy ? '正在加载订单记录…' : `共 ${coverageData.matching ?? coverageData.total ?? summary.gaps} 笔` }}</span><n-pagination v-model:page="coveragePage" :item-count="coverageData.matching || 0" :page-size="50" :disabled="coverageBusy" simple /></div>
       <details v-if="count" class="source-gap-details"><summary>查看 {{ integer(count) }} 条来源缺价记录与参考单价</summary>
         <p class="pricing-help">这是聚水潭等来源行的逐条异常；覆盖缺口以完整订单清单为准，来源行不会重复补录金额。</p>
         <div v-if="data.reason_counts?.length" class="pricing-summary" aria-label="未覆盖原因汇总"><span v-for="item in data.reason_counts" :key="item.reason"><b>{{ integer(item.count) }}</b>{{ reasonName(item.reason) }}</span></div>
@@ -203,7 +222,7 @@ const coverageColumns=[
       </details>
     </n-drawer-content>
   </n-drawer>
-  <n-modal :show="!!editor" preset="dialog" title="人工补录订单总成本" positive-text="保存金额" negative-text="取消" :positive-button-props="{disabled: !editorReason.trim() || (editorAction==='save' && !validCents(editorAmount))}" @update:show="!$event && (editor=null)" @positive-click="saveLine">
+  <n-modal :show="!!editor" :z-index="3960" preset="dialog" title="人工补录订单总成本" positive-text="保存金额" negative-text="取消" :positive-button-props="{disabled: !editorReason.trim() || (editorAction==='save' && !validCents(editorAmount))}" @update:show="!$event && (editor=null)" @positive-click="saveLine">
     <p class="small muted">平台订单 {{ editor?.order_id }} · 子订单 {{ editor?.sub_order_id }} · {{ editor?.order_date || `本店${period}账期，原下单日未提供` }}。金额按本子订单所有商品合计填写；没有原下单日时请在依据中说明月份归属。</p>
     <n-input v-if="editorAction==='save'" v-model:value="editorAmount" inputmode="decimal" aria-label="人工总成本金额" placeholder="输入本子订单总成本" />
     <n-alert v-else type="warning" :bordered="false">将撤销此前的人工补录金额。旧记录仍保留。</n-alert>
@@ -214,6 +233,10 @@ const coverageColumns=[
 </template>
 
 <style scoped>
+.cost-summary{padding:16px 0 18px;margin-bottom:16px;border-bottom:1px solid var(--line,#e2e5eb)}
+.cost-summary-heading{display:flex;align-items:center;gap:12px}.cost-summary-heading strong{font-size:14px}.cost-scope{font-size:12px;color:#657184}
+.cost-summary-main{display:flex;gap:32px;align-items:center;margin-top:12px}.cost-stat{display:flex;flex-direction:column;gap:4px}.cost-stat>span{font-size:12px;color:#657184}.cost-stat b{font-size:24px;line-height:1.3;font-variant-numeric:tabular-nums;color:#17623f}.cost-stat b.attention{color:#8a4a0b}.cost-detail-button{margin-left:auto}.cost-summary>p{margin:10px 0 0;font-size:12px;line-height:1.7;color:#657184}
+.cost-details{margin:20px 0}.cost-details>div{display:flex;justify-content:space-between;gap:16px;padding:12px 0;border-bottom:1px solid #e2e5eb}.cost-details dt{color:#657184}.cost-details dd{margin:0;text-align:right;font-variant-numeric:tabular-nums}
 .pricing-batch{border:1px solid #dce6f2;background:#f8fbff;border-radius:8px;padding:14px;margin:12px 0 16px}.pricing-batch>strong{font-size:14px}.pricing-batch>p{font-size:12px;color:#62728b;margin:8px 0}.pricing-batch-actions{display:flex;align-items:center;gap:10px;flex-wrap:wrap}.pricing-batch-actions input[type=file]{max-width:280px;font-size:12px}.pricing-batch .n-alert{margin:10px 0}.pricing-batch .n-alert p{margin:3px 0}
 .pricing-notice { display: flex; align-items: center; gap: 16px; justify-content: space-between; padding: 16px; margin-bottom: 16px; background: #fff8e8; border: 1px solid #f0dcb0; border-radius: 8px; color: #715020; }
 .pricing-notice.passed { background:#edf8f2;border-color:#bee2ce;color:#17623f; }
@@ -236,6 +259,7 @@ const coverageColumns=[
 .pricing-pages { display: flex; justify-content: space-between; align-items: center; margin-top: 16px; color: #657184; }
 .pricing-mobile { display: none; }
 @media (max-width: 600px) {
+  .cost-summary-main{gap:22px}.cost-summary :deep(button),.pricing-actions :deep(button){min-height:44px}.pricing-search{flex-wrap:wrap}.pricing-search :deep(.n-input){flex-basis:100%}.pricing-pages{gap:8px;flex-wrap:wrap}
   .pricing-notice { align-items: flex-start; flex-direction: column; }
   .pricing-desktop { display: none; }
   .pricing-mobile { display: block; }
