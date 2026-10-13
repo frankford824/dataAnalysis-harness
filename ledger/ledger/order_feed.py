@@ -1278,7 +1278,7 @@ class OrderFeed:
         if self._suspect_cost_rows:
             cost_item.notes.append(
                 f"订单台标了 is_suspect 的商品行 {self._suspect_cost_rows:,} 行"
-                "（占位单价或数量写成 2043 的整数倍），件数不可信，成本不计"
+                "（售价占位或其他异常标记，且缺少可验证的数量与身份依据），暂不计成本"
             )
         if self._unpriced_cost_rows:
             cost_item.notes.append(
@@ -1634,6 +1634,9 @@ class OrderFeed:
         unit = pl.col("unit_cost").cast(pl.Float64, strict=False)
         flags = items.select(
             pl.col("order_id", "sub_order_id").cast(pl.Utf8),
+            pl.col('sku_id').cast(pl.String).alias('__current_item_sku'),
+            pl.col('quantity').alias('__current_item_quantity'),
+            (pl.col('unit_price') if 'unit_price' in items.columns else pl.lit(None)).alias('__current_sale_price'),
             (pl.col("order_flag").cast(pl.Utf8) if "order_flag" in items.columns else pl.lit(None, dtype=pl.Utf8).alias("order_flag")),
             (pl.col('__flag_from_upload').fill_null(False) if '__flag_from_upload' in items.columns
              else pl.lit(False)).alias('__flag_from_upload'),
@@ -1650,6 +1653,7 @@ class OrderFeed:
         ).unique(subset=["order_id", "sub_order_id"], keep="first").join(
             orders.select(
                 pl.col("order_id").cast(pl.Utf8),
+                (pl.col('content_hash') if 'content_hash' in orders.columns else pl.lit(None, dtype=pl.String)).alias('__current_order_hash'),
                 pl.col("order_remark").cast(pl.Utf8)
                 if "order_remark" in orders.columns
                 else pl.lit(None, dtype=pl.Utf8).alias("order_remark"),
@@ -1660,10 +1664,11 @@ class OrderFeed:
             flags, on=["order_id", "sub_order_id"], how="left",
         ).with_columns(pl.col("is_gift", "is_suspect").fill_null(False))
         certified = certified.with_columns(pl.coalesce('__member_order_remark', 'order_remark').alias('order_remark'))
-        # 订单台的 is_suspect 是「源数据留着、金额和件数不可信、不进排名和毛利」：
-        # 单价 9999 起的占位价，以及 2026-09-03 起数量是 2043 整数倍的那批。成本 = 单价 × 件数，
-        # 件数不可信成本就不可信，整行不计。
-        suspect = pl.col("is_suspect")
+        # Legacy is_suspect conflates sale-price placeholders with quantity
+        # risk. Only source-bound, identity-matched positive quantity evidence
+        # can waive that flag; no exception to actual price/date guards.
+        from .cost_input_evidence import placeholder_admission
+        suspect = pl.col("is_suspect") & ~placeholder_admission(certified)
         self._suspect_cost_rows = int(certified.select(suspect.sum()).item() or 0)
         if review_pricing:
             certified=certified.with_columns(suspect.alias('__source_pricing_suspect'))
