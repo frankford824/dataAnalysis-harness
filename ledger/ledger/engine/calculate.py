@@ -306,6 +306,14 @@ def evaluate_metric(
         unit = col("unit_cost").cast(pl.Float64, strict=False)
         quantity = col("quantity").cast(pl.Float64, strict=False)
         reference = pl.coalesce(col("reference_unit_cost"), unit).cast(pl.Float64, strict=False)
+        # A producer can supply an evidenced original day even while the
+        # corresponding sales spine is absent locally (e.g. pre-window sales).
+        # Explain that distinction; never use this display hint to admit cost
+        # into the replacement shipment's month or invent an original order.
+        reported_day = (pl.lit(template.id.startswith('order_console_'))
+            & (col('pricing_evidence').cast(pl.String).str.json_path_match('$.cost_input.version') == 'reship-cost-input.v1')
+            & (col('pricing_evidence').cast(pl.String).str.json_path_match('$.order_date') == quoted.dt.strftime('%Y-%m-%d'))
+            & (col('cost_status') == 'priced') & col('cost_source').is_in(ORDER_DAY_COST_SOURCES))
         if not require_historical_pricing:
             wanted = (col("__spine_order_date__").cast(pl.Date, strict=False) if "__spine_order_date__" in frame.columns
                       else pl.when(col("order_type") == "补发订单").then(pl.lit(None, dtype=pl.Date)).otherwise(
@@ -336,6 +344,9 @@ def evaluate_metric(
             .when(col('failure_reason') == 'component_unit_rounding_conflict').then(pl.lit('套餐组件合计与单价乘数量的结果不一致，请核对金额'))
             .when(col('pricing_source_suspect').cast(pl.Boolean).fill_null(False)).then(pl.lit('原订单商品信息待核对'))
             .when(col("pricing_suspect").cast(pl.Boolean).fill_null(False)).then(pl.lit("成本与订单金额差异较大，需核对"))
+            .when(wanted.is_null() & reported_day.fill_null(False)).then(pl.concat_str([
+                pl.lit('订单台已提供原单日期 '), quoted.dt.strftime('%Y-%m-%d'),
+                pl.lit('，但台账未匹配原销售订单明细；请补齐原单资料，不能计入补发月份')]))
             .when(wanted.is_null()).then(pl.lit("原订单日期待核对"))
             .when(~quantity.is_finite().fill_null(False) | (quantity < 0)).then(pl.lit("原订单数量待核对"))
             .when(col("cost_status") == "pending").then(pl.lit("成本明细尚未同步"))
