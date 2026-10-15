@@ -1203,11 +1203,12 @@ def business_export(report, kind):
         columns += [('托管类销售额','managed_sales')]
     if kind in {'teams','people','store_people'}:
         columns += [('销售归属状态','sales_attribution_state')]
+        columns += [('做货成本口径','creator_cost_scope')]
     if kind=='store_people':columns += [('行类型','kind'),('销售口径','sales_scope')]
     if kind in {'teams','people','stores','store_people','breakdown'}:
         columns += [('利润口径','profit_scope'),('兼职分摊说明','labor_scope')]
     display_labels = {
-        'creator_cost': '非托管做货成本',
+        'creator_cost': '非托管已入账做货成本',
         'creator_gross': '非托管创造毛利',
         'creator_profit': '非托管创造利润（未扣兼职）',
         'managed_sales': '托管销售额（利润已含在综合利润中）',
@@ -1229,6 +1230,8 @@ def business_export(report, kind):
     def rows():
         for row in report['rows' if kind == 'breakdown' else kind]:
             item = {label:row.get(key) for label,key in columns}
+            if '做货成本口径' in item:
+                item['做货成本口径']='仅非托管做货归属的已入账成本；不代表完整成本，缺口及主子单依据见利润构成'
             if '利润口径' in item:
                 item['利润口径']=('全店经营利润（含托管）减本店兼职' if kind=='stores' or row.get('kind')=='store' else
                                '综合经营利润（含托管及财务调整，已扣兼职）；与非托管创造利润范围不同，不能用创造利润直接减兼职核对')

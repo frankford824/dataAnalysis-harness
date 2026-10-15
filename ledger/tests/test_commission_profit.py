@@ -246,3 +246,117 @@ def test_profit_composition_api_round_trip(tmp_path):
         'excluded_product_ids': ['222'], 'note': '过期',
     })
     assert stale.status_code == 409
+
+
+def _cost_fixture(tmp_path, *, captured=()):
+    from ledger.storage_integrity import seal
+    ws = Workspace(tmp_path)
+    run = ws.record('s1', '2026-06', {'can_close':True,
+        'cost_line_posting': {'reviews':list(captured)}}, [])
+    registry = Registry(tmp_path)
+    person = registry.person_save({'name':'甲'}, 'tester', '登记')
+    _persist(registry, person['id'], run_id=run, rows={
+        'status':['distribute']*3, 'duty':['produce']*3,
+        'person_id':[person['id']]*3, 'person':['甲']*3,
+        'product_id':['known','missing','free'], 'product_name':['有成本','缺成本','真实零成本'],
+        'share':[.05]*3, 'total_rate':[.05]*3, 'original_base':[45.,38.27,9.],
+        'amount':[2.25,1.91,.45], 'participation_sales':[50.,41.65,10.],
+        'participation_gross':[49.03,41.65,10.], 'participation_profit':[45.,38.27,9.],
+        'spine_row':[1,2,3], 'order_id':['M1','M1','M2'], 'sub_order_id':['S1','S2','S3'],
+    })
+    path=ws.coverage_gaps_path(run)
+    pl.DataFrame([{'coverage_key':'S2','context_sha':'ctx2','order_id':'M1',
+        'sub_order_id':'S2','product_ids':'missing','order_count':1,'product_count':1}]).write_parquet(path)
+    seal(path)
+    return ws, registry, person['id'], run
+
+
+def test_cost_gap_is_not_zero_and_parent_sibling_cost_is_not_borrowed(tmp_path):
+    ws, registry, person, run = _cost_fixture(tmp_path)
+    result=compose(registry,'s1','2026-06',person,run,workspace=ws)
+    products={p['product_id']:p for p in result['products']}
+    assert result['cost_evidence_available'] and result['cost_pending_products']==['missing']
+    assert products['known']['creator_cost']==.97 and not products['known']['cost_pending']
+    assert products['free']['creator_cost']==0 and not products['free']['cost_pending']
+    missing=products['missing']
+    assert missing['creator_cost'] is None and missing['cost'] is None
+    assert missing['booked_creator_cost']==0 and missing['cost_pending_sub_order_ids']==['S2']
+    assert missing['creator_profit']==38.27 and missing['profit']==38.27
+    assert missing['lines'][0]['sub_order_id']=='S2' and missing['lines'][0]['cost_pending']
+    assert not products['known']['lines'][0]['cost_pending']
+    # Financial snapshot, calculation file and payout calculation remain unchanged.
+    assert result['commission_trial']==4.61 and result['included_profit']==92.27
+    with registry.connect() as c:
+        assert c.execute('SELECT count(*) FROM payout_confirmation').fetchone()[0]==0
+
+
+def test_cost_status_uses_captured_context_not_live_cost_edits(tmp_path, monkeypatch):
+    from ledger import cost_lines
+    from ledger.commission_profit import _saved_cost_gaps
+    ws, registry, person, run = _cost_fixture(tmp_path, captured=[{
+        'coverage_key':'S2','context_sha':'other-context','amount':0}])
+    def refuse_live(*args, **kwargs):
+        raise AssertionError('historical composition must not read latest cost decisions')
+    monkeypatch.setattr(cost_lines,'_latest',refuse_live)
+    assert len(_saved_cost_gaps(ws,'s1','2026-06',run))==1
+    decision={'source_run_id':run,'line_reviews':[
+        {'coverage_key':'S2','context_sha':'ctx2','amount':0}]}
+    ws.conn.execute('INSERT INTO manual_finance VALUES (?,?,?,?,?,?,?,?)',
+        (run,'s1','2026-06',json_text({'manual_cost':{'source_run_id':run}}),
+         json_text(decision),'sha','now','test'))
+    ws.conn.commit()
+    result=compose(registry,'s1','2026-06',person,run,workspace=ws)
+    # The original calculation captured a different order context. Even a
+    # later frozen zero must not silently certify that archived product row.
+    assert result['cost_pending_products']==['missing']
+    assert next(p for p in result['products'] if p['product_id']=='missing')['cost_status']=='成本口径待核对'
+    assert _saved_cost_gaps(ws,'another-store','2026-06',run) is None
+
+
+def test_absent_cost_coverage_archive_is_not_claimed_as_verified(tmp_path):
+    ws, registry, person, run = _cost_fixture(tmp_path)
+    ws.coverage_gaps_path(run).unlink()
+    result=compose(registry,'s1','2026-06',person,run,workspace=ws)
+    assert result['cost_evidence_available'] is False
+    assert all(p['cost_status']=='成本覆盖留档不可用' for p in result['products'])
+
+
+def test_explicit_frozen_zero_without_conflicting_capture_stays_zero(tmp_path):
+    ws, registry, person, run = _cost_fixture(tmp_path)
+    decision={'source_run_id':run,'line_reviews':[
+        {'coverage_key':'S2','context_sha':'ctx2','amount':0}]}
+    ws.conn.execute('INSERT INTO manual_finance VALUES (?,?,?,?,?,?,?,?)',
+        (run,'s1','2026-06',json_text({'manual_cost':{'source_run_id':run}}),
+         json_text(decision),'sha','now','test'))
+    ws.conn.commit()
+    result=compose(registry,'s1','2026-06',person,run,workspace=ws)
+    assert result['cost_pending_products']==[]
+    assert next(p for p in result['products'] if p['product_id']=='missing')['creator_cost']==0
+
+
+@pytest.mark.parametrize('booked', [[], [{'coverage_key':'S2','context_sha':'ctx2','amount':1.0}]])
+def test_frozen_supplement_does_not_certify_older_commission_cost(tmp_path, booked):
+    ws, registry, person, run = _cost_fixture(tmp_path, captured=booked)
+    decision={'source_run_id':run,'line_reviews':[
+        {'coverage_key':'S2','context_sha':'ctx2','amount':2.0}]}
+    ws.conn.execute('INSERT INTO manual_finance VALUES (?,?,?,?,?,?,?,?)',
+        (run,'s1','2026-06',json_text({'manual_cost':{'source_run_id':run}}),
+         json_text(decision),'sha','now','test'))
+    ws.conn.commit()
+    result=compose(registry,'s1','2026-06',person,run,workspace=ws)
+    row=next(p for p in result['products'] if p['product_id']=='missing')
+    assert row['cost_status']=='成本口径待核对' and row['creator_cost'] is None
+    assert row['creator_profit']==38.27 and result['commission_trial']==4.61
+
+
+def test_cost_status_api_keeps_booked_amounts_and_previous_profit_contract(tmp_path):
+    ws, registry, person, run = _cost_fixture(tmp_path)
+    app=FastAPI()
+    from ledger.commission_api import install
+    install(app,lambda:ws,_model)
+    found=TestClient(app).get('/api/commission-v2/profit-composition',params={
+        'store_id':'s1','period':'2026-06','person_id':person,'run_id':run}).json()
+    row=next(p for p in found['products'] if p['product_id']=='missing')
+    assert row['cost_pending'] and row['creator_cost'] is None
+    assert row['booked_creator_cost']==0 and row['creator_profit']==38.27
+    assert found['included_profit']==92.27

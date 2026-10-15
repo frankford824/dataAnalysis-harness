@@ -87,3 +87,34 @@ test('long product ids stay exact text in Excel and formulas stay inert', () => 
   assert.ok(csv.includes("'123456789012345678"))
   assert.ok(csv.includes("'=危险公式"))
 })
+
+
+test('missing cost exports blank with child evidence while real zero stays zero', () => {
+  const rows=profitCompositionExportRows({products:[
+    {product_id:'missing',cost_pending:true,cost_status:'成本待核实',creator_cost:0,cost:0,
+      creator_profit:38.27,cost_pending_order_ids:['3315178344080006680'],
+      cost_pending_sub_order_ids:['3315178344080042690']},
+    {product_id:'free',cost_pending:false,cost_status:'核算成本清单无缺口',creator_cost:0,cost:0},
+  ]},[])
+  assert.equal(rows[0].做货成本,null)
+  assert.equal(rows[0].原核算分摊成本,null)
+  assert.equal(rows[0].成本核实状态,'成本待核实')
+  assert.equal(rows[0].成本待核实子单号,'3315178344080042690')
+  assert.equal(rows[0]['非托管创造利润（未扣兼职）'],38.27)
+  assert.match(rows[0].利润口径,/尚未扣除成本缺口/)
+  assert.equal(rows[1].做货成本,0)
+  assert.equal(rows[0].已入账做货成本,0)
+  const csv=profitCompositionCsv({products:[{product_id:'missing',cost_pending:true,
+    cost_pending_sub_order_ids:['3315178344080042690']}]},[])
+  assert.match(csv,/'3315178344080042690/)
+})
+
+
+test('frozen-supplement difference is explicit while booked totals remain reconcilable', () => {
+  const [row]=profitCompositionExportRows({products:[{product_id:'p',cost_pending:true,
+    cost_status:'成本口径待核对',creator_cost:null,booked_creator_cost:12.34,creator_profit:38.27}]})
+  assert.equal(row.做货成本,null)
+  assert.equal(row.已入账做货成本,12.34)
+  assert.equal(row['非托管创造利润（未扣兼职）'],38.27)
+  assert.match(row.利润口径,/不代表冻结补录已反映/)
+})

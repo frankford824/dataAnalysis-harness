@@ -878,7 +878,8 @@ def install(app, workspace, model, model_root: Path | None = None):
         store_name = profit_scope(store_id, period, person_id, run_id)
         duties = commission_reports.store_member_duties(reg(), store_id, period)
         return commission_profit.compose(reg(), store_id, period, person_id, run_id,
-                                         store_name=store_name, duties=duties, include_orders=include_orders, product_id=product_id)
+                                         store_name=store_name, duties=duties, include_orders=include_orders, product_id=product_id,
+                                         workspace=workspace())
 
     @router.post('/profit-exclusions')
     def profit_exclusion_save(change: ProfitExclusionChange, request: Request):

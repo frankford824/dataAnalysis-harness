@@ -44,7 +44,7 @@ export const PROFIT_BASIS_NOTE = '非托管商品销售额、成本、毛利及�
 function csvCell(value, header = '') {
   if (value == null || value === '') return ''
   let text = String(value)
-  if ((header === '宝贝ID' && /^\d{15,}$/.test(text)) || /^[=+@\t\r\n]/.test(text)) text = "'" + text
+  if (((header === '宝贝ID' || header.endsWith('单号')) && /^\d{15,}$/.test(text)) || /^[=+@\t\r\n]/.test(text)) text = "'" + text
   return /[",\n\r]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text
 }
 
@@ -74,27 +74,33 @@ export function profitCompositionExportRows(data, includedIds = []) {
     商品: row.product_name || '',
     宝贝ID: row.product_id || '',
     订单数: row.orders ?? '',
+    成本核实状态: row.cost_status || '成本覆盖留档不可用',
+    成本待核实主单号: (row.cost_pending_order_ids || []).join(';'),
+    成本待核实子单号: (row.cost_pending_sub_order_ids || []).join(';'),
     '商品销售收入（全额）': row.product_sales,
     本人销售额: row.sales,
     销售归属状态: row.sales_pending ? '待确认身份' : '已解析',
     创造业绩归属状态: row.managed ? '托管商品另列' : row.creator_pending ? '待确认身份或商品金额' : '已解析',
     销售身份规则版本: (row.sales_rule_versions || []).join(';'),
-    做货成本: row.creator_cost,
+    做货成本: row.cost_pending ? null : row.creator_cost,
+    已入账做货成本: row.booked_creator_cost ?? row.creator_cost,
     做货毛利: row.creator_gross,
     [PROFIT_BEFORE_LABOR]: row.creator_profit,
-    原核算分摊成本: row.cost,
+    原核算分摊成本: row.cost_pending ? null : row.cost,
     原核算分摊毛利: row.gross,
     '原核算阶梯利润（未扣兼职）': row.profit,
     本人点数: rateLabel(row),
     是否计入阶梯: keep.has(row.product_id) ? '计入' : '剔除',
-    利润口径: PROFIT_BASIS_NOTE + (data.allocation_correction ? `；历史分配更正自核算 ${data.allocation_correction.from_run}，已核实 ${data.allocation_correction.verified_orders} 个主单，另有 ${data.allocation_correction.pending_orders?.length || 0} 个主单保留原分配待复核；已核定实发未改变` : ''),
+    利润口径: PROFIT_BASIS_NOTE + (row.cost_pending ? (row.cost_status === '成本口径待核对'
+      ? '；冻结补录与原提成成本口径待核对；成本空值不代表零，毛利与利润保留原明细已入账金额，不代表冻结补录已反映到原明细'
+      : '；成本待核实，成本空值不代表零；毛利与利润只反映已入账成本，尚未扣除成本缺口；原提成与核定金额未改动') : '') + (data.allocation_correction ? `；历史分配更正自核算 ${data.allocation_correction.from_run}，已核实 ${data.allocation_correction.verified_orders} 个主单，另有 ${data.allocation_correction.pending_orders?.length || 0} 个主单保留原分配待复核；已核定实发未改变` : ''),
   }))
 }
 
 export function profitCompositionCsv(data, includedIds = []) {
-  const headers = ['人员', '店铺', '月份', '核算记录', '核算档案校验值', '做货归属规则指纹', '商品', '宝贝ID', '订单数',
+  const headers = ['人员', '店铺', '月份', '核算记录', '核算档案校验值', '做货归属规则指纹', '商品', '宝贝ID', '订单数', '成本核实状态', '成本待核实主单号', '成本待核实子单号',
     '商品销售收入（全额）', '本人销售额', '销售归属状态', '创造业绩归属状态', '销售身份规则版本',
-    '做货成本', '做货毛利', PROFIT_BEFORE_LABOR,
+    '做货成本', '已入账做货成本', '做货毛利', PROFIT_BEFORE_LABOR,
     '原核算分摊成本', '原核算分摊毛利', '原核算阶梯利润（未扣兼职）',
     '本人点数', '是否计入阶梯', '利润口径']
   const rows = profitCompositionExportRows(data, includedIds)

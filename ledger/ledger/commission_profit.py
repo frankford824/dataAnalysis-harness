@@ -21,7 +21,7 @@ _WANTED = (
     'status', 'person_id', 'person', 'product_id', 'product_name',
     'share', 'total_rate', 'original_base', 'amount',
     'participation_sales', 'participation_gross', 'participation_profit',
-    'spine_row', 'order_id', 'order_at', 'fallback_reason', 'duty', 'managed', 'managed_team_id', 'sales_unassigned',
+    'spine_row', 'order_id', 'sub_order_id', 'order_at', 'fallback_reason', 'duty', 'managed', 'managed_team_id', 'sales_unassigned',
 )
 
 
@@ -185,6 +185,8 @@ def _order_rows(parts):
     aggs = []
     if 'order_id' in parts.columns:
         aggs.append(pl.col('order_id').drop_nulls().first().alias('order_id'))
+    if 'sub_order_id' in parts.columns:
+        aggs.append(pl.col('sub_order_id').drop_nulls().first().alias('sub_order_id'))
     if 'participation_profit' in parts.columns:
         aggs.append(pl.col('participation_profit').sum().alias('profit'))
     if 'creator_profit' in parts.columns:
@@ -198,6 +200,7 @@ def _order_rows(parts):
         pid = row.get('product_id') or ''
         out.setdefault(pid, []).append({
             'order_id': str(row.get('order_id') or row.get('spine_row') or ''),
+            'sub_order_id': str(row.get('sub_order_id') or ''),
             'profit': _money_or_none(row.get('profit')),
             'creator_profit': _money_or_none(row.get('creator_profit')),
             'amount': _money_or_none(row.get('amount')),
@@ -214,7 +217,79 @@ def _sum_profit(products, pred):
     ), Decimal(0)))
 
 
-def compose(registry, store_id, period, person_id, run_id, *, store_name='', duties=None, include_orders=True, product_id=None):
+def _saved_cost_gaps(ws, store_id, period, run_id):
+    """Only the requested run's sealed coverage and captured supplements count."""
+    if ws is None:
+        return None
+    source = ws.conn.execute('SELECT result FROM run WHERE id=? AND store_id=? AND period=?',
+                             (run_id, store_id, period)).fetchone()
+    if source is None:
+        return None
+    from .cost_lines import _source_rows
+    from .workspace import WorkspaceError
+    try:
+        gaps = _source_rows(ws, run_id)
+    except WorkspaceError:
+        return None
+    payload = json.loads(source['result'])
+    captured = (payload.get('cost_line_posting') or {}).get('reviews') or []
+    original = {r['coverage_key']: r for r in captured if r.get('coverage_key')}
+    frozen = ws.conn.execute('SELECT decision_json,result_json FROM manual_finance WHERE run_id=?',
+                             (run_id,)).fetchone()
+    if frozen:
+        decision = json.loads(frozen['decision_json'])
+        manual = json.loads(frozen['result_json']).get('manual_cost')
+        if manual and decision.get('source_run_id') == run_id and manual.get('source_run_id') == run_id:
+            captured = decision.get('line_reviews') or []
+    covered = {r['coverage_key']: r for r in captured if r.get('coverage_key')}
+    pending = []
+    for gap in gaps:
+        saved = covered.get(gap['coverage_key'])
+        if gap.get('order_count') == 1 and saved and saved.get('context_sha') == gap.get('context_sha'):
+            booked = original.get(gap['coverage_key'])
+            if (booked and booked.get('context_sha') == gap.get('context_sha')
+                    and decimal_amount(booked['amount']) == decimal_amount(saved['amount'])):
+                continue
+            if booked is None and decimal_amount(saved['amount']) == 0:
+                continue  # An explicitly frozen zero is different from a missing cost.
+            # A close-time supplement cannot rewrite the archived commission's
+            # per-product cost. Preserve both records and expose the discrepancy.
+            gap = {**gap, 'cost_reason':'冻结补录与原提成明细的成本口径待核对'}
+        pending.append(gap)
+    return pending
+
+
+def _annotate_cost_gaps(products, assigned, gaps):
+    # A parent order's other children's costs never prove this child's cost.
+    by_child = {g['coverage_key']: g for g in gaps or []}
+    pending = {}
+    for r in assigned.select([c for c in ('order_id','sub_order_id','product_id')
+                              if c in assigned.columns]).unique().iter_rows(named=True):
+        child = r.get('sub_order_id') or ''
+        gap = by_child.get(child)
+        if not child:
+            gap = next((g for g in gaps or [] if g.get('order_id') == r.get('order_id')
+                        and g.get('product_count') == 1 and g.get('product_ids') == r.get('product_id')), None)
+        if gap is not None:
+            pending.setdefault(r.get('product_id') or '', {})[gap['coverage_key']] = gap
+    for p in products:
+        missing = list(pending.get(p['product_id'], {}).values())
+        p['cost_pending'] = bool(missing)
+        p['cost_status'] = ('成本口径待核对' if any(g.get('cost_reason') for g in missing)
+                            else '成本待核实' if missing else '核算成本清单无缺口' if gaps is not None
+                            else '成本覆盖留档不可用')
+        p['cost_pending_order_ids'] = sorted({g.get('order_id') or '' for g in missing})
+        p['cost_pending_sub_order_ids'] = sorted({g.get('sub_order_id') or g['coverage_key'] for g in missing})
+        if missing:
+            p['booked_cost'], p['booked_creator_cost'] = p.get('cost'), p.get('creator_cost')
+            p['cost'] = p['creator_cost'] = None
+        for line in p['lines']:
+            line['cost_pending'] = any(
+                line.get('sub_order_id') == g['coverage_key'] if line.get('sub_order_id') else
+                line.get('order_id') == g.get('order_id') for g in missing)
+
+
+def compose(registry, store_id, period, person_id, run_id, *, store_name='', duties=None, include_orders=True, product_id=None, workspace=None):
     """Group one person's allocated output by product for a single store month."""
     if not person_id:
         raise RegistryError('请选择人员')
@@ -235,6 +310,8 @@ def compose(registry, store_id, period, person_id, run_id, *, store_name='', dut
     # Only the independent sales projection becomes zero, not the entire row.
     parts = _allocated_parts(assigned)
     products = _product_rows(parts, include_orders=include_orders)
+    cost_gaps = _saved_cost_gaps(workspace, store_id, period, run_id)
+    _annotate_cost_gaps(products, assigned, cost_gaps)
     person_name = next((row.get('person') for row in assigned.iter_rows(named=True)
                         if row.get('person')), '') or roster.get(person_id, {}).get('name') or person_id
     split = allocated_outputs(assigned, production=True)
@@ -257,6 +334,8 @@ def compose(registry, store_id, period, person_id, run_id, *, store_name='', dut
         'allocated_profit': None if split is None or engine_pid not in split
         else split[engine_pid].get('profit'),
         'products': products,
+        'cost_evidence_available': cost_gaps is not None,
+        'cost_pending_products': [p['product_id'] for p in products if p['cost_pending']],
         'sales_pending_products':[p['product_id'] for p in products if p.get('sales_pending')],
         'creator_pending_products':[p['product_id'] for p in products if p.get('creator_pending') and not p.get('managed')],
         'excluded_product_ids': excluded_ids,

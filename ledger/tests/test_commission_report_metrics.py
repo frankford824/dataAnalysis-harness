@@ -88,3 +88,17 @@ def test_labor_rounding_is_exact_and_uses_the_same_profit_basis(tmp_path):
     assert attributed_labor(c,None,registry)=={}
     c['production_outputs']={a:{'sales_basis':1},b:{'sales_basis':3}}
     assert attributed_labor(c,20,registry)=={a:5,b:15}  # profit can still be unavailable
+
+
+def test_business_export_preserves_profit_scopes_and_names_booked_cost(tmp_path):
+    _, _, _, _, _, client = dashboard(tmp_path)
+    scope={'start':'2026-06','end':'2026-06','store_ids':['s1'],'presentation':True}
+    response=client.post('/api/commission-v2/export/reports/store_people',json=scope)
+    assert response.status_code==200
+    reader=csv.DictReader(io.StringIO(response.text.lstrip('\ufeff')))
+    columns=reader.fieldnames
+    order=['非托管已入账做货成本','非托管创造利润（未扣兼职）',
+           '托管销售额（利润已含在综合利润中）','综合利润（含托管，已扣兼职）',
+           '其中：已扣兼职（含托管）','提成计算基数（按计提规则）']
+    assert [columns.index(key) for key in order]==sorted(columns.index(key) for key in order)
+    assert all('不代表完整成本' in row['做货成本口径'] for row in reader)

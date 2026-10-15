@@ -69,8 +69,10 @@ const columns = computed(() => [
   {title:() => h('div', {class:'profit-col-title'}, [h('span', '本人销售额'), h('small', '按做货归属')]),
     key:'sales', width:112, mobile:false, align:'right',
     render:row => h('span', {title:'仅使用明确生效的商品身份或归档身份；缺少依据时不猜测'}, row.sales_pending?'归属待确认':money(row.sales))},
+  {title:'成本核实', key:'cost_status', width:140, mobileWidth:120,
+    render:row => h('span', {style:row.cost_pending?'color:#a16207':undefined},row.cost_status || '覆盖留档不可用')},
   {title:() => h('div', {class:'profit-col-title'}, [h('span', '做货成本'), h('small', '非托管身份归属')]),
-    key:'creator_cost', width:112, mobile:false, align:'right', render:row => row.creator_pending?'归属待确认':money(row.creator_cost)},
+    key:'creator_cost', width:112, mobile:false, align:'right', render:row => row.cost_pending?'成本待核实':row.creator_pending?'归属待确认':money(row.creator_cost)},
   {title:() => h('div', {class:'profit-col-title'}, [h('span', '做货毛利'), h('small', '非托管身份归属')]),
     key:'creator_gross', width:112, mobile:false, align:'right', render:row => row.creator_pending?'归属待确认':money(row.creator_gross)},
   {title:() => h('div', {class:'profit-col-title'}, [h('span', '非托管创造利润'), h('small', '未扣兼职')]),
@@ -179,9 +181,11 @@ function exportTable() {
       <n-alert v-if="data?.allocation_correction" type="info" :bordered="false">本次为历史分配更正，原核算 {{data.allocation_correction.from_run}} 已保留。全店已核实 {{data.allocation_correction.verified_orders}} 个主单，另有 {{data.allocation_correction.pending_orders?.length || 0}} 个主单仍保留历史分配待复核；原已核定实发未改变。</n-alert>
       <n-alert v-if="data?.sales_pending_products?.length" type="warning" :bordered="false">本店本月有 {{data.sales_pending_products.length}} 个商品的销售归属待确认，请在提成设置中明确生效身份后刷新；当前不计为已确认个人业绩。</n-alert>
       <n-alert v-if="data?.creator_pending_products?.length" type="warning" :bordered="false">本店本月有 {{data.creator_pending_products.length}} 个非托管商品的做货创造业绩缺少完整身份或金额依据；相关创造成本、毛利和利润保持待确认。</n-alert>
+      <n-alert v-if="data?.cost_pending_products?.length" type="warning" :bordered="false">有 {{data.cost_pending_products.length}} 个商品的成本缺少核实依据，或冻结补录与原提成明细仍需核对。成本显示空值或“待核实”，不代表零成本。下方毛利、利润及提成试算仍沿用原明细已入账成本：缺失成本尚未扣除，冻结补录差额不会自动改写原明细。主表及导出的“已入账做货成本”可对照核对，不能当作完整成本；展开订单可核对主单与子单。已算提成、核定及结账金额未改动。</n-alert>
+      <n-alert v-else-if="data?.cost_evidence_available===false" type="info" :bordered="false">本次核算的成本覆盖留档不可用，明细仅表示原核算已入账金额，无法据此确认零成本。</n-alert>
       <n-spin :show="loading">
         <div class="profit-kpis">
-          <div><span>非托管创造利润<small>未扣兼职</small></span><strong>{{creatorTotal==null?'—':`¥${money(creatorTotal)}`}}</strong></div>
+          <div><span>非托管创造利润<small>未扣兼职<template v-if="data?.cost_pending_products?.length"> · 部分成本待核实</template></small></span><strong>{{creatorTotal==null?'—':`¥${money(creatorTotal)}`}}</strong></div>
           <div><span>旧阶梯利润<small>原核算口径，未扣兼职</small></span><strong>¥{{ money(totals.all) }}</strong></div>
           <div class="cut"><span>已剔除 {{ totals.excludedCount }} 个<small>未扣兼职</small></span><strong>¥{{ money(totals.excluded) }}</strong></div>
           <div class="keep"><span>计入阶梯<small>未扣兼职</small></span><strong>¥{{ money(totals.included) }}</strong></div>
@@ -203,8 +207,8 @@ function exportTable() {
         <div v-if="opened" class="profit-orders-panel">
           <div class="spread"><strong>{{ products.find(row => row.product_id === opened)?.product_name || '商品' }} 的订单</strong>
             <button type="button" class="text-button" @click="opened=''">收起</button></div>
-          <div v-for="line in openedOrders" :key="line.order_id" class="profit-order">
-            <span>{{ line.order_id }}</span>
+          <div v-for="line in openedOrders" :key="line.sub_order_id || line.order_id" class="profit-order">
+            <span>主单 {{ line.order_id }}<small v-if="line.sub_order_id" style="display:block">子单 {{ line.sub_order_id }}</small><small v-if="line.cost_pending" style="display:block;color:#a16207">成本待核实 · 当前利润未扣此项缺口</small></span>
             <span class="num">非托管创造利润 ¥{{ money(line.creator_profit) }} · 旧阶梯利润 ¥{{ money(line.profit) }}</span>
           </div>
           <p v-if="ordersLoading" class="muted">正在加载订单…</p>

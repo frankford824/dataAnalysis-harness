@@ -6,7 +6,7 @@ export const COMMISSION_BASE_LABEL = '提成计算基数（按计提规则）'
 
 // Keep scope visible in every header, including horizontally scrolled/mobile tables.
 export const REPORT_METRIC_HEADERS = {
-  creator_cost: ['做货成本', '仅非托管'],
+  creator_cost: ['已入账做货成本', '仅非托管 · 缺口未计入'],
   creator_gross: ['创造毛利', '仅非托管'],
   creator_profit: ['非托管创造利润', '未扣兼职'],
   managed_sales: ['托管销售额', '利润已含在综合利润中'],

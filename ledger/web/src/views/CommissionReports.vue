@@ -368,6 +368,7 @@ const tableColumns=computed(()=>{
   for(const column of list)if(column.key==='managed_sales')Object.assign(column,{width:170,mobileWidth:165,mobile:true,align:'right'})
   for(const column of list)if(column.key==='profit_after_labor'||column.key==='labor_cost')Object.assign(column,{width:165,mobileWidth:160})
   for(const column of list)if(column.key==='creator_profit')Object.assign(column,{width:150,mobileWidth:145})
+  for(const column of list)if(column.key==='creator_cost')Object.assign(column,{width:170})
   for(const column of list)if(column.key==='subject')Object.assign(column,{width:320,minWidth:240,mobileWidth:220})
   if(['teams','people','stores','store_people','breakdown','coverage'].includes(state.reportView))list.push({
     title:'操作',key:'action',width:292,minWidth:220,mobileWidth:176,mobile:true,fixed:'right',mobileFixed:false,
@@ -425,7 +426,7 @@ defineExpose({reload:load})
     </n-alert>
     <p v-if="state.reportView==='stores'" style="color:#64748b;margin:0 0 12px">提成设置人数按所选月份的有效设置统计；已出金额人数只统计已有结算金额的人员。</p>
     <p v-if="state.reportView!=='managed'" class="report-grain-note">系统应发来自核算；实发列只显示人工核定金额，部分核定时仅合计已核定部分，尚未核定显示「—」。核定不代表已付款。点击人员或「核定实发」选择店铺月份；保存范围为该店该月全部提成人员。人员按当前组织归属展示；托管销售按商品规则生效时指定的团队归属，不随调组改变。</p>
-    <p v-if="state.reportView!=='managed'" class="report-grain-note">托管销售额单列查看，其利润已包含在综合利润中，不要重复相加。兼职列是综合利润中已经扣除的金额，请勿再次扣减；筛选人员不会重新分摊费用。</p>
+    <p v-if="state.reportView!=='managed'" class="report-grain-note">托管销售额单列查看，其利润已包含在综合利润中，不要重复相加。做货成本仅显示已入账部分，完整成本及缺口请查看利润构成。兼职列是综合利润中已经扣除的金额，请勿再次扣减；筛选人员不会重新分摊费用。</p>
     <div class="report-tabs-row"><LedgerTabs v-model="state.reportView" :options="kinds" label="汇总方式" @update:model-value="detail=null" /><div class="report-actions"><n-button v-if="state.reportView!=='managed'" type="primary" :disabled="!report || locked || !(report.confirmation_scopes||[]).length" @click="openToolbarPayout">核定实发</n-button><n-button v-if="state.reportView!=='managed'" :disabled="!canSettle" @click="openSettlement">确认员工结算</n-button><n-button :disabled="!report || locked" :loading="downloading" @click="download">导出表格</n-button></div></div>
     <n-alert v-if="report?.sales_pending_scopes?.length" type="warning" :bordered="false">当前有 {{report.sales_pending_scopes.length}} 项人员店铺月份的销售归属待确认，不计为已确认业绩。<a :href="salesAuditUrl" download>导出全部待确认商品清单</a></n-alert>
     <n-alert v-if="report?.creator_pending_scopes?.length" type="warning" :bordered="false">当前有 {{report.creator_pending_scopes.length}} 项人员店铺月份的做货成本、毛利或商品利润缺少完整归属依据；相关创造业绩显示“归属待确认”，请到商品明细核对。</n-alert>
