@@ -874,12 +874,12 @@ def install(app, workspace, model, model_root: Path | None = None):
         return display_names()[store_id]
 
     @router.get('/profit-composition')
-    def profit_composition(store_id: str, period: str, person_id: str, run_id: int, include_orders: bool = True, product_id: str | None = None):
+    def profit_composition(store_id: str, period: str, person_id: str, run_id: int, include_orders: bool = True, product_id: str | None = None, cost_comparison_run_id: int | None = Query(default=None, ge=1)):
         store_name = profit_scope(store_id, period, person_id, run_id)
         duties = commission_reports.store_member_duties(reg(), store_id, period)
         return commission_profit.compose(reg(), store_id, period, person_id, run_id,
                                          store_name=store_name, duties=duties, include_orders=include_orders, product_id=product_id,
-                                         workspace=workspace())
+                                         workspace=workspace(), comparison_run_id=cost_comparison_run_id)
 
     @router.post('/profit-exclusions')
     def profit_exclusion_save(change: ProfitExclusionChange, request: Request):
@@ -894,7 +894,8 @@ def install(app, workspace, model, model_root: Path | None = None):
                 person_id=change.person_id, run_id=change.run_id,
                 source_sha=change.source_sha,
                 excluded_product_ids=change.excluded_product_ids,
-                note=change.note, actor=actor(request)['id'], store_name=store_name)
+                note=change.note, actor=actor(request)['id'], store_name=store_name,
+                workspace=workspace())
 
     @router.get('/payout-confirmations/context')
     def payout_confirmation_context(store_id: str, period: str, run_id: int):

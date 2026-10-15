@@ -259,7 +259,88 @@ def _saved_cost_gaps(ws, store_id, period, run_id):
     return pending
 
 
-def _annotate_cost_gaps(products, assigned, gaps):
+def _cost_comparison(ws, store_id, period, run_id, gaps, comparison_run_id=None):
+    """Compare coverage only; never substitute later amounts into archived output."""
+    result = {'run_id': None, 'checked_run_id': None, 'at': '', 'available': False, 'closed': False,
+              'reason': '当前状态暂无法核实', 'pending': {}, 'covered': set()}
+    if ws is None:
+        return result
+    closed = ws.conn.execute(
+        "SELECT 1 FROM period WHERE store_id=? AND period=? AND state='closed' AND run_id=? "
+        "UNION ALL SELECT 1 FROM manual_finance WHERE store_id=? AND period=? AND run_id=? "
+        "UNION ALL SELECT 1 FROM run_labor WHERE store_id=? AND period=? AND run_id=? LIMIT 1",
+        (store_id, period, run_id) * 3).fetchone()
+    result['closed'] = bool(closed)
+    if not gaps:
+        return result
+    if comparison_run_id is None:
+        latest = ws.latest_run(store_id, period)
+    else:
+        row = ws.conn.execute('SELECT * FROM run WHERE id=? AND store_id=? AND period=?',
+                              (comparison_run_id, store_id, period)).fetchone()
+        if row is None or row['id'] < run_id:
+            raise RegistryError('成本核对试算与本次店铺账期不匹配，请刷新利润构成')
+        latest = dict(row)
+    if latest is None or latest['id'] < run_id:
+        return result
+    result['checked_run_id'] = latest['id']
+    payload = json.loads(latest['result'])
+    if latest['id'] == run_id:
+        if not result['closed'] and latest['evidence_ready'] and not payload.get('source_sync_pending'):
+            result.update(run_id=run_id, at=latest['at'], available=True, reason='',
+                          pending={g['coverage_key']: g for g in gaps})
+        return result
+    result.update(run_id=latest['id'], at=latest['at'])
+    if not latest['evidence_ready'] or payload.get('source_sync_pending'):
+        result['reason'] = '最新试算证据尚未完整留档或仍在同步，当前状态暂无法核实'
+        return result
+    pending = _saved_cost_gaps(ws, store_id, period, latest['id'])
+    if pending is None:
+        result['reason'] = '最新试算成本覆盖留档不可用，当前状态暂无法核实'
+        return result
+    from .storage_integrity import verified
+    path = ws.facts_path(latest['id'])
+    if not verified(path):
+        result['reason'] = '最新试算成本事实留档不可用，当前状态暂无法核实'
+        return result
+    try:
+        facts = pl.scan_parquet(path)
+        required = {'metric_id', 'counted', 'linked', 'link_key', 'order_id', 'contribution'}
+        if not required.issubset(facts.collect_schema().names()):
+            return result
+        children = [g['coverage_key'] for g in gaps if g.get('sub_order_id')]
+        covered = facts.filter(
+            (pl.col('metric_id') == 'goods_cost') & pl.col('counted') & pl.col('linked')
+            & pl.col('contribution').is_finite() & (pl.col('contribution') <= 0)
+            & pl.col('link_key').is_in(children)
+        ).select('link_key', 'order_id').unique().collect()
+    except (OSError, pl.exceptions.PolarsError):
+        return result
+    result.update(available=True, reason='', pending={g['coverage_key']: g for g in pending},
+                  covered={(r['link_key'], r['order_id']) for r in covered.iter_rows(named=True)})
+    return result
+
+
+def _gap_status(gap, comparison):
+    key = gap['coverage_key']
+    if comparison['available']:
+        current = comparison['pending'].get(key)
+        if current and current.get('order_id') == gap.get('order_id'):
+            return '当前成本口径待核对' if current.get('cost_reason') else '当前仍缺成本'
+        if gap.get('sub_order_id') and (key, gap.get('order_id')) in comparison['covered']:
+            return '后续试算已补齐'
+    return '当前状态暂无法核实'
+
+
+def _current_cost_status(states):
+    if len(states) == 1:
+        return next(iter(states))
+    if '后续试算已补齐' in states:
+        return '后续试算部分补齐，仍有成本待核对'
+    return '当前仍有成本待核对'
+
+
+def _annotate_cost_gaps(products, assigned, gaps, comparison):
     # A parent order's other children's costs never prove this child's cost.
     by_child = {g['coverage_key']: g for g in gaps or []}
     pending = {}
@@ -279,17 +360,41 @@ def _annotate_cost_gaps(products, assigned, gaps):
                             else '成本待核实' if missing else '核算成本清单无缺口' if gaps is not None
                             else '成本覆盖留档不可用')
         p['cost_pending_order_ids'] = sorted({g.get('order_id') or '' for g in missing})
-        p['cost_pending_sub_order_ids'] = sorted({g.get('sub_order_id') or g['coverage_key'] for g in missing})
+        p['cost_pending_sub_order_ids'] = sorted({g['sub_order_id'] for g in missing if g.get('sub_order_id')})
+        origin = ('结账时成本口径待核对' if comparison['closed'] else '原核算成本口径待核对') if any(g.get('cost_reason') for g in missing) else (
+            '结账时缺口' if comparison['closed'] else '原核算缺口')
+        p['cost_snapshot_status'] = origin if missing else p['cost_status']
+        p['cost_gap_details'] = [
+            {'order_id': g.get('order_id') or '',
+             'sub_order_id': g.get('sub_order_id') or '', 'coverage_key': g['coverage_key'],
+             'snapshot_status': origin, 'current_status': _gap_status(g, comparison)}
+            for g in sorted(missing, key=lambda g: g['coverage_key'])]
+        states = {g['current_status'] for g in p['cost_gap_details']}
+        p['cost_current_status'] = _current_cost_status(states) if missing else '不涉及原核算缺口'
+        p['cost_status_note'] = ''
         if missing:
+            p['cost_status'] = origin + '；' + p['cost_current_status']
+            version = f"核对试算 {comparison['run_id']}（{comparison['at']}）" if comparison['run_id'] else '尚无可核对的后续试算'
+            detail = '；'.join(f"{status} {sum(g['current_status'] == status for g in p['cost_gap_details'])} 笔" for status in sorted(states))
+            p['cost_status_note'] = (f'{origin} {len(missing)} 笔；{detail}。{version}。'
+                '空值不代表零成本；原核算毛利与利润尚未扣除成本缺口，或存在冻结补录口径差额。'
+                '后续试算仅用于核对状态，不回填原成本、利润、已算提成、核定及结账金额。')
+            if '当前状态暂无法核实' in states:
+                p['cost_status_note'] += comparison['reason'] + '。'
             p['booked_cost'], p['booked_creator_cost'] = p.get('cost'), p.get('creator_cost')
             p['cost'] = p['creator_cost'] = None
         for line in p['lines']:
             line['cost_pending'] = any(
                 line.get('sub_order_id') == g['coverage_key'] if line.get('sub_order_id') else
                 line.get('order_id') == g.get('order_id') for g in missing)
+            matches = [g for g in p['cost_gap_details'] if (
+                line.get('sub_order_id') == g['coverage_key'] if line.get('sub_order_id') else
+                line.get('order_id') == g['order_id'])]
+            line['cost_status'] = '；'.join(sorted({origin + '；' + g['current_status'] for g in matches}))
+            line['cost_status_note'] = p['cost_status_note'] if matches else ''
 
 
-def compose(registry, store_id, period, person_id, run_id, *, store_name='', duties=None, include_orders=True, product_id=None, workspace=None):
+def compose(registry, store_id, period, person_id, run_id, *, store_name='', duties=None, include_orders=True, product_id=None, workspace=None, comparison_run_id=None):
     """Group one person's allocated output by product for a single store month."""
     if not person_id:
         raise RegistryError('请选择人员')
@@ -311,7 +416,8 @@ def compose(registry, store_id, period, person_id, run_id, *, store_name='', dut
     parts = _allocated_parts(assigned)
     products = _product_rows(parts, include_orders=include_orders)
     cost_gaps = _saved_cost_gaps(workspace, store_id, period, run_id)
-    _annotate_cost_gaps(products, assigned, cost_gaps)
+    comparison = _cost_comparison(workspace, store_id, period, run_id, cost_gaps, comparison_run_id)
+    _annotate_cost_gaps(products, assigned, cost_gaps, comparison)
     person_name = next((row.get('person') for row in assigned.iter_rows(named=True)
                         if row.get('person')), '') or roster.get(person_id, {}).get('name') or person_id
     split = allocated_outputs(assigned, production=True)
@@ -335,6 +441,7 @@ def compose(registry, store_id, period, person_id, run_id, *, store_name='', dut
         else split[engine_pid].get('profit'),
         'products': products,
         'cost_evidence_available': cost_gaps is not None,
+        'cost_comparison': {key: comparison[key] for key in ('run_id', 'checked_run_id', 'at', 'available', 'closed', 'reason')},
         'cost_pending_products': [p['product_id'] for p in products if p['cost_pending']],
         'sales_pending_products':[p['product_id'] for p in products if p.get('sales_pending')],
         'creator_pending_products':[p['product_id'] for p in products if p.get('creator_pending') and not p.get('managed')],
@@ -376,10 +483,11 @@ def latest_for_run(registry, store_id, period, run_id):
 
 
 def save(registry, *, store_id, period, person_id, run_id, source_sha,
-         excluded_product_ids, note, actor, store_name=''):
+         excluded_product_ids, note, actor, store_name='', workspace=None):
     if not note.strip():
         raise RegistryError('请写明剔除这些商品的原因')
-    current = compose(registry, store_id, period, person_id, run_id, store_name=store_name)
+    current = compose(registry, store_id, period, person_id, run_id, store_name=store_name,
+                      workspace=workspace)
     if source_sha != current['source_sha']:
         raise RevisionConflict('逐单明细已更新，请刷新后再保存')
     wanted = {row['product_id'] for row in current['products']}

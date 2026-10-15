@@ -4,7 +4,7 @@ import { NButton } from 'naive-ui'
 import { commissionRequest } from './commissionRequest'
 import { useLatest } from './ui/useLatest'
 import LedgerTable from './ui/LedgerTable.vue'
-import { excludedProductIds, liveProfitTotals, matchesProduct, profitCompositionCsv, rateLabel, sameIds } from '../commissionProfit'
+import { COST_STATUS_SCOPE_NOTE, costStatusLabel, costStatusNote, excludedProductIds, liveProfitTotals, matchesProduct, profitCompositionCsv, rateLabel, sameIds } from '../commissionProfit'
 const props = defineProps({target:{type:Object,default:null}})
 const emit = defineEmits(['close', 'saved'])
 const request = useLatest()
@@ -50,6 +50,7 @@ async function openOrders(row) {
   try{
     const context=data.value, product=opened.value
     const params=new URLSearchParams({store_id:context.store_id,period:context.period,person_id:context.person_id,run_id:String(context.run_id),product_id:product,include_orders:'true'})
+    if(context.cost_comparison?.checked_run_id)params.set('cost_comparison_run_id',String(context.cost_comparison.checked_run_id))
     const result=await orderRequest.run(signal=>commissionRequest(`/profit-composition?${params}`,{signal}))
     if(result&&opened.value===product)orderLines.value=result.value.products.find(p=>p.product_id===product)?.lines||[]
   }catch(e){if(ticket===orderSerial)ordersError.value=e.message}finally{if(ticket===orderSerial)ordersLoading.value=false}
@@ -69,10 +70,12 @@ const columns = computed(() => [
   {title:() => h('div', {class:'profit-col-title'}, [h('span', '本人销售额'), h('small', '按做货归属')]),
     key:'sales', width:112, mobile:false, align:'right',
     render:row => h('span', {title:'仅使用明确生效的商品身份或归档身份；缺少依据时不猜测'}, row.sales_pending?'归属待确认':money(row.sales))},
-  {title:'成本核实', key:'cost_status', width:140, mobileWidth:120,
-    render:row => h('span', {style:row.cost_pending?'color:#a16207':undefined},row.cost_status || '覆盖留档不可用')},
+  {title:'原核算成本状态', key:'cost_status', width:164, mobileWidth:140,
+    render:row => h('span', {title:costStatusNote(row), style:row.cost_pending?'color:#a16207':undefined},row.cost_snapshot_status || costStatusLabel(row))},
+  {title:'当前成本状态', key:'cost_current_status', width:180, mobileWidth:160,
+    render:row => h('span', {title:costStatusNote(row), style:row.cost_current_status==='后续试算已补齐'?'color:#15803d':row.cost_pending?'color:#a16207':undefined},row.cost_current_status || '当前状态暂无法核实')},
   {title:() => h('div', {class:'profit-col-title'}, [h('span', '做货成本'), h('small', '非托管身份归属')]),
-    key:'creator_cost', width:112, mobile:false, align:'right', render:row => row.cost_pending?'成本待核实':row.creator_pending?'归属待确认':money(row.creator_cost)},
+    key:'creator_cost', width:112, mobile:false, align:'right', render:row => row.cost_pending?'原核算有缺口':row.creator_pending?'归属待确认':money(row.creator_cost)},
   {title:() => h('div', {class:'profit-col-title'}, [h('span', '做货毛利'), h('small', '非托管身份归属')]),
     key:'creator_gross', width:112, mobile:false, align:'right', render:row => row.creator_pending?'归属待确认':money(row.creator_gross)},
   {title:() => h('div', {class:'profit-col-title'}, [h('span', '非托管创造利润'), h('small', '未扣兼职')]),
@@ -181,15 +184,15 @@ function exportTable() {
       <n-alert v-if="data?.allocation_correction" type="info" :bordered="false">本次为历史分配更正，原核算 {{data.allocation_correction.from_run}} 已保留。全店已核实 {{data.allocation_correction.verified_orders}} 个主单，另有 {{data.allocation_correction.pending_orders?.length || 0}} 个主单仍保留历史分配待复核；原已核定实发未改变。</n-alert>
       <n-alert v-if="data?.sales_pending_products?.length" type="warning" :bordered="false">本店本月有 {{data.sales_pending_products.length}} 个商品的销售归属待确认，请在提成设置中明确生效身份后刷新；当前不计为已确认个人业绩。</n-alert>
       <n-alert v-if="data?.creator_pending_products?.length" type="warning" :bordered="false">本店本月有 {{data.creator_pending_products.length}} 个非托管商品的做货创造业绩缺少完整身份或金额依据；相关创造成本、毛利和利润保持待确认。</n-alert>
-      <n-alert v-if="data?.cost_pending_products?.length" type="warning" :bordered="false">有 {{data.cost_pending_products.length}} 个商品的成本缺少核实依据，或冻结补录与原提成明细仍需核对。成本显示空值或“待核实”，不代表零成本。下方毛利、利润及提成试算仍沿用原明细已入账成本：缺失成本尚未扣除，冻结补录差额不会自动改写原明细。主表及导出的“已入账做货成本”可对照核对，不能当作完整成本；展开订单可核对主单与子单。已算提成、核定及结账金额未改动。</n-alert>
+      <n-alert v-if="data?.cost_pending_products?.length" type="warning" :bordered="false">有 {{data.cost_pending_products.length}} 个商品在原核算中存在成本缺口或冻结补录口径差额。后续补齐只更新状态，原成本、利润及提成金额不回填。<div v-if="data.cost_comparison?.run_id">当前核对试算：{{data.cost_comparison.run_id}}（{{data.cost_comparison.at}}）。</div><div v-else>尚无可核对的后续试算。</div><div v-if="data.cost_comparison && !data.cost_comparison.available">{{data.cost_comparison.reason}}</div><details class="profit-basis-more"><summary>查看状态区别与金额口径</summary>{{COST_STATUS_SCOPE_NOTE}} 原成本空值不代表零，毛利、利润及提成仍沿用原明细；“已入账做货成本”仅供原金额对照。</details></n-alert>
       <n-alert v-else-if="data?.cost_evidence_available===false" type="info" :bordered="false">本次核算的成本覆盖留档不可用，明细仅表示原核算已入账金额，无法据此确认零成本。</n-alert>
       <n-spin :show="loading">
         <div class="profit-kpis">
-          <div><span>非托管创造利润<small>未扣兼职<template v-if="data?.cost_pending_products?.length"> · 部分成本待核实</template></small></span><strong>{{creatorTotal==null?'—':`¥${money(creatorTotal)}`}}</strong></div>
+          <div><span>非托管创造利润<small>未扣兼职<template v-if="data?.cost_pending_products?.length"> · 原核算成本有缺口</template></small></span><strong>{{creatorTotal==null?'—':`¥${money(creatorTotal)}`}}</strong></div>
           <div><span>旧阶梯利润<small>原核算口径，未扣兼职</small></span><strong>¥{{ money(totals.all) }}</strong></div>
           <div class="cut"><span>已剔除 {{ totals.excludedCount }} 个<small>未扣兼职</small></span><strong>¥{{ money(totals.excluded) }}</strong></div>
           <div class="keep"><span>计入阶梯<small>未扣兼职</small></span><strong>¥{{ money(totals.included) }}</strong></div>
-          <div><span>当前提成试算<small>订单试算，未扣兼职</small></span><strong>¥{{ money(data?.commission_trial) }}</strong></div>
+          <div><span>原核算提成试算<small>订单试算，未扣兼职</small></span><strong>¥{{ money(data?.commission_trial) }}</strong></div>
         </div>
         <n-alert v-if="error" type="error" :bordered="false">{{ error }} <n-button text @click="load">重试</n-button></n-alert>
         <div class="profit-toolbar">
@@ -208,7 +211,7 @@ function exportTable() {
           <div class="spread"><strong>{{ products.find(row => row.product_id === opened)?.product_name || '商品' }} 的订单</strong>
             <button type="button" class="text-button" @click="opened=''">收起</button></div>
           <div v-for="line in openedOrders" :key="line.sub_order_id || line.order_id" class="profit-order">
-            <span>主单 {{ line.order_id }}<small v-if="line.sub_order_id" style="display:block">子单 {{ line.sub_order_id }}</small><small v-if="line.cost_pending" style="display:block;color:#a16207">成本待核实 · 当前利润未扣此项缺口</small></span>
+            <span>主单 {{ line.order_id }}<small v-if="line.sub_order_id" style="display:block">子单 {{ line.sub_order_id }}</small><small v-if="line.cost_pending" :title="line.cost_status_note" style="display:block;color:#a16207">{{line.cost_status}} · 原核算利润保留原金额</small></span>
             <span class="num">非托管创造利润 ¥{{ money(line.creator_profit) }} · 旧阶梯利润 ¥{{ money(line.profit) }}</span>
           </div>
           <p v-if="ordersLoading" class="muted">正在加载订单…</p>

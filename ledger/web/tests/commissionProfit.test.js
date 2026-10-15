@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { excludedProductIds, liveProfitTotals, matchesProduct, profitCompositionCsv, profitCompositionExportRows, sameIds } from '../src/commissionProfit.js'
+import { costStatusLabel, costStatusNote, excludedProductIds, liveProfitTotals, matchesProduct, profitCompositionCsv, profitCompositionExportRows, sameIds } from '../src/commissionProfit.js'
 
 const products = [
   {product_id:'a', product_name:'样品A', profit:100.1},
@@ -99,7 +99,7 @@ test('missing cost exports blank with child evidence while real zero stays zero'
   assert.equal(rows[0].做货成本,null)
   assert.equal(rows[0].原核算分摊成本,null)
   assert.equal(rows[0].成本核实状态,'成本待核实')
-  assert.equal(rows[0].成本待核实子单号,'3315178344080042690')
+  assert.equal(rows[0].原核算缺口子单号,'3315178344080042690')
   assert.equal(rows[0]['非托管创造利润（未扣兼职）'],38.27)
   assert.match(rows[0].利润口径,/尚未扣除成本缺口/)
   assert.equal(rows[1].做货成本,0)
@@ -117,4 +117,30 @@ test('frozen-supplement difference is explicit while booked totals remain reconc
   assert.equal(row.已入账做货成本,12.34)
   assert.equal(row['非托管创造利润（未扣兼职）'],38.27)
   assert.match(row.利润口径,/不代表冻结补录已反映/)
+})
+
+test('page and export share historical and current states without replacing archived money', () => {
+  for (const status of ['后续试算已补齐', '当前仍缺成本', '当前状态暂无法核实']) {
+    const row={product_id:'p', cost_pending:true, cost_status:`结账时缺口；${status}`,
+      cost_snapshot_status:'结账时缺口', cost_current_status:status,
+      cost_status_note:`结账时缺口 1 笔；${status} 1 笔。后续试算仅用于核对状态，不回填原成本。`,
+      creator_cost:null, booked_creator_cost:748.97, creator_profit:1123.6,
+      cost_pending_sub_order_ids:['3314017670784156076'],
+      cost_gap_details:[{sub_order_id:'3314017670784156076',current_status:status}]}
+    const data={run_id:748886,cost_comparison:{run_id:760015,at:'2026-10-15T14:25:16+08:00'},products:[row]}
+    const [exported]=profitCompositionExportRows(data)
+    assert.equal(exported.成本核实状态,costStatusLabel(row))
+    assert.equal(exported.成本状态说明,costStatusNote(row))
+    assert.equal(exported.原核算成本状态,'结账时缺口')
+    assert.equal(exported.当前成本状态,status)
+    assert.equal(exported.当前核对试算,760015)
+    assert.equal(exported.做货成本,null)
+    assert.equal(exported.已入账做货成本,748.97)
+    assert.equal(exported['非托管创造利润（未扣兼职）'],1123.6)
+    const csv=profitCompositionCsv(data)
+    assert.match(csv,/'3314017670784156076/)
+    assert.match(csv,/不代表原结账成本、利润和提成已调整/)
+    const field=status==='后续试算已补齐'?'后续试算已补齐子单号':status==='当前仍缺成本'?'当前仍缺成本子单号':'当前状态待核实子单号'
+    assert.equal(exported[field],'3314017670784156076')
+  }
 })

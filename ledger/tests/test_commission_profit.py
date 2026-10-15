@@ -309,7 +309,7 @@ def test_cost_status_uses_captured_context_not_live_cost_edits(tmp_path, monkeyp
     # The original calculation captured a different order context. Even a
     # later frozen zero must not silently certify that archived product row.
     assert result['cost_pending_products']==['missing']
-    assert next(p for p in result['products'] if p['product_id']=='missing')['cost_status']=='成本口径待核对'
+    assert next(p for p in result['products'] if p['product_id']=='missing')['cost_snapshot_status']=='结账时成本口径待核对'
     assert _saved_cost_gaps(ws,'another-store','2026-06',run) is None
 
 
@@ -345,7 +345,7 @@ def test_frozen_supplement_does_not_certify_older_commission_cost(tmp_path, book
     ws.conn.commit()
     result=compose(registry,'s1','2026-06',person,run,workspace=ws)
     row=next(p for p in result['products'] if p['product_id']=='missing')
-    assert row['cost_status']=='成本口径待核对' and row['creator_cost'] is None
+    assert row['cost_snapshot_status']=='结账时成本口径待核对' and row['creator_cost'] is None
     assert row['creator_profit']==38.27 and result['commission_trial']==4.61
 
 
@@ -360,3 +360,141 @@ def test_cost_status_api_keeps_booked_amounts_and_previous_profit_contract(tmp_p
     assert row['cost_pending'] and row['creator_cost'] is None
     assert row['booked_creator_cost']==0 and row['creator_profit']==38.27
     assert found['included_profit']==92.27
+
+
+def _later_cost_run(ws, *, child='S2', parent='M1', missing=False,
+                    evidence_ready=True, syncing=False, sealed=True, amount=-11.3634):
+    from ledger.storage_integrity import seal
+    later = ws.record('s1', '2026-06', {'can_close':True, 'source_sync_pending':syncing}, [],
+                      evidence_ready=evidence_ready)
+    path=ws.coverage_gaps_path(later)
+    pl.DataFrame([{'coverage_key':child,'context_sha':'new-context','order_id':parent,
+        'sub_order_id':child,'product_ids':'missing','order_count':1,'product_count':1}]
+        if missing else [], schema={
+            'coverage_key':pl.String,'context_sha':pl.String,'order_id':pl.String,
+            'sub_order_id':pl.String,'product_ids':pl.String,'order_count':pl.Int64,'product_count':pl.Int64}).write_parquet(path)
+    seal(path)
+    path=ws.facts_path(later)
+    pl.DataFrame({'metric_id':['goods_cost'], 'counted':[True], 'linked':[True],
+                  'link_key':[child], 'order_id':[parent], 'contribution':[amount]}).write_parquet(path)
+    if sealed:
+        seal(path)
+    return later
+
+
+@pytest.mark.parametrize('amount', [-11.3634, 0.0])
+def test_closed_gap_can_be_filled_later_without_changing_any_frozen_money(tmp_path, amount):
+    ws, registry, person, run = _cost_fixture(tmp_path)
+    ws.conn.execute("UPDATE period SET state='closed',run_id=? WHERE store_id='s1'", (run,))
+    ws.conn.commit()
+    before=compose(registry,'s1','2026-06',person,run,workspace=ws)
+    with registry.connect() as conn:
+        calc=dict(conn.execute('SELECT * FROM calculation').fetchone())
+    frozen=ws.conn.execute('SELECT result FROM run WHERE id=?',(run,)).fetchone()[0]
+    later=_later_cost_run(ws, amount=amount)
+    after=compose(registry,'s1','2026-06',person,run,workspace=ws)
+    row=next(p for p in after['products'] if p['product_id']=='missing')
+    assert row['cost_snapshot_status']=='结账时缺口'
+    assert row['cost_current_status']=='后续试算已补齐'
+    assert row['cost_gap_details'][0]['sub_order_id']=='S2'
+    assert row['lines'][0]['cost_status']=='结账时缺口；后续试算已补齐'
+    assert after['cost_comparison']['run_id']==later
+    # Resolving a status does not fill the archived cost or change any other monetary field.
+    assert row['creator_cost'] is None and row['booked_creator_cost']==0
+    for name in ('commission_trial','included_profit','excluded_profit','source_sha','calculation_sha'):
+        assert after[name]==before[name]
+    for left,right in zip(before['products'],after['products']):
+        for name in ('creator_cost','booked_creator_cost','creator_profit','cost','profit','gross','sales'):
+            assert left.get(name)==right.get(name)
+    assert ws.conn.execute('SELECT result FROM run WHERE id=?',(run,)).fetchone()[0]==frozen
+    with registry.connect() as conn:
+        assert dict(conn.execute('SELECT * FROM calculation').fetchone())==calc
+        assert conn.execute('SELECT count(*) FROM payout_confirmation').fetchone()[0]==0
+
+
+@pytest.mark.parametrize('kwargs, expected', [
+    ({'missing':True}, '当前仍缺成本'),
+    ({'child':'S1'}, '当前状态暂无法核实'),  # A sibling is not evidence for S2.
+    ({'parent':'OTHER'}, '当前状态暂无法核实'),
+    ({'evidence_ready':False}, '当前状态暂无法核实'),
+    ({'syncing':True}, '当前状态暂无法核实'),
+    ({'sealed':False}, '当前状态暂无法核实'),
+    ({'amount':float('nan')}, '当前状态暂无法核实'),
+    ({'amount':1.0}, '当前状态暂无法核实'),
+])
+def test_current_status_requires_exact_complete_latest_trial_evidence(tmp_path, kwargs, expected):
+    ws, registry, person, run = _cost_fixture(tmp_path)
+    _later_cost_run(ws, **kwargs)
+    result=compose(registry,'s1','2026-06',person,run,workspace=ws)
+    row=next(p for p in result['products'] if p['product_id']=='missing')
+    assert row['cost_current_status']==expected
+    assert row['cost_gap_details'][0]['current_status']==expected
+
+
+def test_no_later_trial_does_not_claim_closed_gap_is_still_missing_today(tmp_path):
+    ws, registry, person, run = _cost_fixture(tmp_path)
+    current=compose(registry,'s1','2026-06',person,run,workspace=ws)
+    assert next(p for p in current['products'] if p['product_id']=='missing')['cost_current_status']=='当前仍缺成本'
+    ws.conn.execute("UPDATE period SET state='closed',run_id=? WHERE store_id='s1'", (run,))
+    ws.conn.commit()
+    closed=compose(registry,'s1','2026-06',person,run,workspace=ws)
+    assert next(p for p in closed['products'] if p['product_id']=='missing')['cost_current_status']=='当前状态暂无法核实'
+
+
+def test_newest_incomplete_trial_does_not_reuse_an_older_resolved_status(tmp_path):
+    ws, registry, person, run = _cost_fixture(tmp_path)
+    _later_cost_run(ws)
+    newest=_later_cost_run(ws, evidence_ready=False)
+    result=compose(registry,'s1','2026-06',person,run,workspace=ws)
+    assert result['cost_comparison']['run_id']==newest
+    assert next(p for p in result['products'] if p['product_id']=='missing')['cost_current_status']=='当前状态暂无法核实'
+
+
+def test_save_and_summary_keep_the_same_cost_status_as_order_detail(tmp_path):
+    ws, registry, person, run = _cost_fixture(tmp_path)
+    _later_cost_run(ws)
+    params=dict(registry=registry,store_id='s1',period='2026-06',person_id=person,run_id=run,workspace=ws)
+    detail=compose(**params)
+    summary=compose(**params,include_orders=False)
+    saved=save(**params,source_sha=detail['source_sha'],excluded_product_ids=['free'],
+               note='样品不计入阶梯',actor='test')
+    row=lambda data:next(p for p in data['products'] if p['product_id']=='missing')
+    for current in (summary,saved):
+        for key in ('cost_status','cost_status_note','cost_current_status','cost_snapshot_status','cost_gap_details'):
+            assert row(current)[key]==row(detail)[key]
+
+
+def test_one_product_can_have_both_restored_and_still_missing_children():
+    from ledger.commission_profit import _annotate_cost_gaps
+    products=[{'product_id':'p','cost':0,'creator_cost':0,'lines':[
+        {'order_id':'M','sub_order_id':'S1'},{'order_id':'M','sub_order_id':'S2'}]}]
+    assigned=pl.DataFrame({'product_id':['p','p'],'order_id':['M','M'],'sub_order_id':['S1','S2']})
+    gaps=[{'coverage_key':child,'sub_order_id':child,'order_id':'M'} for child in ('S1','S2')]
+    _annotate_cost_gaps(products,assigned,gaps,{'closed':True,'available':True,'run_id':22,'at':'now',
+        'pending':{'S2':gaps[1]},'covered':{('S1','M')},'reason':''})
+    row=products[0]
+    assert row['cost_current_status']=='后续试算部分补齐，仍有成本待核对'
+    assert [line['cost_status'] for line in row['lines']]==[
+        '结账时缺口；后续试算已补齐','结账时缺口；当前仍缺成本']
+    assert row['creator_cost'] is None and row['booked_creator_cost']==0
+
+
+def test_lazy_order_api_pins_the_summary_comparison_even_when_a_new_trial_arrives(tmp_path):
+    ws, registry, person, run = _cost_fixture(tmp_path)
+    later=_later_cost_run(ws)
+    app=FastAPI()
+    from ledger.commission_api import install
+    install(app,lambda:ws,_model)
+    client=TestClient(app)
+    params={'store_id':'s1','period':'2026-06','person_id':person,'run_id':run,'include_orders':False}
+    url='/api/commission-v2/profit-composition'
+    summary=client.get(url,params=params).json()
+    assert summary['cost_comparison']['checked_run_id']==later
+    _later_cost_run(ws,missing=True)
+    detail=client.get(url,params={**params,'include_orders':True,'product_id':'missing',
+        'cost_comparison_run_id':later}).json()
+    assert detail['products'][0]['cost_current_status']=='后续试算已补齐'
+    fresh=client.get(url,params={**params,'product_id':'missing'}).json()
+    assert fresh['products'][0]['cost_current_status']=='当前仍缺成本'
+    wrong=ws.record('other','2026-06',{'can_close':True},[])
+    assert client.get(url,params={**params,'cost_comparison_run_id':wrong}).status_code==400
