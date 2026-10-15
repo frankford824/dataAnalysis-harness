@@ -220,8 +220,8 @@ def test_closed_report_and_pending_export_share_sales_resolution(tmp_path):
     csv_rows=list(csv.DictReader(io.StringIO(exported.text.lstrip('\ufeff'))))
     producer=next(row for row in csv_rows if row['分配人']=='甲')
     cut=next(row for row in csv_rows if row['分配人']=='乙')
-    assert producer['做货创造毛利']=='10237.81' and producer['做货创造利润']=='6059.18'
-    assert cut['做货创造毛利']=='0.0' and cut['做货创造利润']=='0.0'
+    assert producer['非托管创造毛利']=='10237.81' and producer['非托管创造利润（未扣兼职）']=='6059.18'
+    assert cut['非托管创造毛利']=='0.0' and cut['非托管创造利润（未扣兼职）']=='0.0'
     assert producer['核算记录']==cut['核算记录']=='1'
     assert producer['做货规则指纹']==cut['做货规则指纹']==rows[a]['creator_rule_revision']
     assert ws.state('s1','2026-06').run_id==1

@@ -3,6 +3,7 @@ import { computed, h, ref, watch } from 'vue'
 import { commissionRequest } from './commissionRequest'
 import { useLatest } from './ui/useLatest'
 import LedgerTable from './ui/LedgerTable.vue'
+import { COMMISSION_BASE_LABEL } from '../commissionReportMetrics'
 const props=defineProps({target:{type:Object,default:null}})
 const emit=defineEmits(['close'])
 const request=useLatest(),current=ref(null),data=ref(null),loading=ref(false),error=ref(''),page=ref(1),downloading=ref(false)
@@ -13,7 +14,7 @@ const columns=computed(()=>[
   ...(['stores', 'teams'].includes(current.value?.kind)?[{title:'人员',key:'person',minWidth:120,mobileWidth:100}]:[]),
   {title:'店铺',key:'store',minWidth:180,mobileWidth:130},
   {title:'月份',key:'period',width:90,mobileWidth:75},
-  ...(current.value?.kind==='store_people'?[{title:'本人参与基数',key:'base',width:110,mobileWidth:95,align:'right',render:row=>money(row.base)}]:[]),
+  ...(current.value?.kind==='store_people'?[{title:()=>h('div',{style:'white-space:normal',title:COMMISSION_BASE_LABEL},['提成计算基数',h('small',{style:'display:block;color:#64748b'},'按计提规则')]),key:'base',width:145,mobileWidth:140,align:'right',render:row=>money(row.base)}]:[]),
   {title:'系统应发',key:'trial_amount',width:105,mobileWidth:90,align:'right',render:row=>h('span',{style:'color:#64748b'},money(row.trial_amount))},
   {title:'参考提成金额',key:'amount',width:115,mobileWidth:95,align:'right',render:row=>money(row.amount)},
   {title:'已核定实发',key:'confirmed_amount',width:115,mobileWidth:95,align:'right',render:row=>money(row.confirmed_amount)},
@@ -62,6 +63,7 @@ async function download(){
 <template>
   <n-drawer :show="!!target" :width="'min(560px,100vw)'" @update:show="!$event&&emit('close')"><n-drawer-content :title="`${current?.name || ''}的提成`" closable :native-scrollbar="false">
     <p class="detail-scope">{{current?.selection.start}} 至 {{current?.selection.end}}</p>
+    <p v-if="current?.kind==='store_people'" class="detail-scope">提成计算基数按原核算的利润或毛利、关系有效期及亏损规则确定，不等同于做货创造利润或综合利润。</p>
     <div class="detail-total"><span>所选月份合计</span><strong>¥{{money(data?.total)}}</strong></div>
     <n-alert v-if="error" type="error" :bordered="false">{{error}} <n-button text @click="load">重试</n-button></n-alert>
     <n-alert v-if="mismatch" type="warning" :bordered="false">明细与列表金额不一致，请关闭后刷新列表。</n-alert>

@@ -1206,12 +1206,32 @@ def business_export(report, kind):
     if kind=='store_people':columns += [('行类型','kind'),('销售口径','sales_scope')]
     if kind in {'teams','people','stores','store_people','breakdown'}:
         columns += [('利润口径','profit_scope'),('兼职分摊说明','labor_scope')]
+    display_labels = {
+        'creator_cost': '非托管做货成本',
+        'creator_gross': '非托管创造毛利',
+        'creator_profit': '非托管创造利润（未扣兼职）',
+        'managed_sales': '托管销售额（利润已含在综合利润中）',
+        'profit_after_labor': '综合利润（含托管，已扣兼职）',
+        'labor_cost': '其中：已扣兼职（含托管）',
+        'base': '提成计算基数（按计提规则）',
+    }
+    columns = [(display_labels.get(key, label), key) for label, key in columns]
+    # Keep the non-managed output, inclusive accounting and commission blocks
+    # in the same order as the report. Labor is an already-deducted subset.
+    identities = ('team', 'person', 'employee_no', 'store', 'period', 'finance_run', 'creator_rule_revision')
+    metrics = ('sales', 'creator_cost', 'creator_gross', 'creator_profit', 'managed_sales',
+               'profit_after_labor', 'labor_cost', 'base', 'trial_amount', 'amount',
+               'confirmed_amount', 'diff_amount')
+    ordered = {key: label for label, key in columns}
+    columns = [(label, key) for label, key in columns if key in identities] + [
+        (ordered[key], key) for key in metrics if key in ordered] + [
+        (label, key) for label, key in columns if key not in identities and key not in metrics]
     def rows():
         for row in report['rows' if kind == 'breakdown' else kind]:
             item = {label:row.get(key) for label,key in columns}
             if '利润口径' in item:
                 item['利润口径']=('全店经营利润（含托管）减本店兼职' if kind=='stores' or row.get('kind')=='store' else
-                               '原财务分摊利润（含托管及调整），已经扣兼职；不等同非托管做货创造利润')
+                               '综合经营利润（含托管及财务调整，已扣兼职）；与非托管创造利润范围不同，不能用创造利润直接减兼职核对')
                 item['兼职分摊说明']='沿用原利润扣减的销售基数（含托管）；仅展示已扣金额，不再次扣减；筛选不重分摊'
             if '销售口径' in item:
                 item['销售口径']={'person':'非托管商品创造业绩按做货身份归属；提成与原核算另列','managed':'托管销售额；不计入个人非托管销售','store':'全店财务销售额（含托管）；个人创造列不作店铺合计','unassigned':'尚未分配到人员'}.get(row.get('kind'),'')

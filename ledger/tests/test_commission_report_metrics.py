@@ -60,8 +60,8 @@ def test_person_managed_labor_and_net_profit_align_with_export_and_filters(tmp_p
         assert response.status_code==200,response.text
         exported=list(csv.DictReader(io.StringIO(response.text.lstrip('\ufeff'))))
         first=next(r for r in exported if r['分配人']=='做货甲')
-        assert Decimal(first['托管类销售额'])==100 and Decimal(first['兼职额'])==20
-        assert Decimal(first['利润额（扣兼职）' if presentation else '利润额'])==80
+        assert Decimal(first['托管销售额（利润已含在综合利润中）' if presentation else '托管类销售额'])==100 and Decimal(first['其中：已扣兼职（含托管）' if presentation else '兼职额'])==20
+        assert Decimal(first['综合利润（含托管，已扣兼职）' if presentation else '利润额'])==80
     grouped=client.post('/api/commission-v2/reports/query',json={**selection,'view':'people'}).json()
     assert next(r for r in grouped['items'] if r['person_id']==a)['managed_sales']==100
     # Reads and exports do not create payouts or rewrite the source calculation.

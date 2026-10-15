@@ -73,7 +73,7 @@ const columns = computed(() => [
     key:'creator_cost', width:112, mobile:false, align:'right', render:row => row.creator_pending?'归属待确认':money(row.creator_cost)},
   {title:() => h('div', {class:'profit-col-title'}, [h('span', '做货毛利'), h('small', '非托管身份归属')]),
     key:'creator_gross', width:112, mobile:false, align:'right', render:row => row.creator_pending?'归属待确认':money(row.creator_gross)},
-  {title:() => h('div', {class:'profit-col-title'}, [h('span', '做货创造利润'), h('small', '未扣店级兼职')]),
+  {title:() => h('div', {class:'profit-col-title'}, [h('span', '非托管创造利润'), h('small', '未扣兼职')]),
     key:'creator_profit', width:132, mobileWidth:118, align:'right',
     render:row => h('span', {class:['table-money', row.creator_profit < 0 ? 'negative' : ''],
       title:'非托管商品经营利润按做货身份归属；提成沿用原核算点数'},
@@ -181,7 +181,7 @@ function exportTable() {
       <n-alert v-if="data?.creator_pending_products?.length" type="warning" :bordered="false">本店本月有 {{data.creator_pending_products.length}} 个非托管商品的做货创造业绩缺少完整身份或金额依据；相关创造成本、毛利和利润保持待确认。</n-alert>
       <n-spin :show="loading">
         <div class="profit-kpis">
-          <div><span>做货创造利润<small>非托管商品，未扣兼职</small></span><strong>{{creatorTotal==null?'—':`¥${money(creatorTotal)}`}}</strong></div>
+          <div><span>非托管创造利润<small>未扣兼职</small></span><strong>{{creatorTotal==null?'—':`¥${money(creatorTotal)}`}}</strong></div>
           <div><span>旧阶梯利润<small>原核算口径，未扣兼职</small></span><strong>¥{{ money(totals.all) }}</strong></div>
           <div class="cut"><span>已剔除 {{ totals.excludedCount }} 个<small>未扣兼职</small></span><strong>¥{{ money(totals.excluded) }}</strong></div>
           <div class="keep"><span>计入阶梯<small>未扣兼职</small></span><strong>¥{{ money(totals.included) }}</strong></div>
@@ -205,7 +205,7 @@ function exportTable() {
             <button type="button" class="text-button" @click="opened=''">收起</button></div>
           <div v-for="line in openedOrders" :key="line.order_id" class="profit-order">
             <span>{{ line.order_id }}</span>
-            <span class="num">做货创造利润 ¥{{ money(line.creator_profit) }} · 旧阶梯利润 ¥{{ money(line.profit) }}</span>
+            <span class="num">非托管创造利润 ¥{{ money(line.creator_profit) }} · 旧阶梯利润 ¥{{ money(line.profit) }}</span>
           </div>
           <p v-if="ordersLoading" class="muted">正在加载订单…</p>
           <p v-else-if="ordersError" role="alert">{{ ordersError }}</p>

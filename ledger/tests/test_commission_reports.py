@@ -409,7 +409,7 @@ def test_store_person_composition_shows_store_amounts_once_and_filters_people(tm
     assert export.status_code == 200, export.text
     export_rows = list(csv.DictReader(io.StringIO(export.text.lstrip('\ufeff'))))
     assert [r['销售额'] for r in export_rows] == ['1000', '700.0', '300.0']
-    assert all(r['做货创造利润'] == '' for r in export_rows)
+    assert all(r['非托管创造利润（未扣兼职）'] == '' for r in export_rows)
     assert [r['参考提成金额'] for r in export_rows] == ['', '12.34', '3.21']
     assert [r['已核定实发'] for r in export_rows] == ['', '', '']
 
@@ -468,9 +468,9 @@ def test_store_person_profit_after_labor_keeps_full_participation_and_export(tmp
     })
     assert export.status_code == 200, export.text
     exported = list(csv.DictReader(io.StringIO(export.text.lstrip('\ufeff'))))
-    assert [r['利润额（扣兼职）'] for r in exported] == ['150.0', '90.0', '60.0']
-    assert all(r['做货创造利润'] == '' for r in exported)
-    assert [r['兼职额'] for r in exported] == ['50.0', '30.0', '20.0']
+    assert [r['综合利润（含托管，已扣兼职）'] for r in exported] == ['150.0', '90.0', '60.0']
+    assert all(r['非托管创造利润（未扣兼职）'] == '' for r in exported)
+    assert [r['其中：已扣兼职（含托管）'] for r in exported] == ['50.0', '30.0', '20.0']
     raw_export = client.post('/api/commission-v2/export/reports/store_people', json=scope)
     assert raw_export.status_code == 200
     raw_rows = list(csv.DictReader(io.StringIO(raw_export.text.lstrip('\ufeff'))))

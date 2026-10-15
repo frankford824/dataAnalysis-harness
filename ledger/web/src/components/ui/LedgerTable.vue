@@ -10,7 +10,7 @@ onMounted(()=>{observer=new ResizeObserver(measure);observer.observe(host.value)
 onUnmounted(()=>{observer?.disconnect();window.removeEventListener('resize',measure)})
 watch(()=>[props.rows,props.loading],()=>nextTick(measure))
 const height=computed(()=>Math.min(Number(props.maxHeight)||520,availableHeight.value))
-const visibleColumns=computed(()=>props.columns.filter(c=>width.value>=640||c.mobile!==false).map(c=>({...c,width:width.value<640?(c.mobileWidth??c.width):c.width,minWidth:width.value<640?undefined:c.minWidth})))
+const visibleColumns=computed(()=>props.columns.filter(c=>width.value>=640||c.mobile!==false).map(c=>({...c,width:width.value<640?(c.mobileWidth??c.width):c.width,minWidth:width.value<640?undefined:c.minWidth,fixed:width.value<640&&c.mobileFixed===false?undefined:c.fixed})))
 const scrollWidth=computed(()=>visibleColumns.value.reduce((n,c)=>n+(Number(c.width)||Number(c.minWidth)||120),0))
 </script>
 <template><div ref="host" class="ledger-data-table"><NDataTable :columns="visibleColumns" :data="rows" :row-key="rowKey" :loading="loading" :checked-row-keys="checkedKeys" :max-height="height" :scroll-x="scrollWidth" :bordered="false" :single-line="true" :striped="false" size="medium" @update:checked-row-keys="$emit('update:checkedKeys',$event)"><template #empty><NEmpty :description="empty" size="small"/></template></NDataTable></div></template>

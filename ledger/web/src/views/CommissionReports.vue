@@ -11,7 +11,7 @@ import { commissionRequest } from '../components/commissionRequest'
 import { sameSettlementScope, settlementDifference as compareSettlement } from '../components/commissionSettlement'
 import { reportRowActions } from '../commissionRowActions'
 import { dutyLabel, dutyTagType } from '../storeMembers'
-import { AFTER_LABOR_LABEL, reportMetricText, storeLaborFor } from '../commissionReportMetrics'
+import { AFTER_LABOR_LABEL, CREATOR_PROFIT_LABEL, LABOR_LABEL, REPORT_METRIC_HEADERS, reportMetricText, storeLaborFor } from '../commissionReportMetrics'
 const state = useCommission()
 const page = ref(1), downloading = ref(false), downloadError = ref(''), detail = ref(null)
 const settlements = ref([]), settlementLoading = ref(false), settlementOpen = ref(false)
@@ -70,12 +70,12 @@ function explanation(row) {
 }
 const columns = computed(() => ({
   managed:[['subject','托管团队 → 人员 → 商品'],['store','店铺'],['period','月份'],['sales','托管销售额'],['managed_cost','托管商品做货成本'],['gross','托管毛利额'],['profit_after_labor','托管利润（分摊后）'],['trial_amount','托管系统应发'],['status','口径 / 状态']],
-  teams:[['team','团队 / 团队长'],['sales','团队销售额'],['creator_gross','做货创造毛利'],['creator_profit','做货创造利润'],['managed_sales','托管类销售额'],['labor_cost','兼职额'],['profit_after_labor',AFTER_LABOR_LABEL],['trial_amount','系统应发'],['amount','实发提成'],['diff_amount','调整差额'],['members_count','团队人数'],['stores','涉及店铺'],['periods','月份'],['status','状态']],
-  people:[['person','人员'],['team','所属团队'],['employee_no','工号'],['sales','个人销售额'],['creator_gross','做货创造毛利'],['creator_profit','做货创造利润'],['managed_sales','托管类销售额'],['labor_cost','兼职额'],['profit_after_labor',AFTER_LABOR_LABEL],['trial_amount','系统应发'],['amount','实发提成'],['diff_amount','调整差额'],['stores','店铺'],['periods','月份'],['status','状态']],
-  store_people:[['store','店铺'],['person','分配人'],['team','所属团队'],['period','月份'],['sales','销售额'],['creator_cost','做货成本'],['creator_gross','做货创造毛利'],['creator_profit','做货创造利润'],['managed_sales','托管类销售额'],
-    ['labor_cost','兼职额'],['profit_after_labor',AFTER_LABOR_LABEL],['trial_amount','系统应发'],['amount','实发提成'],['diff_amount','调整差额'],['status','状态']],
-  stores:[['store','店铺'],['managed_sales','托管类销售额'],['amount','提成金额'],['labor_cost','兼职分摊'],['profit_after_labor',AFTER_LABOR_LABEL],['configured_people','提成设置人数'],['people','已出金额人数'],['periods','已有金额'],['missing','未出金额'],['status','状态']],
-  breakdown:[['person','人员'],['team','所属团队'],['store','店铺'],['period','月份'],['managed_sales','托管类销售额'],['labor_cost','兼职额'],['profit_after_labor',AFTER_LABOR_LABEL],['trial_amount','系统应发'],['amount','实发提成'],['diff_amount','调整差额'],['status','状态']],
+  teams:[['team','团队 / 团队长'],['sales','团队销售额'],['creator_gross','做货创造毛利'],['creator_profit',CREATOR_PROFIT_LABEL],['managed_sales','托管类销售额'],['profit_after_labor',AFTER_LABOR_LABEL],['labor_cost',LABOR_LABEL],['trial_amount','系统应发'],['amount','实发提成'],['diff_amount','调整差额'],['members_count','团队人数'],['stores','涉及店铺'],['periods','月份'],['status','状态']],
+  people:[['person','人员'],['team','所属团队'],['employee_no','工号'],['sales','个人销售额'],['creator_gross','做货创造毛利'],['creator_profit',CREATOR_PROFIT_LABEL],['managed_sales','托管类销售额'],['profit_after_labor',AFTER_LABOR_LABEL],['labor_cost',LABOR_LABEL],['trial_amount','系统应发'],['amount','实发提成'],['diff_amount','调整差额'],['stores','店铺'],['periods','月份'],['status','状态']],
+  store_people:[['store','店铺'],['person','分配人'],['team','所属团队'],['period','月份'],['sales','销售额'],['creator_cost','做货成本'],['creator_gross','做货创造毛利'],['creator_profit',CREATOR_PROFIT_LABEL],['managed_sales','托管类销售额'],
+    ['profit_after_labor',AFTER_LABOR_LABEL],['labor_cost',LABOR_LABEL],['trial_amount','系统应发'],['amount','实发提成'],['diff_amount','调整差额'],['status','状态']],
+  stores:[['store','店铺'],['managed_sales','托管类销售额'],['profit_after_labor',AFTER_LABOR_LABEL],['labor_cost',LABOR_LABEL],['amount','提成金额'],['configured_people','提成设置人数'],['people','已出金额人数'],['periods','已有金额'],['missing','未出金额'],['status','状态']],
+  breakdown:[['person','人员'],['team','所属团队'],['store','店铺'],['period','月份'],['managed_sales','托管类销售额'],['profit_after_labor',AFTER_LABOR_LABEL],['labor_cost',LABOR_LABEL],['trial_amount','系统应发'],['amount','实发提成'],['diff_amount','调整差额'],['status','状态']],
   coverage:[['store','店铺'],['period','月份'],['selected_amount','提成金额'],['status','状态'],['explanation','待办']],
 }[state.reportView]))
 function cell(row,key) {
@@ -303,9 +303,16 @@ async function viewSettlement(item){
 }
 
 const rowKey=row=>row.key || [row.kind||'',row.team_id||'',row.person_id||'',row.store_id,row.period].filter(Boolean).join(':')
+function metricHeader(key, title) {
+  const labels = state.reportView === 'managed' ? null : REPORT_METRIC_HEADERS[key]
+  if (!labels) return title
+  return h('div', {class:'report-metric-header'}, [h('span', labels[0]), h('small', labels[1])])
+}
 const tableColumns=computed(()=>{
   const composition=state.reportView==='store_people'
-  const list=columns.value.map(([key,title],index)=>({title,key,
+  const list=columns.value.map(([key,title],index)=>({title:()=>metricHeader(key,title),key,
+    className:state.reportView!=='managed'&&['managed_sales','trial_amount'].includes(key)?'report-scope-boundary':undefined,
+    fixed:composition&&key==='person'?'left':undefined,
     width:composition?(key==='store'?170:key==='person'?120:key==='team'?100:key==='period'?82:key==='status'?90:135):
       key==='managed_cost'?170:['amount','selected_amount','labor_cost','sales','creator_cost','creator_gross','creator_profit','gross','profit_after_labor','base','store_amount','trial_amount','diff_amount'].includes(key)?135:key==='team'?120:key==='employee_no'?90:key==='period'?95:index===0?undefined:key==='store'?220:120,
     minWidth:index===0?170:undefined,mobileWidth:['amount','selected_amount','labor_cost','sales','creator_cost','creator_gross','creator_profit','gross','profit_after_labor','base','store_amount','trial_amount','diff_amount'].includes(key)?115:key==='period'?84:index===0?135:undefined,
@@ -350,7 +357,7 @@ const tableColumns=computed(()=>{
       return h('div',{class:['amount','selected_amount','labor_cost','sales','gross','profit_after_labor','base','store_amount'].includes(key)?['table-money',row[key]<0?'negative':'']:undefined,
                title:state.reportView==='store_people'&&row.kind==='person'&&['sales','creator_cost','creator_gross','creator_profit'].includes(key)?'非托管商品创造业绩按有效做货身份归属；抽点不分走业绩':
                  state.reportView==='store_people'&&key==='gross'?'原核算口径毛利，可能与当前商品身份的创造毛利不同':
-                 key==='profit_after_labor'?row.kind==='store'?'店铺经营账利润减本店兼职额':'原财务口径利润，含托管及财务调整，已扣本人兼职分摊；不等于非托管做货创造利润':
+                 key==='profit_after_labor'?row.kind==='store'?'店铺经营账利润减本店兼职额':'综合经营利润，含托管及财务调整，已扣本人兼职分摊；不能用非托管创造利润直接减兼职核对':
                  key==='labor_cost'?row.kind==='store'?'本店本月兼职总额；下方个人分摊与待分摊金额合计为此数':'沿用原利润扣减中的个人销售基数（含托管）分摊；仅展示已扣金额，不重复扣减，筛选人员不重新分摊':undefined},
         index===0?[h('span',{class:row.kind==='store'?'store-total-name':''},cell(row,key)),h('div',{class:'table-secondary table-mobile-only'},status(row.status))]:
           key==='person'&&row.kind==='store'?h('strong','店铺合计'):
@@ -358,10 +365,12 @@ const tableColumns=computed(()=>{
           cell(row,key))
     }
   }))
-  for(const column of list)if(column.key==='managed_sales')Object.assign(column,{width:135,mobileWidth:115,mobile:true,align:'right'})
+  for(const column of list)if(column.key==='managed_sales')Object.assign(column,{width:170,mobileWidth:165,mobile:true,align:'right'})
+  for(const column of list)if(column.key==='profit_after_labor'||column.key==='labor_cost')Object.assign(column,{width:165,mobileWidth:160})
+  for(const column of list)if(column.key==='creator_profit')Object.assign(column,{width:150,mobileWidth:145})
   for(const column of list)if(column.key==='subject')Object.assign(column,{width:320,minWidth:240,mobileWidth:220})
   if(['teams','people','stores','store_people','breakdown','coverage'].includes(state.reportView))list.push({
-    title:'操作',key:'action',width:292,minWidth:220,mobileWidth:176,mobile:true,fixed:'right',
+    title:'操作',key:'action',width:292,minWidth:220,mobileWidth:176,mobile:true,fixed:'right',mobileFixed:false,
     render:row=>renderRowActions(row),
   })
   return list
@@ -416,12 +425,16 @@ defineExpose({reload:load})
     </n-alert>
     <p v-if="state.reportView==='stores'" style="color:#64748b;margin:0 0 12px">提成设置人数按所选月份的有效设置统计；已出金额人数只统计已有结算金额的人员。</p>
     <p v-if="state.reportView!=='managed'" class="report-grain-note">系统应发来自核算；实发列只显示人工核定金额，部分核定时仅合计已核定部分，尚未核定显示「—」。核定不代表已付款。点击人员或「核定实发」选择店铺月份；保存范围为该店该月全部提成人员。人员按当前组织归属展示；托管销售按商品规则生效时指定的团队归属，不随调组改变。</p>
-    <p v-if="state.reportView!=='managed'" class="report-grain-note">托管类销售额已包含在团队/店铺销售额中，不要重复相加；个人行单列本人已归属托管部分，不并入个人非托管销售额。兼职额展示现有扣减中的个人分摊，不额外扣款。利润额（扣兼职）沿用原财务口径，含托管及财务调整，与非托管做货创造利润分开。指定人员筛选不会重新分摊费用。</p>
+    <p v-if="state.reportView!=='managed'" class="report-grain-note">托管销售额单列查看，其利润已包含在综合利润中，不要重复相加。兼职列是综合利润中已经扣除的金额，请勿再次扣减；筛选人员不会重新分摊费用。</p>
     <div class="report-tabs-row"><LedgerTabs v-model="state.reportView" :options="kinds" label="汇总方式" @update:model-value="detail=null" /><div class="report-actions"><n-button v-if="state.reportView!=='managed'" type="primary" :disabled="!report || locked || !(report.confirmation_scopes||[]).length" @click="openToolbarPayout">核定实发</n-button><n-button v-if="state.reportView!=='managed'" :disabled="!canSettle" @click="openSettlement">确认员工结算</n-button><n-button :disabled="!report || locked" :loading="downloading" @click="download">导出表格</n-button></div></div>
     <n-alert v-if="report?.sales_pending_scopes?.length" type="warning" :bordered="false">当前有 {{report.sales_pending_scopes.length}} 项人员店铺月份的销售归属待确认，不计为已确认业绩。<a :href="salesAuditUrl" download>导出全部待确认商品清单</a></n-alert>
     <n-alert v-if="report?.creator_pending_scopes?.length" type="warning" :bordered="false">当前有 {{report.creator_pending_scopes.length}} 项人员店铺月份的做货成本、毛利或商品利润缺少完整归属依据；相关创造业绩显示“归属待确认”，请到商品明细核对。</n-alert>
-    <p v-if="state.reportView==='store_people'" class="report-grain-note"><template v-if="state.personIds.length">当前仅显示所选人员；请清空人员筛选后再核对店铺合计。 </template>非托管商品的销售额、做货成本、创造毛利及商品利润按明确生效的做货身份归属；单人做货归全额，多人仅在做货人员间按点数分摊，抽点不分走创造业绩。身份依据不足时显示待确认。利润额（扣兼职）在本表展示，旧核算毛利仍在导出中单列；提成仍按原规则。</p>
+    <p v-if="state.reportView==='store_people'" class="report-grain-note"><template v-if="state.personIds.length">当前仅显示所选人员；请清空人员筛选后再核对店铺合计。 </template>单人做货归全额，多人仅在做货人员间按点数分摊；抽点不分走创造业绩，身份依据不足时显示待确认。店铺合计行采用全店财务口径。</p>
 
+    <div v-if="['teams','people','store_people'].includes(state.reportView)" class="report-metric-guide" aria-label="利润口径说明">
+      <div><strong>非托管做货业绩</strong><span>创造利润未扣兼职，仅计本人做货的非托管商品。</span></div>
+      <div><strong>综合经营利润</strong><span>包含托管利润及经营调整，已扣兼职；与左侧范围不同，不是“创造利润－兼职”。</span></div>
+    </div>
     <n-alert v-if="state.reportView==='managed'" type="info" :bordered="false">展开团队查看个人，再展开个人查看商品。以下均为原核算中的「其中托管部分」，不能与人员或店铺合计重复相加。托管商品做货成本＝托管销售额－托管毛利额，已在原核算中扣除，不再扣减。利润已按原销售基数拆分原有费用；销售额不并入个人普通业绩；实发未按比例拆分。筛选人员时仅显示所选人员小计；「—」或「待核对」表示依据不足，不代表零。</n-alert>
     <p v-if="state.reportView==='managed'&&managedTeam" class="report-grain-note">当前托管团队：{{managedTeam.name}} <button class="text-button" @click="managedTeam=null">查看全部团队</button></p>
     <div v-if="loading" class="commission-loading-line"/>
@@ -508,6 +521,14 @@ defineExpose({reload:load})
   </div>
 </template>
 <style scoped>
+.report-content :deep(.report-metric-header){display:flex;flex-direction:column;align-items:flex-end;gap:3px;line-height:1.5}
+.report-content :deep(.report-metric-header small){font-size:11px;font-weight:400;color:#64748b}
+.report-content :deep(.report-scope-boundary){border-left:2px solid #e2e8f0}
+.report-metric-guide{display:grid;grid-template-columns:1fr 1.5fr;gap:16px;margin:12px 0;color:#64748b;font-size:12px}
+.report-metric-guide>div{padding:10px 12px;border-left:3px solid #cbd5e1;background:#f8fafc}
+.report-metric-guide strong{display:block;color:#334155;font-size:13px;margin-bottom:4px}
+@media(max-width:640px){.report-metric-guide{grid-template-columns:1fr;gap:6px}}
+
 .report-content :deep(.table-money){white-space:nowrap;font-variant-numeric:tabular-nums}
 .report-months input{box-sizing:border-box}
 @media(max-width:600px){.report-tabs-row :deep(.ledger-tabs){flex:0 0 100%;width:100%;max-width:100%}.report-actions{margin-left:auto}}

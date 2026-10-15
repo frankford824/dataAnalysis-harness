@@ -38,7 +38,7 @@ export function sameIds(left = [], right = []) {
   return left.every(id => other.has(id))
 }
 
-export const PROFIT_BEFORE_LABOR = '做货创造利润（未扣兼职）'
+export const PROFIT_BEFORE_LABOR = '非托管创造利润（未扣兼职）'
 export const PROFIT_BASIS_NOTE = '非托管商品销售额、成本、毛利及商品利润按明确生效的做货身份归属：单人做货归全额，多人仅按做货人员点数分摊，抽点不参与；依据不足时待确认。原核算分摊利润仍用于阶梯剔除和提成参考，不因创造归属变化而重算；托管商品另列'
 
 function csvCell(value, header = '') {

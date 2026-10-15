@@ -15,7 +15,7 @@ test('labor display is an existing allocation, not another deduction', () => {
   assert.equal(reportMetricText({labor_cost:30},'labor_cost',money),'30.00')
   assert.equal(reportMetricText({labor_pending:true},'labor_cost',money),'待分摊')
   assert.equal(reportMetricText({profit_after_labor:90,labor_cost:30},'profit_after_labor',money),'90.00')
-  assert.equal(AFTER_LABOR_LABEL,'利润额（扣兼职）')
+  assert.equal(AFTER_LABOR_LABEL,'综合利润（含托管，已扣兼职）')
 })
 
 test('profit drawer keeps shop labor even without a paginated shop header', () => {
