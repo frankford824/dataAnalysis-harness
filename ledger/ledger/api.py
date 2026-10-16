@@ -37,7 +37,7 @@ from pydantic import BaseModel, Field, ValidationError
 
 from . import assist, cost_lines, fees as fees_mod, gaps, index_client, manual_cost, nas_ingest, nas_status, onboard, order_feed, overhead, ownership, progress, service, view
 from . import search as search_mod
-from . import commission_api, commission_manager, freight_review_api, storage_maintenance, store_display
+from . import commission_api, commission_manager, freight_review_api, index_preview as index_preview_mod, storage_maintenance, store_display
 from .model import propose
 from .model.config import (
     COMMISSION_COLUMNS,
@@ -1455,6 +1455,10 @@ def index_preview(
 ) -> dict:
     if not re.fullmatch(r"[0-9a-f]{64}", sha):
         raise HTTPException(400, "文件 SHA 不合法")
+    catalog = Path(os.environ.get("LEDGER_INDEX_CATALOG", r"D:\ledger\index\catalog.db"))
+    local = index_preview_mod.local(catalog, sha, sheet=sheet, offset=max(0, offset), limit=min(max(1, limit), 200))
+    if local is not None:
+        return local
     try:
         return index_client.get("/preview", {
             "sha": sha, "sheet": sheet, "offset": max(0, offset),

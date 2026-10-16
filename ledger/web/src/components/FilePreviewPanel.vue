@@ -39,7 +39,7 @@ const previewRequest=useLatest()
 let previewSerial=0
 async function load(nextOffset=offset.value){
   if(!props.target?.sha256)return
-  const serial=++previewSerial;offset.value=Math.max(0,nextOffset);loading.value=true;error.value=''
+  const serial=++previewSerial;offset.value=Math.max(0,nextOffset);loading.value=true;error.value='';result.value=null
   try{
     const response=await previewRequest.run(signal=>api.indexPreview({sha:props.target.sha256,sheet:props.target.sheet||'',offset:offset.value,limit:pageSize},{signal}))
     if(response)result.value=response.value
@@ -91,8 +91,9 @@ async function copyPath() {
       <div class="spread preview-toolbar">
         <div class="small muted">
           <span v-if="target?.sheet">{{ target.sheet }} · </span>
-          <template v-if="result?.rows?.length">第 {{offset + 1}}–{{ offset + result.rows.length }} 行</template><template v-else>{{loading?'正在加载…':'暂无记录'}}</template>
-          <template v-if="result?.metadata?.total_rows"> / 共 {{ result.metadata.total_rows }} 行</template>
+          <template v-if="result?.rows?.length">留档行 {{result.rows[0].row_no}}–{{result.rows[result.rows.length-1].row_no}}</template><template v-else>{{loading?'正在加载…':error?'加载未完成':'暂无记录'}}</template>
+          <template v-if="result?.metadata?.preview_rows!=null"> · 共 {{ result.metadata.preview_rows }} 条可预览记录</template>
+          <template v-else-if="result?.metadata?.total_rows"> · 目录记载 {{result.metadata.total_rows}} 行</template>
         </div>
         <div class="row">
           <n-button size="tiny" :disabled="offset === 0 || loading" @click="load(offset - pageSize)">上一页</n-button>
@@ -101,7 +102,7 @@ async function copyPath() {
         </div>
       </div>
 
-      <n-alert v-if="error" type="error" :bordered="false">{{ error }}</n-alert>
+      <n-alert v-if="error" type="warning" title="原文件暂未加载" :bordered="false">{{ error }}<div>账内核算金额不受影响。 <n-button size="small" @click="load()">重试预览</n-button></div></n-alert>
       <n-spin v-else :show="loading">
         <div v-if="result?.rows?.length" class="preview-grid-wrap">
           <table class="preview-grid">
@@ -135,6 +136,7 @@ async function copyPath() {
         <n-empty v-else description="没有可预览的记录" />
       </n-spin>
 
+      <p v-if="fileName.toLowerCase().endsWith('.csv')" class="xs muted">CSV 按记录定位，可能与文本编辑器的行号不同。</p>
       <p class="xs muted preview-path">{{ target?.path || result?.metadata?.path }}</p>
     </n-drawer-content>
   </n-drawer>

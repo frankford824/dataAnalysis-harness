@@ -27,6 +27,9 @@ def get(path: str, params: dict | None = None, *, timeout: float = 3.0) -> dict:
         with urlopen(Request(url, headers={"Accept": "application/json"}), timeout=timeout) as response:
             payload = json.loads(response.read().decode("utf-8"))
     except (HTTPError, URLError, TimeoutError, OSError, json.JSONDecodeError) as exc:
+        if isinstance(exc, TimeoutError) or (isinstance(exc, URLError) and isinstance(exc.reason, TimeoutError)):
+            label = '原文件预览' if path == '/preview' else '原文件检索' if path == '/search' else '索引状态读取'
+            raise IndexerUnavailable(f'{label}超时，请稍后重试。') from exc
         raise IndexerUnavailable(f"索引服务不可用：{exc}") from exc
     if isinstance(payload, dict) and payload.get("error"):
         raise IndexerUnavailable(str(payload["error"]))
