@@ -13,7 +13,7 @@ import { computed, defineAsyncComponent, ref, watch } from 'vue'
 
 import { useLatest } from './ui/useLatest'
 import { api } from '../api'
-import { count, money } from '../format'
+import { count, money as ledgerMoney, stamp } from '../format'
 
 const props = defineProps({
   runId: { type: Number, required: true },
@@ -24,8 +24,11 @@ const props = defineProps({
   period: { type: String, default: '' },
   platform: { type: String, default: '' },
   liveIndex: { type: Boolean, default: false },
+  reviewContext: { type: Object, default: null },
 })
-const emit = defineEmits(['close'])
+const emit = defineEmits(['close','select-record'])
+const money=value=>ledgerMoney(props.reviewContext?.expense && value!=null ? -Number(value) : value)
+const reviewRecord=computed(()=>props.reviewContext?.records?.find(r=>r.run_id===props.runId))
 
 const show = ref(true)
 const data = ref(null)
@@ -35,6 +38,7 @@ const FilePreviewPanel = defineAsyncComponent(() => import('./FilePreviewPanel.v
 const indexLoading = ref(false)
 const indexError = ref('')
 const indexResult = ref(null)
+let indexSerial=0
 const previewing = ref(false)
 const previewTarget = ref(null)
 
@@ -78,6 +82,7 @@ async function load() {
 }
 
 watch([() => props.runId, () => props.node, () => props.only], () => {
+  data.value = null
   only.value = props.only
   page.value = 0
   subject.value = ''
@@ -86,6 +91,8 @@ watch([() => props.runId, () => props.node, () => props.only], () => {
   appliedTerm.value = ''
   indexResult.value = null
   indexError.value = ''
+  indexSerial+=1
+  indexLoading.value=false
 })
 
 watch(
@@ -119,6 +126,7 @@ function applyFilter() {
 async function searchIndex() {
   const queries = terms.value.slice(0, 5)
   if (!queries.length) return
+  const serial=++indexSerial
   indexLoading.value = true
   indexError.value = ''
   try {
@@ -129,6 +137,7 @@ async function searchIndex() {
       platform: props.platform,
       limit: 30,
     })))
+    if(serial!==indexSerial)return
     const hits = new Map()
     for (const result of results) {
       for (const hit of result.hits || []) {
@@ -141,9 +150,9 @@ async function searchIndex() {
       notes: [...new Set(results.flatMap((result) => result.notes || []))],
     }
   } catch (reason) {
-    indexError.value = reason.message
+    if(serial===indexSerial)indexError.value = reason.message
   } finally {
-    indexLoading.value = false
+    if(serial===indexSerial)indexLoading.value = false
   }
 }
 function preview(hit) {
@@ -176,17 +185,25 @@ function close() {
         <n-alert v-if="failed" type="error" :bordered="false">{{ failed }}</n-alert>
 
         <template v-else-if="data">
+          <section v-if="reviewContext" class="drill-review-context" aria-label="本次查看的核算依据">
+            <strong>{{reviewContext.store}} · {{reviewContext.period}}</strong>
+            <div v-if="reviewContext.records?.length>1" class="drill-record-picker" role="group" aria-label="切换核算记录">
+              <button v-for="record in reviewContext.records" :key="record.run_id" type="button" :aria-pressed="record.run_id===runId" @click="emit('select-record',record.run_id)">{{record.label}}</button>
+            </div>
+            <p>{{reviewRecord?.hint}} 费用按正数展示，退费冲减可为负数。</p>
+            <details><summary>记录时间与编号</summary><p>{{reviewRecord?.at?stamp(reviewRecord.at):'时间未记录'}} · 核算 {{runId}}</p></details>
+          </section>
           <div class="board-kpis" style="grid-template-columns: repeat(2, 1fr)">
             <div class="kpi">
               <div class="label">
                 {{ data.statement_available === false ? '完整核算金额' : data.kind === 'statement' ? '账期核算金额' : '本类记录合计' }}
               </div>
-              <div class="value" :class="{ neg: data.value < 0 }">{{ data.statement_available === false ? '待核对' : money(data.value) }}</div>
+              <div class="value" :class="{ neg: !reviewContext?.expense && data.value < 0 }">{{ data.statement_available === false ? '待核对' : money(data.value) }}</div>
               <div v-if="data.statement_available === false && data.verified_partial!=null" class="foot">已计入部分 {{ money(data.verified_partial) }}，完整核算金额仍待核对</div>
             </div>
             <div class="kpi">
               <div class="label">{{ only === 'allocated' ? '已计入的分摊来源金额（勿重复相加）' : only === 'uncounted' ? '未计入来源金额（非应补金额）' : only === 'all' ? '全部来源记录（不作金额合计）' : '本行计入金额合计' }}</div>
-              <div class="value" :class="{ neg: only !== 'all' && data.source_total < 0 }">
+              <div class="value" :class="{ neg: !reviewContext?.expense && only !== 'all' && data.source_total < 0 }">
                 {{ only === 'all' ? count(data.rows) + ' 条' : money(data.source_total) }}
               </div>
               <div class="foot">
@@ -198,7 +215,8 @@ function close() {
             </div>
           </div>
 
-          <p class="xs muted" style="margin-top:var(--s3)">
+          <p v-if="reviewContext" class="xs muted" style="margin-top:var(--s3)">“计入”表示已扣进核算，不表示已付款。未计入来源含其他店铺或账期的记录，不是本店应补扣金额。</p>
+          <p v-else class="xs muted" style="margin-top:var(--s3)">
             对账请按科目合计“本行计入金额”。“来源金额”含原始明细与汇总，不能直接相加。
             “汇总分摊已计入”的明细行显示0，是因为费用已在汇总行计入，不是漏记。
             “计入”指纳入核算，不表示实际收付款。
@@ -446,3 +464,6 @@ function close() {
     :target="previewTarget"
   />
 </template>
+<style scoped>
+.drill-review-context{padding:14px 16px;background:#f3f6fc;border-radius:7px;margin-bottom:18px;color:#33465e}.drill-review-context>strong{display:block;font-size:14px;font-weight:550}.drill-review-context p{font-size:12px;line-height:1.7;color:#657184;margin:8px 0 0}.drill-record-picker{display:flex;flex-wrap:wrap;gap:8px;margin-top:12px}.drill-record-picker button{font:inherit;font-size:13px;background:white;border:1px solid #dce3ed;border-radius:5px;padding:7px 13px;color:#52657d;cursor:pointer}.drill-record-picker button[aria-pressed=true]{background:#315fd6;border-color:#315fd6;color:white}.drill-review-context details{font-size:12px;margin-top:9px}.drill-review-context summary{cursor:pointer;color:#4861a5}
+</style>

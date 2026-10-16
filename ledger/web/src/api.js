@@ -38,6 +38,12 @@ function query(params) {
 }
 
 export const api = {
+  freightReview: (params, options={}) => call(`/api/freight-review${query(params)}`, options),
+  freightReviewExport: async params => {
+    const response=await fetch(`/api/freight-review/export.csv${query(params)}`)
+    if(!response.ok){const error=await response.json().catch(()=>({}));throw new Error(typeof error.detail==='string'?error.detail:'导出暂未完成，请稍后重试')}
+    return response.blob()
+  },
   statementReview: (storeId,period,runId,offset=0) => call(`/api/stores/${encodeURIComponent(storeId)}/periods/${encodeURIComponent(period)}/statement-review${query({run_id:runId,offset})}`),
   confirmStatementReview: (storeId,period,body) => call(`/api/stores/${encodeURIComponent(storeId)}/periods/${encodeURIComponent(period)}/statement-review`,{
     method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(body),

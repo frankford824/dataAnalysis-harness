@@ -10,6 +10,7 @@ export const router = createRouter({
   routes: [
     { path: '/', name: 'board', component: () => import('./views/BoardView.vue') },
     { path: '/deliver', name: 'deliver', component: () => import('./views/DeliverView.vue') },
+    { path: '/freight', name: 'freight-review', component: () => import('./views/FreightReview.vue') },
     {
       path: '/store/:id',
       name: 'period',

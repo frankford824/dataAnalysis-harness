@@ -37,7 +37,7 @@ from pydantic import BaseModel, Field, ValidationError
 
 from . import assist, cost_lines, fees as fees_mod, gaps, index_client, manual_cost, nas_ingest, nas_status, onboard, order_feed, overhead, ownership, progress, service, view
 from . import search as search_mod
-from . import commission_api, commission_manager, storage_maintenance, store_display
+from . import commission_api, commission_manager, freight_review_api, storage_maintenance, store_display
 from .model import propose
 from .model.config import (
     COMMISSION_COLUMNS,
@@ -253,6 +253,8 @@ def _warm_commission_report_slices() -> None:
 
 
 _commission_actor = commission_api.install(app, lambda: workspace(), lambda: _model(), DEFAULT_MODEL)
+freight_review_api.install(app, lambda: workspace(), lambda: _model(),
+    lambda: {store.id: _display_store(store)['name'] for store in _model().stores})
 from . import labor_api
 labor_api.install(app, lambda: workspace(), lambda: _model(), DEFAULT_MODEL, lambda: _invalidate_model(), _commission_actor)
 
