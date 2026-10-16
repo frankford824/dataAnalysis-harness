@@ -38,6 +38,15 @@ function query(params) {
 }
 
 export const api = {
+  freightShipmentLatest: (period, options={}) => call(`/api/freight-review/shipments${query({period})}`, options),
+  freightShipmentStart: period => call('/api/freight-review/shipments', {method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({period})}),
+  freightShipmentResult: (id,params,options={}) => call(`/api/freight-review/shipments/${id}${query(params)}`,options),
+  freightShipmentDetail: (id,charge,params,options={}) => call(`/api/freight-review/shipments/${id}/charges/${charge}${query(params)}`,options),
+  freightShipmentExport: async (id,params) => {
+    const response=await fetch(`/api/freight-review/shipments/${id}/export.csv${query(params)}`)
+    if(!response.ok){const error=await response.json().catch(()=>({}));throw new Error(typeof error.detail==='string'?error.detail:'导出暂未完成，请稍后重试')}
+    return response.blob()
+  },
   freightReview: (params, options={}) => call(`/api/freight-review${query(params)}`, options),
   freightReviewExport: async params => {
     const response=await fetch(`/api/freight-review/export.csv${query(params)}`)

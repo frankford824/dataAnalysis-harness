@@ -261,7 +261,7 @@ async function reopen() {
 
 function openDrill(row, only = 'counted') {
   if(row.id==='n_freight'){
-    router.push({name:'freight-review',query:{period:period.value,store_id:props.id,platform:info.value?.store?.platform || ''}})
+    router.push({name:'freight-review',query:{period:period.value,store_id:props.id,platform:info.value?.store?.platform || '',view:'records'}})
     return
   }
   if (periodDrillTarget(row) === 'pricing' && pricingPanel.value) { pricingPanel.value.open(); return }

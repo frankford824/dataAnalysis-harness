@@ -1,5 +1,5 @@
 <script setup>
-import { computed, h, onMounted, onUnmounted, ref, watch } from 'vue'
+import { computed, defineAsyncComponent, h, onMounted, onUnmounted, ref, watch } from 'vue'
 import { NButton } from 'naive-ui'
 import { useRoute, useRouter } from 'vue-router'
 import { api } from '../api'
@@ -11,6 +11,9 @@ import DrillDrawer from '../components/DrillDrawer.vue'
 import { changeText, expenseText, freightEvidence, reviewConclusion, taskStores, trialState } from '../freightReview'
 
 const app=useApp(),route=useRoute(),router=useRouter()
+const FreightShipmentTrial=defineAsyncComponent(()=>import('../components/FreightShipmentTrial.vue'))
+const view=computed(()=>route.query.view==='records'?'records':'shipments')
+function showView(value){evidence.value=null;router.replace({query:{...route.query,view:value}})}
 const data=ref(null),loading=ref(false),error=ref(''),exporting=ref(false),ready=ref(false)
 const group=ref(''),page=ref(1),evidence=ref(null),selectedRun=ref(null),newResult=ref(false)
 const pollError=ref(false)
@@ -76,13 +79,14 @@ function syncRoute(){
 }
 let timer
 onMounted(async()=>{
-  try{await app.loadNavigation();routeScope();ready.value=true;syncRoute();await load(true)}catch(e){error.value=e.message}
-  timer=setInterval(checkUpdates,30000)
+  try{await app.loadNavigation();routeScope();ready.value=true;syncRoute();if(view.value==='records')await load(true)}catch(e){error.value=e.message}
+  timer=setInterval(()=>{if(view.value==='records')checkUpdates()},30000)
 })
 onUnmounted(()=>{clearInterval(timer);request.cancel();pollRequest.cancel()})
-watch(()=>scopeKey(params.value),()=>{if(ready.value){newResult.value=false;syncRoute();load(true)}})
+watch(()=>scopeKey(params.value),()=>{if(ready.value){newResult.value=false;syncRoute();if(view.value==='records')load(true);else{request.cancel();pollRequest.cancel();data.value=null;evidence.value=null}}})
+watch(view,value=>{if(ready.value && value==='records')load(true)})
 watch(()=>route.query,()=>{if(ready.value)routeScope()})
-watch(()=>app.uiRefresh,()=>{if(ready.value)load()})
+watch(()=>app.uiRefresh,()=>{if(ready.value && view.value==='records')load()})
 
 const columns=computed(()=>[
   {title:'店铺',key:'store',minWidth:190,mobileWidth:150,render:r=>h('div',{class:'freight-store'},[
@@ -98,13 +102,14 @@ const columns=computed(()=>[
 
 <template>
   <main class="freight-review-page">
-    <PageHead title="运费复核" :scope="scope" hint="对照已有核算记录；原始运费账单尚未逐笔核实。">
-      <template #actions><n-button :loading="loading" @click="load()">更新结果</n-button></template>
+    <PageHead title="运费复核" :scope="scope" :hint="view==='records'?'对照已有核算记录；原始运费账单尚未逐笔核实。':'按实际发货商品试算运费，原账与提成保留。'">
+      <template v-if="view==='records'" #actions><n-button :loading="loading" @click="load()">更新结果</n-button></template>
     </PageHead>
-    <n-alert v-if="error" type="error" :bordered="false" role="alert">{{error}} <n-button text @click="load()">重试</n-button></n-alert>
-    <div v-if="newResult" class="freight-update" role="status"><span>有新核算结果，当前仍显示上次读取的记录。</span><n-button size="small" @click="load()">更新结果</n-button></div>
-    <p v-else-if="pollError" class="freight-money-note" role="status">暂时无法检查新数据，当前仍是上次读取的记录。可点击“更新结果”重试。</p>
-    <n-spin :show="loading">
+    <div class="freight-views" role="group" aria-label="查看运费记录"><n-button :type="view==='shipments'?'primary':'default'" :aria-pressed="view==='shipments'" @click="showView('shipments')">包裹分摊试算</n-button><n-button :type="view==='records'?'primary':'default'" :aria-pressed="view==='records'" @click="showView('records')">账内记录对照</n-button></div>
+    <n-alert v-if="view==='records' && error" type="error" :bordered="false" role="alert">{{error}} <n-button text @click="load()">重试</n-button></n-alert>
+    <div v-if="view==='records' && newResult" class="freight-update" role="status"><span>有新核算结果，当前仍显示上次读取的记录。</span><n-button size="small" @click="load()">更新结果</n-button></div>
+    <p v-else-if="view==='records' && pollError" class="freight-money-note" role="status">暂时无法检查新数据，当前仍是上次读取的记录。可点击“更新结果”重试。</p>
+    <n-spin v-if="view==='records'" :show="loading">
       <section class="freight-conclusion" aria-label="本月核对结论">
         <div><h2>{{conclusion.title}}</h2><p>{{conclusion.hint}}</p></div>
         <span v-if="summary.store_count" class="freight-scope-count">{{summary.store_count}} 家有核算记录 · {{summary.closed_count}} 家已结账</span>
@@ -134,11 +139,13 @@ const columns=computed(()=>[
       </section>
       <section v-else-if="!loading" class="freight-empty"><p>该范围内暂无运费核算记录。</p><n-button @click="router.push({name:'deliver'})">查看数据与店铺</n-button></section>
     </n-spin>
-    <DrillDrawer v-if="evidence && selectedRun" :run-id="selectedRun" node="n_freight" title="运费依据" :store-id="evidence.store_id" :period="evidence.period" :platform="evidence.platform" :review-context="evidence" :live-index="true" @select-record="selectedRun=$event" @close="evidence=null"/>
+    <FreightShipmentTrial v-if="ready && view==='shipments'" :period="app.period" :store-id="app.storeId" :platform="app.platform" :refresh-token="app.uiRefresh"/>
+    <DrillDrawer v-if="view==='records' && evidence && selectedRun" :run-id="selectedRun" node="n_freight" title="运费依据" :store-id="evidence.store_id" :period="evidence.period" :platform="evidence.platform" :review-context="evidence" :live-index="true" @select-record="selectedRun=$event" @close="evidence=null"/>
   </main>
 </template>
 
 <style scoped>
+.freight-views{display:flex;gap:10px;flex-wrap:wrap;margin:18px 0 22px}
 .freight-swipe-note{display:none}@media(max-width:600px){.freight-swipe-note{display:block;font-size:12px;color:#718097;margin:0 0 10px}}
 .freight-group-change{font-size:13px;color:#657184;margin:0 0 16px;line-height:1.8}.freight-group-change strong{color:#945b12;font-variant-numeric:tabular-nums;font-weight:550;margin-left:6px}.freight-group-change span{display:block;font-size:12px}
 .freight-review-page{max-width:1280px;margin:0 auto;padding:28px}.freight-conclusion{display:flex;align-items:center;justify-content:space-between;gap:20px;margin:22px 0 18px}.freight-conclusion h2{font-size:18px;font-weight:550;margin:0 0 7px}.freight-conclusion p,.freight-section-title p{color:#657184;font-size:13px;line-height:1.7;margin:0}.freight-scope-count{font-size:12px;color:#657184;white-space:nowrap}.freight-metrics{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:16px}.freight-metrics>div{background:white;border:1px solid #e2e7ef;border-radius:8px;padding:18px 20px;min-width:0}.freight-metrics span{display:block;font-size:13px;color:#627087}.freight-metrics strong{display:block;font-weight:550;font-size:24px;font-variant-numeric:tabular-nums;letter-spacing:-.5px;margin:10px 0;color:#203148;overflow-wrap:anywhere}.freight-metrics small{display:block;color:#7a8698;font-size:12px;line-height:1.6}.freight-metrics .freight-change{background:#fffaf1;border-color:#efdfbe}.freight-change strong{color:#945b12}.freight-money-note{font-size:12px;color:#718097;margin:12px 0 26px;line-height:1.7}.freight-section-title{display:flex;justify-content:space-between;align-items:center;gap:16px;margin-bottom:14px}.freight-section-title h2{font-size:17px;margin:0;font-weight:550}.freight-section-title h3{font-size:15px;font-weight:550;margin:0 0 5px}.freight-section-title>span{font-size:12px;color:#718097}.freight-task-list{display:flex;flex-wrap:wrap;gap:10px;margin-bottom:22px}.freight-task-list>button{border:1px solid #e1e7f0;border-radius:7px;padding:13px 16px;background:#fff;display:grid;gap:4px;text-align:left;min-width:160px;color:#34445a;font:inherit;cursor:pointer}.freight-task-list>button.selected{border-color:#4268d8;background:#f1f5ff}.freight-task-list strong{font-size:14px;font-weight:550}.freight-task-list>button>span:last-child{font-size:12px;color:#718097}.freight-task-owner{font-size:11px;color:#657184}.freight-affected{padding:20px;background:white;border:1px solid #e3e8f0;border-radius:8px}.freight-affected>.freight-section-title{align-items:flex-start}.freight-affected :deep(.freight-store strong){font-weight:550;color:#26364d;display:block;white-space:normal;overflow-wrap:anywhere}.freight-affected :deep(.freight-store small),.freight-affected :deep(.freight-secondary){display:block;color:#7a8698;font-size:11px;line-height:1.6;margin-top:4px;white-space:normal}.freight-affected :deep(.freight-row-warning){color:#966019}.freight-no-issues,.freight-empty{padding:24px;color:#718097;background:white;border:1px solid #e3e8f0;border-radius:8px;margin-bottom:20px}.freight-empty p{margin:0 0 12px}.freight-scope-note{margin:18px 0 0;color:#657184;font-size:12px;line-height:1.8}.freight-scope-note summary{cursor:pointer;color:#4265be}.freight-scope-note p{margin:8px 0 0}.freight-paging{display:flex;gap:12px;align-items:center;justify-content:flex-end;margin-top:16px;font-size:12px;color:#718097;flex-wrap:wrap}.freight-update{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:12px 16px;margin:16px 0;background:#edf3ff;border-radius:6px;color:#3155a8;font-size:13px}.n-alert{margin:16px 0}
