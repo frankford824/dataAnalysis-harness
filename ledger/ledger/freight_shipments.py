@@ -10,6 +10,7 @@ from .engine.allocation import refund_values
 from .engine.rules import _norm
 from .freight_allocation import number, text_amount
 from .freight_trial_inputs import digest
+from .order_lifecycle import SUPERSEDED_PARENT_STATES
 
 
 def _scalar(value):
@@ -125,6 +126,8 @@ def build_packages(headers,items,relations,mapping,model,children,controls,nativ
         if index%100000==0:progress('确认包裹商品与金额依据',index,items.height)
         oid,osid=_norm(row['order_id']),_norm(row['order_store_id'])
         header=head.get((osid,oid),{})
+        if str(header.get('order_status_raw') or '').strip() in SUPERSEDED_PARENT_STATES:
+            continue
         sid=mapped.get(osid,'');store=stores.get(sid);platform=store.platform if store else ''
         tracking=_norm(row.get('tracking_no')) or _norm(header.get('tracking_no'))
         if row.get('is_virtual') is True:continue

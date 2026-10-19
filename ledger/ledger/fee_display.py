@@ -1,4 +1,6 @@
 """Shared human-facing descriptions; never changes accounting facts."""
+from .order_lifecycle import SUPERSEDED_COST_NOTE
+
 SOURCE_AMOUNT = '来源金额（勿合计）'
 BOOKED_AMOUNT = '本行计入金额（合计此列）'
 IDENTIFIER = '订单号/商品ID'
@@ -38,6 +40,9 @@ def describe(row, *, graded=True):
     elif counted and str(row.get('record_type') or '').startswith('结账'):
         status='冻结金额已计入'
         explanation='本行采用结账时保存的核定记录，未按后来更新的源数据覆盖。'
+    elif counted and row.get('contribution') == 0 and row.get('metric_id') in ('goods_cost','reshipment_cost') and SUPERSEDED_COST_NOTE in str(row.get('source_note') or ''):
+        status='拆分/合并原单不计成本'
+        explanation='此原单仅保留追溯；实际发货单的成本另行核算，缺失时仍待核实。'
     elif counted and row.get('contribution') == 0 and row.get('metric_id') in ('goods_cost','reshipment_cost') and '邮费补差价（HQT00365）' in str(row.get('source_note') or ''):
         status='邮费补差价：商品成本为0'
         explanation='运费按运费表核算，本商品不再重复计成本，无需补录成本。'

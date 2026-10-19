@@ -1719,8 +1719,11 @@ def _scoped_link_reports(
             report.spine_keys = len(expected)
             report.expect_label = metric.expect_label if len(expected) != len(known) else ""
             if not rows.is_empty() and {"linked", "link_key"} <= set(rows.columns):
+                # A trace-only split/merged original must not certify that its
+                # physical children's actual cost has been captured.
+                from ..order_lifecycle import superseded_cost_fact
                 hit = set(
-                    rows.filter(pl.col("linked").fill_null(False))
+                    rows.filter(pl.col("linked").fill_null(False) & ~superseded_cost_fact(rows))
                     .get_column("link_key").drop_nulls().unique().to_list()
                 )
                 report.covered_keys = hit & expected

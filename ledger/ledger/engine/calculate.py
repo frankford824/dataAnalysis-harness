@@ -115,6 +115,7 @@ def evaluate_metric(
         return _empty_facts(), notes
 
     from .cost_policy import is_dropship, is_exempt, is_cancelled, prepare_dropship, is_freight_surcharge, FREIGHT_SURCHARGE_NOTE
+    from ..order_lifecycle import superseded_parent, SUPERSEDED_COST_NOTE
     is_erp_cost = metric.id in {"goods_cost", "reshipment_cost"}
     if metric.where:
         selected = _predicates(metric.where, frame, notes)
@@ -379,6 +380,7 @@ def evaluate_metric(
     source_note = pl.when(erp_exempt).then(pl.concat_str([
         source_note, pl.when(is_freight_surcharge(frame)).then(pl.lit(FREIGHT_SURCHARGE_NOTE))
         .when(is_cancelled(frame)).then(pl.lit("商品已取消，成本计 0"))
+        .when(superseded_parent(frame)).then(pl.lit(SUPERSEDED_COST_NOTE))
         .when(pl.col("__cost_exempt_reason").is_not_null() if "__cost_exempt_reason" in frame.columns else pl.lit(False))
         .then(pl.col("__cost_exempt_reason") if "__cost_exempt_reason" in frame.columns else pl.lit(None,dtype=pl.Utf8))
         .when(is_dropship(frame)).then(pl.lit("代发商品：聚水潭成本计 0，代发支出按代发表单独核算"))

@@ -2,6 +2,7 @@
 import re
 from functools import lru_cache
 import polars as pl
+from ..order_lifecycle import superseded_parent
 
 
 BRUSHING_REMARK_PATTERN = r"(?i)(^|[^a-z])by([^a-z]|$)"
@@ -95,7 +96,7 @@ def is_dropship(frame):
 def is_exempt(frame):
     after_sale = (pl.col('__cost_exempt_reason').is_not_null()
                   if '__cost_exempt_reason' in frame.columns else pl.lit(False))
-    return is_dropship(frame) | is_cancelled(frame) | after_sale | is_freight_surcharge(frame)
+    return is_dropship(frame) | is_cancelled(frame) | superseded_parent(frame) | after_sale | is_freight_surcharge(frame)
 
 
 def is_cancelled(frame):

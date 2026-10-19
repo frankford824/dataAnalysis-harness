@@ -1464,6 +1464,9 @@ class OrderFeed:
         store: Store, fingerprint: str, reship_origins: dict[str, str] | None = None,
         exported_orders: dict[str, str | None] | None = None,
     ) -> pl.DataFrame:
+        from .order_lifecycle import superseded_parent
+        orders = orders.filter(~superseded_parent(orders, 'order_status_raw'))
+        items = items.join(orders.select('order_id').unique(), on='order_id', how='semi')
         reships = (
             relations.filter(pl.col("relation_type") == "reship")
             .get_column("target_order_id").cast(pl.Utf8).drop_nulls().unique().to_list()

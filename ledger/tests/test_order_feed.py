@@ -162,6 +162,21 @@ def test_order_header_controls_supplemental_payment(tmp_path,header,freight,vali
     assert (result['alloc_ratio'].item() is not None)==valid
 
 
+def test_superseded_parent_does_not_double_the_live_sales_spine(tmp_path):
+    manifest=_fixture(tmp_path/'feed')
+    def table(name):return pl.read_parquet(tmp_path/'feed'/manifest['objects'][name]['path'])
+    feed=OrderFeed(tmp_path/'ws',feed_root=tmp_path/'feed')
+    parent=table('orders.parquet').with_columns(pl.lit('Split').alias('order_status_raw'))
+    live=parent.with_columns(pl.lit('2').alias('order_id'),pl.lit('Sent').alias('order_status_raw'))
+    old_items=table('order_items.parquet')
+    live_items=old_items.with_columns(pl.lit('2').alias('order_id'),pl.lit('22').alias('sub_order_id'))
+    result=feed._order_frame(pl.concat([parent,live]),pl.concat([old_items,live_items]),
+        table('after_sales.parquet'),table('order_relations.parquet'),
+        Store(id='taobao_test',name='测试店',platform='taobao'),'test')
+    assert result['buyer_paid'].item()==20
+    assert result['internal_order_id'].item()=='2'
+
+
 def _write(root: Path, name: str, frame: pl.DataFrame) -> dict:
     data = root / "objects" / name
     data.parent.mkdir(parents=True, exist_ok=True)

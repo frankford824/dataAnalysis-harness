@@ -25,7 +25,7 @@ from .freight_trial_inputs import capture, parse_sources, feed_frames, digest, I
 
 SESSION=uuid.uuid4().hex
 RULE_HASH=hashlib.sha256(b''.join((Path(__file__).parent/name).read_bytes() for name in
-    ('freight_allocation.py','freight_shipments.py','freight_trial_inputs.py','freight_trial.py'))).hexdigest()
+    ('freight_allocation.py','freight_shipments.py','freight_trial_inputs.py','freight_trial.py','order_lifecycle.py'))).hexdigest()
 _managers={};_guard=threading.Lock()
 
 

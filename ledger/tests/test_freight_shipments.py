@@ -58,6 +58,20 @@ def test_missing_packet_member_identity_is_retained_instead_of_dropped():
     assert allocate('10',result['W1']['members'])['reason']=='identity_missing'
 
 
+def test_superseded_parent_with_reused_tracking_is_not_another_shipment_or_quantity():
+    result=packages([header('old','@W1','100',order_status_raw='Split',ship_time='2026-06-01 09:59:00'),
+        header('e1','W1','60',is_split=True,order_status_raw='Sent'),
+        header('e2','W2','40',is_split=True,order_status_raw='Sent')],
+        [item('old','o1','100000001','2','80'),item('old','o2','100000002','1','20'),
+         item('e1','i1','100000001','1','40'),item('e1','i2','100000002','1','20'),
+         item('e2','i3','100000001','1','40')],
+        [order('100000001','80','2'),order('100000002','20','1')])
+    packet=result['W1']
+    assert packet['issue']=='' and packet['internal_order_ids']==['e1']
+    proposal=allocate('12',packet['members'])
+    assert {a['child_id']:Decimal(a['amount']) for a in proposal['allocations']}=={'100000001':Decimal(8),'100000002':Decimal(4)}
+
+
 def test_verified_child_amount_fragments_work_when_purchase_quantity_is_absent():
     result=packages([header('e1','W1','100',is_split=True),header('e2','W2','100',is_split=True)],
         [item('e1','i1','100000001','1','40'),item('e1','i2','100000002','1','20'),item('e2','i3','100000001','1','40')],
