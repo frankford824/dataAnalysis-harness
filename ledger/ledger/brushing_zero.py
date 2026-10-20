@@ -130,8 +130,12 @@ def supplement(evidence, spine, metric, facts):
         for parent in json.loads(record['parents']):
             key = (record['store'], normalize_key(parent))
             proofs.setdefault(key, []).append(record)
+    from .order_lifecycle import superseded_cost_fact
+    # Trace-only original containers never cover a sale. They must not block
+    # an independently proven brushing zero fact for the same platform child.
     existing = {(r['store'], r['period'], normalize_key(r['link_key'])) for r in facts.filter(
-        pl.col('metric_id') == metric.id).select('store', 'period', 'link_key').iter_rows(named=True)} if facts.height else set()
+        (pl.col('metric_id') == metric.id) & ~superseded_cost_fact(facts)
+    ).select('store', 'period', 'link_key').iter_rows(named=True)} if facts.height else set()
     # Reject conflicting visible child evidence, including explicit buyer-show
     # instructions. Missing fields in a platform export are not contradictions.
     conflicted = set()

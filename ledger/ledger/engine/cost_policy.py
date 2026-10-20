@@ -8,13 +8,28 @@ from ..order_lifecycle import superseded_parent
 BRUSHING_REMARK_PATTERN = r"(?i)(^|[^a-z])by([^a-z]|$)"
 FREIGHT_SURCHARGE_SKU = 'HQT00365'
 FREIGHT_SURCHARGE_NOTE = '邮费补差价（HQT00365）：商品成本按规则计 0，运费按运费表单独核算，不重复扣成本'
+NO_SHIPPING_SKU = 'HQT01773'
+NO_SHIPPING_NOTE = '无需发货（HQT01773）：按已确认商品规则计 0，来源参考成本 0.0001 不作为商品成本，无需补录'
 
 
 def is_freight_surcharge(frame, sku_column='sku'):
     """User-confirmed zero goods cost, by exact SKU, never by product name."""
+    return _exact_zero_sku(frame, sku_column, FREIGHT_SURCHARGE_SKU)
+
+
+def is_no_shipping(frame, sku_column='sku'):
+    """The confirmed HQT01773 exception does not round other tiny prices to zero."""
+    return _exact_zero_sku(frame, sku_column, NO_SHIPPING_SKU)
+
+
+def is_policy_zero_sku(frame, sku_column='sku'):
+    return is_freight_surcharge(frame, sku_column) | is_no_shipping(frame, sku_column)
+
+
+def _exact_zero_sku(frame, sku_column, code):
     if sku_column not in frame.columns:
         return pl.lit(False)
-    matched=(pl.col(sku_column).cast(pl.Utf8).str.strip_chars().str.to_uppercase()==FREIGHT_SURCHARGE_SKU).fill_null(False)
+    matched=(pl.col(sku_column).cast(pl.Utf8).str.strip_chars().str.to_uppercase()==code).fill_null(False)
     for flag in ('pricing_identity_changed','__identity_changed'):
         if flag in frame.columns:
             matched &= ~pl.col(flag).cast(pl.Boolean,strict=False).fill_null(False)
@@ -96,7 +111,7 @@ def is_dropship(frame):
 def is_exempt(frame):
     after_sale = (pl.col('__cost_exempt_reason').is_not_null()
                   if '__cost_exempt_reason' in frame.columns else pl.lit(False))
-    return is_dropship(frame) | is_cancelled(frame) | superseded_parent(frame) | after_sale | is_freight_surcharge(frame)
+    return is_dropship(frame) | is_cancelled(frame) | superseded_parent(frame) | after_sale | is_policy_zero_sku(frame)
 
 
 def is_cancelled(frame):
