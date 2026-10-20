@@ -251,6 +251,9 @@ end;
 """
 
 #: 后加的列。老工作区打开时补上，不用导数据。
+from .snapshot_store import SCHEMA as SNAPSHOT_SCHEMA
+_SCHEMA += SNAPSHOT_SCHEMA
+
 _COLUMNS = {
     "run_report_slice": {"overview_json": "text"},
     "period": {"at_version": "integer not null default 0"},
@@ -373,7 +376,8 @@ class Workspace:
         conn = getattr(self._local, "conn", None)
         if conn is None:
             conn = sqlite3.connect(self.root / "workspace.db", check_same_thread=False)
-            conn.row_factory = sqlite3.Row
+            from .snapshot_store import install_reader
+            install_reader(conn)
             # WAL在Workspace启动时只设置一次。连接这里只保留等待策略。
             # 写与写还是要排队。默认排不到就立刻抛
             # "database is locked"：两个人同时交表，后一个直接失败，而他交的表
@@ -674,6 +678,8 @@ class Workspace:
                 "select state from period where store_id=? and period=?", (store_id, period)
             ).fetchone()
             payload = json.dumps(result, ensure_ascii=False)
+            from .snapshot_store import store
+            stored_payload = store(conn, payload, self.root)
             cur = conn.execute(
                 "insert into run "
                 "(store_id, period, at, can_close, evidence_ready, engine, "
@@ -683,7 +689,7 @@ class Workspace:
                     store_id, period, _now(), int(bool(result.get("can_close"))),
                     int(evidence_ready), engine_version(),
                     model_revision or None, input_fingerprint or None,
-                    json.dumps(sorted(shas)), payload,
+                    json.dumps(sorted(shas)), stored_payload,
                 ),
             )
             run_id = int(cur.lastrowid or 0)
@@ -717,11 +723,12 @@ class Workspace:
                         "message": message,
                     })
             payload = json.dumps(result, ensure_ascii=False)
+            from .snapshot_store import store
             conn.execute(
                 "update run set evidence_ready=?, evidence_error=?, can_close=?, result=? where id=?",
                 (
                     int(ready), error[:1000], int(bool(result.get("can_close"))),
-                    payload, run_id,
+                    store(conn, payload, self.root), run_id,
                 ),
             )
             commission_slice.save(conn, run_id, result, kind='run', payload_text=payload)
@@ -735,7 +742,8 @@ class Workspace:
         """
         d = self.root / "runs"
         d.mkdir(parents=True, exist_ok=True)
-        return d / f"{run_id}.parquet"
+        from .run_artifacts import path
+        return path(self.root, run_id)
 
     def pricing_gaps_path(self, run_id: int) -> Path:
         return self.facts_path(run_id).with_suffix(".pricing.parquet")
@@ -776,8 +784,8 @@ class Workspace:
         rows = self.conn.execute(
             "select p.period, p.state, p.changed_at, p.by, p.note, "
             "r.id as shown_id, r.at as shown_at, "
-            "json_extract(s.overview_json,'$.can_close') as can_close, "
-            "json_extract(s.overview_json,'$.cost_review.requires_human') as cost_human, "
+            "json_extract(snapshot_json(s.overview_json),'$.can_close') as can_close, "
+            "json_extract(snapshot_json(s.overview_json),'$.cost_review.requires_human') as cost_human, "
             "case when p.state=? and exists (select 1 from version nv "
             "where nv.store_id in (p.store_id, ?) and nv.id>p.at_version) then 1 else 0 end as stale "
             "from period p left join run r on r.id = case "
@@ -800,7 +808,7 @@ class Workspace:
     def previous_gap_basis(self, store_id: str, period: str) -> dict[str, Any] | None:
         """缺口比对只需要上一期报表行，不要整份核算。"""
         row = self.conn.execute(
-            "select json_extract(coalesce(mf.result_json,r.result),'$.statement') as statement "
+            "select json_extract(snapshot_json(coalesce(mf.result_json,r.result)),'$.statement') as statement "
             "from period p left join run r on r.id = case "
             "when p.state=? and p.run_id is not null then p.run_id else "
             "(select lr.id from run lr where lr.store_id=p.store_id and lr.period=p.period "
@@ -1142,6 +1150,7 @@ class Workspace:
         """
         if not by.strip() or not note.strip():
             raise WorkspaceError("历史快照补证必须写操作人和原因")
+        from .snapshot_store import store
         with self.conn as conn:
             row = conn.execute(
                 "select p.state,p.run_id,r.* from period p join run r on r.id=p.run_id "
@@ -1175,7 +1184,7 @@ class Workspace:
                 (
                     store_id, period, _now(), int(bool(result.get("can_close"))), 1, "",
                     engine_version(), model_revision or None, input_fingerprint or None,
-                    row["shas"], json.dumps(result, ensure_ascii=False),
+                    row["shas"], store(conn, json.dumps(result, ensure_ascii=False), self.root),
                 ),
             )
             run_id = int(cursor.lastrowid or 0)

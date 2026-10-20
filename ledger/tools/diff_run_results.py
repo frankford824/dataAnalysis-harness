@@ -37,6 +37,8 @@ def main() -> int:
     parser.add_argument("--limit", type=int, default=50)
     args = parser.parse_args()
     connection = sqlite3.connect(args.database)
+    from ledger.snapshot_store import install_reader
+    install_reader(connection)
     rows = connection.execute(
         "select id,result from run where store_id=? and period=? order by id desc limit 2",
         (args.store, args.period),

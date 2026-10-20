@@ -2,13 +2,27 @@
 
 ## 共享证据
 
-calculation.model_json/rules_json 新记录保存 $ledger_snapshot_v1 内容哈希引用，原始UTF-8字节压缩保存在同库 evidence_blob。SHA-256覆盖未压缩原文，读取校验解压长度与哈希。旧的内嵌JSON仍可读取。Registry.calculation_evidence还原原文；summary_json及所有业务字段不变。证据表禁止修改和删除。
+calculation.model_json/rules_json 新记录保存 $ledger_snapshot_v1 内容哈希引用，原始UTF-8字节压缩保存在同库 evidence_blob。SHA-256覆盖未压缩原文，读取校验解压长度与哈希。旧的内嵌JSON仍可读取。Registry.calculation_evidence还原原文；所有业务字段不变。证据表禁止修改和删除。
 
 历史迁移只处理候选库，保留原库作为回退。候选库逐条比较逻辑证据摘要，停写后同步尾部及可变表，比较源库与候选库内容并执行完整性检查。禁止在在线库直接删除历史或去掉不可变触发器。
 
 ## 无变化的计算
 
 同店同月的最新记录只有在输入指纹、引擎、业务结果一致且留档SHA-256通过时才复用。只忽略随机calculation_id，不忽略金额、规则版本、待核价或错误信息。旧留档没有校验文件时仍正常新算，文件缺失/损坏不会被复用掩盖。
+
+## 持续增长控制（2026-10-19）
+
+先部署兼容读取，再在 `storage-policy.json` 开启下列开关；默认关闭，不在服务启动时批量改写历史库。
+
+- `compact_snapshots=true`：新 `run.result`、`calculation.summary_json` 及报表切片的大 JSON 使用同库、不可变、按内容寻址的 zlib 证据；小于 1024 字符的字段仍内嵌。保留原始 UTF-8 字节、全部金额及计算 ID，读取逐次校验长度和 SHA-256。存储表示变化不改变账期、结账引用或发放确认。
+- `period_snapshot_reuse=true`：新输入指纹改用账期级完整结果、五类证据表（事实、待核价、成本覆盖缺口、分摊依据、订单问题）和逐行提成明细，以及引擎、模型、规则及其版本。其他账期变化不再单独导致本期另存一份。来源行、数量、零和金额变化、归属及规则变化仍导致新留档；缺失或损坏任一封存附件也不能复用。旧指纹首次过渡会正常产生一版新记录；dirty/unknown 引擎不启用账期指纹。
+- `run_directory_bundles=true`：仅在 `archive_all_completed=true` 时生效。尚未发布的新核算附件写入唯一 NAS 目录，在本地只保留一个目录链接；逐文件校验封条和完整目录清单随附件保留，`storage.db` 记录一条目录归档。旧平铺文件及已发布目录不搬迁。目录准备失败则保留旧的本地写入流程；开始写入后 NAS 中断会使证据未就绪，不能用缺失成本或零金额代替。查询历史目录时不会因 NAS 不可用而转到空白本地路径。
+
+Workspace 和 Registry 连接自动还原已知 JSON 列；SQL 在 JSON 函数中用 `snapshot_json(value)` 还原。只读运维脚本通过 `snapshot_store.install_reader(conn)` 注册读取支持，或显式 `resolve(conn, text)`；原始 SQLite 列现在可能是引用，不能直接将它当业务 JSON。旧内嵌记录照常读取，新开关也可以随时关闭以停止后续压缩/目录写入。**关闭开关不会移除新记录的读取要求，回退时必须保留兼容读取代码，禁止直接退回不识别引用的旧版本。**
+
+这轮控制只影响后续写入，不会自动腾空既有大库。历史重编码及收缩仍须执行下述离线候选、逐条逻辑校验、停写追平和可回退切换流程。
+
+原生索引器每批写入等待后台合并结束；有新索引、首次维护及每 120 次扫描时调用 Tantivy 引擎自己的垃圾回收。Windows 正在使用的映射文件计入 deferred 并在后续轮次重试，不按文件名前缀猜测删除；`index-gc-status.json` 和 `/storage` 记录最近结果。
 
 ## 运行要求
 

@@ -474,14 +474,14 @@ def _visible_run_sql(run_ids):
         source = """FROM period p JOIN run r ON r.id=CASE WHEN p.state='closed' AND p.run_id IS NOT NULL THEN p.run_id
           ELSE (SELECT id FROM run latest WHERE latest.store_id=p.store_id AND latest.period=p.period ORDER BY id DESC LIMIT 1) END"""
         payload_kind = "CASE WHEN p.state='closed' AND mf.result_json IS NOT NULL THEN 'manual' ELSE 'run' END"
-        payload = "coalesce(CASE WHEN p.state='closed' THEN mf.result_json END, r.result)"
+        payload = "snapshot_json(coalesce(CASE WHEN p.state='closed' THEN mf.result_json END, r.result))"
         manual_join = " LEFT JOIN manual_finance mf ON mf.run_id=r.id AND p.state='closed'"
         return source, payload_kind, payload, manual_join
     if len(run_ids) != len(set(run_ids)):
         raise RegistryError('计算记录不能重复')
     source = 'FROM run r LEFT JOIN period p ON p.store_id=r.store_id AND p.period=r.period'
     payload_kind = "CASE WHEN mf.result_json IS NOT NULL THEN 'manual' ELSE 'run' END"
-    payload = 'coalesce(mf.result_json,r.result)'
+    payload = 'snapshot_json(coalesce(mf.result_json,r.result))'
     manual_join = ' LEFT JOIN manual_finance mf ON mf.run_id=r.id'
     return source, payload_kind, payload, manual_join
 
@@ -524,14 +524,18 @@ def _fill_report_slices(workspace, start, end, run_ids=None, store_id=None, visi
             f"{source}{manual_join} LEFT JOIN run_report_slice existing "
             f"ON existing.run_id=r.id AND existing.payload_kind={payload_kind} "
             f"WHERE r.id IN ({marks}) AND (existing.run_id IS NULL OR existing.overview_json IS NULL)", batch):
+            from .snapshot_store import store
+            packed = {key: store(conn, row[key], workspace.root) for key in
+                      ('commission_json', 'products_slim_json', 'statement_json',
+                       'manual_cost_json', 'overview_json')}
             conn.execute(
                 "INSERT OR REPLACE INTO run_report_slice("
                 "run_id,payload_kind,payload_bytes,commission_json,products_slim_json,"
                 "statement_json,store_name,manual_cost_json,overview_json) VALUES (?,?,?,?,?,?,?,?,?)",
                 (row['id'], row['payload_kind'], row['payload_bytes'],
-                 row['commission_json'] or '{}', row['products_slim_json'],
-                 row['statement_json'] or '[]', row['store_name'] or '',
-                 row['manual_cost_json'], row['overview_json']))
+                 packed['commission_json'] or '{}', packed['products_slim_json'],
+                 packed['statement_json'] or '[]', row['store_name'] or '',
+                 packed['manual_cost_json'], packed['overview_json']))
             filled += 1
     return filled
 
@@ -602,7 +606,7 @@ def build(workspace, registry, model, start, end, store_ids=None, person_ids=Non
         if run_ids is None:
             sha_sql = (
                 "SELECT r.id,json_extract(coalesce("
-                "CASE WHEN p.state='closed' THEN mf.result_json END,r.result),'$.commission') "
+                "CASE WHEN p.state='closed' THEN mf.result_json END,snapshot_json(r.result)),'$.commission') "
                 "commission_json FROM run r "
                 "LEFT JOIN period p ON p.store_id=r.store_id AND p.period=r.period "
                 "LEFT JOIN manual_finance mf ON mf.run_id=r.id "
@@ -610,7 +614,7 @@ def build(workspace, registry, model, start, end, store_ids=None, person_ids=Non
             )
         else:
             sha_sql = (
-                "SELECT r.id,json_extract(coalesce(mf.result_json,r.result),'$.commission') "
+                "SELECT r.id,json_extract(snapshot_json(coalesce(mf.result_json,r.result)),'$.commission') "
                 "commission_json FROM run r LEFT JOIN manual_finance mf ON mf.run_id=r.id "
                 f"WHERE r.id IN ({marks})"
             )

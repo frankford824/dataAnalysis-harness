@@ -4,6 +4,9 @@ import hashlib
 import json
 import re
 import zlib
+import os
+import sqlite3
+from pathlib import Path
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS evidence_blob (
@@ -52,5 +55,51 @@ def put(conn, text: str) -> str:
     if len(raw)>256*1024*1024:raise ValueError('Calculation evidence exceeds size limit')
     sha=hashlib.sha256(raw).hexdigest()
     if not conn.execute('SELECT 1 FROM evidence_blob WHERE sha=?',(sha,)).fetchone():
-        conn.execute('INSERT INTO evidence_blob VALUES(?,?,?,?)',(sha,'zlib',len(raw),zlib.compress(raw,6)))
+        # Independent writer connections can both observe a missing shared
+        # blob. The immutable hash key makes the insert idempotent after wait.
+        conn.execute('INSERT OR IGNORE INTO evidence_blob VALUES(?,?,?,?)',(sha,'zlib',len(raw),zlib.compress(raw,6)))
     return json.dumps({'$ledger_snapshot_v1':sha},separators=(',',':'))
+
+
+def compact_enabled(root) -> bool:
+    """Reader support is unconditional; compact writes are enabled after rollout."""
+    configured = os.getenv('LEDGER_COMPACT_SNAPSHOTS')
+    if configured is not None:
+        return configured == '1'
+    try:
+        policy = json.loads((Path(root) / 'storage-policy.json').read_text(encoding='utf-8-sig'))
+        return isinstance(policy, dict) and policy.get('compact_snapshots') is True
+    except (OSError, ValueError):
+        return False
+
+
+def store(conn, text, root):
+    # Small scalars stay inline. Original UTF-8 bytes, including formatting and
+    # calculation IDs, are retained; no money or evidence field is discarded.
+    if isinstance(text, str) and len(text) >= 1024 and compact_enabled(root):
+        return put(conn, text)
+    return text
+
+
+def install_reader(conn):
+    """Expand selected reference cells and explicitly wrapped SQL JSON inputs.
+
+    Never cache decoded evidence across transactions: a rollback must not make
+    a missing blob appear valid. Every expansion verifies length and SHA-256.
+    """
+    def expand(value):
+        return resolve(conn, value) if isinstance(value, str) and value.startswith(PREFIX) else value
+
+    json_columns = {'result', 'shown_result', 'model_json', 'rules_json', 'summary_json',
+                    'overview_json', 'commission_json', 'products_slim_json',
+                    'products_json', 'statement_json', 'manual_cost_json'}
+
+    def row(cursor, values):
+        # User-supplied names/notes are free text even if they happen to start
+        # with the reserved marker. Only internal JSON cells are references.
+        return sqlite3.Row(cursor, tuple(
+            expand(value) if column[0] in json_columns else value
+            for column, value in zip(cursor.description, values)))
+
+    conn.row_factory = row
+    conn.create_function('snapshot_json', 1, expand, deterministic=True)

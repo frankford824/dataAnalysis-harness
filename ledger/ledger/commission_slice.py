@@ -63,6 +63,10 @@ def producer_ids(commission):
 def save(conn, run_id, result, *, kind='run', payload_text=None):
     text = payload_text if payload_text is not None else json.dumps(result, ensure_ascii=False)
     row = from_result(result)
+    from pathlib import Path
+    from .snapshot_store import store
+    root = Path(conn.execute('PRAGMA database_list').fetchone()[2]).parent
+    row = {key: store(conn, value, root) for key, value in row.items()}
     conn.execute(
         "INSERT OR REPLACE INTO run_report_slice("
         "run_id,payload_kind,payload_bytes,commission_json,products_slim_json,"
