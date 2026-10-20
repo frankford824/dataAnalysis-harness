@@ -905,10 +905,24 @@ class OrderFeed:
         if not evidence.is_empty():
             prior = getattr(ingestion, 'brushing_evidence', pl.DataFrame())
             ingestion.brushing_evidence = pl.concat([prior, evidence], how='diagonal_relaxed')
-        after = self.state()
+        with self._connect() as conn:
+            conn.execute("BEGIN")
+            after = conn.execute("SELECT snapshot_id,last_error FROM feed_state WHERE id=1").fetchone()
+            store_advanced = conn.execute(
+                "SELECT 1 FROM feed_entity WHERE order_store_id IN "
+                "(SELECT order_store_id FROM feed_store WHERE ledger_store_id=? AND mapping_status='confirmed') "
+                "AND entity_type IN ('order','order_item','order_cost','order_relation','after_sale','after_sale_item') "
+                "AND seq>? LIMIT 1",
+                (store.id, self._captured_seq),
+            ).fetchone() is not None
+        # Judge this immutable input against the head captured in the same
+        # transaction, not a moving global head observed after building frames.
+        # Later store events keep their own durable recompute obligation.
         ingestion.source_sync_pending = (
-            int(getattr(self, "_captured_seq", state.get("consumed_seq") or 0)) < int(after.get("source_latest_seq") or 0)
-            or bool(after.get("last_error"))
+            int(self._captured_seq) < int(self._captured_source_latest_seq)
+            or self._captured_snapshot_id != after["snapshot_id"]
+            or store_advanced
+            or bool(after["last_error"])
         )
         if not frames:
             raise OrderFeedError(f"订单台没有 {store.name} 的已确认店铺映射")
@@ -1190,12 +1204,15 @@ class OrderFeed:
         self._brushing_evidence = pl.DataFrame()
         with self._connect() as conn:
             conn.execute("BEGIN")
-            captured = conn.execute("SELECT snapshot_id,consumed_seq FROM feed_state WHERE id=1").fetchone()
+            captured = conn.execute(
+                "SELECT snapshot_id,consumed_seq,source_latest_seq FROM feed_state WHERE id=1"
+            ).fetchone()
             if captured["snapshot_id"] != manifest["snapshot_id"]:
                 raise OrderFeedError("订单快照刚发生切换，本次计算等待重试")
             fingerprint = f"order-feed:{captured['snapshot_id']}:{captured['consumed_seq']}"
             self._captured_snapshot_id = captured['snapshot_id']
             self._captured_seq = int(captured["consumed_seq"])
+            self._captured_source_latest_seq = int(captured["source_latest_seq"])
             order_store_ids = [
                 str(r[0]) for r in conn.execute(
                     "select order_store_id from feed_store where ledger_store_id=? and mapping_status='confirmed'",

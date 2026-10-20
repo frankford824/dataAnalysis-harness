@@ -350,6 +350,55 @@ def test_snapshot_and_delta_become_normalized_engine_sources(tmp_path):
     assert after.row(0, named=True)["sku"] == cost.row(0, named=True)["sku"] == "SKU1"
 
 
+@pytest.mark.parametrize(
+    "read_head,end_cursor,end_head,error,snapshot,event_store,pending",
+    [
+        (11, 12, 12, "", "s1", "20", False),
+        (11, 11, 12, "", "s1", None, False),
+        (12, 12, 12, "", "s1", None, True),
+        (11, 11, 11, "source unavailable", "s1", None, True),
+        (11, 11, 11, "", "s2", None, True),
+        (11, 12, 12, "", "s1", "10", True),
+    ],
+    ids=["new-events-consumed", "new-events-not-consumed", "captured-backlog",
+         "source-error", "snapshot-replaced", "same-store-changed"],
+)
+def test_calculation_completion_uses_the_head_captured_with_its_inputs(
+    tmp_path, monkeypatch, read_head, end_cursor, end_head, error, snapshot, event_store, pending,
+):
+    root = tmp_path / "feed"
+    feed = OrderFeed(tmp_path / "workspace", client=FakeClient(_fixture(root)), feed_root=root)
+    feed.sync()
+    frames = feed._frames
+
+    def read_frames(*args, **kwargs):
+        # A revision probe can advance between append_to's initial state read
+        # and the transaction which captures the actual input rows.
+        with feed._connect() as conn:
+            conn.execute("UPDATE feed_state SET source_latest_seq=? WHERE id=1", (read_head,))
+        result = frames(*args, **kwargs)
+        # Events arriving while those frames are built belong to a later run.
+        with feed._connect() as conn:
+            if event_store:
+                conn.execute(
+                    "INSERT INTO feed_entity(entity_type,entity_id,seq,revision,operation,order_store_id) "
+                    "VALUES('order','new-order',12,12,'upsert',?)", (event_store,),
+                )
+            conn.execute(
+                "UPDATE feed_state SET consumed_seq=?,source_latest_seq=?,last_error=?,snapshot_id=? WHERE id=1",
+                (end_cursor, end_head, error, snapshot),
+            )
+        return result
+
+    monkeypatch.setattr(feed, "_frames", read_frames)
+    ingestion = Ingestion(model=None)
+    feed.append_to(ingestion, Store(id="taobao_test", name="淘宝测试店", platform="taobao"))
+
+    assert ingestion.source_sync_pending is pending
+    assert ingestion.frames_of("order_detail")[0].frame["order_id"].to_list() == ["ON1"]
+    assert ingestion.frames_of("order_cost")[0].frame["unit_cost"].to_list() == [3.5]
+
+
 def test_jd_uploaded_cost_only_fills_platform_masters_absent_from_feed():
     model = ModelRepository(
         Path(__file__).resolve().parents[2] / "models" / "cn-ecommerce"
