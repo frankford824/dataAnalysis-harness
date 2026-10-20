@@ -79,7 +79,7 @@ def test_shared_change_reaches_feed_only_stores_with_existing_periods(tmp_path):
 def test_changed_saved_payload_cannot_reuse_same_run_id(tmp_path, monkeypatch):
     ws, model, result, registry, calls = setup_calculation(tmp_path, monkeypatch)
     first = service.recompute(ws, model, model.store("s"))
-    ws.conn.execute("update run set result=json_set(result, '$.changed', 1) where id=?", (first.periods[0]["run_id"],))
+    ws.conn.execute("update run set result=json_set(snapshot_json(result), '$.changed', 1) where id=?", (first.periods[0]["run_id"],))
     ws.conn.commit()
     service.recompute(ws, model, model.store("s"))
     assert len(calls) == 2

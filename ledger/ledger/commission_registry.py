@@ -459,7 +459,8 @@ class Registry:
         # Streaming HTTP iterators resume sequentially on different worker threads.
         # Only those private read connections opt out of thread affinity.
         conn = sqlite3.connect(self.path, timeout=30, check_same_thread=thread_affine)
-        conn.row_factory = sqlite3.Row
+        from .snapshot_store import install_reader
+        install_reader(conn)
         conn.execute("PRAGMA foreign_keys=ON")
         conn.execute("PRAGMA cache_size=-16384")
         conn.execute("PRAGMA mmap_size=268435456")

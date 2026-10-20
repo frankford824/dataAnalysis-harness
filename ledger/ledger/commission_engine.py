@@ -515,11 +515,11 @@ def persist(registry: Registry, finance_run: int, details: pl.DataFrame, metadat
     details.with_columns(pl.lit(finance_run).alias("finance_run")).write_parquet(temporary)
     temporary.replace(path)
     digest = hashlib.sha256(path.read_bytes()).hexdigest()
-    from .snapshot_store import put
+    from .snapshot_store import put, store
     with registry.transaction() as conn:
         model_ref=put(conn,metadata["model_json"])
         rules_ref=put(conn,metadata["rules_json"])
         conn.execute("INSERT INTO calculation VALUES(?,?,?,?,?,?,?,?,?,?,?)",
                      (metadata["id"], finance_run, metadata["store_id"], metadata["period"], now(),
                       metadata["registry_revision"], path.name, digest, model_ref,
-                      rules_ref, metadata["summary_json"]))
+                      rules_ref, store(conn, metadata["summary_json"], registry.root.parent)))

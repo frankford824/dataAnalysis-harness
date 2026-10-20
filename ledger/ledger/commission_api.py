@@ -1028,7 +1028,7 @@ def install(app, workspace, model, model_root: Path | None = None):
     def calculations(store_id: str = "", period: str = "", after: int = 0, limit: int = Query(50, ge=1, le=500)):
         with reg().connect() as conn:
             rows = [dict(r) for r in conn.execute(
-                "SELECT id,finance_run,store_id,period,at,registry_revision,json_remove(summary_json,'$.products','$.people') summary_json FROM calculation "
+                "SELECT id,finance_run,store_id,period,at,registry_revision,json_remove(snapshot_json(summary_json),'$.products','$.people') summary_json FROM calculation "
                 "WHERE (?='' OR store_id=?) AND (?='' OR period=?) AND (?=0 OR finance_run<?) "
                 "ORDER BY finance_run DESC LIMIT ?", (store_id, store_id, period, period, after, after, limit))]
         pairs=sorted({(r['store_id'],r['period']) for r in rows})
