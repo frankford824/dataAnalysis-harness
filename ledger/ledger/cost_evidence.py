@@ -12,9 +12,9 @@ CAPTURED_COST_SOURCES = frozenset({
 # also proves exact order-day alignment, valid quantity/price and stable identity.
 ORDER_DAY_COST_SOURCES = frozenset({
     "history", "component_history", "manual", "blue_flag",
-    "register",
 })
 
-# register_first uses the first register price after the sale. Repeating the
-# requested sale day in cost_as_of is not evidence that this price applied then.
-# Preserve it in CAPTURED_COST_SOURCES for review, never certify it as history.
+# Both register labels were derived from generic inventory metadata timestamps.
+# Those timestamps prove neither the first price nor historical effectiveness.
+# Preserve the amounts for review; dated official history or independently
+# verified manual evidence is required before entering historical profit.
