@@ -351,20 +351,21 @@ def test_snapshot_and_delta_become_normalized_engine_sources(tmp_path):
 
 
 @pytest.mark.parametrize(
-    "read_head,end_cursor,end_head,error,snapshot,event_store,pending",
+    "read_head,end_cursor,end_head,error,snapshot,event_store,captured_error,pending",
     [
-        (11, 12, 12, "", "s1", "20", False),
-        (11, 11, 12, "", "s1", None, False),
-        (12, 12, 12, "", "s1", None, True),
-        (11, 11, 11, "source unavailable", "s1", None, True),
-        (11, 11, 11, "", "s2", None, True),
-        (11, 12, 12, "", "s1", "10", False),
+        (11, 12, 12, "", "s1", "20", "", False),
+        (11, 11, 12, "", "s1", None, "", False),
+        (12, 12, 12, "", "s1", None, "", True),
+        (11, 11, 11, "source unavailable", "s1", None, "", False),
+        (11, 11, 11, "", "s1", None, "source unavailable", True),
+        (11, 11, 11, "", "s2", None, "", True),
+        (11, 12, 12, "", "s1", "10", "", False),
     ],
     ids=["new-events-consumed", "new-events-not-consumed", "captured-backlog",
-         "source-error", "snapshot-replaced", "same-store-changed"],
+         "later-source-error", "captured-source-error", "snapshot-replaced", "same-store-changed"],
 )
 def test_calculation_completion_uses_the_head_captured_with_its_inputs(
-    tmp_path, monkeypatch, read_head, end_cursor, end_head, error, snapshot, event_store, pending,
+    tmp_path, monkeypatch, read_head, end_cursor, end_head, error, snapshot, event_store, captured_error, pending,
 ):
     root = tmp_path / "feed"
     feed = OrderFeed(tmp_path / "workspace", client=FakeClient(_fixture(root)), feed_root=root)
@@ -375,7 +376,7 @@ def test_calculation_completion_uses_the_head_captured_with_its_inputs(
         # A revision probe can advance between append_to's initial state read
         # and the transaction which captures the actual input rows.
         with feed._connect() as conn:
-            conn.execute("UPDATE feed_state SET source_latest_seq=? WHERE id=1", (read_head,))
+            conn.execute("UPDATE feed_state SET source_latest_seq=?,last_error=? WHERE id=1", (read_head,captured_error))
         result = frames(*args, **kwargs)
         # Events arriving while those frames are built belong to a later run.
         with feed._connect() as conn:
