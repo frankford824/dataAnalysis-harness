@@ -125,7 +125,10 @@ class Manager:
                     raise ValueError(why)
                 # No order inputs yet is a normal state for a newly registered
                 # listing/store. Its next source revision will enqueue it again.
-            provisional = any(p.get("source_sync_pending") for p in result.periods)
+            # Frozen close-time flags describe historical evidence, not the
+            # current work. Only open periods can require another sync pass.
+            provisional = any(p.get("state") != "closed" and p.get("source_sync_pending")
+                              for p in result.periods)
             with registry.transaction() as conn:
                 # A published trial has consumed the captured file generation
                 # even if newer ERP events still require another pass. Newer
