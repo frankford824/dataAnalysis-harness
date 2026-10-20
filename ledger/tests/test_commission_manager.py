@@ -74,6 +74,27 @@ def test_completed_input_retires_only_its_own_captured_work(tmp_path, monkeypatc
     assert [(row["store_id"], row["source_seq"]) for row in pending] == [(updated_store, 12)]
 
 
+@pytest.mark.parametrize("open_pending", [False, True], ids=["open-complete", "open-syncing"])
+def test_frozen_sync_flags_do_not_keep_current_work_pending(tmp_path, monkeypatch, open_pending):
+    monkeypatch.setenv("LEDGER_ORDER_FEED_ENABLED", "0")
+    ws = Workspace(tmp_path)
+    registry = Registry(tmp_path)
+    registry.enqueue_source({"s1"}, "order-feed:snapshot:10")
+    periods = [
+        {"period": "2026-07", "state": "closed", "source_sync_pending": True},
+        {"period": "2026-08", "state": "open", "source_sync_pending": open_pending},
+    ]
+    monkeypatch.setattr("ledger.commission_manager.service.recompute",
+                        lambda *a, **k: SimpleNamespace(failure=None, periods=periods))
+    Manager(lambda: ws, _model).once()
+    with registry.connect() as conn:
+        pending = conn.execute("SELECT 1 FROM pending WHERE store_id='s1'").fetchone()
+        job = json.loads(conn.execute("SELECT result FROM job").fetchone()[0])
+    assert bool(pending) is open_pending
+    assert job["provisional"] is open_pending
+    assert periods[0]["source_sync_pending"] is True
+
+
 def test_repeated_source_updates_preserve_waiting_time_and_worker_lease(tmp_path, monkeypatch):
     registry=Registry(tmp_path)
     monkeypatch.setattr('ledger.commission_registry.time.time',lambda:100)
