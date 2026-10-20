@@ -342,6 +342,7 @@ def evaluate_metric(
             .when(col('failure_reason') == 'original_quantity_conflict').then(pl.lit('原始数量与当前订单数量不一致，请核对后再计价'))
             .when(col('failure_reason') == 'item_identity_mismatch').then(pl.lit('成本证据与当前订单商品不一致，等待重新核实'))
             .when(col('failure_reason') == 'nonpositive_register_cost').then(pl.lit('登记成本为零或负数，尚不能作为有效成本'))
+            .when(col('cost_source') == 'register_first').then(pl.lit('首次登记价晚于下单日，不能证实历史成本；保留参考，待核对'))
             .when(col('failure_reason') == 'unresolved_item_risk').then(pl.lit('订单异常尚未查清，暂不计入成本'))
             .when(col('failure_reason') == 'component_unit_rounding_conflict').then(pl.lit('套餐组件合计与单价乘数量的结果不一致，请核对金额'))
             .when(col('pricing_source_suspect').cast(pl.Boolean).fill_null(False)).then(pl.lit('原订单商品信息待核对'))

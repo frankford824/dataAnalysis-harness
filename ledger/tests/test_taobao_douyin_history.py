@@ -15,7 +15,7 @@ from test_reship_period_and_cost_drill import item
 @pytest.mark.parametrize('source,day,evidence_day,available',[
     ('history','2026-06-05','2026-06-05',True),
     ('register','2026-06-05','2026-06-05',True),
-    ('register_first','2026-06-05','2026-06-05',True),
+    ('register_first','2026-06-05','2026-06-05',False),
     ('register_first','2026-06-05','2026-07-02',False),
     ('register_first','2026-07-02','2026-06-05',False),
     ('history','2026-07-02','2026-06-05',False),
@@ -39,6 +39,20 @@ def test_original_platform_day_controls_cost_evidence(platform,source,day,eviden
     assert sl.nodes['profit'].value==(-10 if available else None)
     assert result.pricing_gaps.height==(0 if available else 1)
     if not available:assert result.pricing_gaps['order_date'].item()=='2026-06-05'
+    if source == 'register_first':
+        assert '首次登记价晚于下单日' in result.pricing_gaps['reason'].item()
+
+
+def test_later_first_register_price_does_not_become_history_by_repeating_sale_day():
+    frame = pl.DataFrame({'order_id': ['SALE'], 'cost_source': ['register_first'],
+        'cost_status': ['priced'], 'unit_cost': [40.838], 'quantity': [1.],
+        'cost_as_of': ['2026-08-05'], '__spine_order_date__': [datetime(2026, 8, 5).date()],
+        'pricing_suspect': [False], 'pricing_missing': [False],
+        'pricing_evidence': [json.dumps({'order_date': '2026-08-05',
+            'register_basis': 'first', 'register_effective_on': '2026-09-17'})]})
+    known, wanted = historical_price_evidence(frame, trusted_feed_history=True)
+    assert not frame.select(known).item()
+    assert frame.select(wanted).item() == datetime(2026, 8, 5).date()
 
 
 @pytest.mark.parametrize('source,quoted,proof,available',[
