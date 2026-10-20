@@ -70,7 +70,7 @@ def test_completed_input_retires_only_its_own_captured_work(tmp_path, monkeypatc
     with registry.connect() as conn:
         pending = [dict(row) for row in conn.execute("SELECT * FROM pending")]
         job = json.loads(conn.execute("SELECT result FROM job").fetchone()[0])
-    assert job["provisional"] is (updated_store == "s1")
+    assert not job["provisional"]
     assert [(row["store_id"], row["source_seq"]) for row in pending] == [(updated_store, 12)]
 
 

@@ -358,7 +358,7 @@ def test_snapshot_and_delta_become_normalized_engine_sources(tmp_path):
         (12, 12, 12, "", "s1", None, True),
         (11, 11, 11, "source unavailable", "s1", None, True),
         (11, 11, 11, "", "s2", None, True),
-        (11, 12, 12, "", "s1", "10", True),
+        (11, 12, 12, "", "s1", "10", False),
     ],
     ids=["new-events-consumed", "new-events-not-consumed", "captured-backlog",
          "source-error", "snapshot-replaced", "same-store-changed"],

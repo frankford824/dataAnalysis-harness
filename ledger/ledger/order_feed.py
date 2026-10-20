@@ -905,23 +905,13 @@ class OrderFeed:
         if not evidence.is_empty():
             prior = getattr(ingestion, 'brushing_evidence', pl.DataFrame())
             ingestion.brushing_evidence = pl.concat([prior, evidence], how='diagonal_relaxed')
-        with self._connect() as conn:
-            conn.execute("BEGIN")
-            after = conn.execute("SELECT snapshot_id,last_error FROM feed_state WHERE id=1").fetchone()
-            store_advanced = conn.execute(
-                "SELECT 1 FROM feed_entity WHERE order_store_id IN "
-                "(SELECT order_store_id FROM feed_store WHERE ledger_store_id=? AND mapping_status='confirmed') "
-                "AND entity_type IN ('order','order_item','order_cost','order_relation','after_sale','after_sale_item') "
-                "AND seq>? LIMIT 1",
-                (store.id, self._captured_seq),
-            ).fetchone() is not None
+        after = self.state()
         # Judge this immutable input against the head captured in the same
         # transaction, not a moving global head observed after building frames.
         # Later store events keep their own durable recompute obligation.
         ingestion.source_sync_pending = (
             int(self._captured_seq) < int(self._captured_source_latest_seq)
             or self._captured_snapshot_id != after["snapshot_id"]
-            or store_advanced
             or bool(after["last_error"])
         )
         if not frames:
