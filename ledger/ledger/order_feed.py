@@ -1879,7 +1879,8 @@ class OrderFeed:
             id=template_id, source=source, name=template_id, match_columns=(roles[0][0],),
             bindings=tuple(ColumnBinding(role=role, columns=(role,), kind=kind) for role, kind in roles),
             time_slots={
-                slot: role for slot, role in (("order_date", "order_time"), ("pay_date", "pay_time"))
+                slot: slot if any(candidate == slot for candidate, _ in roles) else role
+                for slot, role in (("order_date", "order_time"), ("pay_date", "pay_time"))
                 if any(candidate == role for candidate, _ in roles)
             },
         )
@@ -1894,7 +1895,7 @@ class OrderFeed:
             ("order_state", "text"), ("order_type", "text"),
             ("order_flag", "text"), ("order_remark", "text"), ("internal_order_id", "text"),
             ("freight_attribution_evidence", "text"),
-            ("order_time", "time"), ("pay_time", "time"),
+            ("order_date", "time"), ("order_time", "time"), ("pay_time", "time"),
             ("store_name", "text"),
         ])
 

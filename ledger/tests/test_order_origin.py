@@ -44,6 +44,15 @@ def test_merged_member_uses_its_own_parent_and_original_day_in_both_frames(tmp_p
     assert of['order_time'].item() is None
     assert cf['cost_as_of'].item()=='2026-08-19'
     assert items.to_dicts()==original
+    # Preserve the proved date all the way through the accounting spine/link,
+    # even when the source supplies no matching original timestamp.
+    from ledger.engine.runtime import _spine_frame
+    from ledger.engine.link import Spine, _inherit_context, LINK_KEY
+    template=feed._order_template()
+    assert template.time_slots['order_date']=='order_date'
+    spine=Spine(_spine_frame(of,template))
+    linked=_inherit_context(cf.with_columns(pl.col('original_order_id').alias(LINK_KEY)),spine,'order_id')
+    assert str(linked['__spine_order_date__'].item())=='2026-08-19'
 
 
 def test_verified_original_day_crosses_month_without_changing_raw_header(tmp_path):
