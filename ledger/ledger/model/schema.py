@@ -401,6 +401,23 @@ class ParseOptions(Base):
     null_tokens: tuple[str, ...] = ("", "-", "--", "无", "N/A", "null", "NULL")
 
 
+class IdentifierExtraction(Base):
+    """A source-declared identifier replacement, never an amount/date rewrite."""
+
+    target: Literal['order_id', 'base_order_id', 'sub_order_id']
+    when: FieldMatch
+    from_role: str
+    extract: str
+    value_pattern: str
+
+    @model_validator(mode="after")
+    def _check(self):
+        if re.compile(self.extract).groups != 1:
+            raise ValueError('标识提取必须有且仅有一个捕获组')
+        re.compile(self.value_pattern)
+        return self
+
+
 class Template(Base):
     """一个表头签名对应一个模板版本。
 
@@ -435,6 +452,7 @@ class Template(Base):
     time_fallbacks: tuple[TimeFallback, ...] = ()
     #: 取关联键的规则链。声明了就用它，指标的 link.key 只用于没有规则链的简单场合。
     key_rules: tuple[KeyRule, ...] = ()
+    identifier_extractions: tuple[IdentifierExtraction, ...] = ()
     #: 归类的规则链。
     classify_rules: tuple[ClassifyRule, ...] = ()
     #: 归类之后的改判。
@@ -461,6 +479,9 @@ class Template(Base):
         for i, rule in enumerate(self.key_rules, 1):
             if rule.when.field not in roles:
                 raise ValueError(f"{self.id}: 取键规则 {i} 引用了未定义的角色 {rule.when.field}")
+        for rule in self.identifier_extractions:
+            if not {rule.target, rule.from_role, rule.when.field} <= roles:
+                raise ValueError(f'{self.id}: 标识提取引用了未定义的角色')
         for i, rule in enumerate(self.classify_rules, 1):
             if rule.when and rule.when.field not in roles:
                 raise ValueError(f"{self.id}: 归类规则 {i} 引用了未定义的角色 {rule.when.field}")

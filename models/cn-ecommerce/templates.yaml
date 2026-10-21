@@ -1200,6 +1200,12 @@
   match_columns: [动账时间, 动账金额, 动账场景, 子订单号]
   parse: {header_row: 1}
   time_slots: {settle_date: settle_time}
+  identifier_extractions:
+    - target: base_order_id
+      when: {field: subject, equals: [上门取件-支付快递费]}
+      from_role: remark
+      extract: '(?:^|[-－—;；\s])订单[：:\s]*([0-9]+)'
+      value_pattern: '^[0-9]{19}$'
   sign: by_direction
   direction_role: direction
   direction_outflow_values: [出账, 支出]
@@ -1250,6 +1256,12 @@
   match_columns: [关联订单号, 动账金额(元), 动账流水号, 关联子订单号, 动账时间, 动账场景]
   exclude_columns: [保险单号]
   time_slots: {settle_date: settle_time}
+  identifier_extractions:
+    - target: base_order_id
+      when: {field: subject, equals: [上门取件-支付快递费]}
+      from_role: remark
+      extract: '(?:^|[-－—;；\s])订单[：:\s]*([0-9]+)'
+      value_pattern: '^[0-9]{19}$'
   bindings:
     - {role: txn_id, columns: [动账流水号]}
     - {role: base_order_id, columns: [关联订单号], required: false}
