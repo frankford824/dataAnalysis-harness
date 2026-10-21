@@ -1025,6 +1025,10 @@
   match_columns: [保险单号, 动账流水号, 关联子订单号, 摘要描述, "金额(元)"]
   parse: {header_row: 0}
   time_slots: {settle_date: settle_time}
+  key_rules:
+    - when: {field: sub_order_id, extract: '^,([0-9]{19})$'}
+      note: 抖店保险导出的19位订单号可能有一个前导逗号；仅关联时去除，原始值保留。
+    - when: {field: sub_order_id}
   bindings:
     - {role: txn_id, columns: [动账流水号]}
     - {role: sub_order_id, columns: [关联子订单号]}
@@ -1040,6 +1044,10 @@
   name: 抖店保费支出（投保单明细）
   match_columns: [投保单号, 订单编号, 下单时间, 动账时间, 动账流水号, 保险名称, 支付保费]
   time_slots: {settle_date: settle_time}
+  key_rules:
+    - when: {field: sub_order_id, extract: '^,([0-9]{19})$'}
+      note: 抖店保险导出的19位订单号可能有一个前导逗号；仅关联时去除，原始值保留。
+    - when: {field: sub_order_id}
   bindings:
     - {role: txn_id, columns: [动账流水号]}
     - {role: sub_order_id, columns: [订单编号]}
