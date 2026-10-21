@@ -19,6 +19,7 @@ ORDER_FIELDS = (
     'is_paid', 'is_cod', 'is_refund', 'order_type',
 )
 ITEM_FIELDS = ('item_pay_amount', 'line_amount', 'outer_oi_id', 'i_id',
+               'original_order_date', 'cost_company_id',
                'sku_type', 'item_labels', 'properties_value',
                'seller_flag_code', 'seller_flag_name', 'seller_flag_source', 'seller_flag_scope',
                'source_evidence_version',

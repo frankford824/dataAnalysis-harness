@@ -23,15 +23,17 @@ def quantity(value):
         return None
 
 
-def verified_placeholder(row):
+def verified_quantity_input(row, *, require_placeholder=False):
     try:
         evidence = json.loads(row.get('pricing_evidence') or '{}')
         proof = evidence.get('cost_input')
         if not isinstance(proof, dict) or proof.get('version') != 'reship-cost-input.v1':
             return False
         if (proof.get('source') != 'jst.order_detail' or proof.get('identity_status') != 'verified'
-                or proof.get('quantity_status') != 'verified' or proof.get('sale_price_status') != 'placeholder'
+                or proof.get('quantity_status') != 'verified' or proof.get('sale_price_status') not in {'normal','placeholder'}
                 or proof.get('failure_reason') is not None or row.get('__identity_changed')):
+            return False
+        if require_placeholder and proof.get('sale_price_status')!='placeholder':
             return False
         sha = proof.get('source_order_hash')
         if not isinstance(sha, str) or not re.fullmatch('[0-9a-f]{64}', sha) or sha != row.get('__current_order_hash'):
@@ -48,7 +50,9 @@ def verified_placeholder(row):
         if qty is None or qty != quantity(row.get('quantity')) or qty != quantity(row.get('__current_item_quantity')):
             return False
         price = Decimal(str(row.get('__current_sale_price')))
-        if not price.is_finite() or price < 9999:
+        if not price.is_finite() or price<0:
+            return False
+        if (proof['sale_price_status']=='placeholder') != (price>=9999):
             return False
         parts = proof.get('components')
         if not isinstance(parts, list) or not parts or len(parts) > 10000:
@@ -70,6 +74,10 @@ def verified_placeholder(row):
         return True
     except (ValueError, TypeError, KeyError, AttributeError, InvalidOperation):
         return False
+
+
+def verified_placeholder(row):
+    return verified_quantity_input(row,require_placeholder=True)
 
 
 def placeholder_admission(frame):
