@@ -41,6 +41,29 @@ def scan_stamp(value,day):
     return raw.replace('T',' ') or str(day or ''),raw or str(day or '')
 
 
+def flag_charge_overlaps(charges):
+    """Same-parcel same-time rows may be distinct outbound/return/service fees.
+
+    Within one bill only identical signed amounts and settlement objects are
+    indistinguishable candidates. Whole-file aliases are removed separately;
+    overlapping nonidentical files still require source reconciliation.
+    """
+    overlaps={}
+    for charge in charges:
+        overlaps.setdefault((charge['tracking_no'],charge['scan_time_raw']),[]).append(charge)
+    for group in overlaps.values():
+        if len({r['file_sha'] for r in group})>1:
+            for charge in group:charge['source_issue']='source_overlap'
+            continue
+        identical={}
+        for charge in group:
+            key=(number(charge['amount']),charge.get('settlement_object','').strip())
+            identical.setdefault(key,[]).append(charge)
+        for copies in identical.values():
+            if len(copies)>1:
+                for charge in copies:charge['source_issue']='duplicate_charge'
+
+
 def capture(root, model, period):
     if not re.fullmatch(r'\d{4}-(0[1-9]|1[0-2])', period or ''):
         raise InputError('请选择有效月份')
@@ -194,16 +217,10 @@ def parse_sources(root, shadow_root, model, inputs, progress=lambda *_: None):
             charge_id = digest([value['signature'],ordinal])[:32]
             charges.append({'charge_id':charge_id,'tracking_no':tracking,'raw_tracking_no':raw_tracking,
                 'amount':text_amount(amount),'scan_time':when,'scan_time_raw':raw_time,'file_sha':value['sha'],'file':value['name'],
+                'settlement_object':str(row.get('material_name') or '').strip(),
                 'sheet':sheet,'row_no':row_no,'source_issue':'','carrier':''})
     # Cross-file overlap is not silently deduped or counted twice as confirmed.
-    overlaps = {}
-    for charge in charges:
-        overlaps.setdefault((charge['tracking_no'],charge['scan_time_raw']), []).append(charge)
-    for group in overlaps.values():
-        if len({r['file_sha'] for r in group})>1:
-            for charge in group: charge['source_issue']='source_overlap'
-        elif len(group)>1:
-            for charge in group: charge['source_issue']='duplicate_charge'
+    flag_charge_overlaps(charges)
     if not charges:
         raise InputError('该月份没有可读取的运费账单明细；未生成零元试算')
     return charges, order_frames, aliases, warnings

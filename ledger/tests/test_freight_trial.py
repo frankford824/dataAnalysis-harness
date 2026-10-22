@@ -145,6 +145,33 @@ def refund_charge(key,amount,when,**extra):
         'source_issue':'','carrier':'',**extra}
 
 
+def test_distinct_return_fees_allocate_330_with_each_source_row_preserved(result,monkeypatch):
+    from ledger.freight_trial_inputs import flag_charge_overlaps
+    ws,model,jobs,_jid=result;new_id='f'*32;tracking='YT7625530235832'
+    charges=[refund_charge(f'{i:032x}',amount,stamp,tracking_no=tracking,scan_time_raw=stamp,
+                row_no=row,settlement_object=obj) for i,amount,stamp,row,obj in (
+        (1,'1.70','2026-06-05',154983,'皇莉诗旗舰店'),
+        (2,'1.00','2026-06-22 11:23:24',233629,'江苏省南京市江宁区江开'),
+        (3,'0.60','2026-06-22 11:23:24',235729,'江苏省南京市江宁区江开'))]
+    flag_charge_overlaps(charges)
+    monkeypatch.setattr(trial,'parse_sources',lambda *_:(charges,[],{},[]))
+    monkeypatch.setattr(trial,'build_packages',lambda *_:{tracking:refund_packet(tracking_no=tracking)})
+    before=[tuple(r) for r in ws.conn.execute('SELECT * FROM run')]
+    trial.build(ws.root,ws.root,model,'2026-06',jobs.path(new_id)/'result')
+    trial._write_json(jobs.path(new_id)/'job.json',{'state':'ready','job_id':new_id,'period':'2026-06'})
+    page=trial.query(jobs,new_id)
+    assert page['summary']['allocated_count']==3 and page['summary']['pending_count']==0
+    assert Decimal(page['summary']['source_amount'])==Decimal(page['summary']['allocated_amount'])==Decimal('3.30')
+    rows=list(csv.DictReader(io.StringIO(trial.export(jobs,new_id,scope_fingerprint=page['scope_fingerprint']).lstrip('\ufeff'))))
+    assert len(rows)==3 and sum(Decimal(r['商品分摊运费']) for r in rows)==Decimal('3.30')
+    assert sorted(r['账单结算对象'] for r in rows)==sorted(r['settlement_object'] for r in charges)
+    for charge in charges:
+        detail=trial.detail(jobs,new_id,charge['charge_id'])['charge']
+        assert detail['status']=='allocated' and detail['row_no']==charge['row_no']
+        assert len(detail['allocations'])==1
+    assert [tuple(r) for r in ws.conn.execute('SELECT * FROM run')]==before
+
+
 def refund_packet(members=None,**extra):
     return {'packet_id':'sf-parcel','tracking_no':'SF5197274462604','store_ids':['s1'],
         'carrier':'顺丰','ship_time':'2026-06-15 09:32:24','internal_order_ids':['15432477'],

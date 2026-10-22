@@ -330,7 +330,7 @@ def export(jobs,job_id,*,store_id='',platform='',reason='',q='',scope_fingerprin
     if digest(scope)!=scope_fingerprint:raise InputError('导出范围与页面不一致，请重新读取结果')
     manifest,path=jobs.manifest(job_id);output=io.StringIO();writer=csv.writer(output)
     writer.writerow(['账单月份','收费记录号','运单号','店铺候选','状态','分摊方法','来源运费（每笔仅首行）','本包分摊基数（每笔仅首行）','待核原因',
-        '主订单号','平台子订单号','商品ID','权重类型','分摊权重','分摊比例','商品分摊运费','来源文件','工作表','留档行号','试算编号','输入校验值','冲减依据收费记录'])
+        '主订单号','平台子订单号','商品ID','权重类型','分摊权重','分摊比例','商品分摊运费','来源文件','工作表','留档行号','试算编号','输入校验值','冲减依据收费记录','账单结算对象'])
     names={s['id']:s['name'] for s in manifest['stores']}
     def safe(v):
         if isinstance(v,str) and (v.lstrip().startswith(('=','+','-','@')) or v.startswith(('\t','\r','\n')) or (v.isdigit() and len(v)>=15)):return "'"+v
@@ -345,5 +345,5 @@ def export(jobs,job_id,*,store_id='',platform='',reason='',q='',scope_fingerprin
                 Decimal(row['amount']) if index==0 else None,Decimal(row['basis_total']) if index==0 and row['basis_total'] is not None else None,REASONS.get(row['reason'],''),allocation.get('order_id',''),
                 allocation.get('child_id',''),allocation.get('product_id',''),'核定比例' if row['basis_unit']=='ratio' else '金额基数',allocation.get('basis_weight'),
                 Decimal(allocation['factor']) if allocation.get('factor') is not None else None,
-                Decimal(allocation['amount']) if allocation.get('amount') is not None else None,row['file'],row['sheet'],row['row_no'],job_id,manifest['input_fingerprint'],originals]])
+                Decimal(allocation['amount']) if allocation.get('amount') is not None else None,row['file'],row['sheet'],row['row_no'],job_id,manifest['input_fingerprint'],originals,row.get('settlement_object','')]])
     return '\ufeff'+output.getvalue()

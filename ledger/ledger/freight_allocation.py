@@ -5,7 +5,7 @@ from decimal import Decimal, localcontext, ROUND_HALF_UP
 
 from .money import decimal_amount
 
-RULE_VERSION = 'shipment-erp-goods-refund.v4'
+RULE_VERSION = 'shipment-erp-goods-multifee.v5'
 REASONS = {
     'no_shipment': '未找到实际发货记录',
     'non_shipping_items': '有发货记录，明细被标记为非实物，需核对商品属性',
