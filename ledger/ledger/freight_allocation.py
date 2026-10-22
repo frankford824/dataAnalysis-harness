@@ -5,7 +5,7 @@ from decimal import Decimal, localcontext, ROUND_HALF_UP
 
 from .money import decimal_amount
 
-RULE_VERSION = 'shipment-erp-goods-amount.v2'
+RULE_VERSION = 'shipment-erp-goods-refund.v3'
 REASONS = {
     'no_shipment': '未找到实际发货记录',
     'non_shipping_items': '有发货记录，明细被标记为非实物，需核对商品属性',
@@ -92,7 +92,10 @@ def allocate(amount, members, *, issue='', allow_zero_equal=False, original_fact
         if not original_factors or set(original_factors) != {m['target_key'] for m in members}:
             return _pending(amount, 'refund_basis')
         factors = [number(original_factors[m['target_key']]) for m in members]
-        if any(v is None or v < 0 for v in factors) or sum(factors) != 1:
+        with localcontext() as context:
+            context.prec = 50
+            valid = all(v is not None and v >= 0 for v in factors) and sum(factors) == 1
+        if not valid:
             return _pending(amount, 'refund_basis')
         method = 'original_reversal'
     elif method == 'direct':
@@ -121,11 +124,16 @@ def allocate(amount, members, *, issue='', allow_zero_equal=False, original_fact
                 factors = [w / total for w in weights]
             if relative: method='declared_ratio'
             elif all(m.get('basis_source')=='erp_goods_amount' for m in members): method='erp_goods_amount'
-    quantum = Decimal(1).scaleb(min(-6, amount.as_tuple().exponent))
-    amounts = [(amount * factor).quantize(quantum, rounding=ROUND_HALF_UP) for factor in factors]
     # Fixed tie break: input order never decides who receives the residue.
     recipient = min(range(len(members)), key=lambda i: (-factors[i], members[i]['target_key']))
-    amounts[recipient] += amount - sum(amounts)
+    quantum = Decimal(1).scaleb(min(-6, amount.as_tuple().exponent))
+    with localcontext() as context:
+        context.prec = 50
+        # Persist factors that sum exactly to one, including repeating thirds,
+        # so a later credit can use the saved allocation without a false gap.
+        factors[recipient] += Decimal(1) - sum(factors)
+        amounts = [(amount * factor).quantize(quantum, rounding=ROUND_HALF_UP) for factor in factors]
+        amounts[recipient] += amount - sum(amounts)
     assert sum(amounts) == amount
     allocations = [{'target_key': m['target_key'], 'store_id': m['store_id'],
         'order_id': m.get('order_id') or '', 'child_id': m.get('child_id') or '',

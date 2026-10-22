@@ -104,3 +104,16 @@ def test_subcent_charge_and_rounding_residue_are_conserved_deterministically():
 @pytest.mark.parametrize('value',[None,'bad','NaN','Infinity'])
 def test_invalid_charge_is_unknown_and_is_not_changed_to_zero(value):
     result=allocate(value,[member('A')]);assert result['reason']=='invalid_amount' and result['amount'] is None
+
+
+def test_repeating_factors_can_be_reused_to_reverse_a_charge_exactly():
+    from decimal import localcontext
+    members=[member(k,'1') for k in ('C','B','A')]
+    original=allocate('.01',members)
+    factors={a['target_key']:a['factor'] for a in original['allocations']}
+    with localcontext() as context:
+        context.prec=50
+        assert sum(Decimal(v) for v in factors.values())==1
+    credit=allocate('-.01',members,original_factors=factors)
+    assert credit['status']=='allocated'
+    assert all(amounts(original)[key]+amounts(credit)[key]==0 for key in factors)

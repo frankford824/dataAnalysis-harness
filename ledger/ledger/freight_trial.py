@@ -59,6 +59,42 @@ def _batch(folder,rows,index):
     pl.from_dicts(rows,infer_schema_length=None,schema_overrides=schema).write_parquet(folder/f'{index:06d}.parquet',compression='zstd')
 
 
+def _charge_time(charge):
+    try:return datetime.fromisoformat(str(charge.get('scan_time') or '').replace('/','-'))
+    except ValueError:return None
+
+
+def refund_bases(charges,packages):
+    """Bind credits to prior, successfully allocated charges of the same parcel.
+
+    Input order and filename order are not chronology. Multiple originals are
+    usable only when they agree on the complete target/factor map; no guessed
+    original is selected. All positive/negative source rows remain separate.
+    """
+    credits=[c for c in charges if Decimal(c['amount'])<0 and not c['source_issue']]
+    wanted={c['tracking_no'] for c in credits}
+    originals=defaultdict(list)
+    for charge in charges:
+        if charge['tracking_no'] not in wanted or Decimal(charge['amount'])<=0 or charge['source_issue']:continue
+        when=_charge_time(charge);packet=packages.get(charge['tracking_no'])
+        if when is None or not packet or packet['issue']:continue
+        result=allocate(charge['amount'],packet['members'],allow_zero_equal=packet.get('allow_zero_equal',False))
+        if result['status']!='allocated':continue
+        factors={a['target_key']:a['factor'] for a in result['allocations']}
+        reference={k:charge[k] for k in ('charge_id','amount','scan_time','file_sha','file','sheet','row_no')}
+        originals[charge['tracking_no']].append((when,factors,reference))
+    bases={}
+    for credit in credits:
+        when=_charge_time(credit);packet=packages.get(credit['tracking_no'])
+        if when is None or not packet or packet['issue']:continue
+        eligible=[r for r in originals.get(credit['tracking_no'],[]) if r[0].tzinfo==when.tzinfo and r[0]<=when]
+        if not eligible or len({tuple(sorted(r[1].items())) for r in eligible})!=1:continue
+        eligible.sort(key=lambda r:(r[0],r[2]['charge_id']))
+        bases[credit['charge_id']]={'tracking_no':credit['tracking_no'],'packet_id':packet['packet_id'],
+            'factors':eligible[0][1],'original_charges':[r[2] for r in eligible]}
+    return bases
+
+
 def build(root,feed_root,model,period,target,progress=lambda *_:None,names=None):
     root, target=Path(root),Path(target)
     target.mkdir(parents=True,exist_ok=True)
@@ -82,20 +118,24 @@ def build(root,feed_root,model,period,target,progress=lambda *_:None,names=None)
             'members_json':json.dumps(package['members'],ensure_ascii=False,default=str)})
         if len(chunk)>=5000:_batch(target/'packets',chunk,part);chunk=[];part+=1
     _batch(target/'packets',chunk,part)
+    bases=refund_bases(charges,packages)
     rows=[];part=0
     charges.sort(key=lambda r:r['charge_id'])
     for index,charge in enumerate(charges):
         if index%5000==0:progress('按实际包裹试算运费',index,len(charges))
         package=packages.get(charge['tracking_no'])
         issue=charge['source_issue'] or (package['issue'] if package else '')
+        basis=bases.get(charge['charge_id'])
         result=allocate(charge['amount'],package['members'] if package else [],issue=issue,
-            allow_zero_equal=package.get('allow_zero_equal',False) if package else False)
+            allow_zero_equal=package.get('allow_zero_equal',False) if package else False,
+            original_factors=basis['factors'] if basis else None)
         rows.append({**charge,'packet_id':package['packet_id'] if package else '',
             'store_ids':package['store_ids'] if package else [],
             'carrier':package['carrier'] if package else '',
             'status':result['status'],'reason':result['reason'],'method':result['method'],
             'basis_total':result.get('basis_total'),'basis_unit':result.get('basis_unit',''),
             'member_count':len(package['members']) if package else 0,
+            'refund_basis_json':json.dumps(basis if result['status']=='allocated' else None,ensure_ascii=False),
             'allocations_json':json.dumps(result['allocations'],ensure_ascii=False)})
         if len(rows)>=5000:_batch(target/'charges',rows,part);rows=[];part+=1
     _batch(target/'charges',rows,part)
@@ -222,6 +262,7 @@ def _summary(query):
     value=query.select(pl.len().alias('charge_count'),money.sum().alias('source_amount'),
         (pl.col('status')=='allocated').sum().alias('allocated_count'),
         money.filter(pl.col('status')=='allocated').sum().alias('allocated_amount'),
+        (-money).filter((pl.col('status')=='allocated') & (money<0)).sum().alias('allocated_refund'),
         (pl.col('status')=='pending').sum().alias('pending_count'),
         money.filter(pl.col('status')=='pending').sum().alias('pending_amount'),
         money.filter((pl.col('status')=='pending') & (money>=0)).sum().alias('pending_expense'),
@@ -245,7 +286,8 @@ def query(jobs,job_id,*,store_id='',platform='',reason='',q='',offset=0,limit=30
     count=_query(manifest,path,store_id,platform,reason,q).select(pl.len()).collect().item()
     names={s['id']:s['name'] for s in manifest['stores']}
     for row in rows:
-        row.pop('allocations_json',None);row['stores']=[names.get(s,s) for s in row['store_ids']]
+        row.pop('allocations_json',None);row.pop('refund_basis_json',None)
+        row['stores']=[names.get(s,s) for s in row['store_ids']]
         row['reason_label']=REASONS.get(row['reason'],'');row['method_label']=METHODS.get(row['method'],'')
     scope={'job_id':job_id,'store_id':store_id,'platform':platform,'reason':reason,'q':q}
     return {'job_id':job_id,'period':manifest['period'],'created_at':manifest['created_at'],
@@ -263,6 +305,7 @@ def detail(jobs,job_id,charge_id,*,store_id='',platform=''):
     rows=_query(manifest,path,store_id,platform).filter(pl.col('charge_id')==charge_id).collect().to_dicts()
     if len(rows)!=1:raise InputError('该范围内没有找到收费记录')
     row=rows[0];allocations=json.loads(row.pop('allocations_json'))
+    row['refund_basis']=json.loads(row.pop('refund_basis_json',None) or 'null')
     packet=None
     if row['packet_id'] and (path/'packets').exists():
         found=pl.scan_parquet(str(path/'packets'/'*.parquet')).filter(pl.col('packet_id')==row['packet_id']).collect().to_dicts()
@@ -287,18 +330,20 @@ def export(jobs,job_id,*,store_id='',platform='',reason='',q='',scope_fingerprin
     if digest(scope)!=scope_fingerprint:raise InputError('导出范围与页面不一致，请重新读取结果')
     manifest,path=jobs.manifest(job_id);output=io.StringIO();writer=csv.writer(output)
     writer.writerow(['账单月份','收费记录号','运单号','店铺候选','状态','分摊方法','来源运费（每笔仅首行）','本包分摊基数（每笔仅首行）','待核原因',
-        '主订单号','平台子订单号','商品ID','权重类型','分摊权重','分摊比例','商品分摊运费','来源文件','工作表','留档行号','试算编号','输入校验值'])
+        '主订单号','平台子订单号','商品ID','权重类型','分摊权重','分摊比例','商品分摊运费','来源文件','工作表','留档行号','试算编号','输入校验值','冲减依据收费记录'])
     names={s['id']:s['name'] for s in manifest['stores']}
     def safe(v):
         if isinstance(v,str) and (v.lstrip().startswith(('=','+','-','@')) or v.startswith(('\t','\r','\n')) or (v.isdigit() and len(v)>=15)):return "'"+v
         return v
     for row in _query(manifest,path,store_id,platform,reason,q).sort('charge_id').collect().iter_rows(named=True):
         allocations=json.loads(row['allocations_json']) or [{}]
+        basis=json.loads(row.get('refund_basis_json') or 'null') or {}
+        originals='；'.join(r['charge_id'] for r in basis.get('original_charges',[]))
         for index,allocation in enumerate(allocations):
             writer.writerow([safe(v) for v in [manifest['period'],row['charge_id'],row['tracking_no'],'；'.join(names.get(s,s) for s in row['store_ids']),
                 '可分摊' if row['status']=='allocated' else '待核',METHODS.get(row['method'],''),
                 Decimal(row['amount']) if index==0 else None,Decimal(row['basis_total']) if index==0 and row['basis_total'] is not None else None,REASONS.get(row['reason'],''),allocation.get('order_id',''),
                 allocation.get('child_id',''),allocation.get('product_id',''),'核定比例' if row['basis_unit']=='ratio' else '金额基数',allocation.get('basis_weight'),
                 Decimal(allocation['factor']) if allocation.get('factor') is not None else None,
-                Decimal(allocation['amount']) if allocation.get('amount') is not None else None,row['file'],row['sheet'],row['row_no'],job_id,manifest['input_fingerprint']]])
+                Decimal(allocation['amount']) if allocation.get('amount') is not None else None,row['file'],row['sheet'],row['row_no'],job_id,manifest['input_fingerprint'],originals]])
     return '\ufeff'+output.getvalue()
