@@ -1,6 +1,6 @@
 import {test} from 'node:test'
 import assert from 'node:assert/strict'
-import {amountText,canStart,identityLabel,memberRows,percentage,quantityLabel,trialState} from '../src/freightShipment.js'
+import {amountText,basisSourceLabel,canStart,identityLabel,memberRows,percentage,quantityLabel,trialState} from '../src/freightShipment.js'
 
 test('nonzero subcent calculation values are not misleadingly displayed as zero',()=>{
   assert.equal(amountText('0.003333'),'<¥0.01')
@@ -32,4 +32,10 @@ test('native and replacement item identities are not mislabeled as platform chil
   assert.equal(identityLabel({identity_kind:'erp_reship_item'}),'ERP补发商品行')
   assert.equal(quantityLabel({quantity_verified:false,shipped_quantity:2}),'数量未用于分摊')
   assert.equal(quantityLabel({quantity_verified:true,shipped_quantity:1,ordered_quantity:2}),'本次 1 / 原数量 2')
+})
+test('ERP components are displayed as evidence lines without adding unlike quantities',()=>{
+  const member={basis_source:'erp_goods_amount',erp_items:[{quantity:3},{quantity:1}]}
+  assert.equal(quantityLabel(member),'ERP发货明细 2 条')
+  assert.equal(basisSourceLabel(member),'聚水潭商品金额（本包实际发货明细合计）')
+  assert.equal(basisSourceLabel({basis_source:'platform_order'}),'平台订单原表')
 })

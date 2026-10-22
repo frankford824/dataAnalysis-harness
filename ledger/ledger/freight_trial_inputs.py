@@ -228,7 +228,7 @@ def feed_frames(feed_root, inputs, deltas, tracking, progress=lambda *_: None):
     match=norm_expr(pl.col('tracking_no').cast(pl.String)).is_in(tracking)
     progress('读取实际发货范围',0,3)
     headers=load('order','orders.parquet','order_id',hcols,match)
-    icols=('order_id','order_store_id','sub_order_id','outer_sku','online_order_no','quantity','paid_amount','item_pay_amount',
+    icols=('order_id','order_store_id','sub_order_id','outer_sku','online_order_no','quantity','line_amount','paid_amount','item_pay_amount',
         'refund_amount','tracking_no','shop_item_id','merchant_sku','sku_id','sku_type','product_name','is_gift','is_virtual','item_status_raw')
     items=load('order_item','order_items.parquet','sub_order_id',icols,
         match | pl.col('order_id').is_in(headers['order_id'].unique().to_list()))

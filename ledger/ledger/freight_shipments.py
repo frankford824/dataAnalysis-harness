@@ -13,6 +13,27 @@ from .freight_trial_inputs import digest
 from .order_lifecycle import SUPERSEDED_PARENT_STATES
 
 
+_FEE_NAME = re.compile(r'补差价|差价|运费|邮费|运补|补邮')
+
+
+def _non_shipping_item(row,header,tracking):
+    kind=str(row.get('sku_type') or '').strip().lower()
+    if kind in {'virtual','no_deliver','虚拟','虚拟商品'}:
+        return True
+    if row.get('is_virtual') is not True:
+        return False
+    name=str(row.get('product_name') or '')
+    # Old feeds used a name heuristic that also matched physical 定制专拍.
+    # Override only that legacy case, with a concrete normal SKU and dispatch;
+    # unknown classifications and actual fee lines retain their exclusion.
+    special_purchase=('专拍' in name and not _FEE_NAME.search(name)
+        and _norm(row.get('sku_id'))
+        and kind in {'normal','普通','普通商品'}
+        and tracking and header.get('ship_time')
+        and str(header.get('order_status_raw') or '') in {'Sent','Completed'})
+    return not special_purchase
+
+
 def _scalar(value):
     amount=number(value)
     return None if amount is None else format(amount.normalize(),'f')
@@ -101,7 +122,7 @@ def _main(header,row,store,children,platform):
     return '',None
 
 
-def build_packages(headers,items,relations,mapping,model,children,controls,native_rows,progress=lambda *_:None):
+def build_packages(headers,items,relations,mapping,model,children,_controls,_native_rows,progress=lambda *_:None):
     stores={s.id:s for s in model.stores}
     mapped={r['order_store_id']:r['ledger_store_id'] for r in mapping if r['mapping_status']=='confirmed'}
     head={};head_conflicts=set()
@@ -110,7 +131,7 @@ def build_packages(headers,items,relations,mapping,model,children,controls,nativ
         if key in head and digest(head[key])!=digest(h):head_conflicts.add(key)
         else:head[key]=h
     item_by_id={};item_conflicts=set()
-    fields=('order_id','outer_sku','shop_item_id','merchant_sku','tracking_no','quantity','item_pay_amount','paid_amount','refund_amount')
+    fields=('order_id','outer_sku','shop_item_id','merchant_sku','tracking_no','quantity','line_amount','sku_id')
     for r in items.iter_rows(named=True):
         key=(_norm(r.get('order_store_id')),_norm(r['sub_order_id']))
         if key in item_by_id and any(item_by_id[key].get(c)!=r.get(c) for c in fields):item_conflicts.add(key)
@@ -119,9 +140,7 @@ def build_packages(headers,items,relations,mapping,model,children,controls,nativ
     for relation in relations.iter_rows(named=True):
         if relation.get('relation_type')=='reship':origins[_norm(relation.get('target_order_id'))].append(relation)
     packages=defaultdict(lambda:{'rows':[],'headers':{},'carriers':set(),'stores':set(),'unknown':False})
-    child_pieces=defaultdict(list);master_paid=defaultdict(lambda:{'paid':Decimal(0),'refund':Decimal(0),'valid':True})
-    header_paid=defaultdict(lambda:{'paid':Decimal(0),'valid':True})
-    seen_items={}
+    seen_items={};excluded_packages={}
     for index,row in enumerate(items.iter_rows(named=True)):
         if index%100000==0:progress('确认包裹商品与金额依据',index,items.height)
         oid,osid=_norm(row['order_id']),_norm(row['order_store_id'])
@@ -130,7 +149,15 @@ def build_packages(headers,items,relations,mapping,model,children,controls,nativ
             continue
         sid=mapped.get(osid,'');store=stores.get(sid);platform=store.platform if store else ''
         tracking=_norm(row.get('tracking_no')) or _norm(header.get('tracking_no'))
-        if row.get('is_virtual') is True:continue
+        if _non_shipping_item(row,header,tracking):
+            if tracking:
+                excluded=excluded_packages.setdefault(tracking,{'rows':[],'headers':{},'carriers':set(),
+                    'stores':set(),'unknown':False,'non_shipping':True})
+                excluded['headers'][(osid,oid)]=header
+                if sid:excluded['stores'].add(sid)
+                else:excluded['unknown']=True
+                if header.get('logistics_company'):excluded['carriers'].add(str(header['logistics_company']).strip())
+            continue
         raw_child=_norm(row.get('outer_sku'));main,basis=_main(header,row,sid,children,platform)
         reship=bool(origins.get(oid)) or '补发' in str(header.get('order_type') or '')
         product=_norm(row.get('shop_item_id')) or _norm(row.get('merchant_sku'))
@@ -161,45 +188,31 @@ def build_packages(headers,items,relations,mapping,model,children,controls,nativ
         if (osid,oid) in head_conflicts or (osid,_norm(row['sub_order_id'])) in item_conflicts:identity=False
         if basis and (basis['identity_conflict'] or (basis.get('product_id') and product!=basis['product_id'])):identity=False
         target=digest([sid,main,child or product,role,'reship' if reship else 'sale'])[:24]
-        paid=number(row.get('item_pay_amount') if row.get('item_pay_amount') not in (None,'') else row.get('paid_amount'))
-        refund=number(row.get('refund_amount'))
+        # line_amount is JST's 商品金额 (a line total), not payment or unit price.
+        goods_amount=number(row.get('line_amount'))
         member={'target_key':target,'store_id':sid,'order_id':main,'child_id':child,'product_id':product,
             'product_name':str(row.get('product_name') or ''),'identity_kind':role,'identity_verified':identity,
             'internal_order_id':oid,'internal_item_id':_norm(row['sub_order_id']),'tracking_no':tracking,
             'is_reship':reship,'basis':basis,'raw_quantity':number(row.get('quantity')),
             'sku_id':_norm(row.get('sku_id')),'sku_type':str(row.get('sku_type') or ''),
-            'erp_paid':paid,'erp_refund':refund,'header':header}
+            'erp_goods_amount':goods_amount,'header':header}
         item_key=(osid,member['internal_item_id'])
-        signature=digest([oid,raw_child,product,tracking,str(paid),str(refund),str(member['raw_quantity'])])
+        signature=digest([oid,raw_child,product,tracking,str(goods_amount),member['sku_id'],str(member['raw_quantity'])])
         duplicate_conflict=item_key in seen_items and seen_items[item_key]!=signature
         if item_key in seen_items and not duplicate_conflict:continue
         seen_items[item_key]=signature
         if duplicate_conflict:member['identity_verified']=False
-        if not reship:
-            child_pieces[(sid,child or main+'|'+product)].append(member)
-            control=master_paid[(sid,main)]
-            control['valid'] &= identity and paid is not None and refund is not None and paid>=0 and refund>=0
-            if paid is not None:control['paid']+=paid
-            if refund is not None:control['refund']+=refund
-            hcontrol=header_paid[(osid,oid)]
-            hcontrol['valid'] &= paid is not None and paid>=0
-            if paid is not None:hcontrol['paid']+=paid
         if not tracking:continue
         package=packages[tracking];package['rows'].append(member);package['headers'][(osid,oid)]=header
         if sid:package['stores'].add(sid)
         else:package['unknown']=True
         carrier=str(header.get('logistics_company') or '').strip()
         if carrier:package['carriers'].add(carrier)
-    # Header totals certify that item amounts are not copied header values.
-    header_ok={}
-    for key,value in header_paid.items():
-        header=head.get(key,{})
-        paid,freight=number(header.get('paid_amount')),number(header.get('freight_amount'))
-        header_ok[key]=bool(value['valid'] and paid is not None and
-            (abs(value['paid']-paid)<=Decimal('.01') or (freight is not None and abs(value['paid']-(paid-freight))<=Decimal('.01'))))
+    for tracking,excluded in excluded_packages.items():
+        if tracking not in packages:packages[tracking]=excluded
     output={}
     for tracking,package in packages.items():
-        issue=''
+        issue='non_shipping_items' if package.get('non_shipping') else ''
         if len(package['stores'])>1 or package['unknown']:issue='cross_store'
         elif len(package['carriers'])>1:issue='carrier_conflict'
         dispatches={str(h.get('ship_time') or '') for h in package['headers'].values()}
@@ -208,69 +221,28 @@ def build_packages(headers,items,relations,mapping,model,children,controls,nativ
         for row in package['rows']:grouped[row['target_key']].append(row)
         members=[]
         for target,rows in grouped.items():
-            first=rows[0];sid,main,child=first['store_id'],first['order_id'],first['child_id'];basis=first['basis']
-            m={k:first[k] for k in ('target_key','store_id','order_id','child_id','product_id','product_name','identity_kind','is_reship')}
+            first=rows[0]
+            m={k:first[k] for k in ('target_key','store_id','order_id','child_id','product_id','identity_kind','is_reship')}
             m['identity_verified']=all(r['identity_verified'] for r in rows)
-            m.update(amount_verified=False,basis_amount=None,whole_child=False,basis_unit='amount',ordered_quantity=None,shipped_quantity=None,quantity_verified=False)
-            pieces=child_pieces[(sid,child or main+'|'+first['product_id'])]
-            packet_ids={r['tracking_no'] for r in pieces if r['tracking_no']}
-            unshipped=any(not r['tracking_no'] for r in pieces)
-            skus={r['sku_id'] for r in [*pieces,*rows]};normal=all(r['sku_type'].lower() in {'normal','普通','普通商品'} for r in [*pieces,*rows])
-            quantity=sum((r['raw_quantity'] for r in rows),Decimal(0)) if all(r['raw_quantity'] is not None and r['raw_quantity']>0 for r in rows) else None
-            original_quantity=number(basis.get('quantity')) if basis else None
-            if not basis and first['identity_kind']=='native_item':
-                native=[r for r in native_rows.get((sid,main),[]) if r['product_id']==first['product_id']]
-                qs={r['quantity'] for r in native if r['quantity'] is not None}
-                if len(qs)==1 and len({(r['product_id'],r['quantity'],r['paid']) for r in native})==1:original_quantity=number(next(iter(qs)))
-            total_quantity=sum((r['raw_quantity'] for r in pieces),Decimal(0)) if pieces and all(r['raw_quantity'] is not None and r['raw_quantity']>0 for r in pieces) else None
-            quantity_ok=bool(normal and len(skus)==1 and next(iter(skus),'') and quantity is not None and original_quantity is not None and original_quantity>0
-                and (first['is_reship'] or quantity<=original_quantity) and (first['is_reship'] or total_quantity==original_quantity))
-            whole=bool(not first['is_reship'] and len(packet_ids)==1 and not unshipped
-                and all(r['header'].get('is_split') is False for r in rows)
-                and (original_quantity is None or (quantity_ok and quantity==original_quantity)))
-            if first['is_reship'] and quantity_ok and quantity==original_quantity:whole=True
-            m.update(whole_child=whole,ordered_quantity=text_amount(original_quantity),shipped_quantity=text_amount(quantity),quantity_verified=quantity_ok)
-            if basis and basis['amount_verified']:
-                m.update(amount_verified=True,basis_amount=basis['basis_amount'],basis_unit=basis['basis_unit'],basis_source='platform_order',basis_reference=basis['source'])
-                # An exact child-level payment control can certify a monetary
-                # shipment fragment even when the export has no purchase qty.
-                # Split headers may repeat the original header amount; never
-                # confuse that header value with the actual item fragments.
-                if not whole and not first['is_reship'] and pieces:
-                    paid,refund=number(basis['paid']),number(basis['refund'])
-                    complete=all(r['identity_verified'] and r['erp_paid'] is not None and r['erp_refund'] is not None
-                        and r['erp_paid']>=0 and r['erp_refund']>=0
-                        and (header_ok.get((_norm(r['header'].get('order_store_id')),_norm(r['header'].get('order_id'))),False)
-                             or r['header'].get('is_split') is True) for r in pieces)
-                    if complete and paid is not None and refund is not None:
-                        paid_total=sum((r['erp_paid'] for r in pieces),Decimal(0));refund_total=sum((r['erp_refund'] for r in pieces),Decimal(0))
-                        net_total=sum((max(Decimal(0),r['erp_paid']-r['erp_refund']) for r in pieces),Decimal(0))
-                        if abs(paid_total-paid)<=Decimal('.01') and abs(refund_total-refund)<=Decimal('.01'):
-                            part=sum((max(Decimal(0),r['erp_paid']-r['erp_refund']) for r in rows),Decimal(0))
-                            factor=part/net_total if net_total>0 else Decimal(1) if len(packet_ids)==1 and not unshipped else None
-                            if factor is not None:
-                                m.update(portion_amount=text_amount(number(basis['basis_amount'])*factor),
-                                    basis_source='platform_order_with_checked_erp_portion',
-                                    basis_reference={**basis['source'],'internal_item_ids':[r['internal_item_id'] for r in rows]})
-            elif not first['is_reship']:
-                control=master_paid[(sid,main)]
-                original=controls.get((sid,main),set())
-                header_valid=all(header_ok.get((_norm(r['header'].get('order_store_id')),_norm(r['header'].get('order_id'))),False) for r in rows)
-                if control['valid'] and header_valid and any(abs(control['paid']-paid)<=Decimal('.01')
-                    and abs(control['refund']-refund)<=Decimal('.01') for paid,refund in original):
-                    part=sum((max(Decimal(0),r['erp_paid']-r['erp_refund']) for r in rows),Decimal(0))
-                    sources=[r['source'] for r in native_rows.get((sid,main),[])]
-                    m.update(amount_verified=True,portion_amount=text_amount(part),basis_source='erp_checked_against_platform',basis_reference={
-                        'internal_item_ids':[r['internal_item_id'] for r in rows],
-                        'platform_sources':sources[:20],'platform_source_count':len(sources)})
+            # A platform child may contain several ERP SKUs (e.g. glue + paper).
+            # Sum this package's line totals without comparing unlike quantities,
+            # subtracting refunds, or requiring agreement with platform payment.
+            amounts=[r['erp_goods_amount'] for r in rows]
+            verified=all(v is not None and v>=0 for v in amounts)
+            total=sum(amounts,Decimal(0)) if verified else None
+            erp_items=[{'internal_order_id':r['internal_order_id'],'internal_item_id':r['internal_item_id'],
+                'sku_id':r['sku_id'],'product_name':r['product_name'],
+                'quantity':text_amount(r['raw_quantity']),'goods_amount':text_amount(r['erp_goods_amount'])}
+                for r in sorted(rows,key=lambda r:(r['internal_order_id'],r['internal_item_id']))]
+            m.update(product_name=' / '.join(dict.fromkeys(r['product_name'] for r in erp_items if r['product_name'])),
+                amount_verified=verified,basis_amount=text_amount(total),portion_amount=text_amount(total),
+                whole_child=False,basis_unit='amount',basis_source='erp_goods_amount',
+                ordered_quantity=None,shipped_quantity=None,quantity_verified=False,erp_items=erp_items,
+                basis_reference={'internal_item_ids':[r['internal_item_id'] for r in erp_items],
+                    'field':'line_amount','field_label':'聚水潭商品金额'})
             members.append(m)
-        original_metric=next((metric for metric in model.metrics if metric.id=='freight_cost'),None)
-        owner=stores.get(next(iter(package['stores']),'') ) if len(package['stores'])==1 else None
-        policy=original_metric.for_platform(owner.platform) if original_metric and owner else None
-        zero_allowed=bool(policy and policy.allocate and policy.allocate.mode=='ratio'
-            and all(m['identity_kind']=='platform_child' for m in members))
         output[tracking]={'packet_id':digest([tracking,sorted(package['stores']),sorted(package['headers'])])[:24],
             'tracking_no':tracking,'store_ids':sorted(package['stores']),'carrier':';'.join(sorted(package['carriers'])),
             'ship_time':';'.join(sorted(dispatches)),'internal_order_ids':sorted({key[1] for key in package['headers']}),
-            'members':members,'issue':issue,'allow_zero_equal':zero_allowed}
+            'members':members,'issue':issue,'allow_zero_equal':False}
     return output

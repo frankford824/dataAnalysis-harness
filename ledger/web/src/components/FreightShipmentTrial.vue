@@ -4,7 +4,7 @@ import {NButton} from 'naive-ui'
 import {useRoute,useRouter} from 'vue-router'
 import {api} from '../api'
 import {stamp} from '../format'
-import {amountText as expenseText,canStart,identityLabel,memberRows,percentage,quantityLabel,trialState} from '../freightShipment'
+import {amountText as expenseText,basisSourceLabel,canStart,identityLabel,memberRows,percentage,quantityLabel,trialState} from '../freightShipment'
 import {useLatest} from './ui/useLatest'
 import LedgerTable from './ui/LedgerTable.vue'
 import FilePreviewPanel from './FilePreviewPanel.vue'
@@ -19,6 +19,7 @@ let serial=0,detailSerial=0,timer,alive=true
 const valid=computed(()=>/^\d{4}-(0[1-9]|1[0-2])$/.test(props.period || ''))
 const scope=computed(()=>({store_id:props.storeId,platform:props.platform}))
 const summary=computed(()=>data.value?.summary || {})
+const erpGoodsRule=computed(()=>data.value?.rule_version==='shipment-erp-goods-amount.v2')
 const selectedGroup=computed(()=>data.value?.groups.find(g=>g.id===reason.value))
 const detailMembers=computed(()=>memberRows(detail.value))
 const active=computed(()=>!canStart(job.value))
@@ -150,7 +151,7 @@ const memberColumns=[
         <p class="shipment-mobile-note">左右滑动查看金额、状态和分摊依据。</p>
         <LedgerTable :columns="columns" :rows="data.rows" :row-key="r=>r.charge_id" :loading="loading" :max-height="500" empty="本范围暂无收费记录；未归属店铺的记录请在全部店铺查看"/>
         <div class="shipment-pages"><span>共 {{data.count}} 条</span><n-button size="small" :disabled="page<=1 || loading" @click="page--;readResult(selectedJob)">上一页</n-button><span>{{page}} / {{Math.max(1,Math.ceil(data.count/30))}}</span><n-button size="small" :disabled="page*30>=data.count || loading" @click="page++;readResult(selectedJob)">下一页</n-button></div>
-        <details class="shipment-explanation"><summary>分摊规则与资料范围</summary><p>同包多商品优先用原表分配率；没有分配率时，用实付减退款后的非负金额。拆包只计本次发出份额，跨主单先换成可比较金额。缺数量、金额或身份依据时保留待核。</p><p>补发不按新增零收入吞掉运费。单商品直接归属，多商品需有原单金额及补发范围依据。只有同主单商品的基数全部确认为零，且原核算允许比例分摊时才均分；缺失金额不当作零。</p><p>{{data.notice}} 原生无独立子单的平台按其商品行核对，不伪造子订单号。</p><p>规则 {{data.rule_version}} · 订单快照 {{data.snapshot_id}} · 已接收增量 {{data.consumed_seq}}</p><p>输入校验值 {{data.input_fingerprint}}</p><p v-for="(warning,i) in data.warnings" :key="i">{{warning.file}}：{{warning.reason}}</p></details>
+        <details class="shipment-explanation"><summary>分摊规则与资料范围</summary><template v-if="erpGoodsRule"><p>同包多商品按聚水潭“商品金额”占比分摊：本商品的包内明细金额 ÷ 本包全部商品明细金额 × 本包运费。商品金额已是行合计，不再乘数量，也不扣退款。</p><p>只取本包实际发出的明细，套装内点胶、相纸等按金额汇总，不将不同商品的数量相加比较。单商品直接归属；多商品金额缺失、为负或全部为零时保留待核。补发同样按本次发货的商品金额，不能用原单金额代替缺失金额。</p></template><template v-else><p>同包多商品优先用原表分配率；没有分配率时，用实付减退款后的非负金额。拆包只计本次发出份额，跨主单先换成可比较金额。缺数量、金额或身份依据时保留待核。</p><p>补发不按新增零收入吞掉运费。单商品直接归属，多商品需有原单金额及补发范围依据。只有同主单商品的基数全部确认为零，且原核算允许比例分摊时才均分；缺失金额不当作零。</p></template><p>{{data.notice}} 原生无独立子单的平台按其商品行核对，不伪造子订单号。</p><p>规则 {{data.rule_version}} · 订单快照 {{data.snapshot_id}} · 已接收增量 {{data.consumed_seq}}</p><p>输入校验值 {{data.input_fingerprint}}</p><p v-for="(warning,i) in data.warnings" :key="i">{{warning.file}}：{{warning.reason}}</p></details>
       </template>
       <p v-else-if="valid && !loading && !active && !error" class="shipment-empty">本月尚无包裹分摊试算。生成后会固定记录，方便与原账核对。</p>
     </n-spin>
@@ -158,11 +159,19 @@ const memberColumns=[
       <n-spin :show="detailLoading"><n-alert v-if="detailError" type="error">{{detailError}}</n-alert>
         <template v-if="detail"><div class="shipment-detail-head"><div><h3>{{detail.charge.tracking_no}}</h3><p>{{detail.charge.packet?.carrier || '承运商未提供'}} · {{detail.charge.packet?.ship_time || '发货时点待核'}}</p></div><div><span>本次来源运费</span><strong :title="detail.charge.amount">{{expenseText(detail.charge.amount)}}</strong></div></div>
           <n-alert v-if="detail.charge.status==='pending'" type="warning" :bordered="false"><strong>{{detail.charge.reason_label}}</strong><div>该笔保留待核，本次没有分给商品；不代表原账未计入，也不能重复补扣。</div></n-alert>
-          <div v-else class="shipment-allocation-rule"><strong>{{detail.charge.method_label}}</strong><span v-if="detail.charge.basis_total!=null">本包分摊基数 {{expenseText(detail.charge.basis_total)}}</span><span v-else>直接归属或按原表比例在本包内重新归一，未将缺失金额填成零。</span><p>基数仅用于分费用，不是新增销售额；补发用原单金额作权重。分摊合计等于来源运费；页面按分显示可能有舍入差，导出保留计算精度。</p></div>
+          <div v-else class="shipment-allocation-rule"><strong>{{detail.charge.method_label}}</strong><span v-if="detail.charge.basis_total!=null">本包分摊基数 {{expenseText(detail.charge.basis_total)}}</span><span v-else>直接归属或按原表比例在本包内重新归一，未将缺失金额填成零。</span><p>基数仅用于分费用，不是新增销售额。分摊合计等于来源运费；页面按分显示可能有舍入差，导出保留计算精度。</p></div>
           <h3 class="shipment-detail-title">本次实际发货商品</h3><p class="shipment-note">“店铺原账”打开整店对应账期，原账总额不能与本行试算直接相减。</p><p class="shipment-mobile-note">左右滑动查看金额权重、比例和商品分摊运费。</p>
           <LedgerTable :columns="memberColumns" :rows="detailMembers" :row-key="r=>r.target_key" :max-height="470" empty="尚无可追溯的发货商品行"/>
           <div class="shipment-source"><strong>收费来源</strong><span>{{detail.charge.file}} · {{detail.charge.sheet}} · 留档行 {{detail.charge.row_no}}</span><span>账单扫描时间 {{detail.charge.scan_time}}</span><n-button size="small" @click="viewSource(detail.charge)">查看原文件</n-button></div>
-          <details class="shipment-explanation"><summary>查看原单金额与数量依据</summary><div v-for="member in detailMembers" :key="member.target_key"><p>{{member.product_name || member.product_id}} · {{quantityLabel(member)}} · {{member.basis_source==='platform_order'?'平台订单原表':member.basis_source==='platform_order_with_checked_erp_portion'?'本次发货金额片段与原子单合计核对':member.basis_source==='erp_checked_against_platform'?'订单台金额与平台原表合计核对':'金额依据尚未核定'}}</p><p v-if="member.basis_amount!=null">原单权重：{{member.basis_unit==='ratio'?percentage(member.basis_amount):expenseText(member.basis_amount)}}。本次权重见上表，拆包不直接套原单全部金额。</p><n-button v-for="(source,i) in member.basis_reference?.platform_sources || []" :key="i" text size="small" @click="viewSource(source)">金额原表 {{i+1}}</n-button></div><p>输入校验值 {{detail.input_fingerprint}}</p><p>此处为固定试算记录；查看或导出不会改变已结账金额和提成。</p></details>
+          <details class="shipment-explanation"><summary>查看商品金额与发货明细依据</summary>
+            <div v-for="member in detailMembers" :key="member.target_key">
+              <p>{{member.product_name || member.product_id}} · {{quantityLabel(member)}} · {{basisSourceLabel(member)}}</p>
+              <p v-if="member.basis_amount!=null">{{member.basis_source==='erp_goods_amount'?'本包聚水潭商品金额':'原单权重'}}：{{member.basis_unit==='ratio'?percentage(member.basis_amount):expenseText(member.basis_amount)}}。</p>
+              <ul v-if="member.basis_source==='erp_goods_amount'"><li v-for="line in member.erp_items || []" :key="line.internal_item_id">ERP订单 {{line.internal_order_id}} · 明细 {{line.internal_item_id}} · {{line.sku_id}} {{line.product_name}} · 数量 {{line.quantity ?? '未知'}} · 商品金额 {{expenseText(line.goods_amount)}}</li></ul>
+              <n-button v-for="(source,i) in member.basis_reference?.platform_sources || []" :key="i" text size="small" @click="viewSource(source)">金额原表 {{i+1}}</n-button>
+            </div>
+            <p>输入校验值 {{detail.input_fingerprint}}</p><p>此处为固定试算记录；查看或导出不会改变已结账金额和提成。</p>
+          </details>
         </template>
       </n-spin>
     </n-drawer-content></n-drawer>

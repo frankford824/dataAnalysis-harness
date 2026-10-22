@@ -5,9 +5,10 @@ from decimal import Decimal, localcontext, ROUND_HALF_UP
 
 from .money import decimal_amount
 
-RULE_VERSION = 'shipment-amount.v1'
+RULE_VERSION = 'shipment-erp-goods-amount.v2'
 REASONS = {
     'no_shipment': '未找到实际发货记录',
+    'non_shipping_items': '有发货记录，明细被标记为非实物，需核对商品属性',
     'identity_missing': '商品或订单身份待核对',
     'duplicate_member': '同一商品的发货明细存在冲突',
     'cross_store': '运单涉及多个店铺，归属待核对',
@@ -24,7 +25,7 @@ REASONS = {
     'source_conflict': '收费来源或金额存在冲突',
     'invalid_amount': '运费金额无效',
 }
-METHODS = {'direct': '单商品直接归属', 'amount': '按本包商品金额', 'declared_ratio': '按原表分配率',
+METHODS = {'direct': '单商品直接归属', 'amount': '按本包商品金额', 'erp_goods_amount': '按本包聚水潭商品金额', 'declared_ratio': '按原表分配率',
            'zero_equal': '零净额商品均分', 'original_reversal': '按原分摊冲回'}
 
 
@@ -102,7 +103,8 @@ def allocate(amount, members, *, issue='', allow_zero_equal=False, original_fact
             return _pending(amount, 'cross_order_basis')
         if any(v is None for v in weights):
             reason = ('reship_basis' if any(m.get('is_reship') for m in members)
-                      else 'quantity_basis' if any(m.get('amount_verified') and not m.get('whole_child') for m in members)
+                      else 'quantity_basis' if any(m.get('amount_verified') and not m.get('whole_child') and w is None
+                                                   for m,w in zip(members,weights))
                       else 'amount_basis')
             return _pending(amount, reason)
         total = sum(weights)
@@ -118,6 +120,7 @@ def allocate(amount, members, *, issue='', allow_zero_equal=False, original_fact
                 context.prec = 40
                 factors = [w / total for w in weights]
             if relative: method='declared_ratio'
+            elif all(m.get('basis_source')=='erp_goods_amount' for m in members): method='erp_goods_amount'
     quantum = Decimal(1).scaleb(min(-6, amount.as_tuple().exponent))
     amounts = [(amount * factor).quantize(quantum, rounding=ROUND_HALF_UP) for factor in factors]
     # Fixed tie break: input order never decides who receives the residue.
