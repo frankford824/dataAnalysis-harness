@@ -5,7 +5,7 @@ from decimal import Decimal, localcontext, ROUND_HALF_UP
 
 from .money import decimal_amount
 
-RULE_VERSION = 'shipment-erp-goods-refund.v3'
+RULE_VERSION = 'shipment-erp-goods-refund.v4'
 REASONS = {
     'no_shipment': '未找到实际发货记录',
     'non_shipping_items': '有发货记录，明细被标记为非实物，需核对商品属性',
@@ -26,7 +26,8 @@ REASONS = {
     'invalid_amount': '运费金额无效',
 }
 METHODS = {'direct': '单商品直接归属', 'amount': '按本包商品金额', 'erp_goods_amount': '按本包聚水潭商品金额', 'declared_ratio': '按原表分配率',
-           'zero_equal': '零净额商品均分', 'original_reversal': '按原分摊冲回'}
+           'zero_equal': '零净额商品均分', 'original_reversal': '按原分摊冲回',
+           'direct_credit': '单商品运费冲减', 'erp_goods_credit': '按本包聚水潭商品金额冲减'}
 
 
 def number(value):
@@ -87,7 +88,8 @@ def allocate(amount, members, *, issue='', allow_zero_equal=False, original_fact
     weights = [_weight(m) for m in members]
     relative = any(m.get('basis_unit')=='ratio' for m in members)
     method = 'direct' if len(members) == 1 else 'amount'
-    if amount < 0:
+    erp_basis=all(m.get('basis_source')=='erp_goods_amount' and m.get('basis_unit','amount')=='amount' for m in members)
+    if amount < 0 and original_factors is not None:
         # A later refund must not silently acquire today's unrelated weights.
         if not original_factors or set(original_factors) != {m['target_key'] for m in members}:
             return _pending(amount, 'refund_basis')
@@ -98,8 +100,11 @@ def allocate(amount, members, *, issue='', allow_zero_equal=False, original_fact
         if not valid:
             return _pending(amount, 'refund_basis')
         method = 'original_reversal'
+    elif amount < 0 and not erp_basis:
+        return _pending(amount, 'refund_basis')
     elif method == 'direct':
         factors = [Decimal(1)]
+        if amount < 0:method='direct_credit'
     else:
         if relative and (any(m.get('basis_unit')!='ratio' for m in members)
                          or len({m.get('order_id') for m in members})!=1):
@@ -123,7 +128,7 @@ def allocate(amount, members, *, issue='', allow_zero_equal=False, original_fact
                 context.prec = 40
                 factors = [w / total for w in weights]
             if relative: method='declared_ratio'
-            elif all(m.get('basis_source')=='erp_goods_amount' for m in members): method='erp_goods_amount'
+            elif erp_basis:method='erp_goods_credit' if amount<0 else 'erp_goods_amount'
     # Fixed tie break: input order never decides who receives the residue.
     recipient = min(range(len(members)), key=lambda i: (-factors[i], members[i]['target_key']))
     quantum = Decimal(1).scaleb(min(-6, amount.as_tuple().exponent))

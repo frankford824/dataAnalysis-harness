@@ -214,3 +214,19 @@ def test_legacy_artifact_without_credit_evidence_remains_readable(result):
     assert trial.detail(jobs,jid,f'{1:032x}')['charge']['refund_basis'] is None
     rows=list(csv.DictReader(io.StringIO(trial.export(jobs,jid,scope_fingerprint=page['scope_fingerprint']).lstrip('\ufeff'))))
     assert all(r['冲减依据收费记录']=='' for r in rows)
+
+
+def test_credit_only_month_uses_proven_erp_parcel_without_fabricating_original(result,monkeypatch):
+    ws,model,jobs,_jid=result;new_id='d'*32
+    credit=refund_charge('a'*32,'-.50','2026-06-18')
+    m=member('1','8.33');m['basis_source']='erp_goods_amount'
+    monkeypatch.setattr(trial,'parse_sources',lambda *_:([credit],[],{},[]))
+    monkeypatch.setattr(trial,'build_packages',lambda *_:{credit['tracking_no']:refund_packet([m])})
+    trial.build(ws.root,ws.root,model,'2026-06',jobs.path(new_id)/'result')
+    trial._write_json(jobs.path(new_id)/'job.json',{'state':'ready','job_id':new_id,'period':'2026-06'})
+    page=trial.query(jobs,new_id)
+    assert Decimal(page['summary']['allocated_amount'])==Decimal('-.50')
+    assert page['summary']['pending_count']==0
+    detail=trial.detail(jobs,new_id,credit['charge_id'])['charge']
+    assert detail['method']=='direct_credit' and detail['refund_basis'] is None
+    assert detail['allocations'][0]['amount']=='-0.500000'

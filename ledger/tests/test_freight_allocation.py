@@ -117,3 +117,23 @@ def test_repeating_factors_can_be_reused_to_reverse_a_charge_exactly():
     credit=allocate('-.01',members,original_factors=factors)
     assert credit['status']=='allocated'
     assert all(amounts(original)[key]+amounts(credit)[key]==0 for key in factors)
+
+
+def test_erp_parcel_credit_does_not_require_a_positive_bill_in_the_same_month():
+    single=allocate('-.5',[member('only',basis_source='erp_goods_amount')])
+    assert single['method']=='direct_credit' and amounts(single)=={'only':Decimal('-.5')}
+    members=[member('A','70',basis_source='erp_goods_amount'),member('B','30',basis_source='erp_goods_amount')]
+    credit=allocate('-10',members)
+    assert credit['method']=='erp_goods_credit' and amounts(credit)=={'A':Decimal(-7),'B':Decimal(-3)}
+    # A recorded original allocation still takes priority over current weights.
+    assert amounts(allocate('-10',members,original_factors={'A':'.2','B':'.8'}))=={'A':Decimal(-2),'B':Decimal(-8)}
+
+
+def test_missing_original_never_bypasses_parcel_identity_money_or_source_checks():
+    members=[member('A','70',basis_source='erp_goods_amount'),member('B',basis_source='erp_goods_amount')]
+    assert allocate('-10',members)['reason']=='amount_basis'
+    assert allocate('-10',members,issue='duplicate_charge')['reason']=='duplicate_charge'
+    members[1]['identity_verified']=False
+    assert allocate('-10',members)['reason']=='identity_missing'
+    zero=[member(k,'0',basis_source='erp_goods_amount') for k in ('A','B')]
+    assert allocate('-10',zero)['reason']=='zero_basis'
