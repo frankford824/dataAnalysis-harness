@@ -236,7 +236,20 @@ class Jobs:
         return manifest,path
 
 
-def _query(manifest,path,store_id='',platform='',reason='',q=''):
+def _excluded_stores(manifest,value):
+    ids=sorted(set(v.strip() for v in value.split(',') if v.strip()))
+    known={s['id'] for s in manifest['stores']}
+    if any(v not in known for v in ids):raise InputError('排除列表包含该试算未登记的店铺')
+    return ids
+
+
+def _scope(job_id,store_id,platform,reason,q,excluded):
+    value={'job_id':job_id,'store_id':store_id,'platform':platform,'reason':reason,'q':q}
+    if excluded:value['exclude_store_ids']=','.join(excluded)
+    return value
+
+
+def _query(manifest,path,store_id='',platform='',reason='',q='',exclude_store_ids=''):
     stores={s['id']:s for s in manifest['stores']}
     if store_id and store_id not in stores:raise InputError('请选择已登记店铺')
     if platform and platform not in {s['platform'] for s in stores.values()}:raise InputError('请选择已登记平台')
@@ -245,6 +258,9 @@ def _query(manifest,path,store_id='',platform='',reason='',q=''):
     if platform:
         allowed=[s['id'] for s in stores.values() if s['platform']==platform]
         query=query.filter(pl.col('store_ids').list.eval(pl.element().is_in(allowed)).list.any())
+    excluded=_excluded_stores(manifest,exclude_store_ids)
+    if excluded:
+        query=query.filter((pl.col('store_ids').list.len()==0) | pl.col('store_ids').list.eval(~pl.element().is_in(excluded)).list.any())
     if reason:
         if reason=='allocated':query=query.filter(pl.col('status')=='allocated')
         elif reason in REASONS:query=query.filter(pl.col('reason')==reason)
@@ -271,10 +287,15 @@ def _summary(query):
     return {k:format(v,'f') if isinstance(v,Decimal) else v for k,v in value.items()}
 
 
-def query(jobs,job_id,*,store_id='',platform='',reason='',q='',offset=0,limit=30):
+def query(jobs,job_id,*,store_id='',platform='',reason='',q='',offset=0,limit=30,exclude_store_ids=''):
     manifest,path=jobs.manifest(job_id)
-    base=_query(manifest,path,store_id,platform)
+    excluded=_excluded_stores(manifest,exclude_store_ids)
+    base=_query(manifest,path,store_id,platform,exclude_store_ids=exclude_store_ids)
     summary=_summary(base)
+    excluded_summary=None
+    if excluded:
+        full=_summary(_query(manifest,path,store_id,platform))
+        excluded_summary={k:(full[k]-v if isinstance(v,int) else str(Decimal(full[k])-Decimal(v))) for k,v in summary.items()}
     groups=base.group_by('reason','status').agg(pl.len().alias('count'),
         pl.col('amount').cast(pl.Decimal(38,12)).sum().alias('amount'),
         pl.col('amount').cast(pl.Decimal(38,12)).abs().sum().alias('abs_amount')).collect().to_dicts()
@@ -282,27 +303,28 @@ def query(jobs,job_id,*,store_id='',platform='',reason='',q='',offset=0,limit=30
         group.update(id=group['reason'] or 'allocated',title=REASONS.get(group['reason'],'可分摊'),
                      amount=str(group['amount']),abs_amount=str(group['abs_amount']))
     groups.sort(key=lambda g:(g['status']=='allocated',-Decimal(g['abs_amount']),g['id']))
-    rows=_query(manifest,path,store_id,platform,reason,q).sort('charge_id').slice(max(0,offset),min(100,max(1,limit))).collect().to_dicts()
-    count=_query(manifest,path,store_id,platform,reason,q).select(pl.len()).collect().item()
+    rows=_query(manifest,path,store_id,platform,reason,q,exclude_store_ids).sort('charge_id').slice(max(0,offset),min(100,max(1,limit))).collect().to_dicts()
+    count=_query(manifest,path,store_id,platform,reason,q,exclude_store_ids).select(pl.len()).collect().item()
     names={s['id']:s['name'] for s in manifest['stores']}
     for row in rows:
         row.pop('allocations_json',None);row.pop('refund_basis_json',None)
         row['stores']=[names.get(s,s) for s in row['store_ids']]
         row['reason_label']=REASONS.get(row['reason'],'');row['method_label']=METHODS.get(row['method'],'')
-    scope={'job_id':job_id,'store_id':store_id,'platform':platform,'reason':reason,'q':q}
+    scope=_scope(job_id,store_id,platform,reason,q,excluded)
     return {'job_id':job_id,'period':manifest['period'],'created_at':manifest['created_at'],
         'input_captured_at':manifest.get('input_captured_at'),
         'rule_version':manifest['rule_version'],'input_fingerprint':manifest['input_fingerprint'],
         'rule_hash':manifest.get('rule_hash'),'rules_current':manifest.get('rule_hash')==RULE_HASH,'input_pending':manifest.get('input_pending',False),
         'snapshot_id':manifest['snapshot_id'],'consumed_seq':manifest['consumed_seq'],
+        'stores':manifest['stores'],'excluded_store_ids':excluded,'excluded_summary':excluded_summary,
         'summary':summary,'groups':groups,'rows':rows,'count':count,'offset':max(0,offset),
         'scope':scope,'scope_fingerprint':digest(scope),'warnings':manifest['warnings'],'notice':manifest['notice']}
 
 
-def detail(jobs,job_id,charge_id,*,store_id='',platform=''):
+def detail(jobs,job_id,charge_id,*,store_id='',platform='',exclude_store_ids=''):
     if not re.fullmatch(r'[0-9a-f]{32}',charge_id or ''):raise InputError('收费记录编号无效')
     manifest,path=jobs.manifest(job_id)
-    rows=_query(manifest,path,store_id,platform).filter(pl.col('charge_id')==charge_id).collect().to_dicts()
+    rows=_query(manifest,path,store_id,platform,exclude_store_ids=exclude_store_ids).filter(pl.col('charge_id')==charge_id).collect().to_dicts()
     if len(rows)!=1:raise InputError('该范围内没有找到收费记录')
     row=rows[0];allocations=json.loads(row.pop('allocations_json'))
     row['refund_basis']=json.loads(row.pop('refund_basis_json',None) or 'null')
@@ -325,17 +347,19 @@ def detail(jobs,job_id,charge_id,*,store_id='',platform=''):
         'input_fingerprint':manifest['input_fingerprint'],'charge':row,'notice':manifest['notice']}
 
 
-def export(jobs,job_id,*,store_id='',platform='',reason='',q='',scope_fingerprint=''):
-    scope={'job_id':job_id,'store_id':store_id,'platform':platform,'reason':reason,'q':q}
+def export(jobs,job_id,*,store_id='',platform='',reason='',q='',scope_fingerprint='',exclude_store_ids=''):
+    manifest,path=jobs.manifest(job_id)
+    excluded=_excluded_stores(manifest,exclude_store_ids)
+    scope=_scope(job_id,store_id,platform,reason,q,excluded)
     if digest(scope)!=scope_fingerprint:raise InputError('导出范围与页面不一致，请重新读取结果')
-    manifest,path=jobs.manifest(job_id);output=io.StringIO();writer=csv.writer(output)
+    output=io.StringIO();writer=csv.writer(output)
     writer.writerow(['账单月份','收费记录号','运单号','店铺候选','状态','分摊方法','来源运费（每笔仅首行）','本包分摊基数（每笔仅首行）','待核原因',
         '主订单号','平台子订单号','商品ID','权重类型','分摊权重','分摊比例','商品分摊运费','来源文件','工作表','留档行号','试算编号','输入校验值','冲减依据收费记录','账单结算对象'])
     names={s['id']:s['name'] for s in manifest['stores']}
     def safe(v):
         if isinstance(v,str) and (v.lstrip().startswith(('=','+','-','@')) or v.startswith(('\t','\r','\n')) or (v.isdigit() and len(v)>=15)):return "'"+v
         return v
-    for row in _query(manifest,path,store_id,platform,reason,q).sort('charge_id').collect().iter_rows(named=True):
+    for row in _query(manifest,path,store_id,platform,reason,q,exclude_store_ids).sort('charge_id').collect().iter_rows(named=True):
         allocations=json.loads(row['allocations_json']) or [{}]
         basis=json.loads(row.get('refund_basis_json') or 'null') or {}
         originals='；'.join(r['charge_id'] for r in basis.get('original_charges',[]))

@@ -1,11 +1,12 @@
 <script setup>
 import {computed,h,onMounted,onUnmounted,ref,watch} from 'vue'
-import {NButton} from 'naive-ui'
+import {NButton,NInput,NSelect} from 'naive-ui'
 import {useRoute,useRouter} from 'vue-router'
 import {api} from '../api'
 import {stamp} from '../format'
 import {amountText as expenseText,basisSourceLabel,canStart,identityLabel,memberRows,percentage,quantityLabel,trialState} from '../freightShipment'
 import {useLatest} from './ui/useLatest'
+import {readStoreGroups,writeStoreGroups} from '../freightStoreGroups'
 import LedgerTable from './ui/LedgerTable.vue'
 import FilePreviewPanel from './FilePreviewPanel.vue'
 
@@ -17,7 +18,31 @@ const detail=ref(null),detailLoading=ref(false),detailError=ref(''),showDetail=r
 const stateRequest=useLatest(),resultRequest=useLatest(),detailRequest=useLatest()
 let serial=0,detailSerial=0,timer,alive=true
 const valid=computed(()=>/^\d{4}-(0[1-9]|1[0-2])$/.test(props.period || ''))
-const scope=computed(()=>({store_id:props.storeId,platform:props.platform}))
+const scope=computed(()=>({store_id:props.storeId,platform:props.platform,exclude_store_ids:excluded.value.join(',')}))
+const excluded=ref(typeof route.query.exclude_store_ids==='string'?route.query.exclude_store_ids.split(',').filter(Boolean):[])
+const exclusionDraft=ref([...excluded.value]),groupName=ref(''),groupNotice=ref(''),savedGroups=ref(readStoreGroups())
+const storeOptions=computed(()=>(data.value?.stores || []).map(s=>({label:s.name,value:s.id})))
+const groupOptions=computed(()=>savedGroups.value.map(g=>({label:g.name,value:g.name})))
+function applyExclusion(){excluded.value=[...new Set(exclusionDraft.value)].sort()}
+function clearExclusion(){exclusionDraft.value=[];applyExclusion()}
+function loadGroup(name){
+  const group=savedGroups.value.find(g=>g.name===name);if(!group)return
+  const known=new Set(storeOptions.value.map(s=>s.value))
+  exclusionDraft.value=group.store_ids.filter(id=>known.has(id));groupName.value=group.name
+  groupNotice.value=exclusionDraft.value.length<group.store_ids.length?'部分店铺不在本次试算中，已列出可选店铺。':''
+}
+function saveGroup(){
+  const name=groupName.value.trim()
+  if(!name || !exclusionDraft.value.length){groupNotice.value='请填写分组名称并选择店铺。';return}
+  const next=[...savedGroups.value.filter(g=>g.name!==name),{name,store_ids:[...new Set(exclusionDraft.value)].sort()}]
+  try{writeStoreGroups(next);savedGroups.value=next;groupNotice.value='分组已保存到当前浏览器；点击“应用排除”更新范围。'}
+  catch{groupNotice.value='当前浏览器无法保存分组，仍可直接应用排除。'}
+}
+function deleteGroup(){
+  const next=savedGroups.value.filter(g=>g.name!==groupName.value.trim())
+  try{writeStoreGroups(next);savedGroups.value=next;groupNotice.value='已删除保存的分组；当前筛选未改变。'}
+  catch{groupNotice.value='当前浏览器无法删除保存的分组。'}
+}
 const summary=computed(()=>data.value?.summary || {})
 const erpGoodsRule=computed(()=>['shipment-erp-goods-amount.v2','shipment-erp-goods-refund.v3','shipment-erp-goods-refund.v4','shipment-erp-goods-multifee.v5'].includes(data.value?.rule_version))
 const selectedGroup=computed(()=>data.value?.groups.find(g=>g.id===reason.value))
@@ -27,8 +52,8 @@ const oldVisible=computed(()=>data.value && job.value?.job_id!==data.value.job_i
 
 function pin(id){
   if(!alive)return
-  if(route.query.shipment_job===id && route.query.period===props.period && route.query.view==='shipments')return
-  router.replace({query:{...route.query,period:props.period,store_id:props.storeId,platform:props.platform,view:'shipments',shipment_job:id}})
+  if(route.query.shipment_job===id && route.query.period===props.period && route.query.view==='shipments' && (route.query.exclude_store_ids || '')===excluded.value.join(','))return
+  router.replace({query:{...route.query,period:props.period,store_id:props.storeId,platform:props.platform,view:'shipments',shipment_job:id,exclude_store_ids:excluded.value.join(',') || undefined}})
 }
 async function readResult(id,clear=false){
   if(!valid.value || !id)return
@@ -139,6 +164,18 @@ const memberColumns=[
         <p class="shipment-snapshot">账单月 {{data.period}} · 资料固定于 {{stamp(data.input_captured_at || data.created_at)}} · 记录 {{data.job_id.slice(0,8)}}</p>
         <n-alert v-if="data.rules_current===false" type="warning" :bordered="false">此记录使用历史规则，仅供对照；重新试算使用当前规则。</n-alert>
         <n-alert v-if="data.input_pending" type="warning" :bordered="false">生成时订单资料仍在同步；此结果仅使用当时已接收资料，不能作为完整分摊结论。</n-alert>
+        <div class="shipment-store-filter">
+          <strong>排除店铺</strong>
+          <n-select v-model:value="exclusionDraft" multiple filterable clearable :options="storeOptions" placeholder="选择要排除的店铺，可多选" aria-label="排除店铺"/>
+          <div class="shipment-filter-actions"><n-button size="small" type="primary" @click="applyExclusion">应用排除</n-button><n-button size="small" @click="clearExclusion">恢复全部店铺</n-button></div>
+          <details><summary>保存或套用店铺分组</summary><div class="shipment-filter-actions">
+            <n-select :value="null" :options="groupOptions" placeholder="选择已保存分组" aria-label="已保存店铺分组" @update:value="loadGroup"/>
+            <n-input v-model:value="groupName" maxlength="40" placeholder="分组名称，如箔类" aria-label="店铺分组名称"/>
+            <n-button size="small" @click="saveGroup">保存分组</n-button><n-button size="small" :disabled="!savedGroups.some(g=>g.name===groupName.trim())" @click="deleteGroup">删除分组</n-button>
+          </div><small>分组保存在当前浏览器，可保存多类店铺；选择分组后点击“应用排除”。同名保存会更新名单。</small><p v-if="groupNotice" role="status">{{groupNotice}}</p></details>
+          <small>仅排除候选店铺全部在名单内的收费；店铺未定、同时涉及其他店铺的记录继续保留。筛选同步影响汇总、问题分组、明细和导出，不改变分摊比例。</small>
+          <p v-if="data.excluded_store_ids?.length">已应用 {{data.excluded_store_ids.length}} 家店铺排除 · 排除 {{data.excluded_summary.charge_count}} 条 · 收费 {{expenseText(Number(data.excluded_summary.source_amount)+Number(data.excluded_summary.pending_refund)+Number(data.excluded_summary.allocated_refund))}} · 退差 {{expenseText(Number(data.excluded_summary.pending_refund)+Number(data.excluded_summary.allocated_refund))}} · 净额 {{expenseText(data.excluded_summary.source_amount)}}</p>
+        </div>
         <div class="shipment-metrics">
           <div><span>本范围来源金额</span><strong>{{expenseText(summary.source_amount)}}</strong><small>{{summary.charge_count}} 条收费；含待核候选</small></div>
           <div><span>试算可分摊金额（净额）</span><strong>{{expenseText(summary.allocated_amount)}}</strong><small>{{summary.allocated_count}} 条；已含退费 {{expenseText(summary.allocated_refund || 0)}}；尚未改账</small></div>
@@ -185,6 +222,8 @@ const memberColumns=[
 </template>
 
 <style scoped>
+.shipment-store-filter{padding:16px 18px;margin:16px 0;background:#fff;border:1px solid #e2e7ef;border-radius:8px;display:grid;gap:10px;font-size:13px}.shipment-store-filter>strong{font-weight:550}.shipment-store-filter small,.shipment-store-filter p{font-size:12px;color:#657184;line-height:1.8;margin:0}.shipment-store-filter summary{cursor:pointer;color:#4265be}.shipment-filter-actions{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin:6px 0}.shipment-filter-actions :deep(.n-select),.shipment-filter-actions :deep(.n-input){width:230px;max-width:100%}
+
 .shipment-refund-original{display:flex;flex-wrap:wrap;gap:4px 12px;align-items:center;font-size:12px;margin-top:6px}
 .shipment-detail :deep(.shipment-evidence-actions){display:flex;gap:8px;flex-wrap:wrap;align-items:flex-start}
 .shipment-detail :deep(.shipment-id strong){display:block;font-weight:550;white-space:normal;overflow-wrap:anywhere}.shipment-detail :deep(.shipment-id small){display:block;font-size:11px;color:#7a8698;white-space:normal;line-height:1.7}

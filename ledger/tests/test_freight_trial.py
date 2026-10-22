@@ -257,3 +257,43 @@ def test_credit_only_month_uses_proven_erp_parcel_without_fabricating_original(r
     detail=trial.detail(jobs,new_id,credit['charge_id'])['charge']
     assert detail['method']=='direct_credit' and detail['refund_basis'] is None
     assert detail['allocations'][0]['amount']=='-0.500000'
+
+
+def test_store_exclusion_keeps_unknown_and_mixed_candidates_and_binds_export(result):
+    _ws,_model,jobs,jid=result
+    page=trial.query(jobs,jid,exclude_store_ids='s1')
+    assert {r['tracking_no'] for r in page['rows']}=={'W3','W4'}
+    assert page['summary']['charge_count']==2 and Decimal(page['summary']['source_amount'])==Decimal('14')
+    assert page['excluded_summary']['charge_count']==3
+    assert Decimal(page['summary']['source_amount'])+Decimal(page['excluded_summary']['source_amount'])==Decimal('31.877')
+    assert sum(g['count'] for g in page['groups'])==2
+    assert {s['id'] for s in page['stores']}=={'s1','s2'}
+    rows=list(csv.DictReader(io.StringIO(trial.export(jobs,jid,exclude_store_ids='s1',scope_fingerprint=page['scope_fingerprint']).lstrip('\ufeff'))))
+    assert {r['运单号'] for r in rows}=={'W3','W4'}
+    with pytest.raises(InputError,match='范围'):
+        trial.export(jobs,jid,scope_fingerprint=page['scope_fingerprint'])
+    with pytest.raises(InputError,match='没有找到'):
+        trial.detail(jobs,jid,f'{1:032x}',exclude_store_ids='s1')
+    assert trial.detail(jobs,jid,f'{4:032x}',exclude_store_ids='s1')['charge']['reason']=='cross_store'
+    all_excluded=trial.query(jobs,jid,exclude_store_ids='s2,s1,s1')
+    assert all_excluded['count']==1 and all_excluded['rows'][0]['tracking_no']=='W3'
+    assert all_excluded['scope']['exclude_store_ids']=='s1,s2'
+    assert trial.query(jobs,jid,exclude_store_ids='s1,s2')['scope_fingerprint']==all_excluded['scope_fingerprint']
+    selected=trial.query(jobs,jid,store_id='s1',exclude_store_ids='s1')
+    assert selected['count']==1 and selected['rows'][0]['tracking_no']=='W4'
+    original=trial.detail(jobs,jid,f'{1:032x}')['charge']['allocations']
+    assert trial.detail(jobs,jid,f'{1:032x}',exclude_store_ids='s2')['charge']['allocations']==original
+    with pytest.raises(InputError,match='未登记'):
+        trial.query(jobs,jid,exclude_store_ids='not-a-store')
+
+
+def test_store_exclusion_api_passes_same_scope_to_page_details_and_export(result,monkeypatch):
+    ws,model,jobs,jid=result
+    monkeypatch.setattr(trial,'manager',lambda *_:jobs)
+    app=FastAPI();install(app,lambda:ws,lambda:model,lambda:{})
+    client=TestClient(app);base=f'/api/freight-review/shipments/{jid}'
+    page=client.get(base,params={'exclude_store_ids':'s1'}).json()
+    assert page['count']==2
+    assert client.get(base+f'/charges/{1:032x}',params={'exclude_store_ids':'s1'}).status_code==400
+    assert client.get(base+'/export.csv',params={'exclude_store_ids':'s1','scope_fingerprint':page['scope_fingerprint']}).status_code==200
+    assert client.get(base+'/export.csv',params={'scope_fingerprint':page['scope_fingerprint']}).status_code==400

@@ -59,16 +59,16 @@ def install(app, workspace, model, display_names):
             os.environ.get('LEDGER_ORDER_FEED_ROOT',r'D:\order\exchange\ledger-feed'),display_names()))
 
     @router.get('/shipments/{job_id}')
-    def shipment_result(job_id: str, store_id: str='', platform: str='', reason: str='',q: str='',offset: int=0,limit: int=30):
-        return guarded(lambda:freight_trial.query(jobs(),job_id,store_id=store_id,platform=platform,reason=reason,q=q,offset=offset,limit=limit))
+    def shipment_result(job_id: str, store_id: str='', platform: str='', reason: str='',q: str='',offset: int=0,limit: int=30,exclude_store_ids: str=''):
+        return guarded(lambda:freight_trial.query(jobs(),job_id,store_id=store_id,platform=platform,reason=reason,q=q,offset=offset,limit=limit,exclude_store_ids=exclude_store_ids))
 
     @router.get('/shipments/{job_id}/charges/{charge_id}')
-    def shipment_charge(job_id: str,charge_id: str,store_id: str='',platform: str=''):
-        return guarded(lambda:freight_trial.detail(jobs(),job_id,charge_id,store_id=store_id,platform=platform))
+    def shipment_charge(job_id: str,charge_id: str,store_id: str='',platform: str='',exclude_store_ids: str=''):
+        return guarded(lambda:freight_trial.detail(jobs(),job_id,charge_id,store_id=store_id,platform=platform,exclude_store_ids=exclude_store_ids))
 
     @router.get('/shipments/{job_id}/export.csv')
-    def shipment_export(job_id: str,store_id: str='',platform: str='',reason: str='',q: str='',scope_fingerprint: str=''):
-        content=guarded(lambda:freight_trial.export(jobs(),job_id,store_id=store_id,platform=platform,reason=reason,q=q,scope_fingerprint=scope_fingerprint))
+    def shipment_export(job_id: str,store_id: str='',platform: str='',reason: str='',q: str='',scope_fingerprint: str='',exclude_store_ids: str=''):
+        content=guarded(lambda:freight_trial.export(jobs(),job_id,store_id=store_id,platform=platform,reason=reason,q=q,scope_fingerprint=scope_fingerprint,exclude_store_ids=exclude_store_ids))
         return PlainTextResponse(content,media_type='text/csv; charset=utf-8',headers={
             'Content-Disposition':"attachment; filename*=UTF-8''"+quote('包裹运费试算.csv'),
             'Cache-Control':'private,no-cache'})
