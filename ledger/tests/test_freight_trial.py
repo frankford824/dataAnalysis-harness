@@ -297,3 +297,36 @@ def test_store_exclusion_api_passes_same_scope_to_page_details_and_export(result
     assert client.get(base+f'/charges/{1:032x}',params={'exclude_store_ids':'s1'}).status_code==400
     assert client.get(base+'/export.csv',params={'exclude_store_ids':'s1','scope_fingerprint':page['scope_fingerprint']}).status_code==200
     assert client.get(base+'/export.csv',params={'scope_fingerprint':page['scope_fingerprint']}).status_code==400
+
+
+def test_category_scope_unmatched_details_and_export_are_consistent(result,monkeypatch):
+    ws,model,jobs,jid=result
+    fake={'source_file':'verified.xlsx','source_sha256':'proof','source_date':'2026-10-23','version':'catalog-v1',
+          'categories':[{'id':'festival','name':'节日品类店铺'},{'id':'foil_paint','name':'箔漆店铺'}],
+          'rows':[{'source_row':2,'category_id':'festival','ledger_store_id':'s1','ledger_platform':'taobao','match_status':'confirmed'},
+                  {'source_row':3,'category_id':'foil_paint','ledger_store_id':'s2','ledger_platform':'taobao','match_status':'confirmed'}]}
+    monkeypatch.setattr(trial.classification,'source',lambda:fake)
+    page=trial.query(jobs,jid,only_category='festival')
+    assert page['summary']['charge_count']==3
+    assert {r['tracking_no'] for r in page['rows']}=={'W1','W2','W5'}
+    assert page['classification_pending_summary']['charge_count']==2
+    assert Decimal(page['summary']['source_amount'])+Decimal(page['classification_pending_summary']['source_amount'])==Decimal('31.877')
+    pending=trial.query(jobs,jid,only_category='festival',classification_view='unmatched')
+    assert {r['tracking_no'] for r in pending['rows']}=={'W3','W4'}
+    assert trial.query(jobs,jid,exclude_categories='foil_paint')['count']==5  # Mixed and unknown stay visible.
+    detail=trial.detail(jobs,jid,f'{1:032x}',only_category='festival')['charge']
+    assert [Decimal(r['amount']) for r in detail['allocations']]==[Decimal(8),Decimal(4)]
+    with pytest.raises(InputError):trial.detail(jobs,jid,f'{4:032x}',only_category='festival')
+    rows=list(csv.DictReader(io.StringIO(trial.export(jobs,jid,only_category='festival',scope_fingerprint=page['scope_fingerprint']).lstrip('\ufeff'))))
+    assert {r['运单号'] for r in rows}=={'W1','W2','W5'}
+    assert all(r['店铺分类']=='节日品类店铺' for r in rows)
+    with pytest.raises(InputError):trial.export(jobs,jid,scope_fingerprint=page['scope_fingerprint'])
+    monkeypatch.setattr(trial,'manager',lambda *_:jobs)
+    app=FastAPI();install(app,lambda:ws,lambda:model,lambda:{})
+    client=TestClient(app);base=f'/api/freight-review/shipments/{jid}'
+    assert client.get(base,params={'only_category':'festival'}).json()['count']==3
+    assert client.get(base+'/export.csv',params={**page['scope'],'scope_fingerprint':page['scope_fingerprint']}).status_code==200
+    assert client.get(base+f'/charges/{4:032x}',params={'only_category':'festival'}).status_code==400
+    fake['version']='catalog-v2'
+    with pytest.raises(InputError,match='范围'):trial.export(jobs,jid,only_category='festival',scope_fingerprint=page['scope_fingerprint'])
+    assert client.get(base+'/export.csv',params={**page['scope'],'scope_fingerprint':page['scope_fingerprint']}).status_code==400

@@ -6,7 +6,7 @@ from fastapi import APIRouter, HTTPException
 from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel
 
-from . import freight_review, freight_trial
+from . import freight_review, freight_trial, store_classification
 
 
 class ShipmentRequest(BaseModel):
@@ -47,6 +47,11 @@ def install(app, workspace, model, display_names):
         try:return operation()
         except freight_trial.InputError as exc:raise HTTPException(400,str(exc)) from exc
 
+    @router.get('/store-classification')
+    def classification_catalog():
+        value=store_classification.resolve([{'id':s.id,'name':s.name,'platform':s.platform} for s in model().stores])
+        return {k:v for k,v in value.items() if k!='mapping'}
+
     @router.get('/shipments')
     def shipment_latest(period: str):
         return guarded(lambda:jobs().latest(period))
@@ -59,16 +64,16 @@ def install(app, workspace, model, display_names):
             os.environ.get('LEDGER_ORDER_FEED_ROOT',r'D:\order\exchange\ledger-feed'),display_names()))
 
     @router.get('/shipments/{job_id}')
-    def shipment_result(job_id: str, store_id: str='', platform: str='', reason: str='',q: str='',offset: int=0,limit: int=30,exclude_store_ids: str=''):
-        return guarded(lambda:freight_trial.query(jobs(),job_id,store_id=store_id,platform=platform,reason=reason,q=q,offset=offset,limit=limit,exclude_store_ids=exclude_store_ids))
+    def shipment_result(job_id: str, store_id: str='', platform: str='', reason: str='',q: str='',offset: int=0,limit: int=30,exclude_store_ids: str='',only_category: str='',exclude_categories: str='',classification_view: str=''):
+        return guarded(lambda:freight_trial.query(jobs(),job_id,store_id=store_id,platform=platform,reason=reason,q=q,offset=offset,limit=limit,exclude_store_ids=exclude_store_ids,only_category=only_category,exclude_categories=exclude_categories,classification_view=classification_view))
 
     @router.get('/shipments/{job_id}/charges/{charge_id}')
-    def shipment_charge(job_id: str,charge_id: str,store_id: str='',platform: str='',exclude_store_ids: str=''):
-        return guarded(lambda:freight_trial.detail(jobs(),job_id,charge_id,store_id=store_id,platform=platform,exclude_store_ids=exclude_store_ids))
+    def shipment_charge(job_id: str,charge_id: str,store_id: str='',platform: str='',exclude_store_ids: str='',only_category: str='',exclude_categories: str='',classification_view: str=''):
+        return guarded(lambda:freight_trial.detail(jobs(),job_id,charge_id,store_id=store_id,platform=platform,exclude_store_ids=exclude_store_ids,only_category=only_category,exclude_categories=exclude_categories,classification_view=classification_view))
 
     @router.get('/shipments/{job_id}/export.csv')
-    def shipment_export(job_id: str,store_id: str='',platform: str='',reason: str='',q: str='',scope_fingerprint: str='',exclude_store_ids: str=''):
-        content=guarded(lambda:freight_trial.export(jobs(),job_id,store_id=store_id,platform=platform,reason=reason,q=q,scope_fingerprint=scope_fingerprint,exclude_store_ids=exclude_store_ids))
+    def shipment_export(job_id: str,store_id: str='',platform: str='',reason: str='',q: str='',scope_fingerprint: str='',exclude_store_ids: str='',only_category: str='',exclude_categories: str='',classification_view: str='',classification_version: str=''):
+        content=guarded(lambda:freight_trial.export(jobs(),job_id,store_id=store_id,platform=platform,reason=reason,q=q,scope_fingerprint=scope_fingerprint,classification_version=classification_version,exclude_store_ids=exclude_store_ids,only_category=only_category,exclude_categories=exclude_categories,classification_view=classification_view))
         return PlainTextResponse(content,media_type='text/csv; charset=utf-8',headers={
             'Content-Disposition':"attachment; filename*=UTF-8''"+quote('包裹运费试算.csv'),
             'Cache-Control':'private,no-cache'})

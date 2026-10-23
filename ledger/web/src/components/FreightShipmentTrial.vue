@@ -18,8 +18,23 @@ const detail=ref(null),detailLoading=ref(false),detailError=ref(''),showDetail=r
 const stateRequest=useLatest(),resultRequest=useLatest(),detailRequest=useLatest()
 let serial=0,detailSerial=0,timer,alive=true
 const valid=computed(()=>/^\d{4}-(0[1-9]|1[0-2])$/.test(props.period || ''))
-const scope=computed(()=>({store_id:props.storeId,platform:props.platform,exclude_store_ids:excluded.value.join(',')}))
+const scope=computed(()=>({store_id:props.storeId,platform:props.platform,exclude_store_ids:excluded.value.join(','),only_category:onlyCategory.value,exclude_categories:excludedCategories.value.join(','),classification_view:classificationView.value}))
 const excluded=ref(typeof route.query.exclude_store_ids==='string'?route.query.exclude_store_ids.split(',').filter(Boolean):[])
+const onlyCategory=ref(String(route.query.only_category || '')),excludedCategories=ref(String(route.query.exclude_categories || '').split(',').filter(Boolean)),classificationView=ref(String(route.query.classification_view || ''))
+const onlyDraft=ref(onlyCategory.value),categoryExclusionDraft=ref([...excludedCategories.value])
+const categoryOptions=computed(()=>(data.value?.classification?.categories || []).map(g=>({label:`${g.name}（已匹配 ${g.matched_count}/${g.source_count} 家）`,value:g.id})))
+const categoryLabel=id=>(data.value?.classification?.categories || []).find(g=>g.id===id)?.name || '分类待核'
+function applyCategories(){if(onlyDraft.value && categoryExclusionDraft.value.includes(onlyDraft.value)){error.value='同一分类不能同时选择只看和排除，请调整分类筛选。';return}onlyCategory.value=onlyDraft.value || '';excludedCategories.value=[...new Set(categoryExclusionDraft.value)].sort();classificationView.value=''}
+function festivalOnly(){clearExclusion();onlyDraft.value='festival';onlyCategory.value='festival';categoryExclusionDraft.value=[];excludedCategories.value=[];classificationView.value=''}
+function clearAllFilters(){clearExclusion();onlyDraft.value='';onlyCategory.value='';categoryExclusionDraft.value=[];excludedCategories.value=[];classificationView.value=''}
+const unmatchedColumns=[
+  {title:'原表行',key:'source_row',width:80},
+  {title:'名单店铺',key:'name',minWidth:230},
+  {title:'平台',key:'platform',width:130},
+  {title:'名单分类',key:'category_name',minWidth:150},
+  {title:'待核原因',key:'reason',minWidth:180},
+  {title:'核查说明',key:'note',minWidth:320},
+]
 const exclusionDraft=ref([...excluded.value]),groupName=ref(''),groupNotice=ref(''),savedGroups=ref(readStoreGroups())
 const storeOptions=computed(()=>(data.value?.stores || []).map(s=>({label:s.name,value:s.id})))
 const groupOptions=computed(()=>savedGroups.value.map(g=>({label:g.name,value:g.name})))
@@ -52,8 +67,8 @@ const oldVisible=computed(()=>data.value && job.value?.job_id!==data.value.job_i
 
 function pin(id){
   if(!alive)return
-  if(route.query.shipment_job===id && route.query.period===props.period && route.query.view==='shipments' && (route.query.exclude_store_ids || '')===excluded.value.join(','))return
-  router.replace({query:{...route.query,period:props.period,store_id:props.storeId,platform:props.platform,view:'shipments',shipment_job:id,exclude_store_ids:excluded.value.join(',') || undefined}})
+  if(route.query.shipment_job===id && route.query.period===props.period && route.query.view==='shipments' && (route.query.exclude_store_ids || '')===excluded.value.join(',') && (route.query.only_category || '')===onlyCategory.value && (route.query.exclude_categories || '')===excludedCategories.value.join(',') && (route.query.classification_view || '')===classificationView.value)return
+  router.replace({query:{...route.query,period:props.period,store_id:props.storeId,platform:props.platform,view:'shipments',shipment_job:id,exclude_store_ids:excluded.value.join(',') || undefined,only_category:onlyCategory.value || undefined,exclude_categories:excludedCategories.value.join(',') || undefined,classification_view:classificationView.value || undefined}})
 }
 async function readResult(id,clear=false){
   if(!valid.value || !id)return
@@ -137,6 +152,7 @@ const columns=[
     h('strong',r.tracking_no),h('small',r.stores.length?r.stores.join('；'):'店铺未定')])},
   {title:'来源运费',key:'amount',width:135,mobileWidth:120,align:'right',render:r=>h('span',{title:r.amount},expenseText(r.amount))},
   {title:'本包分摊基数',key:'basis_total',width:145,mobileWidth:130,align:'right',render:r=>r.basis_total==null?'—':expenseText(r.basis_total)},
+  {title:'店铺分类',key:'store_category',minWidth:140,render:r=>categoryLabel(r.store_category)},
   {title:'方法与状态',key:'status',minWidth:200,mobileWidth:180,render:r=>h('div',[r.status==='allocated'?r.method_label:'资料待核',h('small',{class:'shipment-secondary'},r.reason_label || '试算可分摊，原账未改')])},
   {title:'依据',key:'action',width:110,mobileWidth:100,render:r=>h(NButton,{text:true,type:'primary',size:'small',onClick:()=>open(r)},()=> '查看分摊')},
 ]
@@ -164,6 +180,16 @@ const memberColumns=[
         <p class="shipment-snapshot">账单月 {{data.period}} · 资料固定于 {{stamp(data.input_captured_at || data.created_at)}} · 记录 {{data.job_id.slice(0,8)}}</p>
         <n-alert v-if="data.rules_current===false" type="warning" :bordered="false">此记录使用历史规则，仅供对照；重新试算使用当前规则。</n-alert>
         <n-alert v-if="data.input_pending" type="warning" :bordered="false">生成时订单资料仍在同步；此结果仅使用当时已接收资料，不能作为完整分摊结论。</n-alert>
+        <div v-if="data.classification" class="shipment-store-filter shipment-category-filter">
+          <strong>按名单分类筛选</strong>
+          <small>分类来源：{{data.classification.source_file}} · 名单 {{data.classification.source_count}} 家，本次已匹配 {{data.classification.matched_count}} 家。分类仅用于当前复核范围。</small>
+          <div class="shipment-filter-actions"><n-button size="small" type="primary" @click="festivalOnly">只看节日品类店铺</n-button><n-button size="small" @click="clearAllFilters">恢复全部分类和店铺</n-button></div>
+          <div class="shipment-category-fields"><label>只看分类<n-select v-model:value="onlyDraft" clearable :options="categoryOptions" placeholder="全部分类" aria-label="只看分类"/></label><label>排除分类<n-select v-model:value="categoryExclusionDraft" multiple clearable :options="categoryOptions" placeholder="选择要排除的分类" aria-label="排除分类"/></label><n-button size="small" @click="applyCategories">应用分类筛选</n-button></div>
+          <p>当前：{{classificationView==='unmatched'?'分类待核运费':onlyCategory?`只看${categoryLabel(onlyCategory)}`:'全部分类'}}<template v-if="excludedCategories.length"> · 排除 {{excludedCategories.map(categoryLabel).join('、')}}</template></p>
+          <small>只看某类时，仅展示全部候选店铺均明确属于该类的收费；未匹配、平台不一致或跨类别的记录在“分类待核运费”单独查看。按分类排除不会隐藏这些待核记录。</small>
+          <div class="shipment-filter-actions"><span>分类待核运费：{{data.classification_pending_summary.charge_count}} 条 · 收费 {{expenseText(Number(data.classification_pending_summary.source_amount)+Number(data.classification_pending_summary.pending_refund)+Number(data.classification_pending_summary.allocated_refund))}} · 退差 {{expenseText(Number(data.classification_pending_summary.pending_refund)+Number(data.classification_pending_summary.allocated_refund))}}</span><n-button size="small" @click="classificationView=classificationView==='unmatched'?'':'unmatched'">{{classificationView==='unmatched'?'返回分类筛选结果':'查看分类待核运费'}}</n-button></div>
+          <details><summary>名单未匹配或需核对：{{data.classification.unmatched.length}} 家</summary><p>以下店铺不自动归并到已登记店铺。此清单是店铺名单核对结果，与待核运费条数不同。</p><LedgerTable :columns="unmatchedColumns" :rows="data.classification.unmatched" :row-key="r=>r.source_row" :max-height="360" empty="本次名单全部匹配"/></details>
+        </div>
         <div class="shipment-store-filter">
           <strong>排除店铺</strong>
           <n-select v-model:value="exclusionDraft" multiple filterable clearable :options="storeOptions" placeholder="选择要排除的店铺，可多选" aria-label="排除店铺"/>
@@ -174,7 +200,7 @@ const memberColumns=[
             <n-button size="small" @click="saveGroup">保存分组</n-button><n-button size="small" :disabled="!savedGroups.some(g=>g.name===groupName.trim())" @click="deleteGroup">删除分组</n-button>
           </div><small>分组保存在当前浏览器，可保存多类店铺；选择分组后点击“应用排除”。同名保存会更新名单。</small><p v-if="groupNotice" role="status">{{groupNotice}}</p></details>
           <small>仅排除候选店铺全部在名单内的收费；店铺未定、同时涉及其他店铺的记录继续保留。筛选同步影响汇总、问题分组、明细和导出，不改变分摊比例。</small>
-          <p v-if="data.excluded_store_ids?.length">已应用 {{data.excluded_store_ids.length}} 家店铺排除 · 排除 {{data.excluded_summary.charge_count}} 条 · 收费 {{expenseText(Number(data.excluded_summary.source_amount)+Number(data.excluded_summary.pending_refund)+Number(data.excluded_summary.allocated_refund))}} · 退差 {{expenseText(Number(data.excluded_summary.pending_refund)+Number(data.excluded_summary.allocated_refund))}} · 净额 {{expenseText(data.excluded_summary.source_amount)}}</p>
+          <p v-if="data.excluded_summary">本次筛选未显示 {{data.excluded_summary.charge_count}} 条 · 收费 {{expenseText(Number(data.excluded_summary.source_amount)+Number(data.excluded_summary.pending_refund)+Number(data.excluded_summary.allocated_refund))}} · 退差 {{expenseText(Number(data.excluded_summary.pending_refund)+Number(data.excluded_summary.allocated_refund))}} · 净额 {{expenseText(data.excluded_summary.source_amount)}}</p>
         </div>
         <div class="shipment-metrics">
           <div><span>本范围来源金额</span><strong>{{expenseText(summary.source_amount)}}</strong><small>{{summary.charge_count}} 条收费；含待核候选</small></div>
@@ -184,7 +210,7 @@ const memberColumns=[
         <p class="shipment-note">来源净额 = 可分摊净额 + 待核收费 − 待核退差。收费和退差分开展示，避免正负抵消。均非应补扣额；筛选不缩小分摊分母，未定归属不能当成各店费用。</p>
         <div class="shipment-group-head"><h3>按问题查看</h3><n-button text size="small" @click="select('')">全部收费</n-button></div>
         <div class="shipment-groups"><button v-for="group in data.groups" :key="group.id" :class="{selected:reason===group.id}" :aria-pressed="reason===group.id" @click="select(group.id)"><strong>{{group.title}}</strong><span>{{group.count}} 条 · 净额 {{expenseText(group.amount)}}</span></button></div>
-        <div class="shipment-table-head"><div><h3>{{selectedGroup?.title || '全部收费'}}</h3><span>{{data.count}} 条结果，点击“查看分摊”回查依据。</span></div><div class="shipment-search"><n-input v-model:value="term" size="small" placeholder="查运单号" clearable @keyup.enter="search"/><n-button size="small" @click="search">查找</n-button><n-button size="small" :loading="exporting" :disabled="loading || !data.count" @click="download">导出本组</n-button></div></div>
+        <div class="shipment-table-head"><div><h3>{{selectedGroup?.title || (classificationView==='unmatched'?'分类待核运费':'当前范围收费')}}</h3><span>{{data.count}} 条结果，点击“查看分摊”回查依据。</span></div><div class="shipment-search"><n-input v-model:value="term" size="small" placeholder="查运单号" clearable @keyup.enter="search"/><n-button size="small" @click="search">查找</n-button><n-button size="small" :loading="exporting" :disabled="loading || !data.count" @click="download">导出本组</n-button></div></div>
         <p class="shipment-mobile-note">左右滑动查看金额、状态和分摊依据。</p>
         <LedgerTable :columns="columns" :rows="data.rows" :row-key="r=>r.charge_id" :loading="loading" :max-height="500" empty="本范围暂无收费记录；未归属店铺的记录请在全部店铺查看"/>
         <div class="shipment-pages"><span>共 {{data.count}} 条</span><n-button size="small" :disabled="page<=1 || loading" @click="page--;readResult(selectedJob)">上一页</n-button><span>{{page}} / {{Math.max(1,Math.ceil(data.count/30))}}</span><n-button size="small" :disabled="page*30>=data.count || loading" @click="page++;readResult(selectedJob)">下一页</n-button></div>
@@ -222,6 +248,7 @@ const memberColumns=[
 </template>
 
 <style scoped>
+.shipment-category-fields{display:flex;gap:12px;align-items:flex-end;flex-wrap:wrap}.shipment-category-fields label{display:grid;gap:6px;flex:1;min-width:220px}.shipment-category-filter details{overflow:hidden}.shipment-category-filter summary{margin:8px 0}
 .shipment-store-filter{padding:16px 18px;margin:16px 0;background:#fff;border:1px solid #e2e7ef;border-radius:8px;display:grid;gap:10px;font-size:13px}.shipment-store-filter>strong{font-weight:550}.shipment-store-filter small,.shipment-store-filter p{font-size:12px;color:#657184;line-height:1.8;margin:0}.shipment-store-filter summary{cursor:pointer;color:#4265be}.shipment-filter-actions{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin:6px 0}.shipment-filter-actions :deep(.n-select),.shipment-filter-actions :deep(.n-input){width:230px;max-width:100%}
 
 .shipment-refund-original{display:flex;flex-wrap:wrap;gap:4px 12px;align-items:center;font-size:12px;margin-top:6px}
