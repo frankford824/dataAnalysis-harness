@@ -51,12 +51,13 @@ def test_actual_shipments_exclude_unshipped_sibling_and_weight_partial_quantitie
     assert allocate('6',result['W2']['members'])['status']=='allocated'
 
 
-def test_missing_packet_member_identity_is_retained_instead_of_dropped():
+def test_blank_child_is_excluded_from_weight_but_retained_as_evidence():
     result=packages([header('e1','W1','100')],
         [item('e1','i1','100000001','1','80'),item('e1','i2','', '1','20')],
         [order('100000001','80','1')])
-    assert len(result['W1']['members'])==2
-    assert allocate('10',result['W1']['members'])['reason']=='identity_missing'
+    assert len(result['W1']['members'])==1
+    assert result['W1']['ignored_empty_child_items'][0]['internal_item_id']=='i2'
+    assert Decimal(allocate('10',result['W1']['members'])['allocations'][0]['amount'])==10
 
 
 def test_superseded_parent_with_reused_tracking_is_not_another_shipment_or_quantity():
@@ -244,7 +245,9 @@ def test_explicit_zero_goods_amount_and_all_zero_package_are_distinct():
     assert [Decimal(a['amount']) for a in allocate('10',packet['members'])['allocations']]==[Decimal(0),Decimal(10)]
     rows[1]['line_amount']='0'
     packet=packages([header('e','W','20')],rows,originals)['W']
-    assert allocate('10',packet['members'],allow_zero_equal=packet['allow_zero_equal'])['reason']=='zero_basis'
+    equal=allocate('10',packet['members'],allow_zero_equal=packet['allow_zero_equal'])
+    assert equal['method']=='zero_identity_equal'
+    assert [Decimal(a['amount']) for a in equal['allocations']]==[Decimal(5),Decimal(5)]
 
 
 def test_erp_duplicate_lines_do_not_inflate_weights_and_conflicts_block():
@@ -314,3 +317,18 @@ def test_parcel_preserves_each_erp_identity_even_when_ledger_store_is_unmapped()
         header('two','W1','10',order_store_id='unknown')],
         [item('one','i1','100000001','1','10'),item('two','i2','100000002','1','10',order_store_id='unknown')],[order('100000001','10')])
     assert incomplete['W1']['erp_shop_keys']==['','19027942|得物']
+
+
+def test_all_empty_child_lines_leave_a_pending_package_with_original_evidence():
+    p=packages([header('e','W','10')],[item('e','i','','1','10')],[order('100000001','10')])['W']
+    assert p['members']==[] and len(p['ignored_empty_child_items'])==1
+    assert allocate('2',p['members'],issue=p['issue'])['reason']=='no_valid_members'
+
+
+def test_empty_native_child_is_not_a_manual_line_and_nonblank_invalid_identity_still_blocks():
+    p=packages([header('e','W','10')],[item('e','i','','1','10',shop_item_id='p')],[order('100000001','10')],platform='pdd')['W']
+    assert len(p['members'])==1 and not p['ignored_empty_child_items']
+    assert p['members'][0]['identity_kind']=='native_item'
+    p=packages([header('e','W','10')],[item('e','i','invalid-child','1','10')],[order('100000001','10')])['W']
+    assert not p['ignored_empty_child_items']
+    assert allocate('2',p['members'],issue=p['issue'])['reason']=='identity_missing'

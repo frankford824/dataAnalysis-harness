@@ -61,7 +61,9 @@ function deleteGroup(){
   catch{groupNotice.value='当前浏览器无法删除保存的分组。'}
 }
 const summary=computed(()=>data.value?.summary || {})
-const erpGoodsRule=computed(()=>['shipment-erp-goods-amount.v2','shipment-erp-goods-refund.v3','shipment-erp-goods-refund.v4','shipment-erp-goods-multifee.v5'].includes(data.value?.rule_version))
+const erpGoodsRule=computed(()=>['shipment-erp-goods-amount.v2','shipment-erp-goods-refund.v3','shipment-erp-goods-refund.v4','shipment-erp-goods-multifee.v5','shipment-erp-group-child-equal.v6'].includes(data.value?.rule_version))
+const v6Rule=computed(()=>data.value?.rule_version==='shipment-erp-group-child-equal.v6')
+const basisText=r=>r?.basis_unit==='identity'?`${r.basis_total} 个身份`:expenseText(r?.basis_total)
 const selectedGroup=computed(()=>data.value?.groups.find(g=>g.id===reason.value))
 const detailMembers=computed(()=>memberRows(detail.value))
 const active=computed(()=>!canStart(job.value))
@@ -164,7 +166,7 @@ const columns=[
   {title:'运单及店铺候选',key:'tracking_no',minWidth:220,mobileWidth:170,render:r=>h('div',{class:'shipment-id'},[
     h('strong',r.tracking_no),h('small',r.stores.length?r.stores.join('；'):'店铺未定')])},
   {title:'来源运费',key:'amount',width:135,mobileWidth:120,align:'right',render:r=>h('span',{title:r.amount},expenseText(r.amount))},
-  {title:'本包分摊基数',key:'basis_total',width:145,mobileWidth:130,align:'right',render:r=>r.basis_total==null?'—':expenseText(r.basis_total)},
+  {title:'本包分摊基数',key:'basis_total',width:145,mobileWidth:130,align:'right',render:r=>r.basis_total==null?'—':basisText(r)},
   {title:'店铺分类',key:'store_category',minWidth:140,render:r=>categoryLabel(r.store_category)},
   {title:'方法与状态',key:'status',minWidth:200,mobileWidth:180,render:r=>h('div',[r.status==='allocated'?r.method_label:'资料待核',h('small',{class:'shipment-secondary'},r.reason_label || '试算可分摊，原账未改')])},
   {title:'依据',key:'action',width:110,mobileWidth:100,render:r=>h(NButton,{text:true,type:'primary',size:'small',onClick:()=>open(r)},()=> '查看分摊')},
@@ -172,7 +174,7 @@ const columns=[
 const memberColumns=[
   {title:'实际发货商品',key:'product_name',minWidth:200,mobileWidth:180,render:r=>h('div',{class:'shipment-id'},[h('strong',r.product_name || r.product_id),h('small',`商品 ${r.product_id || '待核'}`),h('small',quantityLabel(r))])},
   {title:'订单身份',key:'child_id',minWidth:220,mobileWidth:190,render:r=>h('div',{class:'shipment-id'},[h('small',`主单 ${r.order_id || '待核'}`),h('small',`${identityLabel(r)} ${r.child_id || '见ERP发货记录'}`),r.is_reship?h('small','补发商品'):null])},
-  {title:'本次分摊权重',key:'basis',width:150,mobileWidth:130,align:'right',render:r=>r.allocation?(detail.value?.charge.basis_unit==='ratio'?percentage(r.allocation.basis_weight):expenseText(r.allocation.basis_amount)):'—'},
+  {title:'本次分摊权重',key:'basis',width:150,mobileWidth:130,align:'right',render:r=>r.allocation?(detail.value?.charge.basis_unit==='identity'?`${Number(r.allocation.basis_weight).toLocaleString('zh-CN',{maximumFractionDigits:6})} 份`:detail.value?.charge.basis_unit==='ratio'?percentage(r.allocation.basis_weight):expenseText(r.allocation.basis_amount)):'—'},
   {title:'分摊比例',key:'factor',width:120,mobileWidth:110,align:'right',render:r=>percentage(r.allocation?.factor)},
   {title:'商品分摊运费',key:'cost',width:145,mobileWidth:130,align:'right',render:r=>r.allocation?h('span',{title:`计算值 ${r.allocation.amount}`},expenseText(r.allocation.amount)):'尚未分摊'},
   {title:'对照依据',key:'action',width:155,mobileWidth:140,render:r=>h('div',{class:'shipment-evidence-actions'},[h(NButton,{size:'small',text:true,type:'primary',disabled:!r.store_id,onClick:()=>original(r)},()=> '店铺原账'),r.basis_reference?.file_sha?h(NButton,{size:'small',text:true,type:'primary',onClick:()=>viewSource(r.basis_reference)},()=> '金额原表'):null])},
@@ -229,7 +231,7 @@ const memberColumns=[
         <p class="shipment-mobile-note">左右滑动查看金额、状态和分摊依据。</p>
         <LedgerTable :columns="columns" :rows="data.rows" :row-key="r=>r.charge_id" :loading="loading" :max-height="500" empty="本范围暂无收费记录；未归属店铺的记录请在全部店铺查看"/>
         <div class="shipment-pages"><span>共 {{data.count}} 条</span><n-button size="small" :disabled="page<=1 || loading" @click="page--;readResult(selectedJob)">上一页</n-button><span>{{page}} / {{Math.max(1,Math.ceil(data.count/30))}}</span><n-button size="small" :disabled="page*30>=data.count || loading" @click="page++;readResult(selectedJob)">下一页</n-button></div>
-        <details class="shipment-explanation"><summary>分摊规则与资料范围</summary><template v-if="erpGoodsRule"><p>同包多商品按聚水潭“商品金额”占比分摊：本商品的包内明细金额 ÷ 本包全部商品明细金额 × 本包运费。商品金额已是行合计，不再乘数量，也不扣退款。</p><p>只取本包实际发出的明细，套装内点胶、相纸等按金额汇总，不将不同商品的数量相加比较。单商品直接归属；多商品金额缺失、为负或全部为零时保留待核。补发同样按本次发货的商品金额，不能用原单金额代替缺失金额。</p></template><template v-else><p>同包多商品优先用原表分配率；没有分配率时，用实付减退款后的非负金额。拆包只计本次发出份额，跨主单先换成可比较金额。缺数量、金额或身份依据时保留待核。</p><p>补发不按新增零收入吞掉运费。单商品直接归属，多商品需有原单金额及补发范围依据。只有同主单商品的基数全部确认为零，且原核算允许比例分摊时才均分；缺失金额不当作零。</p></template><p v-if="data.rule_version==='shipment-erp-goods-refund.v3'">负数退差额沿用同运单已分摊正数收费的比例冲回，正负分别留存，合计为净运费。本次试算未能匹配原收费依据的冲减仍待核。</p><p v-if="['shipment-erp-goods-refund.v4','shipment-erp-goods-multifee.v5'].includes(data.rule_version)">负数退差额用于减少运费。有同运单原收费分摊依据时沿用原比例；没有原收费记录时，单商品直接冲减，多商品按本包商品金额冲减。归属、来源或金额依据不明确时保留待核。</p><p v-if="data.rule_version==='shipment-erp-goods-multifee.v5'">同一运单的寄件、退回、拦截等独立收费逐条保留并累计分摊。同账单仅运单和时间相同不视为重复；金额与结算对象也相同的候选仍待核。重复上传的相同账单只取一份。</p><p>{{data.notice}} 原生无独立子单的平台按其商品行核对，不伪造子订单号。</p><p>规则 {{data.rule_version}} · 订单快照 {{data.snapshot_id}} · 已接收增量 {{data.consumed_seq}}</p><p>输入校验值 {{data.input_fingerprint}}</p><p v-for="(warning,i) in data.warnings" :key="i">{{warning.file}}：{{warning.reason}}</p></details>
+        <details class="shipment-explanation"><summary>分摊规则与资料范围</summary><template v-if="erpGoodsRule"><p>同包多商品按聚水潭“商品金额”占比分摊：本商品的包内明细金额 ÷ 本包全部商品明细金额 × 本包运费。商品金额已是行合计，不再乘数量，也不扣退款。</p><p>只取本包实际发出的明细，套装内点胶、相纸等按金额汇总，不将不同商品的数量相加比较。单商品直接归属；多商品金额缺失或为负时保留待核。<template v-if="v6Rule">金额全零时按不同有效子单等分；原生商品行或补发行按已确认商品身份等分，同一子单的多条明细不重复计份。</template><template v-else>金额全部为零时保留待核。</template>补发同样按本次发货的商品金额，不能用原单金额代替缺失金额。</p></template><template v-else><p>同包多商品优先用原表分配率；没有分配率时，用实付减退款后的非负金额。拆包只计本次发出份额，跨主单先换成可比较金额。缺数量、金额或身份依据时保留待核。</p><p>补发不按新增零收入吞掉运费。单商品直接归属，多商品需有原单金额及补发范围依据。只有同主单商品的基数全部确认为零，且原核算允许比例分摊时才均分；缺失金额不当作零。</p></template><p v-if="data.rule_version==='shipment-erp-goods-refund.v3'">负数退差额沿用同运单已分摊正数收费的比例冲回，正负分别留存，合计为净运费。本次试算未能匹配原收费依据的冲减仍待核。</p><p v-if="['shipment-erp-goods-refund.v4','shipment-erp-goods-multifee.v5','shipment-erp-group-child-equal.v6'].includes(data.rule_version)">负数退差额用于减少运费。有同运单原收费分摊依据时沿用原比例；没有原收费记录时，单商品直接冲减，多商品按本包商品金额冲减。归属、来源或金额依据不明确时保留待核。</p><p v-if="data.rule_version==='shipment-erp-goods-multifee.v5'">同一运单的寄件、退回、拦截等独立收费逐条保留并累计分摊。同账单仅运单和时间相同不视为重复；金额与结算对象也相同的候选仍待核。重复上传的相同账单只取一份。</p><p v-if="v6Rule">同一账单同运单的全部收费先求和再分摊，保留每笔来源及组内合计；完整重复上传账单只取一份，跨账单重叠仍待核。忽略空子单且身份不完整的手工明细，并在详情保留依据；已有明确原生商品或补发身份的行继续参与。忽略后没有有效身份则待核。</p><p>{{data.notice}} 原生无独立子单的平台按其商品行核对，不伪造子订单号。</p><p>规则 {{data.rule_version}} · 订单快照 {{data.snapshot_id}} · 已接收增量 {{data.consumed_seq}}</p><p>输入校验值 {{data.input_fingerprint}}</p><p v-for="(warning,i) in data.warnings" :key="i">{{warning.file}}：{{warning.reason}}</p></details>
       </template>
       <p v-else-if="valid && !loading && !active && !error" class="shipment-empty">本月尚无包裹分摊试算。生成后会固定记录，方便与原账核对。</p>
     </n-spin>
@@ -237,13 +239,15 @@ const memberColumns=[
       <n-spin :show="detailLoading"><n-alert v-if="detailError" type="error">{{detailError}}</n-alert>
         <template v-if="detail"><div class="shipment-detail-head"><div><h3>{{detail.charge.tracking_no}}</h3><p>{{detail.charge.packet?.carrier || '承运商未提供'}} · {{detail.charge.packet?.ship_time || '发货时点待核'}}</p></div><div><span>本次来源运费</span><strong :title="detail.charge.amount">{{expenseText(detail.charge.amount)}}</strong></div></div>
           <n-alert v-if="detail.charge.status==='pending'" type="warning" :bordered="false"><strong>{{detail.charge.reason_label}}</strong><div>该笔保留待核，本次没有分给商品；不代表原账未计入，也不能重复补扣。</div></n-alert>
-          <div v-else class="shipment-allocation-rule"><strong>{{detail.charge.method_label}}</strong><span v-if="detail.charge.basis_total!=null">本包分摊基数 {{expenseText(detail.charge.basis_total)}}</span><span v-else>直接归属或按原表比例在本包内重新归一，未将缺失金额填成零。</span><p>基数仅用于分费用，不是新增销售额。分摊合计等于来源运费；页面按分显示可能有舍入差，导出保留计算精度。</p></div>
+          <div v-else class="shipment-allocation-rule"><strong>{{detail.charge.method_label}}</strong><span v-if="detail.charge.basis_total!=null">本包分摊基数 {{basisText(detail.charge)}}</span><span v-else>直接归属或按原表比例在本包内重新归一，未将缺失金额填成零。</span><p>基数仅用于分费用，不是新增销售额。分摊合计等于来源运费；页面按分显示可能有舍入差，导出保留计算精度。</p></div>
           <n-alert v-if="detail.charge.refund_basis" type="info" :bordered="false">
             这笔冲减沿用同运单正数收费在本次试算中的分摊比例，负数已计入可分摊净额。
             <div v-for="original in detail.charge.refund_basis.original_charges" :key="original.charge_id" class="shipment-refund-original"><n-button text size="small" @click="open(original)">查看正数收费 {{expenseText(original.amount)}}</n-button><span>{{original.scan_time}}</span></div>
           </n-alert>
           <n-alert v-else-if="detail.charge.status==='allocated' && Number(detail.charge.amount)<0" type="info" :bordered="false">这笔退差额已按本包商品归属冲减，负数已计入可分摊净额。本次试算未匹配原收费记录，商品和金额依据见下方明细。</n-alert>
-          <h3 class="shipment-detail-title">本次实际发货商品</h3><p class="shipment-note">“店铺原账”打开整店对应账期，原账总额不能与本行试算直接相减。</p><p class="shipment-mobile-note">左右滑动查看金额权重、比例和商品分摊运费。</p>
+          <n-alert v-if="detail.charge.charge_group_count>1" type="info" :bordered="false">同一账单、同一运单共 {{detail.charge.charge_group_count}} 笔费用，合计 {{expenseText(detail.charge.charge_group_total)}}，先按合计分摊后保留逐笔来源。本页显示其中一笔。</n-alert>
+          <details v-if="detail.charge.packet?.ignored_empty_child_items?.length" class="shipment-explanation"><summary>本次忽略 {{detail.charge.packet.ignored_empty_child_items.length}} 条空子单明细（查看原记录）</summary><p>这些明细未参与分摊权重，原始记录保留；运费由剩余有效商品身份承担。</p><ul><li v-for="r in detail.charge.packet.ignored_empty_child_items" :key="`${r.internal_order_id}:${r.internal_item_id}`">ERP订单 {{r.internal_order_id}} · 明细 {{r.internal_item_id}} · {{r.sku_id}} {{r.product_name}} · 数量 {{r.raw_quantity ?? '未知'}} · 商品金额 {{r.erp_goods_amount==null?'未知':expenseText(r.erp_goods_amount)}}</li></ul></details>
+          <h3 class="shipment-detail-title">本次参与分摊的发货商品</h3><p class="shipment-note">“店铺原账”打开整店对应账期，原账总额不能与本行试算直接相减。</p><p class="shipment-mobile-note">左右滑动查看金额权重、比例和商品分摊运费。</p>
           <LedgerTable :columns="memberColumns" :rows="detailMembers" :row-key="r=>r.target_key" :max-height="470" empty="尚无可追溯的发货商品行"/>
           <div v-if="detail.charge.erp_shop_keys?.length" class="shipment-source"><strong>聚水潭店铺ID及平台</strong><span>{{detail.charge.erp_shop_keys.filter(Boolean).join('；') || '发货记录缺少店铺ID或平台'}}</span></div>
           <div class="shipment-source"><strong>收费来源</strong><span>{{detail.charge.file}} · {{detail.charge.sheet}} · 留档行 {{detail.charge.row_no}}</span><span>账单扫描时间 {{detail.charge.scan_time}}</span><span v-if="detail.charge.settlement_object">账单结算对象 {{detail.charge.settlement_object}}</span><n-button size="small" @click="viewSource(detail.charge)">查看原文件</n-button></div>

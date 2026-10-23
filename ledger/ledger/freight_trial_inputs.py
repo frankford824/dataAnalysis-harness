@@ -42,11 +42,10 @@ def scan_stamp(value,day):
 
 
 def flag_charge_overlaps(charges):
-    """Same-parcel same-time rows may be distinct outbound/return/service fees.
+    """Keep every row within one bill; only overlapping different bills wait.
 
-    Within one bill only identical signed amounts and settlement objects are
-    indistinguishable candidates. Whole-file aliases are removed separately;
-    overlapping nonidentical files still require source reconciliation.
+    Whole-file aliases are removed separately. Equal time/amount/object inside
+    a bill no longer implies duplicate billing under the confirmed v6 rule.
     """
     overlaps={}
     for charge in charges:
@@ -55,13 +54,6 @@ def flag_charge_overlaps(charges):
         if len({r['file_sha'] for r in group})>1:
             for charge in group:charge['source_issue']='source_overlap'
             continue
-        identical={}
-        for charge in group:
-            key=(number(charge['amount']),charge.get('settlement_object','').strip())
-            identical.setdefault(key,[]).append(charge)
-        for copies in identical.values():
-            if len(copies)>1:
-                for charge in copies:charge['source_issue']='duplicate_charge'
 
 
 def capture(root, model, period):

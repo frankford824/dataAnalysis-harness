@@ -75,7 +75,7 @@ def test_outbound_return_and_interception_fees_are_distinct_bill_rows():
 def test_exact_candidates_do_not_block_other_distinct_fees_in_the_same_group():
     rows=[charge('1'),charge('1.00'),charge('.6'),charge('1',settlement_object='另一结算对象'),charge('-1')]
     flag_charge_overlaps(rows)
-    assert [r['source_issue'] for r in rows]==['duplicate_charge','duplicate_charge','','','']
+    assert all(not r['source_issue'] for r in rows)
 
 
 def test_overlapping_files_are_not_certified_as_additional_fees():
@@ -109,4 +109,5 @@ def test_real_bill_reordered_copy_is_counted_once_and_keeps_distinct_fee_rows(tm
     assert len(distinct)==3 and all(not r['source_issue'] for r in distinct)
     assert sum(Decimal(r['amount']) for r in distinct)==Decimal('3.30')
     assert all(r['settlement_object'] for r in distinct)
-    assert sum(r['source_issue']=='duplicate_charge' for r in charges)==2
+    assert all(not r['source_issue'] for r in charges)
+    assert sum(Decimal(r['amount']) for r in charges if r['tracking_no']=='YT7625391995793')==Decimal('4.80')

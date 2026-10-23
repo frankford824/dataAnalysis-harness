@@ -349,3 +349,52 @@ def test_erp_shop_identity_is_persisted_and_classifies_without_posting_to_a_ledg
     rows=list(csv.DictReader(io.StringIO(trial.export(jobs,new_id,only_category='festival',scope_fingerprint=page['scope_fingerprint']).lstrip('\ufeff'))))
     assert rows[0]['聚水潭店铺ID及平台']=='19027942|得物' and rows[0]['商品分摊运费']==''
     assert [tuple(r) for r in ws.conn.execute('SELECT * FROM run')]==before
+
+
+def test_same_bill_identical_fees_are_aggregated_once_and_export_group_total_once(result,monkeypatch):
+    ws,model,jobs,_jid=result;new_id='7'*32
+    charges=[refund_charge(f'{i:032x}','2.40','2026-06-05',scan_time_raw='2026-06-05',row_no=100+i) for i in (1,2)]
+    from ledger.freight_trial_inputs import flag_charge_overlaps
+    flag_charge_overlaps(charges)
+    packet=refund_packet([member('1','0'),member('2','0')],allow_zero_equal=True)
+    for m in packet['members']:m['basis_source']='erp_goods_amount'
+    packet['ignored_empty_child_items']=[{'internal_order_id':'e','internal_item_id':'manual1','sku_id':'manual','product_name':'手工行','raw_quantity':'1','erp_goods_amount':'100'}]
+    monkeypatch.setattr(trial,'parse_sources',lambda *_:(charges,[],{},[]))
+    monkeypatch.setattr(trial,'build_packages',lambda *_:{charges[0]['tracking_no']:packet})
+    trial.build(ws.root,ws.root,model,'2026-06',jobs.path(new_id)/'result')
+    trial._write_json(jobs.path(new_id)/'job.json',{'state':'ready','job_id':new_id,'period':'2026-06'})
+    page=trial.query(jobs,new_id)
+    assert page['summary']['allocated_count']==2 and Decimal(page['summary']['allocated_amount'])==Decimal('4.80')
+    assert all(r['charge_group_count']==2 and Decimal(r['charge_group_total'])==Decimal('4.80') for r in page['rows'])
+    d=trial.detail(jobs,new_id,charges[0]['charge_id'])['charge']
+    assert d['method']=='zero_identity_equal' and d['basis_total']=='2'
+    assert d['packet']['ignored_empty_child_items'][0]['internal_item_id']=='manual1'
+    rows=list(csv.DictReader(io.StringIO(trial.export(jobs,new_id,scope_fingerprint=page['scope_fingerprint']).lstrip('\ufeff'))))
+    assert sum(Decimal(r['来源运费（每笔仅首行）']) for r in rows if r['来源运费（每笔仅首行）'])==Decimal('4.80')
+    assert sum(Decimal(r['同账单运单费用合计（仅组首行）']) for r in rows if r['同账单运单费用合计（仅组首行）'])==Decimal('4.80')
+    assert all(r['权重类型']=='身份份额' and r['忽略明细依据（ERP订单:明细ID）']=='e:manual1' for r in rows)
+
+
+def test_windows_transient_replace_lock_retries_without_truncating_published_job(tmp_path,monkeypatch):
+    target=tmp_path/'job.json';target.write_text('{"state":"old"}')
+    original=trial.os.replace;calls=[]
+    def replace(a,b):
+        calls.append(1)
+        if len(calls)<3:
+            assert json.loads(target.read_text())['state']=='old'
+            error=PermissionError('sharing violation');error.winerror=5;raise error
+        return original(a,b)
+    monkeypatch.setattr(trial.os,'replace',replace);monkeypatch.setattr(trial.time,'sleep',lambda *_:None)
+    trial._write_json(target,{'state':'ready'})
+    assert len(calls)==3 and json.loads(target.read_text())['state']=='ready'
+    assert not list(tmp_path.glob('*.tmp'))
+
+
+def test_permanent_job_access_failure_is_bounded_and_keeps_previous_result(tmp_path,monkeypatch):
+    target=tmp_path/'job.json';target.write_text('{"state":"old"}');calls=[]
+    def replace(*_):
+        calls.append(1);error=PermissionError('denied');error.winerror=5;raise error
+    monkeypatch.setattr(trial.os,'replace',replace);monkeypatch.setattr(trial.time,'sleep',lambda *_:None)
+    with pytest.raises(PermissionError):trial._write_json(target,{'state':'ready'})
+    assert len(calls)==8 and json.loads(target.read_text())['state']=='old'
+    assert not list(tmp_path.glob('*.tmp'))

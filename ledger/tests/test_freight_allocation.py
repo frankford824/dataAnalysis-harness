@@ -137,3 +137,34 @@ def test_missing_original_never_bypasses_parcel_identity_money_or_source_checks(
     assert allocate('-10',members)['reason']=='identity_missing'
     zero=[member(k,'0',basis_source='erp_goods_amount') for k in ('A','B')]
     assert allocate('-10',zero)['reason']=='zero_basis'
+
+
+@pytest.mark.parametrize('fee',['10','-0.5','0.0000001'])
+def test_zero_erp_amounts_equal_distinct_children_then_split_their_product_targets(fee):
+    rows=[member('A1','0',child_id='A',product_id='p1',basis_source='erp_goods_amount'),
+          member('A2','0',child_id='A',product_id='p2',basis_source='erp_goods_amount'),
+          member('B','0',order_id='another',child_id='B',product_id='p3',basis_source='erp_goods_amount')]
+    result=allocate(fee,rows,allow_zero_equal=True)
+    assert result['method']=='zero_identity_equal' and result['basis_total']=='2' and result['basis_unit']=='identity'
+    assert sum(amounts(result).values())==Decimal(fee)
+    assert [Decimal(a['factor']) for a in result['allocations']]==[Decimal('.25'),Decimal('.25'),Decimal('.5')]
+
+
+def test_zero_native_and_reship_identities_are_equal_without_fabricating_child_ids():
+    rows=[member('A','0',child_id='',product_id='p1',identity_kind='native_item',basis_source='erp_goods_amount'),
+          member('B','0',child_id='',product_id='p2',identity_kind='erp_reship_item',is_reship=True,basis_source='erp_goods_amount')]
+    result=allocate('3',rows,allow_zero_equal=True)
+    assert amounts(result)=={'A':Decimal('1.5'),'B':Decimal('1.5')}
+    assert all(a['child_id']=='' for a in result['allocations'])
+    rows[1]['amount_verified']=False
+    assert allocate('3',rows,allow_zero_equal=True)['status']=='pending'
+
+
+def test_aggregate_then_expand_preserves_every_fee_and_the_aggregate_target_totals():
+    from ledger.freight_allocation import expand_group
+    rows=[member(k,'0',basis_source='erp_goods_amount') for k in ['C','A','B']]
+    charges=[{'charge_id':str(i),'amount':'.01'} for i in range(3)]
+    aggregate=allocate('.03',rows,allow_zero_equal=True);parts=expand_group(aggregate,charges)
+    assert all(sum(amounts(r).values())==Decimal('.01') for r in parts.values())
+    for target in amounts(aggregate):assert sum(amounts(r)[target] for r in parts.values())==amounts(aggregate)[target]
+    assert parts==expand_group(aggregate,list(reversed(charges)))

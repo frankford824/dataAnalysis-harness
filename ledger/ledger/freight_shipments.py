@@ -191,6 +191,8 @@ def build_packages(headers,items,relations,mapping,model,children,_controls,_nat
         # line_amount is JST's 商品金额 (a line total), not payment or unit price.
         goods_amount=number(row.get('line_amount'))
         member={'target_key':target,'store_id':sid,'order_id':main,'child_id':child,'product_id':product,
+            'ignore_empty_child':bool(platform in {'taobao','douyin'} and not raw_child and not identity
+                and (osid,oid) not in head_conflicts and (osid,_norm(row['sub_order_id'])) not in item_conflicts),
             'product_name':str(row.get('product_name') or ''),'identity_kind':role,'identity_verified':identity,
             'internal_order_id':oid,'internal_item_id':_norm(row['sub_order_id']),'tracking_no':tracking,
             'is_reship':reship,'basis':basis,'raw_quantity':number(row.get('quantity')),
@@ -218,7 +220,12 @@ def build_packages(headers,items,relations,mapping,model,children,_controls,_nat
         dispatches={str(h.get('ship_time') or '') for h in package['headers'].values()}
         if not issue and len(package['headers'])>1 and (len(dispatches)!=1 or not next(iter(dispatches))):issue='shipment_conflict'
         grouped=defaultdict(list)
-        for row in package['rows']:grouped[row['target_key']].append(row)
+        ignored=[]
+        for row in package['rows']:
+            if row['ignore_empty_child']:
+                ignored.append({k:row[k] for k in ('internal_order_id','internal_item_id','sku_id','product_name','raw_quantity','erp_goods_amount')})
+            else:grouped[row['target_key']].append(row)
+        if ignored and not grouped and not issue:issue='no_valid_members'
         members=[]
         for target,rows in grouped.items():
             first=rows[0]
@@ -247,5 +254,5 @@ def build_packages(headers,items,relations,mapping,model,children,_controls,_nat
                 if _norm(h.get('jst_shop_id')) and str(h.get('platform_code') or '').strip() else ''
                 for h in package['headers'].values()}),
             'ship_time':';'.join(sorted(dispatches)),'internal_order_ids':sorted({key[1] for key in package['headers']}),
-            'members':members,'issue':issue,'allow_zero_equal':False}
+            'members':members,'ignored_empty_child_items':ignored,'issue':issue,'allow_zero_equal':True}
     return output
