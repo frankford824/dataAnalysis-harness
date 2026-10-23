@@ -62,7 +62,8 @@
       "ledger_platform": "",
       "match_status": "unmapped",
       "match_basis": "",
-      "note": "当前已同步ERP档案及台账均未找到精确对应，不能据此认定店铺不存在或已停用。"
+      "note": "当前已同步ERP档案及台账均未找到精确对应，不能据此认定店铺不存在或已停用。",
+      "erp_verified": false
     },
     {
       "source_row": 3,
@@ -76,7 +77,8 @@
       "ledger_platform": "",
       "match_status": "unmapped",
       "match_basis": "",
-      "note": "当前已同步ERP档案及台账均未找到精确对应，不能据此认定店铺不存在或已停用。"
+      "note": "当前已同步ERP档案及台账均未找到精确对应，不能据此认定店铺不存在或已停用。",
+      "erp_verified": false
     },
     {
       "source_row": 4,
@@ -90,7 +92,8 @@
       "ledger_platform": "",
       "match_status": "unmapped",
       "match_basis": "",
-      "note": "当前已同步ERP档案及台账均未找到精确对应，不能据此认定店铺不存在或已停用。"
+      "note": "当前已同步ERP档案及台账均未找到精确对应，不能据此认定店铺不存在或已停用。",
+      "erp_verified": false
     },
     {
       "source_row": 5,
@@ -104,7 +107,8 @@
       "ledger_platform": "",
       "match_status": "unmapped",
       "match_basis": "",
-      "note": "当前已同步ERP档案及台账均未找到精确对应，不能据此认定店铺不存在或已停用。"
+      "note": "当前已同步ERP档案及台账均未找到精确对应，不能据此认定店铺不存在或已停用。",
+      "erp_verified": false
     },
     {
       "source_row": 6,
@@ -118,7 +122,8 @@
       "ledger_platform": "",
       "match_status": "unmapped",
       "match_basis": "",
-      "note": "当前已同步ERP档案及台账均未找到精确对应，不能据此认定店铺不存在或已停用。"
+      "note": "当前已同步ERP档案及台账均未找到精确对应，不能据此认定店铺不存在或已停用。",
+      "erp_verified": false
     },
     {
       "source_row": 7,
@@ -132,7 +137,9 @@
       "ledger_platform": "",
       "match_status": "unmapped",
       "match_basis": "",
-      "note": "ERP档案可定位；当前台账店铺排除器尚不能选择这家店。"
+      "note": "ERP档案可定位；当前台账店铺排除器尚不能选择这家店。",
+      "erp_verified": true,
+      "erp_match_basis": "聚水潭店铺档案：ID、店名、平台及非空平台店铺名称逐项核对"
     },
     {
       "source_row": 8,
@@ -146,7 +153,8 @@
       "ledger_platform": "",
       "match_status": "unmapped",
       "match_basis": "",
-      "note": "当前已同步ERP档案及台账均未找到精确对应，不能据此认定店铺不存在或已停用。"
+      "note": "当前已同步ERP档案及台账均未找到精确对应，不能据此认定店铺不存在或已停用。",
+      "erp_verified": false
     },
     {
       "source_row": 9,
@@ -160,7 +168,8 @@
       "ledger_platform": "",
       "match_status": "unmapped",
       "match_basis": "",
-      "note": "当前已同步ERP档案及台账均未找到精确对应，不能据此认定店铺不存在或已停用。"
+      "note": "当前已同步ERP档案及台账均未找到精确对应，不能据此认定店铺不存在或已停用。",
+      "erp_verified": false
     },
     {
       "source_row": 10,
@@ -174,7 +183,8 @@
       "ledger_platform": "",
       "match_status": "unmapped",
       "match_basis": "",
-      "note": "当前已同步ERP档案及台账均未找到精确对应，不能据此认定店铺不存在或已停用。"
+      "note": "当前已同步ERP档案及台账均未找到精确对应，不能据此认定店铺不存在或已停用。",
+      "erp_verified": false
     },
     {
       "source_row": 11,
@@ -188,7 +198,8 @@
       "ledger_platform": "",
       "match_status": "unmapped",
       "match_basis": "",
-      "note": "当前已同步ERP档案及台账均未找到精确对应，不能据此认定店铺不存在或已停用。"
+      "note": "当前已同步ERP档案及台账均未找到精确对应，不能据此认定店铺不存在或已停用。",
+      "erp_verified": false
     },
     {
       "source_row": 12,
@@ -202,7 +213,8 @@
       "ledger_platform": "",
       "match_status": "unmapped",
       "match_basis": "",
-      "note": "当前已同步ERP档案及台账均未找到精确对应，不能据此认定店铺不存在或已停用。"
+      "note": "当前已同步ERP档案及台账均未找到精确对应，不能据此认定店铺不存在或已停用。",
+      "erp_verified": false
     },
     {
       "source_row": 13,
@@ -216,7 +228,8 @@
       "ledger_platform": "",
       "match_status": "unmapped",
       "match_basis": "",
-      "note": "当前已同步ERP档案及台账均未找到精确对应，不能据此认定店铺不存在或已停用。"
+      "note": "当前已同步ERP档案及台账均未找到精确对应，不能据此认定店铺不存在或已停用。",
+      "erp_verified": false
     },
     {
       "source_row": 14,
@@ -230,7 +243,8 @@
       "ledger_platform": "",
       "match_status": "unmapped",
       "match_basis": "",
-      "note": "当前已同步ERP档案及台账均未找到精确对应，不能据此认定店铺不存在或已停用。"
+      "note": "当前已同步ERP档案及台账均未找到精确对应，不能据此认定店铺不存在或已停用。",
+      "erp_verified": false
     },
     {
       "source_row": 15,
@@ -244,7 +258,8 @@
       "ledger_platform": "",
       "match_status": "unmapped",
       "match_basis": "",
-      "note": "当前已同步ERP档案及台账均未找到精确对应，不能据此认定店铺不存在或已停用。"
+      "note": "当前已同步ERP档案及台账均未找到精确对应，不能据此认定店铺不存在或已停用。",
+      "erp_verified": false
     },
     {
       "source_row": 16,
@@ -258,7 +273,8 @@
       "ledger_platform": "",
       "match_status": "unmapped",
       "match_basis": "",
-      "note": "当前已同步ERP档案及台账均未找到精确对应，不能据此认定店铺不存在或已停用。"
+      "note": "当前已同步ERP档案及台账均未找到精确对应，不能据此认定店铺不存在或已停用。",
+      "erp_verified": false
     },
     {
       "source_row": 17,
@@ -272,7 +288,8 @@
       "ledger_platform": "",
       "match_status": "unmapped",
       "match_basis": "",
-      "note": "当前已同步ERP档案及台账均未找到精确对应，不能据此认定店铺不存在或已停用。"
+      "note": "当前已同步ERP档案及台账均未找到精确对应，不能据此认定店铺不存在或已停用。",
+      "erp_verified": false
     },
     {
       "source_row": 18,
@@ -286,7 +303,8 @@
       "ledger_platform": "",
       "match_status": "unmapped",
       "match_basis": "",
-      "note": "当前已同步ERP档案及台账均未找到精确对应，不能据此认定店铺不存在或已停用。"
+      "note": "当前已同步ERP档案及台账均未找到精确对应，不能据此认定店铺不存在或已停用。",
+      "erp_verified": false
     },
     {
       "source_row": 19,
@@ -300,7 +318,8 @@
       "ledger_platform": "",
       "match_status": "unmapped",
       "match_basis": "",
-      "note": "当前已同步ERP档案及台账均未找到精确对应，不能据此认定店铺不存在或已停用。"
+      "note": "当前已同步ERP档案及台账均未找到精确对应，不能据此认定店铺不存在或已停用。",
+      "erp_verified": false
     },
     {
       "source_row": 20,
@@ -314,7 +333,8 @@
       "ledger_platform": "",
       "match_status": "unmapped",
       "match_basis": "",
-      "note": "当前已同步ERP档案及台账均未找到精确对应，不能据此认定店铺不存在或已停用。"
+      "note": "当前已同步ERP档案及台账均未找到精确对应，不能据此认定店铺不存在或已停用。",
+      "erp_verified": false
     },
     {
       "source_row": 21,
@@ -328,7 +348,8 @@
       "ledger_platform": "",
       "match_status": "unmapped",
       "match_basis": "",
-      "note": "当前已同步ERP档案及台账均未找到精确对应，不能据此认定店铺不存在或已停用。"
+      "note": "当前已同步ERP档案及台账均未找到精确对应，不能据此认定店铺不存在或已停用。",
+      "erp_verified": false
     },
     {
       "source_row": 22,
@@ -342,7 +363,8 @@
       "ledger_platform": "",
       "match_status": "unmapped",
       "match_basis": "",
-      "note": "当前已同步ERP档案及台账均未找到精确对应，不能据此认定店铺不存在或已停用。"
+      "note": "当前已同步ERP档案及台账均未找到精确对应，不能据此认定店铺不存在或已停用。",
+      "erp_verified": false
     },
     {
       "source_row": 23,
@@ -356,7 +378,8 @@
       "ledger_platform": "",
       "match_status": "unmapped",
       "match_basis": "",
-      "note": "当前已同步ERP档案及台账均未找到精确对应，不能据此认定店铺不存在或已停用。"
+      "note": "当前已同步ERP档案及台账均未找到精确对应，不能据此认定店铺不存在或已停用。",
+      "erp_verified": false
     },
     {
       "source_row": 24,
@@ -370,7 +393,8 @@
       "ledger_platform": "",
       "match_status": "unmapped",
       "match_basis": "",
-      "note": "当前已同步ERP档案及台账均未找到精确对应，不能据此认定店铺不存在或已停用。"
+      "note": "当前已同步ERP档案及台账均未找到精确对应，不能据此认定店铺不存在或已停用。",
+      "erp_verified": false
     },
     {
       "source_row": 25,
@@ -384,7 +408,8 @@
       "ledger_platform": "",
       "match_status": "unmapped",
       "match_basis": "",
-      "note": "当前已同步ERP档案及台账均未找到精确对应，不能据此认定店铺不存在或已停用。"
+      "note": "当前已同步ERP档案及台账均未找到精确对应，不能据此认定店铺不存在或已停用。",
+      "erp_verified": false
     },
     {
       "source_row": 26,
@@ -398,7 +423,8 @@
       "ledger_platform": "",
       "match_status": "unmapped",
       "match_basis": "",
-      "note": "当前已同步ERP档案及台账均未找到精确对应，不能据此认定店铺不存在或已停用。"
+      "note": "当前已同步ERP档案及台账均未找到精确对应，不能据此认定店铺不存在或已停用。",
+      "erp_verified": false
     },
     {
       "source_row": 27,
@@ -412,7 +438,8 @@
       "ledger_platform": "",
       "match_status": "unmapped",
       "match_basis": "",
-      "note": "当前已同步ERP档案及台账均未找到精确对应，不能据此认定店铺不存在或已停用。"
+      "note": "当前已同步ERP档案及台账均未找到精确对应，不能据此认定店铺不存在或已停用。",
+      "erp_verified": false
     },
     {
       "source_row": 28,
@@ -426,7 +453,8 @@
       "ledger_platform": "",
       "match_status": "unmapped",
       "match_basis": "",
-      "note": "当前已同步ERP档案及台账均未找到精确对应，不能据此认定店铺不存在或已停用。"
+      "note": "当前已同步ERP档案及台账均未找到精确对应，不能据此认定店铺不存在或已停用。",
+      "erp_verified": false
     },
     {
       "source_row": 29,
@@ -440,7 +468,9 @@
       "ledger_platform": "douyin",
       "match_status": "platform_conflict",
       "match_basis": "台账店名或已登记别名精确一致",
-      "note": "名单与ERP均为得物，台账为douyin；不得按抖音归类。"
+      "note": "名单与ERP均为得物，台账为douyin；不得按抖音归类。",
+      "erp_verified": true,
+      "erp_match_basis": "聚水潭店铺档案：ID、店名、平台及非空平台店铺名称逐项核对"
     },
     {
       "source_row": 30,
@@ -454,7 +484,9 @@
       "ledger_platform": "douyin",
       "match_status": "confirmed",
       "match_basis": "ERP店铺ID及已确认映射",
-      "note": "名单分类明确；店铺、平台及系统身份已核对。"
+      "note": "名单分类明确；店铺、平台及系统身份已核对。",
+      "erp_verified": true,
+      "erp_match_basis": "聚水潭店铺档案：ID、店名、平台及非空平台店铺名称逐项核对"
     },
     {
       "source_row": 31,
@@ -468,7 +500,9 @@
       "ledger_platform": "douyin",
       "match_status": "confirmed",
       "match_basis": "ERP店铺ID及已确认映射",
-      "note": "台账显示名为“抖音浅花涧节日装饰”，通过ERP店铺ID及已确认映射确认对应。"
+      "note": "台账显示名为“抖音浅花涧节日装饰”，通过ERP店铺ID及已确认映射确认对应。",
+      "erp_verified": true,
+      "erp_match_basis": "聚水潭店铺档案：ID、店名、平台及非空平台店铺名称逐项核对"
     },
     {
       "source_row": 32,
@@ -482,7 +516,9 @@
       "ledger_platform": "douyin",
       "match_status": "confirmed",
       "match_basis": "ERP店铺ID及已确认映射",
-      "note": "名单分类明确；店铺、平台及系统身份已核对。"
+      "note": "名单分类明确；店铺、平台及系统身份已核对。",
+      "erp_verified": true,
+      "erp_match_basis": "聚水潭店铺档案：ID、店名、平台及非空平台店铺名称逐项核对"
     },
     {
       "source_row": 33,
@@ -496,7 +532,9 @@
       "ledger_platform": "kuaishou",
       "match_status": "confirmed",
       "match_basis": "ERP店铺ID及已确认映射",
-      "note": "名单分类明确；店铺、平台及系统身份已核对。"
+      "note": "名单分类明确；店铺、平台及系统身份已核对。",
+      "erp_verified": true,
+      "erp_match_basis": "聚水潭店铺档案：ID、店名、平台及非空平台店铺名称逐项核对"
     },
     {
       "source_row": 34,
@@ -510,7 +548,9 @@
       "ledger_platform": "",
       "match_status": "unmapped",
       "match_basis": "",
-      "note": "ERP档案可定位；当前台账店铺排除器尚不能选择这家店。"
+      "note": "ERP档案可定位；当前台账店铺排除器尚不能选择这家店。",
+      "erp_verified": true,
+      "erp_match_basis": "聚水潭店铺档案：ID、店名、平台及非空平台店铺名称逐项核对"
     },
     {
       "source_row": 35,
@@ -524,7 +564,9 @@
       "ledger_platform": "taobao",
       "match_status": "confirmed",
       "match_basis": "ERP店铺ID及已确认映射",
-      "note": "名单分类明确；店铺、平台及系统身份已核对。"
+      "note": "名单分类明确；店铺、平台及系统身份已核对。",
+      "erp_verified": true,
+      "erp_match_basis": "聚水潭店铺档案：ID、店名、平台及非空平台店铺名称逐项核对"
     },
     {
       "source_row": 36,
@@ -538,7 +580,9 @@
       "ledger_platform": "taobao",
       "match_status": "confirmed",
       "match_basis": "ERP店铺ID及已确认映射",
-      "note": "名单分类明确；店铺、平台及系统身份已核对。"
+      "note": "名单分类明确；店铺、平台及系统身份已核对。",
+      "erp_verified": true,
+      "erp_match_basis": "聚水潭店铺档案：ID、店名、平台及非空平台店铺名称逐项核对"
     },
     {
       "source_row": 37,
@@ -552,7 +596,9 @@
       "ledger_platform": "taobao",
       "match_status": "confirmed",
       "match_basis": "ERP店铺ID及已确认映射",
-      "note": "名单分类明确；店铺、平台及系统身份已核对。"
+      "note": "名单分类明确；店铺、平台及系统身份已核对。",
+      "erp_verified": true,
+      "erp_match_basis": "聚水潭店铺档案：ID、店名、平台及非空平台店铺名称逐项核对"
     },
     {
       "source_row": 38,
@@ -566,7 +612,9 @@
       "ledger_platform": "taobao",
       "match_status": "confirmed",
       "match_basis": "ERP店铺ID及已确认映射",
-      "note": "名单分类明确；店铺、平台及系统身份已核对。"
+      "note": "名单分类明确；店铺、平台及系统身份已核对。",
+      "erp_verified": true,
+      "erp_match_basis": "聚水潭店铺档案：ID、店名、平台及非空平台店铺名称逐项核对"
     },
     {
       "source_row": 39,
@@ -580,7 +628,8 @@
       "ledger_platform": "",
       "match_status": "unmapped",
       "match_basis": "",
-      "note": "当前已同步ERP档案及台账均未找到精确对应，不能据此认定店铺不存在或已停用。"
+      "note": "当前已同步ERP档案及台账均未找到精确对应，不能据此认定店铺不存在或已停用。",
+      "erp_verified": false
     },
     {
       "source_row": 40,
@@ -594,7 +643,9 @@
       "ledger_platform": "taobao",
       "match_status": "confirmed",
       "match_basis": "ERP店铺ID及已确认映射",
-      "note": "名单分类明确；店铺、平台及系统身份已核对。"
+      "note": "名单分类明确；店铺、平台及系统身份已核对。",
+      "erp_verified": true,
+      "erp_match_basis": "聚水潭店铺档案：ID、店名、平台及非空平台店铺名称逐项核对"
     },
     {
       "source_row": 41,
@@ -608,7 +659,9 @@
       "ledger_platform": "other",
       "match_status": "confirmed",
       "match_basis": "ERP店铺ID及已确认映射",
-      "note": "名单分类明确；店铺、平台及系统身份已核对。"
+      "note": "名单分类明确；店铺、平台及系统身份已核对。",
+      "erp_verified": true,
+      "erp_match_basis": "聚水潭店铺档案：ID、店名、平台及非空平台店铺名称逐项核对"
     },
     {
       "source_row": 42,
@@ -622,7 +675,9 @@
       "ledger_platform": "pdd",
       "match_status": "confirmed",
       "match_basis": "ERP店铺ID及已确认映射",
-      "note": "名单分类明确；店铺、平台及系统身份已核对。"
+      "note": "名单分类明确；店铺、平台及系统身份已核对。",
+      "erp_verified": true,
+      "erp_match_basis": "聚水潭店铺档案：ID、店名、平台及非空平台店铺名称逐项核对"
     },
     {
       "source_row": 43,
@@ -636,7 +691,9 @@
       "ledger_platform": "taobao",
       "match_status": "confirmed",
       "match_basis": "ERP店铺ID及已确认映射",
-      "note": "名单分类明确；店铺、平台及系统身份已核对。"
+      "note": "名单分类明确；店铺、平台及系统身份已核对。",
+      "erp_verified": true,
+      "erp_match_basis": "聚水潭店铺档案：ID、店名、平台及非空平台店铺名称逐项核对"
     },
     {
       "source_row": 44,
@@ -650,7 +707,8 @@
       "ledger_platform": "",
       "match_status": "unmapped",
       "match_basis": "",
-      "note": "当前已同步ERP档案及台账均未找到精确对应，不能据此认定店铺不存在或已停用。"
+      "note": "当前已同步ERP档案及台账均未找到精确对应，不能据此认定店铺不存在或已停用。",
+      "erp_verified": false
     },
     {
       "source_row": 45,
@@ -664,7 +722,9 @@
       "ledger_platform": "",
       "match_status": "unmapped",
       "match_basis": "",
-      "note": "ERP档案可定位；当前台账店铺排除器尚不能选择这家店。 名单分类为“暂停”，ERP仍归“气球店铺”；业务暂停与ERP分组是不同字段，未据此启停店铺。"
+      "note": "ERP档案可定位；当前台账店铺排除器尚不能选择这家店。 名单分类为“暂停”，ERP仍归“气球店铺”；业务暂停与ERP分组是不同字段，未据此启停店铺。",
+      "erp_verified": true,
+      "erp_match_basis": "聚水潭店铺档案：ID、店名、平台及非空平台店铺名称逐项核对"
     },
     {
       "source_row": 46,
@@ -678,7 +738,8 @@
       "ledger_platform": "",
       "match_status": "unmapped",
       "match_basis": "",
-      "note": "当前已同步ERP档案及台账均未找到精确对应，不能据此认定店铺不存在或已停用。"
+      "note": "当前已同步ERP档案及台账均未找到精确对应，不能据此认定店铺不存在或已停用。",
+      "erp_verified": false
     },
     {
       "source_row": 47,
@@ -692,7 +753,9 @@
       "ledger_platform": "alibaba1688",
       "match_status": "confirmed",
       "match_basis": "ERP店铺ID及已确认映射",
-      "note": "名单分类明确；店铺、平台及系统身份已核对。"
+      "note": "名单分类明确；店铺、平台及系统身份已核对。",
+      "erp_verified": true,
+      "erp_match_basis": "聚水潭店铺档案：ID、店名、平台及非空平台店铺名称逐项核对"
     },
     {
       "source_row": 48,
@@ -706,7 +769,9 @@
       "ledger_platform": "alibaba1688",
       "match_status": "confirmed",
       "match_basis": "ERP店铺ID及已确认映射",
-      "note": "名单分类明确；店铺、平台及系统身份已核对。"
+      "note": "名单分类明确；店铺、平台及系统身份已核对。",
+      "erp_verified": true,
+      "erp_match_basis": "聚水潭店铺档案：ID、店名、平台及非空平台店铺名称逐项核对"
     },
     {
       "source_row": 49,
@@ -720,7 +785,8 @@
       "ledger_platform": "",
       "match_status": "unmapped",
       "match_basis": "",
-      "note": "当前已同步ERP档案及台账均未找到精确对应，不能据此认定店铺不存在或已停用。"
+      "note": "当前已同步ERP档案及台账均未找到精确对应，不能据此认定店铺不存在或已停用。",
+      "erp_verified": false
     },
     {
       "source_row": 50,
@@ -734,7 +800,9 @@
       "ledger_platform": "",
       "match_status": "unmapped",
       "match_basis": "",
-      "note": "ERP档案可定位；当前台账店铺排除器尚不能选择这家店。"
+      "note": "ERP档案可定位；当前台账店铺排除器尚不能选择这家店。",
+      "erp_verified": true,
+      "erp_match_basis": "聚水潭店铺档案：ID、店名、平台及非空平台店铺名称逐项核对"
     },
     {
       "source_row": 51,
@@ -748,7 +816,9 @@
       "ledger_platform": "",
       "match_status": "unmapped",
       "match_basis": "",
-      "note": "ERP档案可定位；当前台账店铺排除器尚不能选择这家店。"
+      "note": "ERP档案可定位；当前台账店铺排除器尚不能选择这家店。",
+      "erp_verified": true,
+      "erp_match_basis": "聚水潭店铺档案：ID、店名、平台及非空平台店铺名称逐项核对"
     },
     {
       "source_row": 52,
@@ -762,7 +832,9 @@
       "ledger_platform": "taobao",
       "match_status": "confirmed",
       "match_basis": "ERP店铺ID及已确认映射",
-      "note": "名单分类明确；店铺、平台及系统身份已核对。"
+      "note": "名单分类明确；店铺、平台及系统身份已核对。",
+      "erp_verified": true,
+      "erp_match_basis": "聚水潭店铺档案：ID、店名、平台及非空平台店铺名称逐项核对"
     },
     {
       "source_row": 53,
@@ -776,7 +848,9 @@
       "ledger_platform": "taobao",
       "match_status": "confirmed",
       "match_basis": "ERP店铺ID及已确认映射",
-      "note": "名单分类明确；店铺、平台及系统身份已核对。"
+      "note": "名单分类明确；店铺、平台及系统身份已核对。",
+      "erp_verified": true,
+      "erp_match_basis": "聚水潭店铺档案：ID、店名、平台及非空平台店铺名称逐项核对"
     },
     {
       "source_row": 54,
@@ -790,7 +864,9 @@
       "ledger_platform": "taobao",
       "match_status": "confirmed",
       "match_basis": "ERP店铺ID及已确认映射",
-      "note": "名单分类明确；店铺、平台及系统身份已核对。"
+      "note": "名单分类明确；店铺、平台及系统身份已核对。",
+      "erp_verified": true,
+      "erp_match_basis": "聚水潭店铺档案：ID、店名、平台及非空平台店铺名称逐项核对"
     },
     {
       "source_row": 55,
@@ -804,7 +880,9 @@
       "ledger_platform": "taobao",
       "match_status": "confirmed",
       "match_basis": "ERP店铺ID及已确认映射",
-      "note": "名单分类明确；店铺、平台及系统身份已核对。"
+      "note": "名单分类明确；店铺、平台及系统身份已核对。",
+      "erp_verified": true,
+      "erp_match_basis": "聚水潭店铺档案：ID、店名、平台及非空平台店铺名称逐项核对"
     },
     {
       "source_row": 56,
@@ -818,7 +896,9 @@
       "ledger_platform": "taobao",
       "match_status": "confirmed",
       "match_basis": "ERP店铺ID及已确认映射",
-      "note": "名单分类明确；店铺、平台及系统身份已核对。"
+      "note": "名单分类明确；店铺、平台及系统身份已核对。",
+      "erp_verified": true,
+      "erp_match_basis": "聚水潭店铺档案：ID、店名、平台及非空平台店铺名称逐项核对"
     },
     {
       "source_row": 57,
@@ -832,7 +912,8 @@
       "ledger_platform": "",
       "match_status": "unmapped",
       "match_basis": "",
-      "note": "当前已同步ERP档案及台账均未找到精确对应，不能据此认定店铺不存在或已停用。"
+      "note": "当前已同步ERP档案及台账均未找到精确对应，不能据此认定店铺不存在或已停用。",
+      "erp_verified": false
     },
     {
       "source_row": 58,
@@ -846,7 +927,8 @@
       "ledger_platform": "",
       "match_status": "unmapped",
       "match_basis": "",
-      "note": "当前已同步ERP档案及台账均未找到精确对应，不能据此认定店铺不存在或已停用。"
+      "note": "当前已同步ERP档案及台账均未找到精确对应，不能据此认定店铺不存在或已停用。",
+      "erp_verified": false
     },
     {
       "source_row": 59,
@@ -860,7 +942,8 @@
       "ledger_platform": "",
       "match_status": "unmapped",
       "match_basis": "",
-      "note": "当前已同步ERP档案及台账均未找到精确对应，不能据此认定店铺不存在或已停用。"
+      "note": "当前已同步ERP档案及台账均未找到精确对应，不能据此认定店铺不存在或已停用。",
+      "erp_verified": false
     },
     {
       "source_row": 60,
@@ -874,7 +957,8 @@
       "ledger_platform": "",
       "match_status": "unmapped",
       "match_basis": "",
-      "note": "当前已同步ERP档案及台账均未找到精确对应，不能据此认定店铺不存在或已停用。"
+      "note": "当前已同步ERP档案及台账均未找到精确对应，不能据此认定店铺不存在或已停用。",
+      "erp_verified": false
     },
     {
       "source_row": 61,
@@ -888,7 +972,8 @@
       "ledger_platform": "",
       "match_status": "unmapped",
       "match_basis": "",
-      "note": "当前已同步ERP档案及台账均未找到精确对应，不能据此认定店铺不存在或已停用。 与原表第63行的平台及平台店铺名称相同，但店铺名称不同；缺少店铺ID，暂不合并。"
+      "note": "当前已同步ERP档案及台账均未找到精确对应，不能据此认定店铺不存在或已停用。 与原表第63行的平台及平台店铺名称相同，但店铺名称不同；缺少店铺ID，暂不合并。",
+      "erp_verified": false
     },
     {
       "source_row": 62,
@@ -902,7 +987,8 @@
       "ledger_platform": "",
       "match_status": "unmapped",
       "match_basis": "",
-      "note": "当前已同步ERP档案及台账均未找到精确对应，不能据此认定店铺不存在或已停用。"
+      "note": "当前已同步ERP档案及台账均未找到精确对应，不能据此认定店铺不存在或已停用。",
+      "erp_verified": false
     },
     {
       "source_row": 63,
@@ -916,7 +1002,8 @@
       "ledger_platform": "",
       "match_status": "unmapped",
       "match_basis": "",
-      "note": "当前已同步ERP档案及台账均未找到精确对应，不能据此认定店铺不存在或已停用。 与原表第61行的平台及平台店铺名称相同，但店铺名称不同；缺少店铺ID，暂不合并。"
+      "note": "当前已同步ERP档案及台账均未找到精确对应，不能据此认定店铺不存在或已停用。 与原表第61行的平台及平台店铺名称相同，但店铺名称不同；缺少店铺ID，暂不合并。",
+      "erp_verified": false
     },
     {
       "source_row": 64,
@@ -930,7 +1017,9 @@
       "ledger_platform": "pdd",
       "match_status": "confirmed",
       "match_basis": "ERP店铺ID及已确认映射",
-      "note": "名单分类明确；店铺、平台及系统身份已核对。"
+      "note": "名单分类明确；店铺、平台及系统身份已核对。",
+      "erp_verified": true,
+      "erp_match_basis": "聚水潭店铺档案：ID、店名、平台及非空平台店铺名称逐项核对"
     },
     {
       "source_row": 65,
@@ -944,7 +1033,9 @@
       "ledger_platform": "pdd",
       "match_status": "confirmed",
       "match_basis": "ERP店铺ID及已确认映射",
-      "note": "名单分类明确；店铺、平台及系统身份已核对。"
+      "note": "名单分类明确；店铺、平台及系统身份已核对。",
+      "erp_verified": true,
+      "erp_match_basis": "聚水潭店铺档案：ID、店名、平台及非空平台店铺名称逐项核对"
     },
     {
       "source_row": 66,
@@ -958,7 +1049,9 @@
       "ledger_platform": "pdd",
       "match_status": "confirmed",
       "match_basis": "ERP店铺ID及已确认映射",
-      "note": "名单分类明确；店铺、平台及系统身份已核对。"
+      "note": "名单分类明确；店铺、平台及系统身份已核对。",
+      "erp_verified": true,
+      "erp_match_basis": "聚水潭店铺档案：ID、店名、平台及非空平台店铺名称逐项核对"
     },
     {
       "source_row": 67,
@@ -972,7 +1065,9 @@
       "ledger_platform": "pdd",
       "match_status": "confirmed",
       "match_basis": "ERP店铺ID及已确认映射",
-      "note": "名单分类明确；店铺、平台及系统身份已核对。"
+      "note": "名单分类明确；店铺、平台及系统身份已核对。",
+      "erp_verified": true,
+      "erp_match_basis": "聚水潭店铺档案：ID、店名、平台及非空平台店铺名称逐项核对"
     },
     {
       "source_row": 68,
@@ -986,7 +1081,9 @@
       "ledger_platform": "pdd",
       "match_status": "confirmed",
       "match_basis": "ERP店铺ID及已确认映射",
-      "note": "名单分类明确；店铺、平台及系统身份已核对。"
+      "note": "名单分类明确；店铺、平台及系统身份已核对。",
+      "erp_verified": true,
+      "erp_match_basis": "聚水潭店铺档案：ID、店名、平台及非空平台店铺名称逐项核对"
     },
     {
       "source_row": 69,
@@ -1000,7 +1097,9 @@
       "ledger_platform": "pdd",
       "match_status": "confirmed",
       "match_basis": "ERP店铺ID及已确认映射",
-      "note": "名单分类明确；店铺、平台及系统身份已核对。"
+      "note": "名单分类明确；店铺、平台及系统身份已核对。",
+      "erp_verified": true,
+      "erp_match_basis": "聚水潭店铺档案：ID、店名、平台及非空平台店铺名称逐项核对"
     },
     {
       "source_row": 70,
@@ -1014,7 +1113,9 @@
       "ledger_platform": "pdd",
       "match_status": "confirmed",
       "match_basis": "ERP店铺ID及已确认映射",
-      "note": "名单分类明确；店铺、平台及系统身份已核对。"
+      "note": "名单分类明确；店铺、平台及系统身份已核对。",
+      "erp_verified": true,
+      "erp_match_basis": "聚水潭店铺档案：ID、店名、平台及非空平台店铺名称逐项核对"
     },
     {
       "source_row": 71,
@@ -1028,7 +1129,9 @@
       "ledger_platform": "",
       "match_status": "unmapped",
       "match_basis": "",
-      "note": "ERP档案可定位；当前台账店铺排除器尚不能选择这家店。"
+      "note": "ERP档案可定位；当前台账店铺排除器尚不能选择这家店。",
+      "erp_verified": true,
+      "erp_match_basis": "聚水潭店铺档案：ID、店名、平台及非空平台店铺名称逐项核对"
     },
     {
       "source_row": 72,
@@ -1042,7 +1145,9 @@
       "ledger_platform": "pdd",
       "match_status": "confirmed",
       "match_basis": "ERP店铺ID及已确认映射",
-      "note": "名单分类明确；店铺、平台及系统身份已核对。"
+      "note": "名单分类明确；店铺、平台及系统身份已核对。",
+      "erp_verified": true,
+      "erp_match_basis": "聚水潭店铺档案：ID、店名、平台及非空平台店铺名称逐项核对"
     },
     {
       "source_row": 73,
@@ -1056,7 +1161,9 @@
       "ledger_platform": "pdd",
       "match_status": "confirmed",
       "match_basis": "ERP店铺ID及已确认映射",
-      "note": "台账显示名为“邱倩倩-PDD乐趣节庆喜品派对”，通过ERP店铺ID及已确认映射确认对应。"
+      "note": "台账显示名为“邱倩倩-PDD乐趣节庆喜品派对”，通过ERP店铺ID及已确认映射确认对应。",
+      "erp_verified": true,
+      "erp_match_basis": "聚水潭店铺档案：ID、店名、平台及非空平台店铺名称逐项核对"
     },
     {
       "source_row": 74,
@@ -1070,7 +1177,9 @@
       "ledger_platform": "offline",
       "match_status": "confirmed",
       "match_basis": "ERP店铺ID及已确认映射",
-      "note": "名单分类明确；店铺、平台及系统身份已核对。"
+      "note": "名单分类明确；店铺、平台及系统身份已核对。",
+      "erp_verified": true,
+      "erp_match_basis": "聚水潭店铺档案：ID、店名、平台及非空平台店铺名称逐项核对"
     },
     {
       "source_row": 75,
@@ -1084,7 +1193,8 @@
       "ledger_platform": "",
       "match_status": "unmapped",
       "match_basis": "",
-      "note": "当前已同步ERP档案及台账均未找到精确对应，不能据此认定店铺不存在或已停用。"
+      "note": "当前已同步ERP档案及台账均未找到精确对应，不能据此认定店铺不存在或已停用。",
+      "erp_verified": false
     },
     {
       "source_row": 76,
@@ -1098,7 +1208,8 @@
       "ledger_platform": "",
       "match_status": "unmapped",
       "match_basis": "",
-      "note": "当前已同步ERP档案及台账均未找到精确对应，不能据此认定店铺不存在或已停用。"
+      "note": "当前已同步ERP档案及台账均未找到精确对应，不能据此认定店铺不存在或已停用。",
+      "erp_verified": false
     },
     {
       "source_row": 77,
@@ -1112,7 +1223,9 @@
       "ledger_platform": "taobao",
       "match_status": "confirmed",
       "match_basis": "ERP店铺ID及已确认映射",
-      "note": "名单分类明确；店铺、平台及系统身份已核对。"
+      "note": "名单分类明确；店铺、平台及系统身份已核对。",
+      "erp_verified": true,
+      "erp_match_basis": "聚水潭店铺档案：ID、店名、平台及非空平台店铺名称逐项核对"
     },
     {
       "source_row": 78,
@@ -1126,7 +1239,8 @@
       "ledger_platform": "",
       "match_status": "unmapped",
       "match_basis": "",
-      "note": "当前已同步ERP档案及台账均未找到精确对应，不能据此认定店铺不存在或已停用。"
+      "note": "当前已同步ERP档案及台账均未找到精确对应，不能据此认定店铺不存在或已停用。",
+      "erp_verified": false
     },
     {
       "source_row": 79,
@@ -1140,7 +1254,8 @@
       "ledger_platform": "",
       "match_status": "unmapped",
       "match_basis": "",
-      "note": "当前已同步ERP档案及台账均未找到精确对应，不能据此认定店铺不存在或已停用。"
+      "note": "当前已同步ERP档案及台账均未找到精确对应，不能据此认定店铺不存在或已停用。",
+      "erp_verified": false
     },
     {
       "source_row": 80,
@@ -1154,7 +1269,8 @@
       "ledger_platform": "",
       "match_status": "unmapped",
       "match_basis": "",
-      "note": "当前已同步ERP档案及台账均未找到精确对应，不能据此认定店铺不存在或已停用。"
+      "note": "当前已同步ERP档案及台账均未找到精确对应，不能据此认定店铺不存在或已停用。",
+      "erp_verified": false
     },
     {
       "source_row": 81,
@@ -1168,7 +1284,9 @@
       "ledger_platform": "taobao",
       "match_status": "confirmed",
       "match_basis": "ERP店铺ID及已确认映射",
-      "note": "名单分类明确；店铺、平台及系统身份已核对。"
+      "note": "名单分类明确；店铺、平台及系统身份已核对。",
+      "erp_verified": true,
+      "erp_match_basis": "聚水潭店铺档案：ID、店名、平台及非空平台店铺名称逐项核对"
     },
     {
       "source_row": 82,
@@ -1182,7 +1300,9 @@
       "ledger_platform": "taobao",
       "match_status": "confirmed",
       "match_basis": "ERP店铺ID及已确认映射",
-      "note": "名单分类明确；店铺、平台及系统身份已核对。"
+      "note": "名单分类明确；店铺、平台及系统身份已核对。",
+      "erp_verified": true,
+      "erp_match_basis": "聚水潭店铺档案：ID、店名、平台及非空平台店铺名称逐项核对"
     },
     {
       "source_row": 83,
@@ -1196,7 +1316,8 @@
       "ledger_platform": "",
       "match_status": "unmapped",
       "match_basis": "",
-      "note": "当前已同步ERP档案及台账均未找到精确对应，不能据此认定店铺不存在或已停用。"
+      "note": "当前已同步ERP档案及台账均未找到精确对应，不能据此认定店铺不存在或已停用。",
+      "erp_verified": false
     },
     {
       "source_row": 84,
@@ -1210,7 +1331,8 @@
       "ledger_platform": "",
       "match_status": "unmapped",
       "match_basis": "",
-      "note": "当前已同步ERP档案及台账均未找到精确对应，不能据此认定店铺不存在或已停用。"
+      "note": "当前已同步ERP档案及台账均未找到精确对应，不能据此认定店铺不存在或已停用。",
+      "erp_verified": false
     },
     {
       "source_row": 85,
@@ -1224,7 +1346,9 @@
       "ledger_platform": "douyin",
       "match_status": "confirmed",
       "match_basis": "ERP店铺ID及已确认映射",
-      "note": "名单分类明确；店铺、平台及系统身份已核对。"
+      "note": "名单分类明确；店铺、平台及系统身份已核对。",
+      "erp_verified": true,
+      "erp_match_basis": "聚水潭店铺档案：ID、店名、平台及非空平台店铺名称逐项核对"
     },
     {
       "source_row": 86,
@@ -1238,7 +1362,9 @@
       "ledger_platform": "douyin",
       "match_status": "confirmed",
       "match_basis": "ERP店铺ID及已确认映射",
-      "note": "名单分类明确；店铺、平台及系统身份已核对。"
+      "note": "名单分类明确；店铺、平台及系统身份已核对。",
+      "erp_verified": true,
+      "erp_match_basis": "聚水潭店铺档案：ID、店名、平台及非空平台店铺名称逐项核对"
     },
     {
       "source_row": 87,
@@ -1252,7 +1378,9 @@
       "ledger_platform": "taobao",
       "match_status": "confirmed",
       "match_basis": "ERP店铺ID及已确认映射",
-      "note": "名单分类明确；店铺、平台及系统身份已核对。"
+      "note": "名单分类明确；店铺、平台及系统身份已核对。",
+      "erp_verified": true,
+      "erp_match_basis": "聚水潭店铺档案：ID、店名、平台及非空平台店铺名称逐项核对"
     },
     {
       "source_row": 88,
@@ -1266,7 +1394,9 @@
       "ledger_platform": "taobao",
       "match_status": "confirmed",
       "match_basis": "ERP店铺ID及已确认映射",
-      "note": "名单分类明确；店铺、平台及系统身份已核对。"
+      "note": "名单分类明确；店铺、平台及系统身份已核对。",
+      "erp_verified": true,
+      "erp_match_basis": "聚水潭店铺档案：ID、店名、平台及非空平台店铺名称逐项核对"
     },
     {
       "source_row": 89,
@@ -1280,7 +1410,9 @@
       "ledger_platform": "taobao",
       "match_status": "confirmed",
       "match_basis": "ERP店铺ID及已确认映射",
-      "note": "名单分类明确；店铺、平台及系统身份已核对。"
+      "note": "名单分类明确；店铺、平台及系统身份已核对。",
+      "erp_verified": true,
+      "erp_match_basis": "聚水潭店铺档案：ID、店名、平台及非空平台店铺名称逐项核对"
     },
     {
       "source_row": 90,
@@ -1294,7 +1426,9 @@
       "ledger_platform": "offline",
       "match_status": "confirmed",
       "match_basis": "ERP店铺ID及已确认映射",
-      "note": "名单分类明确；店铺、平台及系统身份已核对。"
+      "note": "名单分类明确；店铺、平台及系统身份已核对。",
+      "erp_verified": true,
+      "erp_match_basis": "聚水潭店铺档案：ID、店名、平台及非空平台店铺名称逐项核对"
     },
     {
       "source_row": 91,
@@ -1308,7 +1442,9 @@
       "ledger_platform": "pdd",
       "match_status": "confirmed",
       "match_basis": "ERP店铺ID及已确认映射",
-      "note": "名单分类明确；店铺、平台及系统身份已核对。"
+      "note": "名单分类明确；店铺、平台及系统身份已核对。",
+      "erp_verified": true,
+      "erp_match_basis": "聚水潭店铺档案：ID、店名、平台及非空平台店铺名称逐项核对"
     },
     {
       "source_row": 92,
@@ -1322,7 +1458,9 @@
       "ledger_platform": "pdd",
       "match_status": "confirmed",
       "match_basis": "ERP店铺ID及已确认映射",
-      "note": "名单分类明确；店铺、平台及系统身份已核对。"
+      "note": "名单分类明确；店铺、平台及系统身份已核对。",
+      "erp_verified": true,
+      "erp_match_basis": "聚水潭店铺档案：ID、店名、平台及非空平台店铺名称逐项核对"
     },
     {
       "source_row": 93,
@@ -1336,7 +1474,9 @@
       "ledger_platform": "pdd",
       "match_status": "confirmed",
       "match_basis": "ERP店铺ID及已确认映射",
-      "note": "名单分类明确；店铺、平台及系统身份已核对。"
+      "note": "名单分类明确；店铺、平台及系统身份已核对。",
+      "erp_verified": true,
+      "erp_match_basis": "聚水潭店铺档案：ID、店名、平台及非空平台店铺名称逐项核对"
     },
     {
       "source_row": 94,
@@ -1350,7 +1490,9 @@
       "ledger_platform": "pdd",
       "match_status": "confirmed",
       "match_basis": "ERP店铺ID及已确认映射",
-      "note": "名单分类明确；店铺、平台及系统身份已核对。"
+      "note": "名单分类明确；店铺、平台及系统身份已核对。",
+      "erp_verified": true,
+      "erp_match_basis": "聚水潭店铺档案：ID、店名、平台及非空平台店铺名称逐项核对"
     },
     {
       "source_row": 95,
@@ -1364,7 +1506,9 @@
       "ledger_platform": "pdd",
       "match_status": "confirmed",
       "match_basis": "ERP店铺ID及已确认映射",
-      "note": "名单分类明确；店铺、平台及系统身份已核对。"
+      "note": "名单分类明确；店铺、平台及系统身份已核对。",
+      "erp_verified": true,
+      "erp_match_basis": "聚水潭店铺档案：ID、店名、平台及非空平台店铺名称逐项核对"
     },
     {
       "source_row": 96,
@@ -1378,7 +1522,9 @@
       "ledger_platform": "pdd",
       "match_status": "confirmed",
       "match_basis": "ERP店铺ID及已确认映射",
-      "note": "名单分类明确；店铺、平台及系统身份已核对。"
+      "note": "名单分类明确；店铺、平台及系统身份已核对。",
+      "erp_verified": true,
+      "erp_match_basis": "聚水潭店铺档案：ID、店名、平台及非空平台店铺名称逐项核对"
     },
     {
       "source_row": 97,
@@ -1392,7 +1538,9 @@
       "ledger_platform": "taobao",
       "match_status": "confirmed",
       "match_basis": "ERP店铺ID及已确认映射",
-      "note": "名单分类明确；店铺、平台及系统身份已核对。"
+      "note": "名单分类明确；店铺、平台及系统身份已核对。",
+      "erp_verified": true,
+      "erp_match_basis": "聚水潭店铺档案：ID、店名、平台及非空平台店铺名称逐项核对"
     },
     {
       "source_row": 98,
@@ -1406,7 +1554,8 @@
       "ledger_platform": "",
       "match_status": "unmapped",
       "match_basis": "",
-      "note": "当前已同步ERP档案及台账均未找到精确对应，不能据此认定店铺不存在或已停用。"
+      "note": "当前已同步ERP档案及台账均未找到精确对应，不能据此认定店铺不存在或已停用。",
+      "erp_verified": false
     },
     {
       "source_row": 99,
@@ -1420,7 +1569,9 @@
       "ledger_platform": "xiaohongshu",
       "match_status": "confirmed",
       "match_basis": "ERP店铺ID及已确认映射",
-      "note": "名单分类明确；店铺、平台及系统身份已核对。"
+      "note": "名单分类明确；店铺、平台及系统身份已核对。",
+      "erp_verified": true,
+      "erp_match_basis": "聚水潭店铺档案：ID、店名、平台及非空平台店铺名称逐项核对"
     },
     {
       "source_row": 100,
@@ -1434,7 +1585,9 @@
       "ledger_platform": "",
       "match_status": "unmapped",
       "match_basis": "",
-      "note": "ERP档案可定位；当前台账店铺排除器尚不能选择这家店。"
+      "note": "ERP档案可定位；当前台账店铺排除器尚不能选择这家店。",
+      "erp_verified": true,
+      "erp_match_basis": "聚水潭店铺档案：ID、店名、平台及非空平台店铺名称逐项核对"
     },
     {
       "source_row": 101,
@@ -1448,7 +1601,9 @@
       "ledger_platform": "pdd",
       "match_status": "confirmed",
       "match_basis": "ERP店铺ID及已确认映射",
-      "note": "台账显示名为“pdd快乐节庆”，通过ERP店铺ID及已确认映射确认对应。"
+      "note": "台账显示名为“pdd快乐节庆”，通过ERP店铺ID及已确认映射确认对应。",
+      "erp_verified": true,
+      "erp_match_basis": "聚水潭店铺档案：ID、店名、平台及非空平台店铺名称逐项核对"
     },
     {
       "source_row": 102,
@@ -1462,7 +1617,9 @@
       "ledger_platform": "taobao",
       "match_status": "confirmed",
       "match_basis": "ERP店铺ID及已确认映射",
-      "note": "名单分类明确；店铺、平台及系统身份已核对。"
+      "note": "名单分类明确；店铺、平台及系统身份已核对。",
+      "erp_verified": true,
+      "erp_match_basis": "聚水潭店铺档案：ID、店名、平台及非空平台店铺名称逐项核对"
     },
     {
       "source_row": 103,
@@ -1476,7 +1633,9 @@
       "ledger_platform": "offline",
       "match_status": "confirmed",
       "match_basis": "ERP店铺ID及已确认映射",
-      "note": "名单分类明确；店铺、平台及系统身份已核对。"
+      "note": "名单分类明确；店铺、平台及系统身份已核对。",
+      "erp_verified": true,
+      "erp_match_basis": "聚水潭店铺档案：ID、店名、平台及非空平台店铺名称逐项核对"
     },
     {
       "source_row": 104,
@@ -1490,7 +1649,9 @@
       "ledger_platform": "jd",
       "match_status": "confirmed",
       "match_basis": "ERP店铺ID及已确认映射",
-      "note": "台账显示名为“京东皇莉诗”，通过ERP店铺ID及已确认映射确认对应。"
+      "note": "台账显示名为“京东皇莉诗”，通过ERP店铺ID及已确认映射确认对应。",
+      "erp_verified": true,
+      "erp_match_basis": "聚水潭店铺档案：ID、店名、平台及非空平台店铺名称逐项核对"
     },
     {
       "source_row": 105,
@@ -1504,7 +1665,9 @@
       "ledger_platform": "other",
       "match_status": "confirmed",
       "match_basis": "ERP店铺ID及已确认映射",
-      "note": "名单分类明确；店铺、平台及系统身份已核对。"
+      "note": "名单分类明确；店铺、平台及系统身份已核对。",
+      "erp_verified": true,
+      "erp_match_basis": "聚水潭店铺档案：ID、店名、平台及非空平台店铺名称逐项核对"
     },
     {
       "source_row": 106,
@@ -1518,7 +1681,8 @@
       "ledger_platform": "",
       "match_status": "unmapped",
       "match_basis": "",
-      "note": "当前已同步ERP档案及台账均未找到精确对应，不能据此认定店铺不存在或已停用。"
+      "note": "当前已同步ERP档案及台账均未找到精确对应，不能据此认定店铺不存在或已停用。",
+      "erp_verified": false
     },
     {
       "source_row": 107,
@@ -1532,7 +1696,8 @@
       "ledger_platform": "",
       "match_status": "unmapped",
       "match_basis": "",
-      "note": "当前已同步ERP档案及台账均未找到精确对应，不能据此认定店铺不存在或已停用。"
+      "note": "当前已同步ERP档案及台账均未找到精确对应，不能据此认定店铺不存在或已停用。",
+      "erp_verified": false
     },
     {
       "source_row": 108,
@@ -1546,7 +1711,8 @@
       "ledger_platform": "",
       "match_status": "unmapped",
       "match_basis": "",
-      "note": "当前已同步ERP档案及台账均未找到精确对应，不能据此认定店铺不存在或已停用。"
+      "note": "当前已同步ERP档案及台账均未找到精确对应，不能据此认定店铺不存在或已停用。",
+      "erp_verified": false
     },
     {
       "source_row": 109,
@@ -1560,7 +1726,8 @@
       "ledger_platform": "",
       "match_status": "unmapped",
       "match_basis": "",
-      "note": "当前已同步ERP档案及台账均未找到精确对应，不能据此认定店铺不存在或已停用。"
+      "note": "当前已同步ERP档案及台账均未找到精确对应，不能据此认定店铺不存在或已停用。",
+      "erp_verified": false
     },
     {
       "source_row": 110,
@@ -1574,7 +1741,8 @@
       "ledger_platform": "",
       "match_status": "unmapped",
       "match_basis": "",
-      "note": "当前已同步ERP档案及台账均未找到精确对应，不能据此认定店铺不存在或已停用。"
+      "note": "当前已同步ERP档案及台账均未找到精确对应，不能据此认定店铺不存在或已停用。",
+      "erp_verified": false
     },
     {
       "source_row": 111,
@@ -1588,7 +1756,8 @@
       "ledger_platform": "",
       "match_status": "unmapped",
       "match_basis": "",
-      "note": "当前已同步ERP档案及台账均未找到精确对应，不能据此认定店铺不存在或已停用。"
+      "note": "当前已同步ERP档案及台账均未找到精确对应，不能据此认定店铺不存在或已停用。",
+      "erp_verified": false
     },
     {
       "source_row": 112,
@@ -1602,7 +1771,8 @@
       "ledger_platform": "",
       "match_status": "unmapped",
       "match_basis": "",
-      "note": "当前已同步ERP档案及台账均未找到精确对应，不能据此认定店铺不存在或已停用。"
+      "note": "当前已同步ERP档案及台账均未找到精确对应，不能据此认定店铺不存在或已停用。",
+      "erp_verified": false
     },
     {
       "source_row": 113,
@@ -1616,7 +1786,8 @@
       "ledger_platform": "",
       "match_status": "unmapped",
       "match_basis": "",
-      "note": "当前已同步ERP档案及台账均未找到精确对应，不能据此认定店铺不存在或已停用。"
+      "note": "当前已同步ERP档案及台账均未找到精确对应，不能据此认定店铺不存在或已停用。",
+      "erp_verified": false
     },
     {
       "source_row": 114,
@@ -1630,7 +1801,8 @@
       "ledger_platform": "",
       "match_status": "unmapped",
       "match_basis": "",
-      "note": "当前已同步ERP档案及台账均未找到精确对应，不能据此认定店铺不存在或已停用。"
+      "note": "当前已同步ERP档案及台账均未找到精确对应，不能据此认定店铺不存在或已停用。",
+      "erp_verified": false
     },
     {
       "source_row": 115,
@@ -1644,7 +1816,8 @@
       "ledger_platform": "",
       "match_status": "unmapped",
       "match_basis": "",
-      "note": "当前已同步ERP档案及台账均未找到精确对应，不能据此认定店铺不存在或已停用。"
+      "note": "当前已同步ERP档案及台账均未找到精确对应，不能据此认定店铺不存在或已停用。",
+      "erp_verified": false
     },
     {
       "source_row": 116,
@@ -1658,7 +1831,17 @@
       "ledger_platform": "",
       "match_status": "unmapped",
       "match_basis": "",
-      "note": "订单同步店铺名仍为“papo”，ERP档案已为“张静宜”；ID同为19807059。 ERP档案可定位；当前台账店铺排除器尚不能选择这家店。 不使用“papo”名称跨ID合并：另一店王红的别名也包含papo。"
+      "note": "订单同步店铺名仍为“papo”，ERP档案已为“张静宜”；ID同为19807059。 ERP档案可定位；当前台账店铺排除器尚不能选择这家店。 不使用“papo”名称跨ID合并：另一店王红的别名也包含papo。",
+      "erp_verified": true,
+      "erp_match_basis": "聚水潭店铺档案：ID、店名、平台及非空平台店铺名称逐项核对"
     }
-  ]
+  ],
+  "erp_verification": {
+    "file": "store_classification_erp_verification_20261023.json",
+    "sha256": "21e2f3617783abbd87611a337bd231ebfc4f8abf0856c690bf2793e4fc7dbcb1",
+    "verified_at": "2026-10-23T03:46:59.167Z",
+    "api_shop_count": 60,
+    "matched_rows": 60,
+    "not_returned_rows": 55
+  }
 }

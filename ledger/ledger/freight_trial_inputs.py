@@ -240,7 +240,7 @@ def feed_frames(feed_root, inputs, deltas, tracking, progress=lambda *_: None):
         frame=query.select(columns).filter(predicate).collect()
         frame=OrderFeed._overlay(frame,deltas,kind,key,lambda p:[p.get(kind) or {}])
         return frame.select(columns).filter(predicate)
-    hcols=('order_id','order_store_id','online_order_no','platform_order_ids','platform_order_identity_complete','tracking_no','ship_time','order_time',
+    hcols=('order_id','order_store_id','jst_shop_id','platform_code','online_order_no','platform_order_ids','platform_order_identity_complete','tracking_no','ship_time','order_time',
         'paid_amount','refund_amount','freight_amount','order_type','order_status_raw','order_status_text','logistics_company','is_split','is_merge','split_id','merge_so_id')
     match=norm_expr(pl.col('tracking_no').cast(pl.String)).is_in(tracking)
     progress('读取实际发货范围',0,3)

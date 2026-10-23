@@ -330,3 +330,22 @@ def test_category_scope_unmatched_details_and_export_are_consistent(result,monke
     fake['version']='catalog-v2'
     with pytest.raises(InputError,match='范围'):trial.export(jobs,jid,only_category='festival',scope_fingerprint=page['scope_fingerprint'])
     assert client.get(base+'/export.csv',params={**page['scope'],'scope_fingerprint':page['scope_fingerprint']}).status_code==400
+
+
+def test_erp_shop_identity_is_persisted_and_classifies_without_posting_to_a_ledger_store(result,monkeypatch):
+    ws,model,jobs,_jid=result;new_id='9'*32
+    charge=refund_charge('8'*32,'1.70','2026-06-05',tracking_no='ERP-ONLY')
+    packet=refund_packet(tracking_no='ERP-ONLY',erp_shop_keys=['19027942|得物'],store_ids=[],issue='cross_store')
+    monkeypatch.setattr(trial,'parse_sources',lambda *_:([charge],[],{},[]))
+    monkeypatch.setattr(trial,'build_packages',lambda *_:{'ERP-ONLY':packet})
+    before=[tuple(r) for r in ws.conn.execute('SELECT * FROM run')]
+    trial.build(ws.root,ws.root,model,'2026-06',jobs.path(new_id)/'result')
+    trial._write_json(jobs.path(new_id)/'job.json',{'state':'ready','job_id':new_id,'period':'2026-06'})
+    page=trial.query(jobs,new_id,only_category='festival')
+    assert page['count']==1 and page['erp_evidence_available']
+    assert page['rows'][0]['erp_shop_keys']==['19027942|得物']
+    assert page['rows'][0]['store_category']=='festival' and page['rows'][0]['status']=='pending'
+    assert page['summary']['allocated_count']==0
+    rows=list(csv.DictReader(io.StringIO(trial.export(jobs,new_id,only_category='festival',scope_fingerprint=page['scope_fingerprint']).lstrip('\ufeff'))))
+    assert rows[0]['聚水潭店铺ID及平台']=='19027942|得物' and rows[0]['商品分摊运费']==''
+    assert [tuple(r) for r in ws.conn.execute('SELECT * FROM run')]==before

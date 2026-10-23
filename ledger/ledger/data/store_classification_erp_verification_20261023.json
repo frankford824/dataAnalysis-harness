@@ -1,0 +1,535 @@
+{
+  "verified_at": "2026-10-23T03:46:59.167Z",
+  "source": "聚水潭 ShopPage/GetShopList",
+  "authenticated": true,
+  "page": {
+    "currentPage": 1,
+    "pageSize": 200,
+    "count": 60,
+    "pages": 1,
+    "index": 1
+  },
+  "shops": [
+    {
+      "shop_id": "10854944",
+      "shop_name": "刘露-王浩冉-淘宝藏依格",
+      "platform_shop_name": "藏依格77",
+      "shop_site": "淘宝天猫",
+      "group_name": "气球店铺",
+      "enabled": true
+    },
+    {
+      "shop_id": "10854783",
+      "shop_name": "汪学成-淘宝天楼阁宇",
+      "platform_shop_name": "天楼阁宇9737",
+      "shop_site": "淘宝天猫",
+      "group_name": "气球店铺",
+      "enabled": true
+    },
+    {
+      "shop_id": "10854766",
+      "shop_name": "淘宝美食专家",
+      "platform_shop_name": "美食专家98",
+      "shop_site": "淘宝天猫",
+      "group_name": "气球店铺",
+      "enabled": true
+    },
+    {
+      "shop_id": "11234655",
+      "shop_name": "宋永康-PDD气球创意工坊",
+      "platform_shop_name": "气球创意工坊",
+      "shop_site": "拼多多",
+      "group_name": "气球店铺",
+      "enabled": true
+    },
+    {
+      "shop_id": "11234687",
+      "shop_name": "宋永康-PDD好日子节庆用品超市",
+      "platform_shop_name": "好日子节庆用品超市",
+      "shop_site": "拼多多",
+      "group_name": "气球店铺",
+      "enabled": true
+    },
+    {
+      "shop_id": "12211544",
+      "shop_name": "宋永康-PDD意大利本土",
+      "platform_shop_name": "pdd80248557147",
+      "shop_site": "拼多多",
+      "group_name": "气球店铺",
+      "enabled": true
+    },
+    {
+      "shop_id": "12148335",
+      "shop_name": "宋永康-PDD国风新潮礼品店",
+      "platform_shop_name": "pdd51615679821",
+      "shop_site": "拼多多",
+      "group_name": "气球店铺",
+      "enabled": true
+    },
+    {
+      "shop_id": "21053827",
+      "shop_name": "刘露-王岩-似锦童年旗舰店",
+      "platform_shop_name": "似锦童年旗舰店",
+      "shop_site": "淘宝天猫",
+      "group_name": "气球店铺",
+      "enabled": true
+    },
+    {
+      "shop_id": "20915876",
+      "shop_name": "刘露-李素林-luckyglow旗舰店",
+      "platform_shop_name": "luckyglow旗舰店",
+      "shop_site": "淘宝天猫",
+      "group_name": "气球店铺",
+      "enabled": true
+    },
+    {
+      "shop_id": "20909418",
+      "shop_name": "蔡果-微信小店",
+      "platform_shop_name": null,
+      "shop_site": "微信视频号",
+      "group_name": "气球店铺",
+      "enabled": true
+    },
+    {
+      "shop_id": "20881555",
+      "shop_name": "汪学成-抖店luckywish节日礼品",
+      "platform_shop_name": "luckywish节日礼品",
+      "shop_site": "头条放心购",
+      "group_name": "气球店铺",
+      "enabled": true
+    },
+    {
+      "shop_id": "20804807",
+      "shop_name": "小红薯lswzw5tv的店",
+      "platform_shop_name": "小红薯lswzw5tv的店",
+      "shop_site": "小红书",
+      "group_name": "气球店铺",
+      "enabled": true
+    },
+    {
+      "shop_id": "20367998",
+      "shop_name": "吴鹏-PDD喜舒曼",
+      "platform_shop_name": "喜舒曼礼品旗舰店",
+      "shop_site": "拼多多",
+      "group_name": "气球店铺",
+      "enabled": true
+    },
+    {
+      "shop_id": "20367885",
+      "shop_name": "吴鹏-PDD喜必顺",
+      "platform_shop_name": "喜必顺旗舰店",
+      "shop_site": "拼多多",
+      "group_name": "气球店铺",
+      "enabled": true
+    },
+    {
+      "shop_id": "20367522",
+      "shop_name": "吴鹏-PDDzlvoey",
+      "platform_shop_name": "pdd23850750254",
+      "shop_site": "拼多多",
+      "group_name": "气球店铺",
+      "enabled": true
+    },
+    {
+      "shop_id": "20325712",
+      "shop_name": "刘露-陈婷-天猫阳光朵朵旗舰店",
+      "platform_shop_name": "阳光朵朵旗舰店",
+      "shop_site": "淘宝天猫",
+      "group_name": "气球店铺",
+      "enabled": true
+    },
+    {
+      "shop_id": "20042351",
+      "shop_name": "蔡果-快手茉茜伊",
+      "platform_shop_name": "Victor6580",
+      "shop_site": "快手电商",
+      "group_name": "气球店铺",
+      "enabled": true
+    },
+    {
+      "shop_id": "19916171",
+      "shop_name": "蔡果-抖店浅花涧",
+      "platform_shop_name": "浅花涧节日装饰",
+      "shop_site": "头条放心购",
+      "group_name": "气球店铺",
+      "enabled": true
+    },
+    {
+      "shop_id": "19807059",
+      "shop_name": "张静宜",
+      "platform_shop_name": null,
+      "shop_site": "线下店铺",
+      "group_name": null,
+      "enabled": true
+    },
+    {
+      "shop_id": "19564695",
+      "shop_name": "汪学成-天猫幸运的愿望旗舰店",
+      "platform_shop_name": "luckywish旗舰店",
+      "shop_site": "淘宝天猫",
+      "group_name": "气球店铺",
+      "enabled": true
+    },
+    {
+      "shop_id": "19259984",
+      "shop_name": "吴鹏-PDD浅花涧",
+      "platform_shop_name": "浅花涧旗舰店",
+      "shop_site": "拼多多",
+      "group_name": "气球店铺",
+      "enabled": true
+    },
+    {
+      "shop_id": "19259799",
+      "shop_name": "吴鹏-PDD皇莉诗",
+      "platform_shop_name": "皇莉诗旗舰店",
+      "shop_site": "拼多多",
+      "group_name": "气球店铺",
+      "enabled": true
+    },
+    {
+      "shop_id": "19252140",
+      "shop_name": "刘露-王浩冉-天猫甜嘴熊旗舰店",
+      "platform_shop_name": "甜嘴熊旗舰店1",
+      "shop_site": "淘宝天猫",
+      "group_name": "气球店铺",
+      "enabled": true
+    },
+    {
+      "shop_id": "19236401",
+      "shop_name": "蔡果-抖店喜品",
+      "platform_shop_name": "喜舒曼节庆礼品店",
+      "shop_site": "头条放心购",
+      "group_name": "气球店铺",
+      "enabled": true
+    },
+    {
+      "shop_id": "19204641",
+      "shop_name": "汪学成-抖店喜必顺",
+      "platform_shop_name": "喜必顺节庆礼品",
+      "shop_site": "头条放心购",
+      "group_name": "气球店铺",
+      "enabled": true
+    },
+    {
+      "shop_id": "19027942",
+      "shop_name": "蔡果-得物气球",
+      "platform_shop_name": "yo0NeoXy8vbzqAY2",
+      "shop_site": "得物",
+      "group_name": "气球店铺",
+      "enabled": true
+    },
+    {
+      "shop_id": "18116445",
+      "shop_name": "何润华-天猫思福喜旗舰店",
+      "platform_shop_name": "思福喜旗舰店",
+      "shop_site": "淘宝天猫",
+      "group_name": "气球店铺",
+      "enabled": true
+    },
+    {
+      "shop_id": "17883875",
+      "shop_name": "徐芹-天猫喜菲喵旗舰店",
+      "platform_shop_name": "喜菲喵旗舰店",
+      "shop_site": "淘宝天猫",
+      "group_name": "气球店铺",
+      "enabled": true
+    },
+    {
+      "shop_id": "17626029",
+      "shop_name": "汪学成-天猫喜必顺旗舰店",
+      "platform_shop_name": "喜必顺旗舰店",
+      "shop_site": "淘宝天猫",
+      "group_name": "气球店铺",
+      "enabled": true
+    },
+    {
+      "shop_id": "17324443",
+      "shop_name": "陈慨-天猫浅花涧旗舰店",
+      "platform_shop_name": "浅花涧旗舰店",
+      "shop_site": "淘宝天猫",
+      "group_name": "气球店铺",
+      "enabled": true
+    },
+    {
+      "shop_id": "17310409",
+      "shop_name": "陈慨-天猫喜舒曼礼品旗舰店",
+      "platform_shop_name": "喜舒曼礼品旗舰店",
+      "shop_site": "淘宝天猫",
+      "group_name": "气球店铺",
+      "enabled": true
+    },
+    {
+      "shop_id": "17265841",
+      "shop_name": "姜惠卉-1688义乌星泽天成供应链管理有限公司",
+      "platform_shop_name": "义乌星泽天成供应链管理有限公司",
+      "shop_site": "阿里巴巴",
+      "group_name": "气球店铺",
+      "enabled": true
+    },
+    {
+      "shop_id": "17252300",
+      "shop_name": "谷本文-淘宝喜气洋洋家居用品",
+      "platform_shop_name": "tb3949730440",
+      "shop_site": "淘宝天猫",
+      "group_name": "气球店铺",
+      "enabled": true
+    },
+    {
+      "shop_id": "16982738",
+      "shop_name": "陈慨-淘宝嘻嘻哈哈",
+      "platform_shop_name": "tb231079449067",
+      "shop_site": "淘宝天猫",
+      "group_name": "气球店铺",
+      "enabled": true
+    },
+    {
+      "shop_id": "16971532",
+      "shop_name": "吴鹏-PDD嘻嘻哈哈派对用品",
+      "platform_shop_name": "pdd89667612012",
+      "shop_site": "拼多多",
+      "group_name": "气球店铺",
+      "enabled": true
+    },
+    {
+      "shop_id": "16928664",
+      "shop_name": "孙浩禹-PDD乐趣节庆喜品派对",
+      "platform_shop_name": "乐趣节庆喜品派对",
+      "shop_site": "拼多多",
+      "group_name": "气球店铺",
+      "enabled": true
+    },
+    {
+      "shop_id": "16572607",
+      "shop_name": "小红书京禧派对策划的店",
+      "platform_shop_name": "京禧派对的店",
+      "shop_site": "小红书",
+      "group_name": "气球店铺",
+      "enabled": true
+    },
+    {
+      "shop_id": "15983448",
+      "shop_name": "徐芹-PDD快乐节庆用品",
+      "platform_shop_name": "快乐节庆用品",
+      "shop_site": "拼多多",
+      "group_name": "气球店铺",
+      "enabled": true
+    },
+    {
+      "shop_id": "15901117",
+      "shop_name": "孙浩禹-PDD京禧派对用品",
+      "platform_shop_name": "京禧派对用品",
+      "shop_site": "拼多多",
+      "group_name": "气球店铺",
+      "enabled": true
+    },
+    {
+      "shop_id": "15846713",
+      "shop_name": "徽州腊肉",
+      "platform_shop_name": "徽州腊肉",
+      "shop_site": "头条放心购",
+      "group_name": "气球店铺",
+      "enabled": true
+    },
+    {
+      "shop_id": "15500518",
+      "shop_name": "宋永康-PDDLucky惊喜派对",
+      "platform_shop_name": "Lucky惊喜派对",
+      "shop_site": "拼多多",
+      "group_name": "气球店铺",
+      "enabled": true
+    },
+    {
+      "shop_id": "15454733",
+      "shop_name": "何润华-PDD泡泡堂气球布置",
+      "platform_shop_name": "泡泡堂气球布置",
+      "shop_site": "拼多多",
+      "group_name": "气球店铺",
+      "enabled": true
+    },
+    {
+      "shop_id": "15356215",
+      "shop_name": "陈慨-淘宝拾梦小屋99",
+      "platform_shop_name": "拾梦小屋99",
+      "shop_site": "淘宝天猫",
+      "group_name": "气球店铺",
+      "enabled": true
+    },
+    {
+      "shop_id": "15331794",
+      "shop_name": "宋永康-PDD小红薯气球派对",
+      "platform_shop_name": "pdd90753357767",
+      "shop_site": "拼多多",
+      "group_name": "气球店铺",
+      "enabled": true
+    },
+    {
+      "shop_id": "14987808",
+      "shop_name": "朗歆供应链",
+      "platform_shop_name": "朗歆供应链",
+      "shop_site": "头条放心购",
+      "group_name": null,
+      "enabled": true
+    },
+    {
+      "shop_id": "14856337",
+      "shop_name": "9010946947",
+      "platform_shop_name": "9010946947",
+      "shop_site": "京东商城",
+      "group_name": null,
+      "enabled": true
+    },
+    {
+      "shop_id": "14424456",
+      "shop_name": "叶真-京东皇莉诗",
+      "platform_shop_name": "皇莉诗旗舰店",
+      "shop_site": "京东商城",
+      "group_name": "气球店铺",
+      "enabled": true
+    },
+    {
+      "shop_id": "14221158",
+      "shop_name": "宋永康-PDD婚庆节日礼品",
+      "platform_shop_name": "pdd94159156385",
+      "shop_site": "拼多多",
+      "group_name": "气球店铺",
+      "enabled": true
+    },
+    {
+      "shop_id": "14177688",
+      "shop_name": "蔡果-抖店烘焙",
+      "platform_shop_name": "lucky气球装饰",
+      "shop_site": "头条放心购",
+      "group_name": "气球店铺",
+      "enabled": true
+    },
+    {
+      "shop_id": "14165762",
+      "shop_name": "天猫zlvoey旗舰店",
+      "platform_shop_name": "zlvoey旗舰店",
+      "shop_site": "淘宝天猫",
+      "group_name": "气球店铺",
+      "enabled": true
+    },
+    {
+      "shop_id": "13954149",
+      "shop_name": "天猫皇莉诗旗舰店",
+      "platform_shop_name": "皇莉诗旗舰店",
+      "shop_site": "淘宝天猫",
+      "group_name": "气球店铺",
+      "enabled": true
+    },
+    {
+      "shop_id": "13460684",
+      "shop_name": "姜惠卉-1688南京朗歆信息科技有限公司",
+      "platform_shop_name": "南京朗歆信息科技有限公司",
+      "shop_site": "阿里巴巴",
+      "group_name": "气球店铺",
+      "enabled": true
+    },
+    {
+      "shop_id": "13452187",
+      "shop_name": "西门子砺恒专卖店",
+      "platform_shop_name": "西门子砺恒专卖店",
+      "shop_site": "淘宝天猫",
+      "group_name": null,
+      "enabled": true
+    },
+    {
+      "shop_id": "12877138",
+      "shop_name": "国际站——王红",
+      "platform_shop_name": null,
+      "shop_site": "其它平台",
+      "group_name": null,
+      "enabled": true
+    },
+    {
+      "shop_id": "12876922",
+      "shop_name": "棱智",
+      "platform_shop_name": null,
+      "shop_site": "其它平台",
+      "group_name": null,
+      "enabled": true
+    },
+    {
+      "shop_id": "12876913",
+      "shop_name": "永箔",
+      "platform_shop_name": null,
+      "shop_site": "其它平台",
+      "group_name": null,
+      "enabled": true
+    },
+    {
+      "shop_id": "10959035",
+      "shop_name": "速卖通-王红",
+      "platform_shop_name": null,
+      "shop_site": "线下店铺",
+      "group_name": null,
+      "enabled": true
+    },
+    {
+      "shop_id": "10894298",
+      "shop_name": "王红",
+      "platform_shop_name": null,
+      "shop_site": "线下店铺",
+      "group_name": null,
+      "enabled": true
+    },
+    {
+      "shop_id": "10892101",
+      "shop_name": "亚马逊-王红",
+      "platform_shop_name": null,
+      "shop_site": "线下店铺",
+      "group_name": null,
+      "enabled": true
+    },
+    {
+      "shop_id": "10885258",
+      "shop_name": "孙俪",
+      "platform_shop_name": null,
+      "shop_site": "线下店铺",
+      "group_name": null,
+      "enabled": true
+    }
+  ],
+  "additional_checks": [
+    {
+      "filter": {
+        "enabled": false
+      },
+      "page": {
+        "currentPage": null,
+        "pageSize": null,
+        "count": 0,
+        "pages": 0,
+        "index": 0
+      },
+      "count": 0
+    },
+    {
+      "filter": {
+        "enabled": null
+      },
+      "page": {
+        "currentPage": 1,
+        "pageSize": 200,
+        "count": 60,
+        "pages": 1,
+        "index": 1
+      },
+      "count": 60
+    },
+    {
+      "filter": {
+        "groupId": 14721
+      },
+      "page": {
+        "currentPage": null,
+        "pageSize": null,
+        "count": 0,
+        "pages": 0,
+        "index": 0
+      },
+      "count": 0
+    }
+  ]
+}

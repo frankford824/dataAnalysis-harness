@@ -243,6 +243,9 @@ def build_packages(headers,items,relations,mapping,model,children,_controls,_nat
             members.append(m)
         output[tracking]={'packet_id':digest([tracking,sorted(package['stores']),sorted(package['headers'])])[:24],
             'tracking_no':tracking,'store_ids':sorted(package['stores']),'carrier':';'.join(sorted(package['carriers'])),
+            'erp_shop_keys':sorted({_norm(h.get('jst_shop_id'))+'|'+str(h.get('platform_code') or '').strip()
+                if _norm(h.get('jst_shop_id')) and str(h.get('platform_code') or '').strip() else ''
+                for h in package['headers'].values()}),
             'ship_time':';'.join(sorted(dispatches)),'internal_order_ids':sorted({key[1] for key in package['headers']}),
             'members':members,'issue':issue,'allow_zero_equal':False}
     return output

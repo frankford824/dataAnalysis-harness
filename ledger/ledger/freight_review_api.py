@@ -50,7 +50,15 @@ def install(app, workspace, model, display_names):
     @router.get('/store-classification')
     def classification_catalog():
         value=store_classification.resolve([{'id':s.id,'name':s.name,'platform':s.platform} for s in model().stores])
-        return {k:v for k,v in value.items() if k!='mapping'}
+        return {k:v for k,v in value.items() if k not in {'mapping','erp_mapping'}}
+
+    @router.get('/store-classification/unmatched.csv')
+    def classification_unmatched_export(classification_version: str=''):
+        value=store_classification.resolve([{'id':s.id,'name':s.name,'platform':s.platform} for s in model().stores])
+        content=guarded(lambda:store_classification.unmatched_csv(value,classification_version))
+        return PlainTextResponse(content,media_type='text/csv; charset=utf-8',headers={
+            'Content-Disposition':"attachment; filename*=UTF-8''"+quote('店铺分类未匹配名单.csv'),
+            'Cache-Control':'private,no-cache'})
 
     @router.get('/shipments')
     def shipment_latest(period: str):

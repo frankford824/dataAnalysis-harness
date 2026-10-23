@@ -302,3 +302,15 @@ def test_explicit_nonshipping_type_is_not_overridden_by_a_false_legacy_flag(kind
         [item('e','i1','100000001','1','8.33',is_virtual=False,sku_type=kind,product_name='定制专拍')],
         [order('100000001','8.33','1')])['W']
     assert packet['issue']=='non_shipping_items' and not packet['members']
+
+
+def test_parcel_preserves_each_erp_identity_even_when_ledger_store_is_unmapped():
+    result=packages([header('one','W1','10',jst_shop_id='19027942',platform_code='得物'),
+        header('two','W1','10',order_store_id='unknown',jst_shop_id='12876922',platform_code='其它平台')],
+        [item('one','i1','100000001','1','10'),item('two','i2','100000002','1','10',order_store_id='unknown')],[order('100000001','10')])
+    assert result['W1']['erp_shop_keys']==['12876922|其它平台','19027942|得物']
+    assert result['W1']['issue']=='cross_store'
+    incomplete=packages([header('one','W1','10',jst_shop_id='19027942',platform_code='得物'),
+        header('two','W1','10',order_store_id='unknown')],
+        [item('one','i1','100000001','1','10'),item('two','i2','100000002','1','10',order_store_id='unknown')],[order('100000001','10')])
+    assert incomplete['W1']['erp_shop_keys']==['','19027942|得物']

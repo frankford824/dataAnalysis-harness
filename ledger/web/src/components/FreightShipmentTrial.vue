@@ -13,7 +13,7 @@ import FilePreviewPanel from './FilePreviewPanel.vue'
 const props=defineProps({period:String,storeId:{type:String,default:''},platform:{type:String,default:''},refreshToken:Number})
 const route=useRoute(),router=useRouter()
 const job=ref(null),data=ref(null),selectedJob=ref(''),availableJob=ref(''),reason=ref(''),term=ref(''),applied=ref(''),page=ref(1)
-const loading=ref(false),starting=ref(false),exporting=ref(false),error=ref(''),pollError=ref(false)
+const loading=ref(false),starting=ref(false),exporting=ref(false),unmatchedExporting=ref(false),error=ref(''),pollError=ref(false)
 const detail=ref(null),detailLoading=ref(false),detailError=ref(''),showDetail=ref(false),preview=ref(null)
 const stateRequest=useLatest(),resultRequest=useLatest(),detailRequest=useLatest()
 let serial=0,detailSerial=0,timer,alive=true
@@ -22,7 +22,7 @@ const scope=computed(()=>({store_id:props.storeId,platform:props.platform,exclud
 const excluded=ref(typeof route.query.exclude_store_ids==='string'?route.query.exclude_store_ids.split(',').filter(Boolean):[])
 const onlyCategory=ref(String(route.query.only_category || '')),excludedCategories=ref(String(route.query.exclude_categories || '').split(',').filter(Boolean)),classificationView=ref(String(route.query.classification_view || ''))
 const onlyDraft=ref(onlyCategory.value),categoryExclusionDraft=ref([...excludedCategories.value])
-const categoryOptions=computed(()=>(data.value?.classification?.categories || []).map(g=>({label:`${g.name}（已匹配 ${g.matched_count}/${g.source_count} 家）`,value:g.id})))
+const categoryOptions=computed(()=>(data.value?.classification?.categories || []).map(g=>({label:`${g.name}（身份已确认 ${g.matched_count}/${g.source_count} 家）`,value:g.id})))
 const categoryLabel=id=>(data.value?.classification?.categories || []).find(g=>g.id===id)?.name || '分类待核'
 function applyCategories(){if(onlyDraft.value && categoryExclusionDraft.value.includes(onlyDraft.value)){error.value='同一分类不能同时选择只看和排除，请调整分类筛选。';return}onlyCategory.value=onlyDraft.value || '';excludedCategories.value=[...new Set(categoryExclusionDraft.value)].sort();classificationView.value=''}
 function festivalOnly(){clearExclusion();onlyDraft.value='festival';onlyCategory.value='festival';categoryExclusionDraft.value=[];excludedCategories.value=[];classificationView.value=''}
@@ -31,8 +31,10 @@ const unmatchedColumns=[
   {title:'原表行',key:'source_row',width:80},
   {title:'名单店铺',key:'name',minWidth:230},
   {title:'平台',key:'platform',width:130},
+  {title:'聚水潭店铺ID',key:'erp_shop_id',width:150},
   {title:'名单分类',key:'category_name',minWidth:150},
   {title:'待核原因',key:'reason',minWidth:180},
+  {title:'缺少的依据',key:'missing_evidence',minWidth:320},
   {title:'核查说明',key:'note',minWidth:320},
 ]
 const exclusionDraft=ref([...excluded.value]),groupName=ref(''),groupNotice=ref(''),savedGroups=ref(readStoreGroups())
@@ -120,6 +122,17 @@ async function open(row){
     if(found && id===selectedJob.value && filter===JSON.stringify(scope.value))detail.value=found.value
   }catch(e){if(ticket===detailSerial)detailError.value=e.message}finally{if(ticket===detailSerial)detailLoading.value=false}
 }
+async function downloadUnmatched(){
+  if(!data.value?.classification || unmatchedExporting.value)return
+  unmatchedExporting.value=true
+  try{
+    const params=new URLSearchParams({classification_version:data.value.classification.version})
+    const response=await fetch(`/api/freight-review/store-classification/unmatched.csv?${params}`)
+    if(!response.ok){const body=await response.json().catch(()=>({}));throw new Error(body.detail || '未匹配名单导出失败')}
+    const url=URL.createObjectURL(await response.blob()),link=document.createElement('a')
+    link.href=url;link.download='店铺分类未匹配名单.csv';link.click();setTimeout(()=>URL.revokeObjectURL(url),1000)
+  }catch(e){error.value=e.message}finally{unmatchedExporting.value=false}
+}
 async function download(){
   if(!data.value || exporting.value)return
   exporting.value=true;error.value=''
@@ -182,13 +195,15 @@ const memberColumns=[
         <n-alert v-if="data.input_pending" type="warning" :bordered="false">生成时订单资料仍在同步；此结果仅使用当时已接收资料，不能作为完整分摊结论。</n-alert>
         <div v-if="data.classification" class="shipment-store-filter shipment-category-filter">
           <strong>按名单分类筛选</strong>
-          <small>分类来源：{{data.classification.source_file}} · 名单 {{data.classification.source_count}} 家，本次已匹配 {{data.classification.matched_count}} 家。分类仅用于当前复核范围。</small>
+          <small>分类来源：{{data.classification.source_file}} · 名单 {{data.classification.source_count}} 家，已确认身份 {{data.classification.matched_count}} 家，其中 {{data.classification.ledger_matched_count}} 家已有台账映射。分类可直接使用核实的聚水潭店铺 ID。</small>
           <div class="shipment-filter-actions"><n-button size="small" type="primary" @click="festivalOnly">只看节日品类店铺</n-button><n-button size="small" @click="clearAllFilters">恢复全部分类和店铺</n-button></div>
           <div class="shipment-category-fields"><label>只看分类<n-select v-model:value="onlyDraft" clearable :options="categoryOptions" placeholder="全部分类" aria-label="只看分类"/></label><label>排除分类<n-select v-model:value="categoryExclusionDraft" multiple clearable :options="categoryOptions" placeholder="选择要排除的分类" aria-label="排除分类"/></label><n-button size="small" @click="applyCategories">应用分类筛选</n-button></div>
           <p>当前：{{classificationView==='unmatched'?'分类待核运费':onlyCategory?`只看${categoryLabel(onlyCategory)}`:'全部分类'}}<template v-if="excludedCategories.length"> · 排除 {{excludedCategories.map(categoryLabel).join('、')}}</template></p>
-          <small>只看某类时，仅展示全部候选店铺均明确属于该类的收费；未匹配、平台不一致或跨类别的记录在“分类待核运费”单独查看。按分类排除不会隐藏这些待核记录。</small>
+          <small>只看某类时，仅展示全部ERP店铺或台账候选均明确属于该类的收费；ID不明、证据冲突或跨类别的记录在“分类待核运费”单独查看。按分类排除不会隐藏这些待核记录。</small>
           <div class="shipment-filter-actions"><span>分类待核运费：{{data.classification_pending_summary.charge_count}} 条 · 收费 {{expenseText(Number(data.classification_pending_summary.source_amount)+Number(data.classification_pending_summary.pending_refund)+Number(data.classification_pending_summary.allocated_refund))}} · 退差 {{expenseText(Number(data.classification_pending_summary.pending_refund)+Number(data.classification_pending_summary.allocated_refund))}}</span><n-button size="small" @click="classificationView=classificationView==='unmatched'?'':'unmatched'">{{classificationView==='unmatched'?'返回分类筛选结果':'查看分类待核运费'}}</n-button></div>
-          <details><summary>名单未匹配或需核对：{{data.classification.unmatched.length}} 家</summary><p>以下店铺不自动归并到已登记店铺。此清单是店铺名单核对结果，与待核运费条数不同。</p><LedgerTable :columns="unmatchedColumns" :rows="data.classification.unmatched" :row-key="r=>r.source_row" :max-height="360" empty="本次名单全部匹配"/></details>
+          <p v-if="!data.erp_evidence_available">此历史试算未保存聚水潭店铺ID，暂仅使用台账映射；重新试算后可使用补齐的ERP身份。</p>
+          <details v-if="data.classification.erp_only?.length"><summary>已按ERP店铺ID补齐，台账登记另待核：{{data.classification.erp_only.length}} 家</summary><p>以下店铺按核实的聚水潭ID参与分类，未新建、合并或修改核算店铺。原有平台登记问题继续保留。</p><LedgerTable :columns="unmatchedColumns.filter(c=>c.key!=='missing_evidence')" :rows="data.classification.erp_only" :row-key="r=>r.source_row" :max-height="360"/></details>
+          <details><summary>名单未匹配或需核对：{{data.classification.unmatched.length}} 家</summary><p>以下店铺仅表示当前查询未取得可核对ID，不表示店铺不存在。每行列出缺少的依据；同名不自动合并。</p><n-button size="small" :loading="unmatchedExporting" @click="downloadUnmatched">导出未匹配名单</n-button><LedgerTable :columns="unmatchedColumns" :rows="data.classification.unmatched" :row-key="r=>r.source_row" :max-height="360" empty="本次名单全部匹配"/></details>
         </div>
         <div class="shipment-store-filter">
           <strong>排除店铺</strong>
@@ -230,6 +245,7 @@ const memberColumns=[
           <n-alert v-else-if="detail.charge.status==='allocated' && Number(detail.charge.amount)<0" type="info" :bordered="false">这笔退差额已按本包商品归属冲减，负数已计入可分摊净额。本次试算未匹配原收费记录，商品和金额依据见下方明细。</n-alert>
           <h3 class="shipment-detail-title">本次实际发货商品</h3><p class="shipment-note">“店铺原账”打开整店对应账期，原账总额不能与本行试算直接相减。</p><p class="shipment-mobile-note">左右滑动查看金额权重、比例和商品分摊运费。</p>
           <LedgerTable :columns="memberColumns" :rows="detailMembers" :row-key="r=>r.target_key" :max-height="470" empty="尚无可追溯的发货商品行"/>
+          <div v-if="detail.charge.erp_shop_keys?.length" class="shipment-source"><strong>聚水潭店铺ID及平台</strong><span>{{detail.charge.erp_shop_keys.filter(Boolean).join('；') || '发货记录缺少店铺ID或平台'}}</span></div>
           <div class="shipment-source"><strong>收费来源</strong><span>{{detail.charge.file}} · {{detail.charge.sheet}} · 留档行 {{detail.charge.row_no}}</span><span>账单扫描时间 {{detail.charge.scan_time}}</span><span v-if="detail.charge.settlement_object">账单结算对象 {{detail.charge.settlement_object}}</span><n-button size="small" @click="viewSource(detail.charge)">查看原文件</n-button></div>
           <details class="shipment-explanation"><summary>查看商品金额与发货明细依据</summary>
             <div v-for="member in detailMembers" :key="member.target_key">
