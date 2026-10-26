@@ -5,9 +5,13 @@ import { api } from '../api'
 import { useLatest } from './ui/useLatest'
 import { costCoverageView } from '../costCoverageView'
 
-const props = defineProps({ runId: { type: Number, required: true }, count: { type: Number, required: true }, coverageRows: {type:Number,default:0}, coverage: { type: Object, default: () => ({}) }, observed: {type:Object,default:()=>({})}, lineSummary: {type:Object,default:()=>({})}, manualDecision: {type:Object,default:null}, closed: Boolean, storeId: String, period: String })
+const props = defineProps({ runId: { type: Number, required: true }, count: { type: Number, required: true }, coverageRows: {type:Number,default:0}, coverage: { type: Object, default: () => ({}) }, posting: {type:Object,default:()=>({})}, observed: {type:Object,default:()=>({})}, lineSummary: {type:Object,default:()=>({})}, manualDecision: {type:Object,default:null}, closed: Boolean, storeId: String, period: String })
 const overview = ref(false)
-const summary = computed(() => costCoverageView(props.coverage, props.coverageRows, props.count, props.closed))
+const postedCount = computed(() => props.closed && props.manualDecision?.line_count != null
+  ? props.manualDecision.line_count
+  : props.lineSummary?.posted_line_count ?? props.posting?.count)
+const summary = computed(() => costCoverageView(props.coverage, props.coverageRows, props.count, props.closed,
+  postedCount.value))
 function openGaps() { overview.value=false; show.value=true }
 function requestManual() { overview.value=false; show.value=false; emit('request-manual') }
 const emit = defineEmits(['show-quality','request-manual','line-saved','request-recompute'])
@@ -139,19 +143,33 @@ const coverageColumns=[
   <section class="cost-summary" aria-label="成本覆盖摘要">
     <div class="cost-summary-heading"><strong>{{ summary.title }}</strong><span v-if="closed" class="cost-scope">已结账 · 只读</span><span v-else-if="lineSummary?.line_posting_pending" class="cost-scope">补录待计入</span></div>
     <div class="cost-summary-main">
-      <div class="cost-stat"><span>覆盖率</span><b :class="{attention:!summary.known}">{{ summary.percentage }}</b></div>
-      <div class="cost-stat"><span>{{ closed ? '原始缺口' : '订单缺口' }}</span><b :class="{attention:summary.attention}">{{ summary.gapLabel }}</b></div>
+      <div class="cost-stat"><span>补录后覆盖率</span><b :class="{attention:!summary.afterKnown}">{{ summary.afterPercentage }}</b></div>
+      <div class="cost-stat"><span>补录后剩余缺口</span><b :class="{attention:!summary.afterKnown || summary.afterGaps > 0}">{{ summary.afterGapLabel }}</b></div>
+      <div class="cost-stat cost-stat-secondary"><span>原始覆盖率</span><b>{{ summary.percentage }}</b></div>
+      <div class="cost-stat cost-stat-secondary"><span>原始成本缺口</span><b>{{ summary.gapLabel }}</b></div>
       <n-button class="cost-detail-button" size="small" @click="overview=true">成本详情</n-button>
     </div>
     <p>{{ summary.description }}</p>
+    <p v-if="lineSummary?.line_posting_pending">最新补录待核算；补录后指标仍按本次已计入的记录统计。</p>
   </section>
   <n-drawer v-model:show="overview" :width="600" :z-index="3950" style="max-width:100vw">
     <n-drawer-content title="成本覆盖与核算详情" closable>
       <p class="pricing-help">{{ period }} · {{ summary.title }}。覆盖率说明订单是否有成本依据，不代表全部资料已齐或已满足结账条件。</p>
       <p v-if="closed && manualDecision" class="pricing-help">已确认金额：商品成本 {{ Number(manualDecision.confirmed?.goods || 0).toFixed(2) }} 元 · 代发 {{ Number(manualDecision.confirmed?.dropship || 0).toFixed(2) }} 元 · 补发 {{ Number(manualDecision.confirmed?.reshipment || 0).toFixed(2) }} 元。确认依据：{{ manualDecision.reason }}</p>
-      <dl class="cost-details"><div><dt>已覆盖 / 应覆盖订单</dt><dd>{{ summary.known ? `${integer(coverage.covered)} / ${integer(coverage.expected)} 笔` : '尚未形成统计范围' }}</dd></div><div><dt>覆盖率</dt><dd>{{ summary.percentage }}</dd></div><div><dt>{{ closed ? '结账时原始缺口' : '原始成本缺口' }}</dt><dd>{{ summary.gapLabel }}</dd></div><div><dt>来源成本待核对</dt><dd>{{ integer(count) }} 条</dd></div></dl>
+      <dl class="cost-details">
+        <div><dt>补录后覆盖率</dt><dd>{{ summary.afterPercentage }}</dd></div>
+        <div><dt>补录后已覆盖 / 应覆盖订单</dt><dd>{{ summary.afterKnown ? `${integer(summary.afterCovered)} / ${integer(coverage.expected)} 笔` : '尚未形成完整统计' }}</dd></div>
+        <div><dt>{{ closed ? '结账时已计入人工补录' : '本次核算已计入人工补录' }}</dt><dd>{{ summary.afterKnown ? `${integer(summary.postedCount)} 笔` : '未统计' }}</dd></div>
+        <div><dt>补录后剩余缺口</dt><dd>{{ summary.afterGapLabel }}</dd></div>
+        <div><dt>原始已覆盖 / 应覆盖订单</dt><dd>{{ summary.known ? `${integer(coverage.covered)} / ${integer(coverage.expected)} 笔` : '尚未形成统计范围' }}</dd></div>
+        <div><dt>原始覆盖率</dt><dd>{{ summary.percentage }}</dd></div>
+        <div><dt>{{ closed ? '结账时原始缺口' : '原始成本缺口' }}</dt><dd>{{ summary.gapLabel }}</dd></div>
+        <div><dt>来源成本待核对</dt><dd>{{ integer(count) }} 条</dd></div>
+      </dl>
+      <p class="pricing-help">补录后覆盖率＝（原始已覆盖＋本次核算已计入人工补录的缺口订单）÷应覆盖订单。尚未计入的补录不参与统计；整期人工确认金额不会直接视为订单全部覆盖。</p>
+      <p v-if="!summary.afterKnown" class="pricing-help">当前核算未提供可核对的补录覆盖笔数，暂不推算补录后覆盖率。</p>
       <div class="pricing-notice" :class="{passed:!summary.attention}">
-    <div><strong>{{ manualDecision ? '本期成本已由人工确认' : summary.title }}</strong><p>{{ summary.description }}</p><p v-if="manualDecision">人工确认金额与原因已和结账记录一起保存，原始缺口仍保留供回查。</p><p v-else-if="summary.known && !closed">成本覆盖自动放行参考 {{ percentage(coverage.threshold) }}；{{ thresholdMet ? '覆盖率已达到参考值，但仍需核对其他结账条件。' : `还差 ${integer(needed)} 笔覆盖达到参考值。` }}</p>
+    <div><strong>{{ manualDecision ? '本期成本已由人工确认' : summary.title }}</strong><p>{{ summary.description }}</p><p v-if="manualDecision">人工确认金额与原因已和结账记录一起保存，原始缺口仍保留供回查。</p><p v-else-if="summary.known && !closed">原始成本覆盖自动放行参考 {{ percentage(coverage.threshold) }}；{{ thresholdMet ? '原始覆盖率已达到参考值，但仍需核对其他结账条件。' : `原始覆盖还差 ${integer(needed)} 笔达到参考值。` }}</p>
       <p v-if="observed && Object.hasOwn(observed,'goods') && !manualDecision" class="pricing-help">来源表成本：商品 {{ Number(observed.goods).toLocaleString('zh-CN',{minimumFractionDigits:2}) }} 元 · 代发 {{ Number(observed.dropship).toLocaleString('zh-CN',{minimumFractionDigits:2}) }} 元 · 补发 {{ Number(observed.reshipment).toLocaleString('zh-CN',{minimumFractionDigits:2}) }} 元<template v-if="lineSummary?.line_count"> · 已人工补录 {{ integer(lineSummary.line_count) }} 笔、{{ Number(lineSummary.line_total).toLocaleString('zh-CN',{minimumFractionDigits:2}) }} 元；本次看板已计入补录 {{ Number(lineSummary.posted_line_total || 0).toLocaleString('zh-CN',{minimumFractionDigits:2}) }} 元</template><template v-if="lineSummary?.line_posting_pending">；最新补录待自动核算，当前看板尚未更新。</template></p>
       <p v-if="coverage.brushing_zero_covered" class="pricing-help">其中 {{ integer(coverage.brushing_zero_covered) }} 笔已按“蓝色旗帜＋by”刷单规则确认商品成本为 0，不需要补成本，也不在缺口清单中。</p>
       <p v-if="progress" aria-live="polite">{{ progress.message }}</p>
@@ -235,7 +253,7 @@ const coverageColumns=[
 <style scoped>
 .cost-summary{padding:16px 0 18px;margin-bottom:16px;border-bottom:1px solid var(--line,#e2e5eb)}
 .cost-summary-heading{display:flex;align-items:center;gap:12px}.cost-summary-heading strong{font-size:14px}.cost-scope{font-size:12px;color:#657184}
-.cost-summary-main{display:flex;gap:32px;align-items:center;margin-top:12px}.cost-stat{display:flex;flex-direction:column;gap:4px}.cost-stat>span{font-size:12px;color:#657184}.cost-stat b{font-size:24px;line-height:1.3;font-variant-numeric:tabular-nums;color:#17623f}.cost-stat b.attention{color:#8a4a0b}.cost-detail-button{margin-left:auto}.cost-summary>p{margin:10px 0 0;font-size:12px;line-height:1.7;color:#657184}
+.cost-summary-main{display:flex;flex-wrap:wrap;gap:20px 32px;align-items:center;margin-top:12px}.cost-stat{display:flex;flex-direction:column;gap:4px}.cost-stat>span{font-size:12px;color:#657184}.cost-stat b{font-size:24px;line-height:1.3;font-variant-numeric:tabular-nums;color:#17623f}.cost-stat b.attention{color:#8a4a0b}.cost-stat-secondary b{font-size:20px;color:#526477}.cost-detail-button{margin-left:auto}.cost-summary>p{margin:10px 0 0;font-size:12px;line-height:1.7;color:#657184}
 .cost-details{margin:20px 0}.cost-details>div{display:flex;justify-content:space-between;gap:16px;padding:12px 0;border-bottom:1px solid #e2e5eb}.cost-details dt{color:#657184}.cost-details dd{margin:0;text-align:right;font-variant-numeric:tabular-nums}
 .pricing-batch{border:1px solid #dce6f2;background:#f8fbff;border-radius:8px;padding:14px;margin:12px 0 16px}.pricing-batch>strong{font-size:14px}.pricing-batch>p{font-size:12px;color:#62728b;margin:8px 0}.pricing-batch-actions{display:flex;align-items:center;gap:10px;flex-wrap:wrap}.pricing-batch-actions input[type=file]{max-width:280px;font-size:12px}.pricing-batch .n-alert{margin:10px 0}.pricing-batch .n-alert p{margin:3px 0}
 .pricing-notice { display: flex; align-items: center; gap: 16px; justify-content: space-between; padding: 16px; margin-bottom: 16px; background: #fff8e8; border: 1px solid #f0dcb0; border-radius: 8px; color: #715020; }
@@ -259,7 +277,7 @@ const coverageColumns=[
 .pricing-pages { display: flex; justify-content: space-between; align-items: center; margin-top: 16px; color: #657184; }
 .pricing-mobile { display: none; }
 @media (max-width: 600px) {
-  .cost-summary-main{gap:22px}.cost-summary :deep(button),.pricing-actions :deep(button){min-height:44px}.pricing-search{flex-wrap:wrap}.pricing-search :deep(.n-input){flex-basis:100%}.pricing-pages{gap:8px;flex-wrap:wrap}
+  .cost-summary-main{gap:16px}.cost-stat{flex:1 1 calc(50% - 16px);min-width:0}.cost-detail-button{margin-left:0}.cost-summary :deep(button),.pricing-actions :deep(button){min-height:44px}.pricing-search{flex-wrap:wrap}.pricing-search :deep(.n-input){flex-basis:100%}.pricing-pages{gap:8px;flex-wrap:wrap}
   .pricing-notice { align-items: flex-start; flex-direction: column; }
   .pricing-desktop { display: none; }
   .pricing-mobile { display: block; }
