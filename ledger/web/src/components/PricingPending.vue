@@ -133,9 +133,9 @@ const coverageColumns=[
   {title:'平台订单 / 子订单',key:'order_id',minWidth:230,render:row=>h('div',[h('strong',row.order_id||'订单号未提供'),h('small',{class:'coverage-secondary'},row.sub_order_id||'—')])},
   {title:'商品链接 / 数量',key:'product_ids',minWidth:195,render:row=>h('div',[h('span',row.product_ids||'—'),h('small',{class:'coverage-secondary'},`数量 ${row.quantities||'未提供'}`)])},
   {title:'下单日',key:'order_date',width:112},
-  {title:'核对说明',key:'brushing_review',minWidth:240,render:row=>row.brushing_review||'商品成本未覆盖，需核对来源成本'},
+  {title:'核对说明',key:'brushing_review',minWidth:280,render:row=>row.coverage_reason||row.brushing_review||'商品成本未覆盖，需核对来源成本'},
   {title:'人工补录总成本',key:'manual_amount',width:140,render:row=>row.manual_amount==null?'—':`${Number(row.manual_amount).toFixed(2)} 元`},
-  {title:'操作',key:'action',width:120,render:row=>props.closed?'已结账 · 只读':row.editable?h(NButton,{size:'small',type:'primary',text:true,onClick:()=>editLine(row)},()=>row.manual_amount==null?'添加金额':'修改金额'):'订单归属不唯一'},
+  {title:'操作',key:'action',width:140,render:row=>props.closed?'已结账 · 只读':row.partial_cost?'请核对缺失商品':row.editable?h(NButton,{size:'small',type:'primary',text:true,onClick:()=>editLine(row)},()=>row.manual_amount==null?'添加金额':'修改金额'):'订单归属不唯一'},
 ]
 </script>
 
@@ -184,7 +184,7 @@ const coverageColumns=[
   </n-drawer>
   <n-drawer v-model:show="show" :width="920" :z-index="3950" style="max-width: 100vw">
     <n-drawer-content :title="closed ? '结账时原始成本缺口（只读）' : '订单成本缺口与补录记录'" closable>
-      <p class="pricing-help">{{ closed ? '以下为结账时保留的原始缺口，仅供回查，不代表需要再次补录。' : '按本店本月应有商品成本的订单列出原始缺口；已补录金额与计入情况单独保留，不要重复添加。' }}</p>
+      <p class="pricing-help">{{ closed ? '以下为结账时保留的原始缺口，仅供回查，不代表需要再次补录。' : '列出尚无成本及部分商品成本未计全的订单。部分成本已计入的订单须先核对缺失商品，不能在此重复补录整单成本；已补录记录单独保留。' }}</p>
       <div class="coverage-summary"><span>原始缺口 <b>{{ coverageBusy ? '加载中' : integer(coverageData.total ?? summary.gaps) }}</b> 笔</span><span>已补录 <b>{{ coverageBusy ? '—' : integer(coverageData.reviewed_count) }}</b> 笔</span><span>人工金额 <b>{{ coverageBusy ? '—' : Number(coverageData.supplement_total || 0).toLocaleString('zh-CN',{minimumFractionDigits:2}) }}</b> 元</span></div>
       <form class="pricing-search" @submit.prevent="submit">
         <n-input v-model:value="query" clearable placeholder="搜索订单号、子订单号或商品链接" aria-label="搜索未覆盖成本明细" />
@@ -194,7 +194,7 @@ const coverageColumns=[
       </form>
       <div v-if="!closed && summary.gaps" class="pricing-batch">
         <strong>批量补录成本</strong>
-        <p>下载 Excel 模板，只在“人工补录总成本”列填金额后直接保存并上传；订单号和核对列已固定为文本，不会变成科学计数法。旧 CSV 仍可上传。可在这里填写一条统一依据，逐行依据优先。</p>
+        <p>下载 Excel 模板，仅对“可直接补录”的行填写“人工补录总成本”；部分商品未计全的行需先核对来源明细。订单号和核对列已固定为文本。旧 CSV 仍可上传；可填写统一依据，逐行依据优先。</p>
         <div class="pricing-batch-actions">
           <input ref="batchInput" type="file" accept=".xlsx,.csv" aria-label="上传批量成本Excel或CSV" @change="chooseBatch" />
           <n-input v-model:value="batchReason" aria-label="批量成本统一依据" placeholder="统一确认依据（可选）" style="max-width:260px" />
@@ -215,8 +215,9 @@ const coverageColumns=[
           <strong>{{ row.order_id || '订单号未提供' }}</strong><span>{{ row.order_date || '日期未提供' }}</span>
           <p>子订单 {{ row.sub_order_id || '—' }} · 商品链接 {{ row.product_ids || '—' }} · 数量 {{ row.quantities || '未提供' }}</p>
           <p>人工总成本 {{ row.manual_amount == null ? '尚未补录' : `${Number(row.manual_amount).toFixed(2)} 元` }}</p>
+          <p v-if="row.coverage_reason" class="pricing-reason">{{ row.coverage_reason }}</p>
           <p v-if="row.brushing_review" class="pricing-reason">{{ row.brushing_review }}</p>
-          <span v-if="closed" class="pricing-reason">已结账 · 只读</span><n-button v-else-if="row.editable" size="small" @click="editLine(row)">{{ row.manual_amount == null ? '添加金额' : '修改金额' }}</n-button><span v-else class="pricing-reason">此键对应多个订单，需先确认归属</span>
+          <span v-if="closed" class="pricing-reason">已结账 · 只读</span><span v-else-if="row.partial_cost" class="pricing-reason">请核对缺失商品</span><n-button v-else-if="row.editable" size="small" @click="editLine(row)">{{ row.manual_amount == null ? '添加金额' : '修改金额' }}</n-button><span v-else class="pricing-reason">此键对应多个订单，需先确认归属</span>
         </article>
       </div>
       <div class="pricing-pages"><span>{{ coverageBusy ? '正在加载订单记录…' : `共 ${coverageData.matching ?? coverageData.total ?? summary.gaps} 笔` }}</span><n-pagination v-model:page="coveragePage" :item-count="coverageData.matching || 0" :page-size="50" :disabled="coverageBusy" simple /></div>
@@ -270,7 +271,7 @@ const coverageColumns=[
 .coverage-summary { display:flex;gap:9px;flex-wrap:wrap;margin-bottom:13px; }
 .coverage-summary span {padding:7px 10px;border:1px solid #e4eaf3;border-radius:7px;background:#f7f9fc;color:#657184;font-size:12px; }
 .coverage-summary b {font-variant-numeric:tabular-nums;color:#273b59;font-size:13px;}
-.coverage-secondary { display:block;color:#7a879b;font-size:11px;margin-top:4px;white-space:normal;word-break:break-all; }
+:deep(.coverage-secondary) { display:block;color:#7a879b;font-size:11px;margin-top:4px;white-space:normal;word-break:break-all; }
 .source-gap-details {border-top:1px solid #e8edf4;margin-top:17px;padding-top:14px;}
 .source-gap-details summary {cursor:pointer;color:#3c67c5;font-size:13px;margin-bottom:12px;}
 .pricing-search a { white-space: nowrap; }

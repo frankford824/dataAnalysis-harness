@@ -47,7 +47,7 @@ def test_verified_upstream_day_without_original_sale_never_posts_to_reship_month
     order=dict(order_id='5117236707584255215',sub_order_id='$Asr-1022122218',order_type='补发订单',
                store_name='shop',order_time=datetime(2026,7,3))
     cost={**order,'original_order_id':order['order_id'],'internal_order_id':'15619925','sku':'HSC31230',
-          'quantity':1.,'unit_cost':3.85,'order_state':'Sent','cost_status':'priced','cost_source':'register',
+          'quantity':1.,'unit_cost':3.85,'order_state':'Sent','cost_status':'priced','cost_source':'history',
           'cost_as_of':'2026-05-27','pricing_evidence':json.dumps({'order_date':'2026-05-27','cost_input':{'version':'reship-cost-input.v1'}})}
     result=run(Ingestion(model=model,items=[item('order_detail',[order],order),item('order_cost',[cost],cost)]),'taobao')
     assert result.spine_facts.is_empty()

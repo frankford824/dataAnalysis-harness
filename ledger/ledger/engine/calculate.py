@@ -114,7 +114,8 @@ def evaluate_metric(
     if frame.is_empty():
         return _empty_facts(), notes
 
-    from .cost_policy import is_dropship, is_exempt, is_cancelled, prepare_dropship, is_freight_surcharge, FREIGHT_SURCHARGE_NOTE
+    from .cost_policy import (is_dropship, is_exempt, is_cancelled, prepare_dropship,
+                             is_freight_surcharge, FREIGHT_SURCHARGE_NOTE, is_no_shipping, NO_SHIPPING_NOTE)
     from ..order_lifecycle import superseded_parent, SUPERSEDED_COST_NOTE
     is_erp_cost = metric.id in {"goods_cost", "reshipment_cost"}
     if metric.where:
@@ -327,6 +328,10 @@ def evaluate_metric(
         gaps = frame.filter(pending).select(
             store.fill_null("(未知店铺)").alias("store"), period.fill_null("(未知账期)").alias("period"),
             pl.lit(metric.id).alias("metric_id"), key.alias("order_id"),
+            # Keep the resolved target key, including source-fallback splits.
+            # A master order ID cannot identify which child is incomplete.
+            pl.when(col(LINKED).cast(pl.Boolean).fill_null(False))
+            .then(col(LINK_KEY).cast(pl.Utf8)).otherwise(None).alias("coverage_key"),
             wanted.dt.strftime("%Y-%m-%d").alias("order_date"),
             col("internal_order_id").cast(pl.Utf8).alias("internal_order_id"),
             col("sku").cast(pl.Utf8).alias("sku"), pl.when(quantity.is_finite()).then(quantity).otherwise(None).alias("quantity"),
@@ -341,6 +346,7 @@ def evaluate_metric(
             .when(col('failure_reason') == 'original_quantity_conflict').then(pl.lit('原始数量与当前订单数量不一致，请核对后再计价'))
             .when(col('failure_reason') == 'item_identity_mismatch').then(pl.lit('成本证据与当前订单商品不一致，等待重新核实'))
             .when(col('failure_reason') == 'nonpositive_register_cost').then(pl.lit('登记成本为零或负数，尚不能作为有效成本'))
+            .when(col('cost_source').is_in(['register','register_first'])).then(pl.lit('登记价历史有效期未证实；保留参考，待核对'))
             .when(col('failure_reason') == 'unresolved_item_risk').then(pl.lit('订单异常尚未查清，暂不计入成本'))
             .when(col('failure_reason') == 'component_unit_rounding_conflict').then(pl.lit('套餐组件合计与单价乘数量的结果不一致，请核对金额'))
             .when(col('pricing_source_suspect').cast(pl.Boolean).fill_null(False)).then(pl.lit('原订单商品信息待核对'))
@@ -379,6 +385,7 @@ def evaluate_metric(
     keep = keep | source_note.str.starts_with('对账流水待核对：').fill_null(False)
     source_note = pl.when(erp_exempt).then(pl.concat_str([
         source_note, pl.when(is_freight_surcharge(frame)).then(pl.lit(FREIGHT_SURCHARGE_NOTE))
+        .when(is_no_shipping(frame)).then(pl.lit(NO_SHIPPING_NOTE))
         .when(is_cancelled(frame)).then(pl.lit("商品已取消，成本计 0"))
         .when(superseded_parent(frame)).then(pl.lit(SUPERSEDED_COST_NOTE))
         .when(pl.col("__cost_exempt_reason").is_not_null() if "__cost_exempt_reason" in frame.columns else pl.lit(False))

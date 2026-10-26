@@ -36,6 +36,8 @@ def apply(ws, result, store):
         reviews = []
         rows = []
         for item in sl.coverage_gap_rows.to_dicts():
+            if item.get('partial_cost', False):
+                continue
             saved = latest.get(item['coverage_key'])
             if not saved or saved['action'] != 'save' or saved['context_sha'] != item['context_sha'] or item['order_count'] != 1:
                 continue

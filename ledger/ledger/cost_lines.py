@@ -63,14 +63,15 @@ def current(ws, run_id: int, store_id: str, period: str) -> dict:
     total = Decimal(0)
     reviewed = []
     for item in items:
-        item['editable'] = item['order_count'] == 1 and item.get('goods_scope_version') == 1
+        item['editable'] = (item['order_count'] == 1 and item.get('goods_scope_version') == 1
+                            and not item.get('partial_cost', False))
         saved = latest.get(item['coverage_key'])
         item['line_revision'] = saved['id'] if saved else 0
         item['manual_amount'] = None
         item['manual_reason'] = ''
         item['stale_decision'] = bool(saved and saved['context_sha'] != item['context_sha'])
         if (saved and not item['stale_decision'] and item['order_count'] == 1
-                and saved['action'] == 'save'):
+                and saved['action'] == 'save' and not item.get('partial_cost', False)):
             amount = _cents(saved['amount'])
             item['manual_amount'] = float(amount)
             item['manual_reason'] = saved['reason']
@@ -111,7 +112,9 @@ def export_csv(ws, run_id: int, store_id: str, period: str) -> str:
               ('editable','可直接补录'),
               ('coverage_key','清单键'),('context_sha','核对版本'),
               ('line_revision','修改版本'), ('brushing_review','刷单依据核对说明'),
-              ('brushing_evidence_internal_id','相关聚水潭内部订单号')]
+              ('brushing_evidence_internal_id','相关聚水潭内部订单号'),
+              ('coverage_reason','成本缺口说明'), ('posted_goods_cost','已计入商品成本'),
+              ('pending_cost_skus','待核价商品编码')]
     output = io.StringIO()
     writer = csv.writer(output)
     writer.writerow([label for _, label in fields])
@@ -132,7 +135,9 @@ def export_xlsx(ws, run_id: int, store_id: str, period: str) -> bytes:
               ('manual_amount','人工补录总成本'),('manual_reason','确认依据'),
               ('editable','可直接补录'),('coverage_key','清单键'),
               ('context_sha','核对版本'),('line_revision','修改版本'),
-              ('brushing_review','刷单依据核对说明'), ('brushing_evidence_internal_id','相关聚水潭内部订单号')]
+              ('brushing_review','刷单依据核对说明'), ('brushing_evidence_internal_id','相关聚水潭内部订单号'),
+              ('coverage_reason','成本缺口说明'), ('posted_goods_cost','已计入商品成本'),
+              ('pending_cost_skus','待核价商品编码')]
     workbook = openpyxl.Workbook()
     sheet = workbook.active
     sheet.title = '未覆盖订单成本'
@@ -159,7 +164,7 @@ def export_xlsx(ws, run_id: int, store_id: str, period: str) -> bytes:
                 cell.fill = input_fill
     sheet.freeze_panes = 'A2'
     sheet.auto_filter.ref = sheet.dimensions
-    widths = [24,24,20,12,13,16,28,12,24,68,12,58,25]
+    widths = [24,24,20,12,13,16,28,12,24,68,12,58,25,75,20,40]
     for index, width in enumerate(widths, 1):
         sheet.column_dimensions[openpyxl.utils.get_column_letter(index)].width = width
     for column in ('I','J','K'):
@@ -242,6 +247,9 @@ def _batch_rows(ws, store_id: str, period: str, run_id: int,
             issues.append(f'第{line}行订单键不存在或重复')
             continue
         used.add(canonical)
+        if source.get('partial_cost', False):
+            issues.append(f'第{line}行已有部分商品成本计入，请先核对缺失商品明细，不能重复补录整单成本')
+            continue
         # Excel/WPS can rewrite 18+ digit order numbers even when the export uses
         # formula text.  Those columns are for people to read, not row identity.
         # The opaque key plus the hash of its exact order context are the stable,
@@ -343,6 +351,8 @@ def save(ws, store_id: str, period: str, run_id: int, *, coverage_key: str,
                    if row['coverage_key'] == coverage_key), None)
     if source is None or source['order_count'] != 1 or source['context_sha'] != context_sha:
         raise WorkspaceError("订单对应关系已变化或存在歧义，请刷新明细后再修改")
+    if action == 'save' and source.get('partial_cost', False):
+        raise WorkspaceError('已有部分商品成本计入，请先核对缺失商品明细，不能重复补录整单成本')
     conn = ws.conn
     with conn:
         conn.execute('BEGIN IMMEDIATE')

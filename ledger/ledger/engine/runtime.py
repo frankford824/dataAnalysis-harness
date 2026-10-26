@@ -883,7 +883,7 @@ def run(ingestion: Ingestion, platform: str = "*") -> RunResult:
     result = RunResult(
         model=model, ingestion=ingestion, facts=facts, notes=notes, spine_rows=spine.size,
         spine_facts=spine_facts, projections=projections, spine=spine.frame,
-        eval_errors=eval_errors, pricing_gaps=pl.DataFrame(pricing_gaps) if pricing_gaps else pl.DataFrame(),
+        eval_errors=eval_errors, pricing_gaps=pl.DataFrame(pricing_gaps, infer_schema_length=None) if pricing_gaps else pl.DataFrame(),
     )
 
     slice_keys = set(_slice_keys(spine_facts if not spine_facts.is_empty() else facts))
@@ -1416,10 +1416,21 @@ def _build_slice(
     if not live_feed and 'goods_cost' in link_reports:
         scoped_reports = {**scoped_reports, 'goods_cost':
             _scoped_link_reports(model, scoped, own_spine, platform, link_reports)['goods_cost']}
-    cost_coverage = _cost_coverage(model, scoped_reports)
     zero_keys = scoped.filter((pl.col('metric_id') == 'goods_cost') & pl.col('counted') &
         (pl.col('contribution') == 0) & pl.col('source_note').str.contains(
             '蓝色旗帜且卖家备注含 by', literal=True).fill_null(False))['link_key'].drop_nulls().unique().to_list()
+    # Verified whole-order brushing evidence can supersede stale item pricing
+    # gaps. A single zero-cost accessory cannot exempt the rest of a bundle.
+    zero_key_set = set(zero_keys)
+    pending_costs = {key: rows for key, rows in _pending_goods_keys(own_gaps).items()
+                     if key not in zero_key_set}
+    partial_cost_keys = set()
+    if pending_costs and 'goods_cost' in scoped_reports:
+        original_report = scoped_reports['goods_cost']
+        partial_cost_keys = original_report.covered_keys & set(pending_costs)
+        scoped_reports = {**scoped_reports, 'goods_cost': replace(
+            original_report, covered_keys=original_report.covered_keys - set(pending_costs))}
+    cost_coverage = _cost_coverage(model, scoped_reports)
     zero_covered = len(set(zero_keys) & scoped_reports.get('goods_cost', LinkReport('', '', '')).covered_keys)
     if zero_covered:
         cost_coverage['brushing_zero_covered'] = zero_covered
@@ -1577,7 +1588,9 @@ def _build_slice(
             detail={"items": return_issues},
         ))
     from ..unclassified_evidence import attach
-    coverage_rows = _goods_coverage_rows(model, own_spine, platform, scoped_reports)
+    coverage_rows = _goods_coverage_rows(model, own_spine, platform, scoped_reports,
+                                        pending_costs=pending_costs, partial_keys=partial_cost_keys,
+                                        posted_facts=scoped)
     goods_metric = next((m.for_platform(platform) for m in model.metrics if m.id == 'goods_cost'), None)
     if goods_metric is not None:
         from ..brushing_zero import annotate_pending
@@ -1599,9 +1612,22 @@ def _build_slice(
     )
 
 
+def _pending_goods_keys(pricing_gaps: pl.DataFrame) -> dict[str, list[dict]]:
+    """Unpriced required components keep their exact resolved coverage key."""
+    if pricing_gaps.is_empty() or not {'metric_id', 'coverage_key'} <= set(pricing_gaps.columns):
+        return {}
+    rows = pricing_gaps.filter((pl.col('metric_id') == 'goods_cost') &
+                              pl.col('coverage_key').is_not_null() & (pl.col('coverage_key') != '')).select(
+        [name for name in ('coverage_key', 'sku', 'quantity', 'internal_order_id', 'reason')
+         if name in pricing_gaps.columns])
+    return {str(key[0] if isinstance(key, tuple) else key): group.to_dicts()
+            for key, group in rows.partition_by('coverage_key', as_dict=True).items()}
+
+
 def _goods_coverage_rows(model: Model, spine_frame: pl.DataFrame, platform: str,
-                         reports: dict[str, LinkReport]) -> pl.DataFrame:
-    """List every expected order key without posted goods cost, including absent feed rows."""
+                         reports: dict[str, LinkReport], *, pending_costs=None,
+                         partial_keys=None, posted_facts=None) -> pl.DataFrame:
+    """List missing and partially priced orders without reposting known cost."""
     from ..goods_cost_scope import sales_only, VERSION
     empty = pl.DataFrame(schema={
         "coverage_key": pl.Utf8, "context_sha": pl.Utf8, "order_id": pl.Utf8,
@@ -1609,6 +1635,9 @@ def _goods_coverage_rows(model: Model, spine_frame: pl.DataFrame, platform: str,
         "quantities": pl.Utf8, "order_state": pl.Utf8,
         "order_count": pl.Int64, "product_count": pl.Int64, "editable": pl.Boolean,
         "goods_scope_version": pl.Int64,
+        "partial_cost": pl.Boolean, "posted_goods_cost": pl.Float64,
+        "pending_cost_skus": pl.Utf8, "pending_cost_rows": pl.Int64,
+        "coverage_reason": pl.Utf8,
     })
     report = reports.get("goods_cost")
     raw = next((metric for metric in model.metrics if metric.id == "goods_cost"), None)
@@ -1630,6 +1659,13 @@ def _goods_coverage_rows(model: Model, spine_frame: pl.DataFrame, platform: str,
     fields = ("order_id", "sub_order_id", "product_id", "order_date",
               "quantity", "order_state")
     data = []
+    pending_costs = pending_costs or {}
+    partial_keys = partial_keys or set()
+    posted = {}
+    if posted_facts is not None and not posted_facts.is_empty() and partial_keys:
+        known = posted_facts.filter((pl.col('metric_id') == 'goods_cost') & pl.col('counted') &
+                                   pl.col('link_key').is_in(sorted(partial_keys)))
+        posted = dict(known.group_by('link_key').agg(pl.col('contribution').sum()).iter_rows())
     for key, group in rows.partition_by("coverage_key", as_dict=True, maintain_order=True).items():
         key = key[0] if isinstance(key, tuple) else key
         found = {field: sorted({str(value)[:10] if field == "order_date" else str(value)
@@ -1637,6 +1673,16 @@ def _goods_coverage_rows(model: Model, spine_frame: pl.DataFrame, platform: str,
                                 if str(value).strip()}) if field in group.columns else []
                  for field in fields}
         context = {"coverage_key": key, **found}
+        partial = key in partial_keys
+        pending = pending_costs.get(key, [])
+        pending_skus = '、'.join(sorted({str(r['sku']) for r in pending if r.get('sku')}))
+        known_cost = abs(float(posted.get(key, 0) or 0))
+        if partial:
+            # Old whole-order supplements must not be reused after a source
+            # starts contributing part of the same order's cost.
+            context['partial_cost'] = {'posted_goods_cost': known_cost,
+                'pending': sorted({(str(r.get('internal_order_id') or ''), str(r.get('sku') or ''),
+                                    str(r.get('quantity')), str(r.get('reason') or '')) for r in pending})}
         orders = found["order_id"]
         data.append({
             "coverage_key": key,
@@ -1651,8 +1697,13 @@ def _goods_coverage_rows(model: Model, spine_frame: pl.DataFrame, platform: str,
             # Human confirms a store-period total, not a dated register quote.
             # A missing original day remains visible and in the context hash;
             # only a reused key across different orders makes this ambiguous.
-            "editable": len(orders) == 1,
+            "editable": len(orders) == 1 and not partial,
             "goods_scope_version": VERSION,
+            "partial_cost": partial, "posted_goods_cost": known_cost,
+            "pending_cost_skus": pending_skus, "pending_cost_rows": len(pending),
+            "coverage_reason": (f'部分商品成本未计全：已计入 {known_cost:.2f} 元，'
+                                f'仍有 {len(pending)} 条商品成本待核价（{pending_skus or "商品身份待核"}）；'
+                                '请核对来源商品明细，勿重复补录整单成本。') if partial else '',
         })
     return pl.DataFrame(data, schema=empty.schema).sort("coverage_key") if data else empty
 
