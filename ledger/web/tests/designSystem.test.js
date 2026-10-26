@@ -9,6 +9,12 @@ test('native and component-library colors/type resolve from the same committed t
   assert.equal(readFileSync(new URL('../src/design/tokens.css',import.meta.url),'utf8').replace(/\r\n/g,'\n'),tokenCss())
   for(const dark of [false,true]){const theme=uiTheme(dark),mode=dark?'dark':'light';assert.equal(theme.common.primaryColor,tokens.colors.action[mode]);assert.equal(theme.common.cardColor,tokens.colors.paper[mode]);assert.equal(theme.common.fontSize,`${tokens.type.body}px`)}
 })
+test('the UI publisher avoids PowerShell automatic variables and never restarts the engine',()=>{
+  const publisher=readFileSync(new URL('../../../tools/deploy/win/deploy-static-ui.ps1',import.meta.url),'utf8')
+  assert.doesNotMatch(publisher,/\$(?:home|host|pid|input|args|error|pwd|profile|PSVersionTable|ExecutionContext)\s*=/i)
+  assert.doesNotMatch(publisher,/\b(?:Stop-Process|Restart-Service|Stop-ScheduledTask|Start-ScheduledTask|Set-ExecutionPolicy)\b/i)
+  assert.ok(publisher.includes("StartsWith('ledger/ledger/static/'"))
+})
 test('reading groups preserve identifiers, expose copies, and never carry amounts', () => {
   const model=createReviewGroups(['one','two','three'],'store:period:run1')
   assert.equal(model.move(['one'],'A'),true);assert.equal(model.move(['two'],'B'),true)

@@ -87,9 +87,9 @@ try{
     [IO.File]::Replace($PendingIndex,$IndexTarget,(Join-Path $ReleaseRoot 'index.previous.html'));$Switched=$true
     if(Test-Path -LiteralPath $StampTarget){[IO.File]::Replace($PendingStamp,$StampTarget,(Join-Path $ReleaseRoot 'ui-version.previous.json'))}else{[IO.File]::Move($PendingStamp,$StampTarget)}
     if((Hash $IndexTarget) -ne $Index.sha256 -or (Hash $StampTarget) -ne $UiStamp.sha256){throw 'UI entry readback failed'}
-    $Home=Invoke-WebRequest -Uri 'http://127.0.0.1:8000/' -UseBasicParsing -TimeoutSec 30
+    $UiHomeResponse=Invoke-WebRequest -Uri 'http://127.0.0.1:8000/' -UseBasicParsing -TimeoutSec 30
     $Published=Invoke-RestMethod -Uri ('http://127.0.0.1:8000/static/ui-version.json?release='+$Version) -TimeoutSec 30
-    if($Home.StatusCode -ne 200 -or $Published.ui_version -ne $Version){throw 'Published UI did not read back'}
+    if($UiHomeResponse.StatusCode -ne 200 -or $Published.ui_version -ne $Version){throw 'Published UI did not read back'}
     Check-Engine $Manifest
     $Receipt=[pscustomobject]@{ui_version=$Version;engine_version=$ExpectedEngineVersion;model_revision=$Manifest.model_revision;pid=$Manifest.expected_pid;service_restarted=$false;protected_files=@($Manifest.protected_files).Count;index_sha256=$Index.sha256;backup=$Backup;published_at=[DateTime]::UtcNow.ToString('o')}
     $Receipt | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $ReleaseRoot 'receipt.json') -Encoding UTF8

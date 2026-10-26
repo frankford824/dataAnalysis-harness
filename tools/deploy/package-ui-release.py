@@ -28,6 +28,9 @@ def main():
     git('rev-parse', '--verify', args.version + '^{commit}')
     git('diff', '--exit-code', args.version, '--', 'ledger/web', 'ledger/ledger/static')
     baseline = json.loads(Path(args.baseline).read_text(encoding='utf-8-sig'))
+    publisher = git('show', args.version + ':tools/deploy/win/deploy-static-ui.ps1').decode()
+    if re.search(r'\$(?:home|host|pid|input|args|error|pwd|profile|PSVersionTable|ExecutionContext)\s*=', publisher, re.I):
+        raise SystemExit('UI publisher assigns a PowerShell automatic variable')
     if git('rev-parse', '--short', args.base).decode().strip() != baseline['version']:
         raise SystemExit('The reviewed UI base does not match the production engine stamp')
     allowed_tools = {'tools/deploy/package-ui-release.py', 'tools/deploy/win/deploy-static-ui.ps1'}
