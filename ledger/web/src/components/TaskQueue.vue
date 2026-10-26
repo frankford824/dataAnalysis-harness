@@ -160,7 +160,7 @@ const grouped = computed(() => {
 }
 .task-row:last-child { border-bottom: 0; }
 .task-row:hover { background: var(--n1); }
-.task-row.selected { background: #fffaf1; box-shadow: inset 3px 0 var(--warn); }
+.task-row.selected { background: var(--warn-bg); box-shadow: inset 3px 0 var(--warn); }
 .task-row.selected.ready { background: var(--accent-bg); box-shadow: inset 3px 0 var(--accent); }
 .task-row.selected.evidence { background: #f2faf6; box-shadow: inset 3px 0 var(--ok); }
 
@@ -183,7 +183,7 @@ const grouped = computed(() => {
 .task-badge {
   padding: 2px 8px;
   border-radius: 999px;
-  font-size: 11px;
+  font-size:var(--sk-type-caption);
   font-weight: 600;
   white-space: nowrap;
   flex-shrink: 0;

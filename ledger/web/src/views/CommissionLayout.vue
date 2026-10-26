@@ -52,7 +52,9 @@ watch(() => [state.storeIds, state.personIds, state.start, state.end, state.repo
 </script>
 <template>
   <section class="commission-area workflow-area">
-    <header class="commission-heading"><h1>{{titles[route.name]||'提成设置'}}</h1><div class="workflow-heading-actions"><span class="workflow-updated" aria-live="polite">{{state.loading[section]?'正在更新…':stamp?`更新于 ${stamp}`:''}}</span><template v-if="section==='settings'"><n-button :disabled="!page||!state.ready||page.busy" @click="page?.menu('import')">导入表格</n-button><n-button type="primary" :disabled="!page||!state.ready||page.busy" @click="page?.edit()">新增设置</n-button></template></div></header>
+    <header class="commission-heading" data-region="hero"><h1>{{titles[route.name]||'提成设置'}}</h1></header>
+    <section class="commission-functions" data-region="function">
+    <div class="workflow-heading-actions ui-control-bar"><span class="workflow-updated" aria-live="polite">{{state.loading[section]?'正在更新…':stamp?`更新于 ${stamp}`:''}}</span><template v-if="section==='settings'"><n-button :disabled="!page||!state.ready||page.busy" @click="page?.menu('import')">导入表格</n-button><n-button type="primary" :disabled="!page||!state.ready||page.busy" @click="page?.edit()">新增设置</n-button></template></div>
     <nav class="commission-mobile-nav" aria-label="提成菜单"><router-link :to="{name:'commission',query:route.query}">提成设置</router-link><router-link :to="{name:'commission-reports',query:route.query}">金额汇总</router-link><router-link :to="{name:'commission-org',query:route.query}">组织架构</router-link></nav>
     <div v-if="section!=='org'" class="workflow-scope">
       <div class="workflow-scope-controls">
@@ -63,7 +65,8 @@ watch(() => [state.storeIds, state.personIds, state.start, state.end, state.repo
       </div>
       <div v-if="applied.length" class="workflow-applied" aria-label="当前筛选条件"><button v-for="filter in visibleFilters" :key="filter.type+filter.id" class="workflow-active-chip" :title="filter.name" :aria-label="`移除${filter.type==='store'?'店铺':'人员'}${filter.name}`" @click="removeFilter(filter)"><span>{{filter.name}}</span><X :size="12"/></button><button v-if="applied.length>6" class="text-button" @click="allFilters=!allFilters">{{allFilters?'收起':`展开其余 ${applied.length-6} 项`}}</button><button class="text-button" @click="state.clear">清空筛选</button></div>
     </div>
+    </section>
     <div v-if="state.initError" class="commission-error" role="alert">{{state.initError}} <button class="text-button" @click="state.init(route.query)">重试</button></div>
-    <router-view v-slot="{Component}"><keep-alive><component :is="Component" ref="page" /></keep-alive></router-view>
+    <div data-region="display"><router-view v-slot="{Component}"><keep-alive><component :is="Component" ref="page" /></keep-alive></router-view></div>
   </section>
 </template>

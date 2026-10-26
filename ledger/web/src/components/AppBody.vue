@@ -1,6 +1,6 @@
 <script setup>
 import { useMessage } from 'naive-ui'
-import { LayoutDashboard, Store, Coins, Tags, RefreshCw, Truck } from '@lucide/vue'
+import { LayoutDashboard, Store, Coins, Tags, RefreshCw, Truck, Ruler, ScanLine } from '@lucide/vue'
 import { computed, defineAsyncComponent, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 
@@ -149,11 +149,11 @@ defineExpose({ take })
     <nav class="side">
       <div class="brand">
         台账
-        <div class="brand-scope">{{ app.periodLabel }}</div>
+        <div v-if="!['labor','appearance'].includes($route.name) && (!$route.meta.commission || commission.start)" class="brand-scope"><template v-if="$route.meta.commission">{{commission.start}}{{commission.end && commission.end!==commission.start?` 至 ${commission.end}`:''}}</template><template v-else>{{app.periodLabel}}</template></div>
       </div>
       <router-link
         class="navlink"
-        :class="{ on: $route.name === 'board' }"
+        :class="{ on: $route.name === 'board' && $route.query.review !== '1' }"
         to="/"
         :title="readyCount ? `${readyCount} 个店期可以结账` : '总览'"
       >
@@ -185,11 +185,13 @@ defineExpose({ take })
       </router-link>
       <router-link class="navlink" :class="{on:$route.name==='freight-review'}" to="/freight"><Truck class="nav-icon" aria-hidden="true"/>运费复核</router-link>
       <router-link class="navlink" :class="{on:$route.name==='labor'}" to="/labor"><Coins class="nav-icon" aria-hidden="true"/>兼职人工费用</router-link>
+      <router-link class="navlink appearance-link" :class="{on:$route.name==='board' && $route.query.review==='1'}" :to="{name:'board',query:{review:'1'}}" @click="app.noted('board.tab','here').value='gaps'"><ScanLine class="nav-icon" aria-hidden="true"/>核对工作台</router-link>
+      <router-link class="navlink" :class="{on:$route.name==='appearance'}" to="/appearance"><Ruler class="nav-icon" aria-hidden="true"/>样式规范</router-link>
       <div class="grow" />
     </nav>
 
     <div class="body">
-      <header v-if="!['commission', 'commission-reports', 'commission-org', 'labor'].includes($route.name)" class="topbar">
+      <header v-if="!['commission', 'commission-reports', 'commission-org', 'labor', 'appearance'].includes($route.name)" class="topbar">
         <FilterBar />
         <n-button quaternary size="small" :disabled="app.loading || !!app.busy" aria-label="刷新当前页面" title="刷新当前页面" @click="refreshCurrent"><RefreshCw :size="16"/></n-button>
         <!-- 上传只有这一个固定入口，每一页都在同一个地方。上一版侧栏最下角那个
@@ -211,7 +213,7 @@ defineExpose({ take })
       <main class="page">
         <n-alert v-if="pageLoadError" type="error" class="ledger-page-error" :bordered="false">页面未能加载，请刷新后重试。 <n-button size="small" @click="reloadPage">刷新页面</n-button></n-alert>
         <router-view v-slot="{ Component, route }">
-          <transition name="page-shift">
+          <transition name="page-shift" mode="out-in">
             <div :key="route.meta.commission ? 'commission' : route.name" class="route-page">
               <component :is="Component" />
             </div>

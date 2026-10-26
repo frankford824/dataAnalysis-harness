@@ -10,7 +10,7 @@
  * 下面那张是别的东西。
  */
 import { computed, onMounted, ref, watch } from 'vue'
-import { useRouter } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 
 import { useLatest } from '../components/ui/useLatest'
 import { api } from '../api'
@@ -22,6 +22,7 @@ import PageHead from '../components/PageHead.vue'
 
 const app = useApp()
 const router = useRouter()
+const route = useRoute()
 
 onMounted(() => app.loadOverview().catch(() => {}))
 watch(()=>app.uiRefresh,()=>app.loadOverview(true).catch(()=>{}))
@@ -156,6 +157,9 @@ function delta(v) {
 
 //: 记住上次看的是哪个标签。切走再回来跳回默认，等于把人刚才翻到的地方扔了。
 const tab = app.noted('board.tab', 'here')
+const displayMode = app.noted('board.display', 'table')
+if (route.query.review === '1') tab.value = 'gaps'
+watch(() => route.query.review, value => { if (value === '1') tab.value = 'gaps' })
 
 /* 一个月的细账。
  *
@@ -413,6 +417,8 @@ watch([() => app.storeId, () => app.platform], () => {
         </template>
       </PageHead>
 
+      <div v-if="here.length && tab==='here'" class="board-display-switch" data-region="function" role="group" aria-label="总览显示方式"><button type="button" :aria-pressed="displayMode!=='books'" @click="displayMode='table'">明细表</button><button type="button" :aria-pressed="displayMode==='books'" @click="displayMode='books'">账册视图</button><span class="xs muted">两种视图使用同一份本月数据</span></div>
+
       <div v-if="blankMonth" class="banner warn" style="margin-bottom: var(--s4)">
         <strong>{{ prettyPeriod(period) }} 还没有算出损益</strong>
         销售收入与利润暂未计算。
@@ -431,7 +437,7 @@ watch([() => app.storeId, () => app.platform], () => {
       </div>
 
       <template v-else>
-      <div class="board-kpis">
+      <div class="board-kpis" data-region="display">
         <div class="kpi">
           <div class="label">销售收入</div>
           <div class="value">{{ money(totals.revenue) }}</div>
@@ -460,10 +466,17 @@ watch([() => app.storeId, () => app.platform], () => {
         </div>
       </div>
 
-      <div class="card" style="margin-top: var(--s4)">
+      <div class="card board-results" data-region="display" style="margin-top: var(--s4)">
         <n-tabs v-ledger-tabs v-model:value="tab" type="line" size="small">
           <n-tab-pane name="here" :tab="`本月店铺（${here.length}）`">
-            <div class="scroll tall">
+            <div v-if="displayMode==='books'" class="board-books" data-region="display">
+              <button v-for="r in rows.filter(item=>!item.head)" :key="r.store_id" type="button" class="board-book" @click="open(r)">
+                <h3>{{r.store}}</h3><span class="book-hint">{{app.platforms.find(p=>p.id===r.platform)?.name||r.platform}} · {{r.period}}</span>
+                <div class="book-value" :class="{neg:r.profit<0}">{{money(r.profit)}}</div><span class="book-hint">利润</span>
+                <div class="book-hint">销售收入 {{money(r.revenue)}}</div><footer><span>{{label(r)}}</span><span>打开账页</span></footer>
+              </button>
+            </div>
+            <div v-else class="scroll tall" data-region="display">
               <n-table size="small" :bordered="false" :single-line="false">
                 <thead>
                   <tr>
@@ -488,7 +501,7 @@ watch([() => app.storeId, () => app.platform], () => {
                       <td class="right num">{{ money(r.revenue) }}</td>
                       <td class="right num" :class="{ neg: r.profit < 0 }">{{ money(r.profit) }}</td>
                       <td class="right num">
-                        {{ r.revenue ? percent(r.profit / r.revenue) : '—' }}
+                        {{ r.revenue && r.profit !== null && r.profit !== undefined ? percent(r.profit / r.revenue) : '—' }}
                       </td>
                       <td class="nowrap">
                         <n-tag

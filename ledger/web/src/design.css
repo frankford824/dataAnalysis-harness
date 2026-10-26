@@ -15,7 +15,7 @@
 :root {
   /* 中性色。九阶，够用且不会挑花眼。 */
   --n0: #ffffff;
-  --n1: #f7f8fa;
+  --n1: var(--n1);
   --n2: #eef0f4;
   --n3: #e2e5eb;
   --n4: #c9cdd6;
@@ -26,14 +26,14 @@
   --n9: #14171c;
 
   /* 语义色。各配一个浅底，用于成块的提示区。 */
-  --ok: #0f7b4f;
-  --ok-bg: #e9f6ef;
-  --bad: #b42318;
-  --bad-bg: #fdecea;
-  --warn: #b45309;
-  --warn-bg: #fff8eb;
-  --accent: #1f5eff;
-  --accent-bg: #f1f5ff;
+  --ok: var(--ok);
+  --ok-bg: var(--ok-bg);
+  --bad: var(--bad);
+  --bad-bg: var(--bad-bg);
+  --warn: var(--warn);
+  --warn-bg: var(--warn-bg);
+  --accent: var(--accent);
+  --accent-bg: var(--accent-bg);
 
   /* 字阶。1.2 左右一跳，够分层又不至于跳到刺眼。 */
   --t-mono: 12px;

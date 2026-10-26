@@ -234,41 +234,41 @@ function exportTable() {
   </n-drawer>
 </template>
 <style scoped>
-.profit-scope{font-size:12px;color:#8390a3;margin:0 0 12px;line-height:1.6}
+.profit-scope{font-size:var(--sk-type-caption);color:#8390a3;margin:0 0 12px;line-height:1.6}
 .profit-basis{margin:0 0 14px}
-.profit-basis :deep(.n-alert__content){font-size:12px;line-height:1.7;color:#3d4a5c}
+.profit-basis :deep(.n-alert__content){font-size:var(--sk-type-caption);line-height:1.7;color:#3d4a5c}
 .profit-kpis{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:10px;margin-bottom:16px}
 .profit-basis-more{margin-top:6px}.profit-basis-more summary{cursor:pointer;color:#3560d6}
 .profit-kpis>div{background:#f4f7fc;border-radius:8px;padding:12px 14px}
-.profit-kpis span{display:block;font-size:12px;color:#718097}
-.profit-kpis small{display:block;margin-top:2px;font-size:11px;color:#8a94a3}
-.profit-kpis strong{display:block;margin-top:6px;font-size:20px;font-weight:650;letter-spacing:-.4px;font-variant-numeric:tabular-nums}
+.profit-kpis span{display:block;font-size:var(--sk-type-caption);color:var(--n6)}
+.profit-kpis small{display:block;margin-top:2px;font-size:var(--sk-type-caption);color:#8a94a3}
+.profit-kpis strong{display:block;margin-top:6px;font-size:var(--sk-type-heading);font-weight:650;letter-spacing:-.4px;font-variant-numeric:tabular-nums}
 .profit-kpis .cut{background:#fff4f2}
 .profit-kpis .cut strong{color:#b45248}
 .profit-kpis .keep{background:#eef4ff}
-.profit-kpis .keep strong{color:#3468f0}
+.profit-kpis .keep strong{color:var(--accent)}
 .profit-toolbar{display:flex;align-items:center;gap:14px;margin:0 0 10px}
 .profit-toolbar .commission-search{min-width:0;flex:1;max-width:360px}
-.profit-hint{margin-left:auto;font-size:12px;color:#8a94a3}
-.profit-filter{font-size:12px;color:#7a8595;margin:0 0 10px}
+.profit-hint{margin-left:auto;font-size:var(--sk-type-caption);color:#8a94a3}
+.profit-filter{font-size:var(--sk-type-caption);color:#7a8595;margin:0 0 10px}
 .profit-orders-panel{margin:12px 0 4px;padding:12px 14px;background:#f7f9fc;border-radius:8px}
-.profit-orders-panel strong{font-size:13px}
-.profit-order{display:flex;justify-content:space-between;gap:12px;padding:7px 0;border-bottom:1px solid #e9edf2;font-size:12px}
+.profit-orders-panel strong{font-size:var(--sk-type-body)}
+.profit-order{display:flex;justify-content:space-between;gap:12px;padding:7px 0;border-bottom:1px solid #e9edf2;font-size:var(--sk-type-caption)}
 .profit-order:last-child{border-bottom:0}
-.profit-labor,.profit-foot{font-size:12px;color:#5b6a80;line-height:1.7;margin:14px 0 10px}
-.profit-foot strong{font-size:15px;color:#1e2c40;font-variant-numeric:tabular-nums}
+.profit-labor,.profit-foot{font-size:var(--sk-type-caption);color:#5b6a80;line-height:1.7;margin:14px 0 10px}
+.profit-foot strong{font-size:var(--sk-type-body);color:var(--n9);font-variant-numeric:tabular-nums}
 .n-alert{margin-bottom:12px}
 :deep(.profit-product),:deep(.profit-orders){border:0;background:transparent;padding:0;text-align:left;cursor:pointer;color:inherit;font:inherit}
 :deep(.profit-product){display:grid;gap:3px}
 :deep(.profit-product) strong{font-weight:550;color:#233247}
-:deep(.profit-product) small{color:#8390a2;font-size:12px}
-:deep(.profit-orders){color:#3468f0}
+:deep(.profit-product) small{color:#8390a2;font-size:var(--sk-type-caption)}
+:deep(.profit-orders){color:var(--accent)}
 :deep(.profit-col-title){display:grid;gap:2px;line-height:1.2}
-:deep(.profit-col-title) small{color:#8a94a3;font-weight:400;font-size:11px}
+:deep(.profit-col-title) small{color:#8a94a3;font-weight:400;font-size:var(--sk-type-caption)}
 @media(max-width:940px){.profit-kpis{grid-template-columns:repeat(3,minmax(0,1fr))}}
 @media(max-width:720px){
   .profit-kpis{grid-template-columns:repeat(2,minmax(0,1fr))}
-  .profit-kpis strong{font-size:18px}
+  .profit-kpis strong{font-size:var(--sk-type-heading)}
   .profit-toolbar{flex-wrap:wrap}
 }
 </style>

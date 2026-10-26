@@ -46,6 +46,9 @@ const snap = ref(null)
 const loading = ref(false)
 const failed = ref('')
 const refreshFailed = ref(false)
+// A display scope stamp, independent from calculation/run state. Never show the
+// previous store/month's values under a newly selected heading while reads run.
+const displayedScope = ref('')
 const drill = ref(null)
 const orderIssue = ref(null)
 const pricingPanel = ref(null)
@@ -61,6 +64,7 @@ async function beginClose() {
 }
 
 const period = computed(() => route.query.period || app.period || '')
+const scopeCurrent = computed(() => displayedScope.value === `${props.id}:${period.value}` && info.value?.store?.id === props.id)
 
 // 接口只给平台 id。人看的是「淘宝天猫」，不是 taobao。
 const platformName = computed(() => {
@@ -78,6 +82,7 @@ async function load(force=false, quiet=false) {
   const cachedKey=requested?`${id}:${requested}`:''
   if(!force && cachedKey && snapCache.has(cachedKey)){
     snap.value=snapCache.get(cachedKey)
+    displayedScope.value=cachedKey
     if(!quiet)loading.value=false
   }
   const firstPaint=!info.value && !snap.value
@@ -95,6 +100,7 @@ async function load(force=false, quiet=false) {
     if(!result)return
     info.value=result.value.detail
     if(!quiet||JSON.stringify(snap.value)!==JSON.stringify(result.value.snapshot))snap.value=result.value.snapshot
+    displayedScope.value=`${id}:${result.value.wanted || requested}`
     if(result.value.wanted && result.value.snapshot)snapCache.set(`${id}:${result.value.wanted}`, result.value.snapshot)
     while(snapCache.size>8)snapCache.delete(snapCache.keys().next().value)
     refreshFailed.value=false
@@ -409,10 +415,11 @@ watch(
 </script>
 
 <template>
-  <n-spin :show="loading && !info">
+  <n-spin :show="!failed && ((loading && !info) || (!!info && !scopeCurrent))">
     <n-alert v-if="failed" type="error" :bordered="false">{{ failed }}</n-alert>
 
-    <template v-else-if="info">
+    <section v-if="!failed && info && !scopeCurrent" class="card period-scope-loading" role="status" aria-live="polite"><p>正在加载 {{period}} 的账期资料…</p><n-skeleton text :repeat="5"/></section>
+    <template v-else-if="!failed && info && scopeCurrent">
       <PageHead
         kicker="店铺账期"
         :title="info.store?.name || ''"
@@ -589,7 +596,7 @@ watch(
                 <p v-else class="xs muted" style="margin-bottom: var(--s3)">
                   点击事项查看对应明细。
                 </p>
-                <GapList :gaps="gaps" clickable @open="openGap" />
+                <GapList :gaps="gaps" :scope-key="`${props.id}:${period}:${snap.run_id}`" :evidence-open="!!drill || !!orderIssue" clickable @open="openGap" />
               </n-tab-pane>
 
               <n-tab-pane name="checks">

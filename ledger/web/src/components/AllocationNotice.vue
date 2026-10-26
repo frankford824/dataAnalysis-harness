@@ -16,4 +16,4 @@ defineProps({snapshot:{type:Object,required:true}})
     <a v-if="snapshot.has_allocation_evidence && snapshot.run_id" :href="`/api/runs/${snapshot.run_id}/allocation.csv`" download>下载分配明细（订单号、金额、未分配原因及核对方式）</a>
   </section>
 </template>
-<style scoped>.allocation-notice{display:grid;gap:8px;margin:12px 0}.allocation-notice a{font-size:13px;color:#3560d6;text-decoration:underline}</style>
+<style scoped>.allocation-notice{display:grid;gap:8px;margin:12px 0}.allocation-notice a{font-size:var(--sk-type-body);color:#3560d6;text-decoration:underline}</style>

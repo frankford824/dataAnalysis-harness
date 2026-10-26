@@ -8,7 +8,8 @@ defineProps({
 </script>
 
 <template>
-  <header class="page-head">
+  <section class="page-intro">
+  <header class="page-head" data-region="hero">
     <div class="page-head-copy">
       <div v-if="kicker" class="page-head-kicker">{{ kicker }}</div>
       <h1>{{ title }}</h1>
@@ -19,8 +20,9 @@ defineProps({
       </p>
       <p v-if="hint" class="page-head-hint">{{ hint }}</p>
     </div>
-    <div v-if="$slots.actions" class="page-head-actions">
+  </header>
+    <div v-if="$slots.actions" class="page-head-actions ui-control-bar" data-region="function">
       <slot name="actions" />
     </div>
-  </header>
+  </section>
 </template>

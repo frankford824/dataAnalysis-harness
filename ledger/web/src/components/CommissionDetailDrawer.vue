@@ -72,4 +72,4 @@ async function download(){
     <template #footer><n-space><n-button :disabled="!data||loading||mismatch" :loading="downloading" @click="download">导出明细</n-button><n-button type="primary" @click="emit('close')">关闭</n-button></n-space></template>
   </n-drawer-content></n-drawer>
 </template>
-<style scoped>.detail-scope{font-size:12px;color:#8390a3;margin-bottom:18px}.detail-total{padding:18px 20px;background:#f4f7fc;border-radius:7px;margin-bottom:20px}.detail-total span{color:#718097;font-size:12px}.detail-total strong{display:block;font-size:28px;font-weight:600;color:#3468f0;font-variant-numeric:tabular-nums;margin-top:4px}.n-alert{margin-bottom:14px}</style>
+<style scoped>.detail-scope{font-size:var(--sk-type-caption);color:#8390a3;margin-bottom:18px}.detail-total{padding:18px 20px;background:#f4f7fc;border-radius:7px;margin-bottom:20px}.detail-total span{color:var(--n6);font-size:var(--sk-type-caption)}.detail-total strong{display:block;font-size:var(--sk-type-title);font-weight:600;color:var(--accent);font-variant-numeric:tabular-nums;margin-top:4px}.n-alert{margin-bottom:14px}</style>

@@ -8,7 +8,7 @@
  * 所以这里只做一件事：把它们摆成一条一条，每条一句人话，能点的就点进去。
  * 排序在后端定好了（拦路的在前，同级按金额），前端不再自己排——两处排序迟早会不一样。
  */
-import { computed } from 'vue'
+import { computed, defineAsyncComponent, ref } from 'vue'
 
 import { money } from '../format'
 
@@ -16,9 +16,14 @@ const props = defineProps({
   gaps: { type: Array, default: () => [] },
   //: 点一条能不能落到具体的地方。落不了就不做成可点的，免得点了没反应。
   clickable: { type: Boolean, default: false },
+  scopeKey: { type: String, default: '' },
+  evidenceOpen: { type: Boolean, default: false },
 })
 
 const emit = defineEmits(['open'])
+const ReviewDesk = defineAsyncComponent(() => import('./ReviewDesk.vue'))
+const deskReady = ref(false), deskOpen = ref(false)
+function openDesk() { deskReady.value = true; deskOpen.value = true }
 
 /** 空值项和异常值项分开摆。处置方式不同：一个是去补数据，一个是去查。 */
 const groups = computed(() => {
@@ -43,6 +48,7 @@ function can(g) {
 
 <template>
   <div class="gaps">
+    <div v-if="clickable && gaps.length" class="temporary-workspace-toolbar"><span class="xs muted">原始清单顺序保持不变</span><n-button size="small" @click="openDesk">展开临时处理桌面</n-button></div>
     <div v-if="!gaps.length" class="ok">
       <span class="tick">✓</span> 没找到空值项和异常项
     </div>
@@ -73,6 +79,7 @@ function can(g) {
       </div>
     </section>
   </div>
+  <ReviewDesk v-if="deskReady" v-model:show="deskOpen" :evidence-open="evidenceOpen" :items="gaps" :scope-key="scopeKey" :can-open="can" @open="emit('open',$event)" />
 </template>
 
 <style scoped>

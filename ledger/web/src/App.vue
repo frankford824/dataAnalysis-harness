@@ -4,19 +4,24 @@
  * 拖放挂在整个窗口上而不是某个方框里。交表是这套系统里最高频的动作，让人先找到
  * 一个方框再松手是多出来的一步。
  */
-import { NConfigProvider, NDialogProvider, NMessageProvider, zhCN, dateZhCN } from 'naive-ui'
+import { NConfigProvider, NDialogProvider, NMessageProvider, darkTheme, zhCN, dateZhCN } from 'naive-ui'
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 
 import AppBody from './components/AppBody.vue'
 import { useRoute } from 'vue-router'
 import { useApp } from './store'
-import { theme } from './theme'
+import { uiTheme } from './theme'
+import SketchEdges from './components/ui/SketchEdges.vue'
 
 const app = useApp()
 const route = useRoute()
 const dragging = ref(0)
 const overlay = computed(() => dragging.value > 0)
 const dropped = ref(null)
+const appearance = window.matchMedia('(prefers-color-scheme: dark)')
+const dark = ref(appearance.matches)
+const theme = computed(() => uiTheme(dark.value))
+function updateAppearance(event) { dark.value = event.matches }
 
 function onEnter(e) {
   if (app.ingestMode === 'nas' || route.meta.commission) return
@@ -38,12 +43,14 @@ function onDrop(e) {
 }
 
 onMounted(() => {
+  appearance.addEventListener('change', updateAppearance)
   window.addEventListener('dragenter', onEnter)
   window.addEventListener('dragleave', onLeave)
   window.addEventListener('dragover', onOver)
   window.addEventListener('drop', onDrop)
 })
 onUnmounted(() => {
+  appearance.removeEventListener('change', updateAppearance)
   window.removeEventListener('dragenter', onEnter)
   window.removeEventListener('dragleave', onLeave)
   window.removeEventListener('dragover', onOver)
@@ -52,7 +59,8 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <NConfigProvider :theme="null" :theme-overrides="theme" :locale="zhCN" :date-locale="dateZhCN">
+  <NConfigProvider :theme="dark ? darkTheme : null" :theme-overrides="theme" :locale="zhCN" :date-locale="dateZhCN">
+    <SketchEdges />
     <NMessageProvider>
       <NDialogProvider>
         <AppBody :dropped="dropped" @taken="dropped = null" />

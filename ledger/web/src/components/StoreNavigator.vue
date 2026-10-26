@@ -307,7 +307,7 @@ function renderExtra(option) {
   color: var(--n6);
 }
 :deep(.count-num) { min-width: 2ch; text-align: right; }
-:deep(.count-unit) { font-size: 11px; color: var(--n5); }
+:deep(.count-unit) { font-size:var(--sk-type-caption); color: var(--n5); }
 :deep(.n-menu-item-content--selected .count-tag),
 :deep(.n-menu-item-content--selected .count-unit) { color: var(--accent); }
 

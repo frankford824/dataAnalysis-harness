@@ -3,6 +3,7 @@
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { CalendarDays, ChevronLeft, ChevronRight } from '@lucide/vue'
 import LedgerTabs from './ui/LedgerTabs.vue'
+import MonthGrip from './ui/MonthGrip.vue'
 
 const props = defineProps({
   periods: { type: Array, default: () => [] },
@@ -89,6 +90,7 @@ const nearby=computed(()=>{
 
 <template>
   <div v-if="list.length" class="month-strip" :class="{compact}">
+    <MonthGrip :periods="list.map(item=>item.period)" :model-value="modelValue" @select="go" @open="picker=true" />
     <div class="month-nearby"><button class="month-step" :disabled="index<0||index>=list.length-1" aria-label="上一个月" @click="step(1)"><ChevronLeft :size="15"/></button><button v-for="item in nearby" :key="item.period" class="month-shortcut" :class="{selected:item.period===modelValue}" :title="`${pretty(item.period)} · ${statusOf(item).text}`" :aria-pressed="item.period===modelValue" @click="go(item.period)"><i :class="statusOf(item).mark"/>{{item.period}}</button><button class="month-step" :disabled="index<=0" aria-label="下一个月" @click="step(-1)"><ChevronRight :size="15"/></button></div>
     <n-popover trigger="click" :show="picker" :show-arrow="false" raw placement="bottom-end" @update:show="picker=$event"><template #trigger><button class="month-calendar" :aria-expanded="picker"><CalendarDays :size="15"/><span>全部月份</span></button></template>
       <div class="month-picker"><LedgerTabs v-model="shownYear" :options="years.map(y=>({key:y,label:y,count:yearCounts.get(y)}))" label="选择年份"/><div class="ps-grid" :class="{free:shownYear===OTHER}"><button v-for="month in months" :key="month.key" class="ps-cell" :class="[month.status.mark,{on:month.period===modelValue,off:!month.has}]" :disabled="!month.has" @click="go(month.period)"><span class="ps-m">{{month.label}}<em v-if="shownYear!==OTHER">月</em></span><span v-if="month.has" class="ps-s">{{month.status.text}}</span></button></div><div class="ps-legend"><span class="closed">已结账 {{statusCounts.closed}}</span><span class="ready">可确认 {{statusCounts.ready}}</span><span class="pending">待补资料 {{statusCounts.pending}}</span><span class="evidence">有新资料 {{statusCounts.evidence}}</span></div></div>
@@ -97,7 +99,7 @@ const nearby=computed(()=>{
 </template>
 
 <style scoped>
-.month-strip{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:12px 0;margin-bottom:16px;border-bottom:1px solid #e5ebf3}.month-nearby{display:flex;align-items:center;gap:7px;min-width:0;overflow:auto}.month-shortcut,.month-step,.month-calendar{display:flex;align-items:center;justify-content:center;gap:6px;flex:none;border:1px solid #e0e6ef;background:#fff;border-radius:5px;color:#667992;min-height:34px;padding:6px 10px;font-size:12px;cursor:pointer}.month-shortcut.selected{color:#3468f0;background:#edf3ff;border-color:#b8cdf8}.month-shortcut i{width:5px;height:5px;border-radius:50%;background:#9daabb}.month-shortcut i.closed{background:#3a986b}.month-shortcut i.evidence,.month-shortcut i.pending{background:#d3a252}.month-shortcut i.ready{background:#3468f0}.month-step{padding:5px}.month-step:disabled{opacity:.4;cursor:default}.month-calendar{border-color:transparent;background:transparent;white-space:nowrap;color:#3468f0}.month-picker{width:min(490px,calc(100vw - 24px));background:#fff;border:1px solid #dfe6f0;border-radius:8px;padding:10px 12px;box-shadow:0 10px 32px #233b5e20}.month-picker .ps-grid{padding:12px 0}.month-picker .ps-legend{padding:10px 0 0;background:#fff}.month-picker :deep(.ledger-tabs){padding:0 4px}@media(max-width:600px){.month-strip{gap:4px}.month-step{display:none}.month-shortcut{padding:6px 8px;font-size:11px}.month-nearby{gap:5px}.month-calendar{padding:5px;font-size:11px;gap:4px}.month-picker .ps-grid{grid-template-columns:repeat(3,minmax(0,1fr))}}
+.month-strip{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:12px 0;margin-bottom:16px;border-bottom:1px solid var(--n3)}.month-nearby{display:flex;align-items:center;gap:7px;min-width:0;overflow:auto}.month-shortcut,.month-step,.month-calendar{display:flex;align-items:center;justify-content:center;gap:6px;flex:none;border:1px solid var(--n3);background:var(--n0);border-radius:5px;color:#667992;min-height:34px;padding:6px 10px;font-size:var(--sk-type-caption);cursor:pointer}.month-shortcut.selected{color:var(--accent);background:var(--accent-bg);border-color:#b8cdf8}.month-shortcut i{width:5px;height:5px;border-radius:50%;background:#9daabb}.month-shortcut i.closed{background:#3a986b}.month-shortcut i.evidence,.month-shortcut i.pending{background:#d3a252}.month-shortcut i.ready{background:var(--accent)}.month-step{padding:5px}.month-step:disabled{opacity:.4;cursor:default}.month-calendar{border-color:transparent;background:transparent;white-space:nowrap;color:var(--accent)}.month-picker{width:min(490px,calc(100vw - 24px));background:var(--n0);border:1px solid #dfe6f0;border-radius:8px;padding:10px 12px;box-shadow:0 10px 32px #233b5e20}.month-picker .ps-grid{padding:12px 0}.month-picker .ps-legend{padding:10px 0 0;background:var(--n0)}.month-picker :deep(.ledger-tabs){padding:0 4px}@media(max-width:600px){.month-strip{gap:4px}.month-step{display:none}.month-shortcut{padding:6px 8px;font-size:var(--sk-type-caption)}.month-nearby{gap:5px}.month-calendar{padding:5px;font-size:var(--sk-type-caption);gap:4px}.month-picker .ps-grid{grid-template-columns:repeat(3,minmax(0,1fr))}}
 
 .ps { margin-bottom: var(--s5); padding: var(--s3) 0 var(--s4); border-bottom: 1px solid var(--n2); }
 .ps.compact { margin-top: var(--s4); }
@@ -108,7 +110,7 @@ const nearby=computed(()=>{
   width: 30px; height: 30px; padding: 0;
   border: 1px solid var(--n3); border-radius: var(--r-sm);
   background: var(--n0); color: var(--n6);
-  font-size: 18px; line-height: 1; cursor: pointer;
+  font-size:var(--sk-type-heading); line-height: 1; cursor: pointer;
   transition: color .15s, border-color .15s;
 }
 .ps-pager button:hover:not(:disabled) { color: var(--n9); border-color: var(--n5); }
@@ -144,7 +146,7 @@ const nearby=computed(()=>{
 }
 .ps-years button:hover { color: var(--n8); }
 .ps-years button.on { color: var(--n9); font-weight: 640; border-bottom-color: var(--n9); }
-.ps-years button small { font-family: var(--font); font-size: 10px; font-weight: 400; color: var(--n4); }
+.ps-years button small { font-family: var(--font); font-size:var(--sk-type-caption); font-weight: 400; color: var(--n4); }
 .ps-years button.on small { color: var(--n6); }
 
 /* 6×2 月份网格 */
@@ -161,8 +163,8 @@ const nearby=computed(()=>{
 .ps-cell:hover:not(:disabled):not(.on) { border-color: var(--n5); background: var(--n1); }
 
 .ps-m { font-family: var(--num); font-size: var(--t-base); font-weight: 640; line-height: 1.2; color: var(--n8); }
-.ps-m em { font-style: normal; font-family: var(--font); font-size: 11px; font-weight: 400; margin-left: 1px; color: var(--n5); }
-.ps-s { font-size: 10px; font-weight: 500; line-height: 1; white-space: nowrap; }
+.ps-m em { font-style: normal; font-family: var(--font); font-size:var(--sk-type-caption); font-weight: 400; margin-left: 1px; color: var(--n5); }
+.ps-s { font-size:var(--sk-type-caption); font-weight: 500; line-height: 1; white-space: nowrap; }
 
 /* 状态色 */
 .ps-cell.closed { border-color: #c8e6d4; background: var(--ok-bg); }

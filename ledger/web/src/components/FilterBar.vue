@@ -16,6 +16,7 @@ import { useRoute, useRouter } from 'vue-router'
 import { prettyPeriod } from '../format'
 import { canBack } from '../router'
 import { useApp } from '../store'
+import MonthGrip from './ui/MonthGrip.vue'
 
 const SearchPanel = defineAsyncComponent(() => import('./SearchPanel.vue'))
 
@@ -28,6 +29,7 @@ const route = useRoute()
 const backable = computed(() => canBack.value && route.name !== 'board')
 
 const searching = ref(false)
+const monthMenu = ref(false)
 const term = ref('')
 
 const platformOptions = computed(() => [
@@ -123,13 +125,18 @@ function submit() {
     <span class="locator-sep" aria-hidden="true">›</span>
     <label v-if="!['fees','onboard'].includes(route.name)" class="locator-field period">
       <span class="locator-label">月份</span>
+      <div class="locator-month-control">
       <n-select
         :value="app.period"
         :options="periodOptions"
+        :show="monthMenu"
         size="small"
         title="选择已有数据的月份"
+        @update:show="monthMenu=$event"
         @update:value="onPeriod"
       />
+      <MonthGrip compact :periods="app.periods" :model-value="app.period" @select="onPeriod" @open="monthMenu=true" />
+      </div>
     </label>
 
     <div class="locator-search">

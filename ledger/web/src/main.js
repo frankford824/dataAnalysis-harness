@@ -6,6 +6,9 @@ import './design.css'
 import './app.css'
 import './ledger-ui.css'
 import './workflow.css'
+import './design/tokens.css'
+import './sketch.css'
+import './review-workspace.css'
 import { router } from './router'
 import { accessibleTabs } from './components/ui/accessibleTabs'
 
@@ -15,4 +18,6 @@ import { accessibleTabs } from './components/ui/accessibleTabs'
 // 分片加载失败时显示重试入口，保留当前页面，避免自动刷新丢失未保存的编辑。这种「点了没反应」最招人烦，而且看不出是版本问题。
 window.addEventListener('vite:preloadError', event => { event.preventDefault();window.dispatchEvent(new Event('ledger:page-load-error')) })
 
+document.documentElement.classList.add('sketch-theme')
+document.documentElement.style.setProperty('--sk-edge-filter', 'url("#ledger-pencil-edge")')
 createApp(App).use(createPinia()).use(router).directive('ledger-tabs',accessibleTabs).mount('#app')
