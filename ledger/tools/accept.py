@@ -353,6 +353,21 @@ def compare_case(case: Case, target, human: dict[str, float], model) -> float:
     return math.fsum(gaps)
 
 
+def select_case_slice(model, result, case: Case):
+    """Bind one declared acceptance period to one exact model store identity."""
+    if not case.period:
+        raise ValueError('案例必须显式指定账期')
+    matches = [store for store in model.stores
+               if case.store in (store.id, store.name, *store.aliases)]
+    if len(matches) != 1:
+        raise ValueError('案例未绑定唯一模型店铺身份')
+    candidates = [sl for (store, period), sl in result.slices.items()
+                  if store == matches[0].name and period == case.period]
+    if len(candidates) != 1:
+        raise ValueError(f'缺少唯一的 {case.store} · {case.period} 切片')
+    return candidates[0]
+
+
 def run_case(case: Case) -> float:
     if not case.period:
         print("验收失败：案例必须显式指定账期")
@@ -423,17 +438,11 @@ def run_case(case: Case) -> float:
     # ------------------------------------------------------------------ #
     print("\n" + "=" * 96 + "\n与人工 Excel 表逐项对账\n" + "=" * 96)
     human = human_totals(DATA / case.detail, case.sheet, case.key, case.columns)
-    matches = [store for store in model.stores
-               if case.store in (store.id, store.name, *store.aliases)]
-    if len(matches) != 1:
-        print("验收失败：案例未绑定唯一模型店铺身份")
+    try:
+        target = select_case_slice(model, result, case)
+    except ValueError as error:
+        print(f'验收失败：{error}')
         return float("inf")
-    candidates = [sl for (store, period), sl in result.slices.items()
-                  if store == matches[0].name and period == case.period]
-    if len(candidates) != 1:
-        print(f"验收失败：缺少唯一的 {case.store} · {case.period} 切片")
-        return float("inf")
-    target = candidates[0]
 
     print(f"  {'项目':<16}{'人工表':>16}{'引擎':>16}{'差':>14}   ")
     print("  " + "-" * 66)

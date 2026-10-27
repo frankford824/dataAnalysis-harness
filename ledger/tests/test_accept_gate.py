@@ -106,3 +106,39 @@ def test_baseline_requires_manifest_and_explicit_scope_reduction(tmp_path, monke
 def test_ratio_bool_and_nonfinite_are_not_amount_noise(before, after):
     assert not replay.compare({'s': {'p': {'coverage': after}}},
                               {'stores': {'s': {'p': {'coverage': before}}}}).clean
+
+
+def declared_scope(monkeypatch,periods):
+    import test_acceptance as acceptance
+    store=N(id='audit-id',name='audit',aliases=['legacy-audit'])
+    model=N(stores=[store],sources=[N(id='orders',is_spine=True)])
+    monkeypatch.setattr(acceptance,'CASES',{period:case(period=period) for period in periods})
+    return acceptance,model,store
+
+
+def test_acceptance_helpers_ignore_only_undeclared_tail_periods(monkeypatch):
+    acceptance,model,store=declared_scope(monkeypatch,['2026-05'])
+    selected=object();tail=object()
+    result=N(slices={('audit','2026-05'):selected,('audit','2026-06'):tail})
+    assert acceptance._declared_slices(model,store,result)=={('audit','2026-05'):selected}
+
+
+@pytest.mark.parametrize('available',[{}, {('audit','2026-05'):object()}, {('another-store','2026-06'):object()}])
+def test_acceptance_helpers_refuse_any_missing_declared_period(monkeypatch,available):
+    acceptance,model,store=declared_scope(monkeypatch,['2026-05','2026-06'])
+    with pytest.raises(ValueError,match='缺少唯一'):
+        acceptance._declared_slices(model,store,N(slices=available))
+
+
+@pytest.mark.parametrize('family',['test_store_can_close','test_coverage_denominator_is_scoped','test_spine_source_not_reported_missing'])
+def test_acceptance_helpers_check_every_declared_period_with_original_assertions(monkeypatch,family):
+    acceptance,model,store=declared_scope(monkeypatch,['2026-05','2026-06'])
+    def slice(complete):
+        return N(can_close=complete,audit=N(findings=[]),
+            link_reports={'goods_cost':N(spine_keys=1,spine_keys_total=2,expect_label='已发货',coverage=.99 if complete else .97)},
+            completeness=N(missing=[] if complete else ['orders'],reasons={'orders':'fixture missing'}))
+    result=N(slices={('audit','2026-05'):slice(True),('audit','2026-06'):slice(False),('audit','2026-07'):slice(True)})
+    selected=acceptance._declared_slices(model,store,result)
+    assert set(selected)=={('audit','2026-05'),('audit','2026-06')}
+    monkeypatch.setattr(acceptance,'_run_store',lambda _: (model,store,selected))
+    with pytest.raises(AssertionError):getattr(acceptance,family).__wrapped__(store.id)
