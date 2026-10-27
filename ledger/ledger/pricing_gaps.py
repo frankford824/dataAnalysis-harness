@@ -47,6 +47,6 @@ def csv(path: Path, q: str = "", category: str = '') -> str:
     lines = [",".join(label for _, label in fields)]
     for row in rows(path, q, category).collect().iter_rows(named=True):
         row['required_evidence'] = required_evidence(row)
-        lines.append(",".join(_excel_identifier_cell(row.get(key)) if key.endswith("order_id")
+        lines.append(",".join(_excel_identifier_cell(row.get(key)) if key.endswith("order_id") or key in {'sku','cost_company_id'}
                               else csv_cell(row.get(key)) for key, _ in fields))
     return "\n".join(lines) + "\n"

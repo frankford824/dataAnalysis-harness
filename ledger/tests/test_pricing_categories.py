@@ -7,6 +7,7 @@ import pytest
 from ledger import pricing_gaps, cost_lines
 from ledger.storage_integrity import seal
 from ledger.workspace import Workspace
+from ledger.pricing_categories import categorized
 from test_cost_lines import payload, archive
 from test_pdd_historical_pricing import scenario
 
@@ -54,3 +55,21 @@ def test_gap_categories_count_unique_keys_and_keep_mixed_and_unmatched(tmp_path)
     filtered=cost_lines.page(ws,run,raw['store_id'],raw['period'],category='mixed')
     assert filtered['total']==3 and filtered['matching']==1 and filtered['items'][0]['coverage_key']=='S2'
     ws.close()
+
+
+def test_source_label_does_not_hide_identity_risk_or_conflicting_prices():
+    frame=pl.DataFrame([
+        {'reason':'订单商品与成本明细不一致，等待更新','cost_source':'register'},
+        {'reason':'成本与订单金额差异较大，需核对','cost_source':'history_carry'},
+        {'reason':'同一日期存在多个历史成本价，请核对价格依据','cost_source':'history'},
+    ])
+    assert categorized(frame.lazy()).collect()['category'].to_list()==['identity','amount','price_conflict']
+
+
+def test_evidence_export_preserves_numeric_sku_identifiers(tmp_path):
+    path=tmp_path/'sku.parquet'
+    pl.DataFrame([dict(order_id='o',internal_order_id='1',sku='12345678901234567890',
+        reason='缺少已核实的下单日历史成本',reference_unit_cost=None)]).write_parquet(path)
+    row=next(csv.DictReader(io.StringIO(pricing_gaps.csv(path))))
+    assert row['商品编码']=='="12345678901234567890"'
+    assert row['参考单价（未计入）']==''
