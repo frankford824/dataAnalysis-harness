@@ -2,10 +2,10 @@
 import polars as pl
 
 LABELS = {
-    'original_date': '缺原订单日期',
+    'original_date': '原订单日期待核',
     'register_evidence': '登记价依据待核',
     'history_carry': '沿用价待升级',
-    'historical_price': '缺下单日历史价',
+    'historical_price': '下单日成本依据不足',
     'identity': '商品身份或数量异常',
     'amount': '成本金额异常',
     'price_conflict': '历史价格依据冲突',

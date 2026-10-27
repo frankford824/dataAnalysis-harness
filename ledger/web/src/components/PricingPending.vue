@@ -21,7 +21,7 @@ const needed = computed(() => Math.max(0, Math.ceil((props.coverage?.expected ||
 const uncoveredOrders = computed(() => props.coverage?.uncovered ?? props.count)
 const reasonName = value => ({
   '下单日历史成本待核实':'成本尚未确认',
-  '缺少已核实的下单日历史成本':'没有可用成本',
+  '缺少已核实的下单日历史成本':'下单日成本依据不足',
   '原订单日期待核对':'缺少下单日期',
   '取价日期与下单日不一致':'成本日期不一致',
   '成本与订单金额差异较大，需核对':'成本金额异常',
@@ -238,7 +238,7 @@ const coverageColumns=[
         </article>
       </div>
       <div class="pricing-pages"><span>{{ coverageBusy ? '正在加载订单记录…' : `共 ${coverageData.matching ?? coverageData.total ?? summary.gaps} 笔` }}</span><n-pagination v-model:page="coveragePage" :item-count="coverageData.matching || 0" :page-size="50" :disabled="coverageBusy" simple /></div>
-      <details v-if="count" ref="sourceDetails" class="source-gap-details"><summary>查看 {{ integer(count) }} 条来源缺价记录与参考单价</summary>
+      <details v-if="count" ref="sourceDetails" class="source-gap-details"><summary>查看 {{ integer(count) }} 条待核价明细与参考单价</summary>
         <p class="pricing-help">这是聚水潭等来源行的逐条异常；覆盖缺口以完整订单清单为准，来源行不会重复补录金额。</p>
         <div v-if="data.reason_counts?.length" class="pricing-summary" aria-label="未覆盖原因汇总"><span v-for="item in data.reason_counts" :key="item.reason"><b>{{ integer(item.count) }}</b>{{ reasonName(item.reason) }}</span></div>
       <n-alert v-if="error" type="error" style="margin-bottom: 16px">{{ error }} <n-button size="small" @click="load()">重试</n-button></n-alert>
