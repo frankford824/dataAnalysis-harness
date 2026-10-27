@@ -1595,13 +1595,14 @@ class OrderFeed:
     ) -> pl.DataFrame:
         review_pricing = require_history or require_pricing
         from .engine.cost_policy import is_freight_surcharge
-        self._retired_cost_rows = 0
+        # Deleted/replaced lines are traceability only on every platform,
+        # including platforms that accept provided rather than historical costs.
+        keys = ["order_id", "sub_order_id"]
+        live = items.select(pl.col(*keys).cast(pl.Utf8)).unique()
+        costs = costs.with_columns(pl.col(*keys).cast(pl.Utf8))
+        self._retired_cost_rows = costs.join(live, on=keys, how="anti").height
+        costs = costs.join(live, on=keys, how="semi")
         if review_pricing:
-            keys = ["order_id", "sub_order_id"]
-            live = items.select(pl.col(*keys).cast(pl.Utf8)).unique()
-            costs = costs.with_columns(pl.col(*keys).cast(pl.Utf8))
-            self._retired_cost_rows = costs.join(live, on=keys, how="anti").height
-            costs = costs.join(live, on=keys, how="semi")
             expected=items.select(pl.col(*keys).cast(pl.Utf8),pl.col('sku_id').cast(pl.Utf8).alias('__current_sku'),
                                   pl.col('quantity').cast(pl.Float64,strict=False).alias('__current_quantity')).unique(subset=keys)
             costs=costs.join(expected,on=keys,how='left').with_columns(
