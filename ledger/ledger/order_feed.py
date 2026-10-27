@@ -1640,6 +1640,8 @@ class OrderFeed:
             pl.col("order_id", "sub_order_id").cast(pl.Utf8),
             pl.col('sku_id').cast(pl.String).alias('__current_item_sku'),
             pl.col('quantity').alias('__current_item_quantity'),
+            (pl.col('original_order_date').cast(pl.String) if 'original_order_date' in items.columns
+             else pl.lit(None, dtype=pl.String)).alias('__upstream_original_day'),
             (pl.col('unit_price') if 'unit_price' in items.columns else pl.lit(None)).alias('__current_sale_price'),
             (pl.col("order_flag").cast(pl.Utf8) if "order_flag" in items.columns else pl.lit(None, dtype=pl.Utf8).alias("order_flag")),
             (pl.col('__flag_from_upload').fill_null(False) if '__flag_from_upload' in items.columns
@@ -1766,7 +1768,8 @@ class OrderFeed:
                 (pl.col(name).cast(pl.Utf8) if name in certified.columns else pl.lit(None, dtype=pl.Utf8)).alias(name)
                 for name in ("cost_source", "cost_status", "cost_as_of", "failure_reason", "reference_unit_cost", "pricing_evidence")
             ] if review_pricing else []),
-            *([pl.col("pricing_suspect"), pl.col("pricing_missing")] if review_pricing else []),
+            *([pl.col("pricing_suspect"), pl.col("pricing_missing"),
+               pl.col('__upstream_original_day').alias('source_pricing_day')] if review_pricing else []),
             *([pl.col('__identity_changed').fill_null(False).alias('pricing_identity_changed'),
                pl.col('__source_pricing_suspect').alias('pricing_source_suspect')] if review_pricing else []),
             self._dt("order_time").alias("order_time"),

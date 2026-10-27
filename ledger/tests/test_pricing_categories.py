@@ -73,3 +73,10 @@ def test_evidence_export_preserves_numeric_sku_identifiers(tmp_path):
     row=next(csv.DictReader(io.StringIO(pricing_gaps.csv(path))))
     assert row['商品编码']=='="12345678901234567890"'
     assert row['参考单价（未计入）']==''
+
+
+@pytest.mark.parametrize('day,category',[('2026-05-24','sync'),('2026-05-25','original_date'),(None,'original_date')])
+def test_confirmed_upstream_date_is_distinct_from_waiting_for_a_price(day,category):
+    _,r=scenario(unit_cost=None,cost_status='missing_price',failure_reason='missing_original_order_date',source_pricing_day=day)
+    assert r.pricing_gaps['category'].item()==category
+    assert r.facts.filter(pl.col('counted')).is_empty()

@@ -41,7 +41,7 @@ def csv(path: Path, q: str = "", category: str = '') -> str:
               ("reason", "待核对事项"), ("file_name", "来源文件"),
               ("sheet", "工作表"), ("row_no", "原表行号"),
               ('internal_sub_order_id','聚水潭商品行ID'),('cost_source','成本来源'),('cost_status','来源状态'),
-              ('cost_as_of','来源取价日'),('register_basis','登记价依据类型'),('cost_company_id','成本公司'),
+              ('cost_as_of','来源取价日'),('source_pricing_day','订单台原始取价日'),('register_basis','登记价依据类型'),('cost_company_id','成本公司'),
               ('price_begin_date','历史价格开始日'),('price_end_date','历史价格截止日'),
               ('carry_days','沿用天数'),('upstream_failure_reason','上游待核原因'),('required_evidence','还缺什么依据')]
     lines = [",".join(label for _, label in fields)]

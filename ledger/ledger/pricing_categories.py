@@ -9,7 +9,7 @@ LABELS = {
     'identity': '商品身份或数量异常',
     'amount': '成本金额异常',
     'price_conflict': '历史价格依据冲突',
-    'sync': '成本同步待完成',
+    'sync': '取价或同步待完成',
     'other': '其他待核对',
 }
 
@@ -41,6 +41,7 @@ def category_expr(frame):
     return (pl.when(reason.str.contains('商品信息|商品身份|商品与|组件|数量|身份')).then(pl.lit('identity'))
         .when(reason.str.contains('金额差异|金额异常')).then(pl.lit('amount'))
         .when(reason.str.contains('多个历史成本价|登记记录相互冲突')).then(pl.lit('price_conflict'))
+        .when(reason == '原订单日期已确认，等待历史成本取价').then(pl.lit('sync'))
         .when(col('upstream_failure_reason') == 'missing_original_order_date').then(pl.lit('original_date'))
         .when(col('cost_source') == 'history_carry').then(pl.lit('history_carry'))
         .when(col('cost_source').is_in(['register', 'register_first']) | reason.str.contains('登记价|登记成本|成本登记'))

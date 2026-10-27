@@ -338,6 +338,7 @@ def evaluate_metric(
             col("cost_source").cast(pl.String).alias("cost_source"),
             col("cost_status").cast(pl.String).alias("cost_status"),
             col("cost_as_of").cast(pl.String).alias("cost_as_of"),
+            col("source_pricing_day").cast(pl.String).alias("source_pricing_day"),
             col("failure_reason").cast(pl.String).alias("upstream_failure_reason"),
             col("pricing_evidence").cast(pl.String).str.json_path_match('$.register_basis').alias('register_basis'),
             col("pricing_evidence").cast(pl.String).str.json_path_match('$.cost_company_id').alias('cost_company_id'),
@@ -356,6 +357,9 @@ def evaluate_metric(
             .when(col('failure_reason') == 'original_quantity_conflict').then(pl.lit('原始数量与当前订单数量不一致，请核对后再计价'))
             .when(col('failure_reason') == 'item_identity_mismatch').then(pl.lit('成本证据与当前订单商品不一致，等待重新核实'))
             .when(col('failure_reason') == 'nonpositive_register_cost').then(pl.lit('登记成本为零或负数，尚不能作为有效成本'))
+            .when((col('failure_reason') == 'missing_original_order_date') & wanted.is_not_null()
+                  & (col('source_pricing_day').cast(pl.String).str.slice(0,10) == wanted.dt.strftime('%Y-%m-%d')))
+            .then(pl.lit('原订单日期已确认，等待历史成本取价'))
             .when(col('cost_source') == 'register_first').then(pl.lit('首次登记价晚于下单日，需补历史成本凭据'))
             .when((col('cost_source') == 'register') & (col('pricing_evidence').cast(pl.String).str.json_path_match('$.register_basis') == 'change_log_prior'))
             .then(pl.lit('后续调价前的旧值不能证明下单日价格，需补历史凭据'))
