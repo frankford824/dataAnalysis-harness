@@ -164,22 +164,87 @@ def test_missing_independent_company_metadata_is_not_assumed_healthy(tmp_path):
     with pytest.raises(ValueError,match='metadata is unavailable'):module().saved_company(root,PERIOD)
 
 
+@pytest.mark.parametrize('mutation',['delete_all','changed_frozen'])
+def test_real_unknown_frozen_company_basis_cannot_be_hidden_or_replaced(stored,mutation):
+    ws=stored['ws']
+    # Represent a pre-existing unverified frozen baseline, never a valid close
+    # approval or a positive fixture created by bypassing the batch transaction.
+    basis=[{'store_id':sid,'revenue':None,'run_id':stored['runs'][PERIOD,sid]} for sid in ('s1','s2')]
+    with ws.conn:
+        ws.conn.execute('INSERT INTO automation_overhead_close VALUES(?,?,?,?,?,?,?)',
+            (PERIOD,'f'*64,'10',json.dumps(basis),json.dumps({'s1':'2.50','s2':'7.50'}),'legacy-source','legacy-source'))
+    routes=responses(stored);month=automation_actions.month(ws,stored['model'],PERIOD)
+    assert month['overhead']['finance_decision']['reason_code']=='overhead_frozen_basis_unverified'
+    routes['/api/automation/months/'+PERIOD]=month
+    if mutation=='delete_all':
+        month['overhead']['finance_decision']=None
+        month['decision_groups']=[group for group in month['decision_groups'] if group['kind']!='company_finance']
+        month['counts']['company_finance_decisions']=0;month['company_finance_only']=False;month['status']='completed'
+    else:
+        month['overhead']['finance_decision']['frozen']['total']='0'
+        next(group for group in month['decision_groups'] if group['kind']=='company_finance')['frozen']['total']='0'
+    verify=module()
+    with pytest.raises(ValueError):
+        verify.business_readback('https://user-entry.example.invalid',PERIOD,CODE,reader=reader_for(routes),
+            company_source_lookup=lambda period:verify.saved_company(ws.root,period))
+
+
 def test_frozen_snapshot_includes_all_financial_layers(stored):
     verify=module()
     before=verify.snapshot(stored['root'],reader=lambda url:{'version':'b'*40})
     after=verify.snapshot(stored['root'],reader=lambda url:{'version':CODE})
-    assert set(before['workspace_immutable'])=={'manual_finance','run_labor'}
+    assert set(before['workspace_immutable'])=={'manual_finance','run_labor','automation_overhead_close'}
+    assert before['workspace_schema']['automation_overhead_close']=='present'
     assert set(before['immutable'])=={'payout_confirmation','settlement','profit_exclusion'}
     assert len(before['closed'])==2
     assert verify.compare_history(before,after,CODE)=={'changed_closed':0,'changed_financial_records':0}
 
 
 @pytest.mark.parametrize('section,table',[('workspace_immutable','manual_finance'),('workspace_immutable','run_labor'),
+    ('workspace_immutable','automation_overhead_close'),
     ('immutable','payout_confirmation'),('immutable','settlement'),('immutable','profit_exclusion')])
 def test_missing_required_history_layer_cannot_silently_remove_protection(stored,section,table):
     verify=module();before=verify.snapshot(stored['root'],reader=lambda url:{'version':CODE});after=deepcopy(before)
     del before[section][table]
     with pytest.raises(ValueError):verify.compare_history(before,after,CODE)
+
+
+@pytest.mark.parametrize('mutation',['update','delete','insert','drop_table'])
+def test_company_frozen_basis_records_are_protected_by_actual_sql_history(stored,mutation):
+    ws=stored['ws'];verify=module()
+    def insert(signature):
+        ws.conn.execute('INSERT INTO automation_overhead_close VALUES(?,?,?,?,?,?,?)',
+            (PERIOD,signature,'10','[]','{}','legacy-source','legacy-source'))
+    with ws.conn:insert('a'*64)
+    before=verify.snapshot(ws.root,reader=lambda _:{'version':CODE})
+    with ws.conn:
+        if mutation=='update':
+            ws.conn.execute('DROP TRIGGER automation_overhead_close_no_update')
+            ws.conn.execute("UPDATE automation_overhead_close SET total='99'")
+        elif mutation=='delete':
+            ws.conn.execute('DROP TRIGGER automation_overhead_close_no_delete')
+            ws.conn.execute('DELETE FROM automation_overhead_close')
+        elif mutation=='insert':insert('b'*64)  # Same period, distinct compound identity.
+        else:ws.conn.execute('DROP TABLE automation_overhead_close')
+    after=verify.snapshot(ws.root,reader=lambda _:{'version':CODE})
+    with pytest.raises(ValueError,match='Frozen financial history changed'):verify.compare_history(before,after,CODE)
+
+
+def test_legacy_absent_company_basis_can_only_upgrade_to_an_empty_table(stored):
+    from ledger.automation_store import install
+    ws=stored['ws'];verify=module()
+    with ws.conn:ws.conn.execute('DROP TABLE automation_overhead_close')
+    before=verify.snapshot(ws.root,reader=lambda _:{'version':CODE})
+    assert before['workspace_schema']['automation_overhead_close']=='legacy_absent'
+    assert before['workspace_immutable']['automation_overhead_close']=={}
+    install(ws.conn)
+    empty=verify.snapshot(ws.root,reader=lambda _:{'version':CODE})
+    assert verify.compare_history(before,empty,CODE)=={'changed_closed':0,'changed_financial_records':0}
+    with ws.conn:
+        ws.conn.execute('INSERT INTO automation_overhead_close VALUES(?,?,?,?,?,?,?)',
+            (PERIOD,'a'*64,'10','[]','{}','unapproved-upgrade','unapproved-upgrade'))
+    nonempty=verify.snapshot(ws.root,reader=lambda _:{'version':CODE})
+    with pytest.raises(ValueError,match='Frozen financial history changed'):verify.compare_history(before,nonempty,CODE)
 
 
 @pytest.mark.parametrize('addition',['closed_period','run_labor'])

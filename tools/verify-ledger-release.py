@@ -94,13 +94,19 @@ def saved_company(root,period):
         with readonly(Path(root)/'workspace.db') as db:
             db.row_factory=sqlite3.Row
             db.execute('BEGIN')
-            frozen=db.execute('SELECT 1 FROM automation_overhead_close WHERE period=? LIMIT 1',(period,)).fetchone()
+            frozen=db.execute('SELECT * FROM automation_overhead_close WHERE period=? ORDER BY rowid DESC LIMIT 1',(period,)).fetchone()
+            has_closed=bool(db.execute("SELECT 1 FROM period WHERE period=? AND state='closed' LIMIT 1",(period,)).fetchone())
             closed=db.execute("""SELECT p.store_id,p.period,p.run_id,l.amount,r.engine,r.model_revision,r.input_fingerprint
                 FROM period p JOIN run_labor l ON l.run_id=p.run_id JOIN run r ON r.id=p.run_id
                 WHERE p.period=? AND p.state='closed' ORDER BY p.store_id""",(period,)).fetchall()
             allocations=[dict(row) for row in closed]
+            frozen_value=None if frozen is None else {'input_sha':frozen['input_sha'],'total':frozen['total'],
+                'basis':json.loads(frozen['basis_json']),'shares':json.loads(frozen['shares_json']),'at':frozen['at']}
+            legacy=not frozen and any(amount(row['amount'])!=0 for row in closed)
+            unknown=bool(frozen and has_closed and any(row.get('revenue') is None for row in frozen_value['basis']))
             return {'period':period,'has_frozen_basis':bool(frozen),'closed_allocations':allocations,
-                    'legacy_decision_required':not frozen and any(amount(row['amount'])!=0 for row in closed)}
+                    'frozen':frozen_value,'required_reason':'overhead_frozen_basis_unverified' if unknown else
+                    'overhead_legacy_frozen_basis' if legacy else None}
     except sqlite3.Error as error:
         raise ValueError('Independent company finance metadata is unavailable') from error
 
@@ -243,7 +249,11 @@ def immutable_rows(db,table):
     from ledger.snapshot_store import resolve
     cursor=db.execute('SELECT * FROM '+table)
     names=[column[0] for column in cursor.description]
-    return {str(row[0]):digest(tuple(resolve(db,value) if name.endswith('_json') and isinstance(value,str) else value
+    def identity(row):
+        if table=='automation_overhead_close':
+            return json.dumps([row[names.index('period')],row[names.index('input_sha')]],separators=(',',':'))
+        return str(row[0])
+    return {identity(row):digest(tuple(resolve(db,value) if name.endswith('_json') and isinstance(value,str) else value
         for name,value in zip(names,row))) for row in cursor}
 
 
@@ -255,15 +265,18 @@ def snapshot(root,reader=read_json):
         closed={f'{s}:{p}':{'run':r,'result_sha':digest(json.loads(resolve(db,payload)))} for s,p,r,payload in db.execute(
             "SELECT p.store_id,p.period,p.run_id,r.result FROM period p JOIN run r ON p.run_id=r.id WHERE p.state='closed'")}
         workspace_immutable={table:immutable_rows(db,table) for table in ('manual_finance','run_labor')}
+        company_table=bool(db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='automation_overhead_close'").fetchone())
+        workspace_immutable['automation_overhead_close']=immutable_rows(db,'automation_overhead_close') if company_table else {}
+        workspace_schema={'automation_overhead_close':'present' if company_table else 'legacy_absent'}
     with readonly(root/'commission/registry.db') as db:
         db.execute('BEGIN')
         immutable={table:immutable_rows(db,table) for table in ('payout_confirmation','settlement','profit_exclusion')}
     return dict(schema=2,version=reader('http://127.0.0.1:8000/api/version'),closed=closed,
-                workspace_immutable=workspace_immutable,immutable=immutable)
+                workspace_immutable=workspace_immutable,workspace_schema=workspace_schema,immutable=immutable)
 
 
 def compare_history(baseline,current,code_sha):
-    required={'workspace_immutable':{'manual_finance','run_labor'},
+    required={'workspace_immutable':{'manual_finance','run_labor','automation_overhead_close'},
               'immutable':{'payout_confirmation','settlement','profit_exclusion'}}
     for snapshot_value in (baseline,current):
         if snapshot_value.get('schema')!=2 or not isinstance(snapshot_value.get('closed'),dict):
@@ -271,6 +284,13 @@ def compare_history(baseline,current,code_sha):
         for section,tables in required.items():
             if not isinstance(snapshot_value.get(section),dict) or not tables.issubset(snapshot_value[section]):
                 raise ValueError('Frozen-history receipt lacks required financial layers')
+        company_status=(snapshot_value.get('workspace_schema') or {}).get('automation_overhead_close')
+        company_rows=snapshot_value['workspace_immutable']['automation_overhead_close']
+        if company_status not in {'present','legacy_absent'} or not isinstance(company_rows,dict) or (company_status=='legacy_absent' and company_rows):
+            raise ValueError('Frozen-history receipt lacks explicit company basis metadata')
+    if (baseline['workspace_schema']['automation_overhead_close']=='present'
+            and current['workspace_schema']['automation_overhead_close']!='present'):
+        raise ValueError('Frozen financial history changed: company basis table was removed')
     if current['version'].get('version')!=code_sha:raise ValueError('Live version differs from acceptance receipt')
     changed={k:[baseline['closed'].get(k),current['closed'].get(k)] for k in set(baseline['closed'])|set(current['closed'])
              if current['closed'].get(k)!=baseline['closed'].get(k)}
@@ -337,15 +357,18 @@ def company_scope(month,report,period,company_source_lookup=None):
     if company_source_lookup is not None:
         independent=mapping(company_source_lookup(period),'Independent company finance source')
         if (independent.get('period')!=period or type(independent.get('has_frozen_basis')) is not bool
-                or type(independent.get('legacy_decision_required')) is not bool
-                or not isinstance(independent.get('closed_allocations'),list)):
+                or independent.get('required_reason') not in {None,'overhead_legacy_frozen_basis','overhead_frozen_basis_unverified'}
+                or not isinstance(independent.get('closed_allocations'),list) or 'frozen' not in independent
+                or independent['has_frozen_basis']!=(independent['frozen'] is not None)):
             raise ValueError('Independent company finance metadata is incomplete')
-        legacy=independent['legacy_decision_required']
-        if legacy and (finance is None or finance.get('reason_code')!='overhead_legacy_frozen_basis'
-                       or finance.get('frozen') is not None or finance.get('closed_allocations')!=independent['closed_allocations']):
-            raise ValueError('Independent legacy company finance decision is missing or changed')
-        if not legacy and finance is not None and finance.get('reason_code')=='overhead_legacy_frozen_basis':
-            raise ValueError('Company legacy decision differs from its independent saved source')
+        required_reason=independent['required_reason']
+        if required_reason and (finance is None or finance.get('reason_code')!=required_reason):
+            raise ValueError('Independent company finance decision is missing or changed')
+        if finance is not None:
+            if finance.get('frozen')!=independent['frozen'] or finance.get('closed_allocations')!=independent['closed_allocations']:
+                raise ValueError('Company finance frozen records differ from their independent saved source')
+            if not required_reason and finance.get('reason_code') in {'overhead_legacy_frozen_basis','overhead_frozen_basis_unverified'}:
+                raise ValueError('Company finance reason differs from its independent saved source')
     expected_status='needs_decision' if counts['needs_decision'] or finance is not None else 'processing' if counts['processing'] else 'completed'
     if month.get('status')!=expected_status:raise ValueError('Monthly workflow status differs from its store statuses')
     scope=mapping(report.get('scope'),'Business report scope')
