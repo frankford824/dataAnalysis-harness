@@ -118,13 +118,18 @@ def test_apply_archives_sources_and_preserves_june_state(tmp_path: Path) -> None
     workspace.record("douyin_mszr2dhn", "2025-02", old, ["old-2025"], evidence_ready=True)
     revenue=next(n.id for n in model.statement if n.headline=='revenue')
     june = {"can_close": True, "findings": [], "missing_sources": [],
-            "statement": [{'id':revenue,'value':100,'available':True}]}
-    workspace.record("taobao_xibishun", "2026-06", june, ["june"], evidence_ready=True)
+            "statement": [{'id':revenue,'value':100,'available':True}],
+            "calculation_inputs": {'metric_totals': {'trade_receipt':100},'unavailable_metrics':[]}}
+    june_run=workspace.record("taobao_xibishun", "2026-06", june, [], evidence_ready=True)
     from ledger.automation_checker import bind_model
     from ledger.model.schema import Overhead
     june_model=model.model_copy(update={'stores':(model.store('taobao_xibishun'),),
         'overheads':tuple(x for x in model.overheads if x.period!='2026-06')+(Overhead(period='2026-06',amount=0),)})
     bind_model(workspace,june_model)
+    # First capture of an explicit synthetic June original and its income facts;
+    # this is an isolated archive-preservation fixture, not a real golden case.
+    from automation_fixtures import capture_synthetic_summary_fixture
+    capture_synthetic_summary_fixture(workspace,june_model,june_run)
     workspace.close_period("taobao_xibishun", "2026-06", by="test",model=june_model)
     first = plan.cells[0]
     old_body = payload(first, model, "old-model-revision")

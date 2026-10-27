@@ -14,7 +14,7 @@ from dataclasses import asdict
 from pathlib import Path
 
 from .storage_integrity import digest, verified
-from .version import engine_version
+from .version import engine_version, assert_code_integrity
 from .content_fingerprint import update_frame
 
 _lock = threading.Lock()
@@ -34,8 +34,9 @@ def fingerprint(ws, model, store, ingestion, registry):
     version = engine_version()
     if not version or version == "unknown" or "dirty" in version:
         return None
+    source_code_sha = assert_code_integrity()['source_code_sha']
     state = revisions(ws, registry)
-    h = hashlib.sha256(json.dumps([version, model.model_dump_json(), store.id,
+    h = hashlib.sha256(json.dumps([version, source_code_sha, model.model_dump_json(), store.id,
                                   state, ingestion.source_sync_pending, ingestion.validation_errors,
                                   ingestion.deduplication], ensure_ascii=False, sort_keys=True).encode())
     for item in ingestion.items:
@@ -52,7 +53,7 @@ def fingerprint(ws, model, store, ingestion, registry):
     evidence = getattr(ingestion, 'brushing_evidence', None)
     if evidence is not None and not evidence.is_empty():
         update_frame(h, evidence)
-    return h.hexdigest(), state
+    return h.hexdigest(), state, source_code_sha
 
 
 def _key(ws, store):
@@ -81,10 +82,14 @@ def load(ws, store, signature, registry):
         if any(not verified(path) for path in paths):
             return None
         period_proof=ws.conn.execute('SELECT manifest_json FROM automation_run_proof WHERE run_id=?',(run_id,)).fetchone()
-        if period_proof:
-            from .automation_period_proof import valid_artifact
-            if any(not valid_artifact(ws,item) for item in json.loads(period_proof['manifest_json']).get('artifacts',[])):
-                return None
+        if not period_proof:
+            return None
+        manifest = json.loads(period_proof['manifest_json'])
+        if manifest.get('source_code_sha') != signature[2]:
+            return None
+        from .automation_period_proof import valid_artifact
+        if any(not valid_artifact(ws,item) for item in manifest.get('artifacts',[])):
+            return None
         payload = json.loads(row["result"])
         calculation = (payload.get("commission") or {}).get("calculation_id")
         if calculation:

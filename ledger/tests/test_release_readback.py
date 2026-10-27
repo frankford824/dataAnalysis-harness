@@ -3,6 +3,7 @@ from contextlib import contextmanager,nullcontext
 from copy import deepcopy
 import importlib.util
 import hashlib
+import io
 import json
 import os
 from pathlib import Path
@@ -93,8 +94,74 @@ def test_real_saved_operations_dto_reads_back_through_actual_http(stored):
     assert result['formula_checks']==12
     assert result['store_rows']==2
     assert result['input_sha']==stored['report']['input_sha']
-    assert result['business_status']==stored['month']['status']=='completed'
-    assert result['business_complete'] is True
+    assert result['business_status']==stored['month']['status']=='needs_decision'
+    assert result['business_complete'] is False
+
+
+def test_real_batch_close_with_unified_company_basis_has_complete_readback(tmp_path):
+    """Synthetic source construction, followed by the real human batch transaction."""
+    import polars as pl
+    from ledger import automation_checker,operations_readmodel
+    from ledger.storage_integrity import seal
+    from automation_fixtures import capture_synthetic_summary_fixture
+    ws,model,registry,runs=create_fixture(tmp_path/'batch',overhead=10,engine_can_close=True)
+    actor={'id':'fixture-finance','kind':'human','authenticated':True}
+    try:
+        automation_checker.bind_model(ws,model)
+        # Complete each synthetic original before its first immutable proof.
+        # Distinct period/store originals avoid invented shared-source claims.
+        for (period,sid),run in runs.items():
+            path=ws.facts_path(run);facts=pl.read_parquet(path)
+            source=ws.keep(f'synthetic-{sid}-{period}.csv',io.BytesIO(facts.write_csv().encode()),sid)
+            facts=facts.with_columns(pl.lit(source.sha).alias('file_sha'),pl.lit(source.name).alias('file_name'))
+            facts.write_parquet(path);seal(path)
+            payload=json.loads(ws.conn.execute('SELECT result FROM run WHERE id=?',(run,)).fetchone()[0])
+            totals={row['metric_id']:row['contribution'] for row in facts.group_by('metric_id').agg(pl.col('contribution').sum()).to_dicts()}
+            payload.update(store_id=sid,calculation_inputs={'metric_totals':totals,'unavailable_metrics':[]})
+            with ws.conn:
+                ws.conn.execute('UPDATE run SET result=?,shas=? WHERE id=?',(json.dumps(payload),json.dumps([source.sha]),run))
+        for (period,sid),run in sorted(runs.items()):
+            capture_synthetic_summary_fixture(ws,model,run)
+        preview=automation_actions.close_preview(ws,model,request_id='positive-preview',period=PERIOD,
+            store_ids=['s1','s2'],actor=actor)
+        assert not preview['blocked'],preview['blocked']
+        closed=automation_actions.close_confirm(ws,model,request_id='positive-confirm',proposal_id=preview['proposal_id'],
+            proposal_sha=preview['proposal_sha'],input_sha=preview['input_sha'],actor=actor)
+        assert closed['status']=='completed' and len(closed['completed'])==2
+        assert ws.conn.execute('SELECT count(*) FROM automation_overhead_close WHERE period=?',(PERIOD,)).fetchone()[0]==1
+        routes={'/api/version':{'version':CODE},'/api/automation/months/'+PERIOD:automation_actions.month(ws,model,PERIOD),
+                '/api/operations/month':operations_readmodel.read_month(ws,model,PERIOD)}
+        verify=module()
+        with http(routes) as base:
+            result=verify.business_readback(base,PERIOD,CODE,company_source_lookup=lambda period:verify.saved_company(ws.root,period))
+        assert result['business_complete'] is True and result['formula_checks']==12
+    finally:ws.close()
+
+
+@pytest.mark.parametrize('mutation',['delete_all','fake_flag','changed_allocation','duplicate_card'])
+def test_real_legacy_company_finance_cannot_be_hidden_or_forged(stored,mutation):
+    routes=responses(stored);month=routes['/api/automation/months/'+PERIOD]
+    assert month['overhead']['finance_decision']['reason_code']=='overhead_legacy_frozen_basis'
+    if mutation=='delete_all':
+        month['overhead']['finance_decision']=None
+        month['decision_groups']=[group for group in month['decision_groups'] if group['kind']!='company_finance']
+        month['counts']['company_finance_decisions']=0;month['company_finance_only']=False;month['status']='completed'
+    elif mutation=='fake_flag':
+        month['company_finance_only']=False;month['status']='completed'
+    elif mutation=='changed_allocation':
+        month['overhead']['finance_decision']['closed_allocations'][0]['amount']='0.00'
+        next(group for group in month['decision_groups'] if group['kind']=='company_finance')['closed_allocations'][0]['amount']='0.00'
+    else:month['decision_groups'].append(deepcopy(next(group for group in month['decision_groups'] if group['kind']=='company_finance')))
+    verify=module()
+    with pytest.raises(ValueError):
+        verify.business_readback('https://user-entry.example.invalid',PERIOD,CODE,reader=reader_for(routes),
+            company_source_lookup=lambda period:verify.saved_company(stored['root'],period))
+
+
+def test_missing_independent_company_metadata_is_not_assumed_healthy(tmp_path):
+    root=tmp_path/'incomplete';root.mkdir()
+    with sqlite3.connect(root/'workspace.db') as db:db.execute('CREATE TABLE placeholder(id)')
+    with pytest.raises(ValueError,match='metadata is unavailable'):module().saved_company(root,PERIOD)
 
 
 def test_frozen_snapshot_includes_all_financial_layers(stored):
@@ -449,10 +516,13 @@ def income_routes(case,report=None):
 def test_real_registered_legacy_bundle_reads_back_without_creating_directories(tmp_path,monkeypatch):
     case=registered_income_bundle(tmp_path);ws=case['ws'];verify=module()
     try:
+        # Generate the backend DTO before observing the read-only release
+        # consumer; backend month() may prepare its own derived source index.
+        routes=income_routes(case)
         def forbidden(*args,**kwargs):raise AssertionError('readback created a directory')
         monkeypatch.setattr(Path,'mkdir',forbidden)
         result=verify.business_readback('https://user-entry.example.invalid','2026-07',CODE,
-            reader=reader_for(income_routes(case)),source_lookup=lambda run:verify.saved_run(ws.root,run))
+            reader=reader_for(routes),source_lookup=lambda run:verify.saved_run(ws.root,run))
         assert result['store_rows']==1
     finally:ws.close()
 

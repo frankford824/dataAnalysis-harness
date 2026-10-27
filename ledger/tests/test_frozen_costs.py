@@ -98,8 +98,14 @@ def test_api_uses_closed_snapshot_not_later_supplements_or_new_run(tmp_path,monk
     from automation_fixtures import capture_synthetic_summary_fixture
     from ledger.storage_integrity import seal
     m=monthly_model(m,sid,period,0)
-    run=ws.record(sid,period,raw,[])
-    facts([('goods_cost',-600.,True)]).write_parquet(ws.facts_path(run))
+    # Explicit synthetic original rows, including the freight already declared
+    # by the summary. This fixture does not represent a production invoice.
+    original=facts([('goods_cost',-600.,True),('freight_cost',-50.,True)])
+    source=ws.keep('synthetic-frozen-costs.csv',io.BytesIO(original.write_csv().encode()),sid)
+    original=original.with_columns(pl.lit(source.sha).alias('file_sha'),pl.lit(source.name).alias('file_name'),
+        pl.lit(m.store(sid).name).alias('store'),pl.lit(period).alias('period'))
+    run=ws.record(sid,period,raw,[source.sha])
+    original.write_parquet(ws.facts_path(run))
     seal(ws.facts_path(run))
     capture_synthetic_summary_fixture(ws,m,run)
     original_sha=hashlib.sha256(ws.facts_path(run).read_bytes()).hexdigest()
@@ -120,7 +126,8 @@ def test_api_uses_closed_snapshot_not_later_supplements_or_new_run(tmp_path,monk
     response=client.get(f'/api/runs/{run}/fees.csv')
     assert response.status_code==200,response.text
     rows=list(csv.DictReader(io.StringIO(response.content.decode('utf-8-sig'))))
-    assert sum(Decimal(r[BOOKED_AMOUNT]) for r in rows)==-700
+    assert sum(Decimal(r[BOOKED_AMOUNT]) for r in rows if r['科目']=='商品成本')==-700
+    assert sum(Decimal(r[BOOKED_AMOUNT]) for r in rows)==-750
     assert sum(r['记录类型']=='结账人工补录' for r in rows)==1
     assert '9999' not in response.text
     assert '已含本次结账冻结的人工成本' in response.text

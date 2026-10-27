@@ -88,6 +88,23 @@ def saved_run(root,run_id):
                 'payload':payload,'manifest':manifest,'root':root}
 
 
+def saved_company(root,period):
+    """Read the same legacy frozen-pay criterion as the backend, without writes."""
+    try:
+        with readonly(Path(root)/'workspace.db') as db:
+            db.row_factory=sqlite3.Row
+            db.execute('BEGIN')
+            frozen=db.execute('SELECT 1 FROM automation_overhead_close WHERE period=? LIMIT 1',(period,)).fetchone()
+            closed=db.execute("""SELECT p.store_id,p.period,p.run_id,l.amount,r.engine,r.model_revision,r.input_fingerprint
+                FROM period p JOIN run_labor l ON l.run_id=p.run_id JOIN run r ON r.id=p.run_id
+                WHERE p.period=? AND p.state='closed' ORDER BY p.store_id""",(period,)).fetchall()
+            allocations=[dict(row) for row in closed]
+            return {'period':period,'has_frozen_basis':bool(frozen),'closed_allocations':allocations,
+                    'legacy_decision_required':not frozen and any(amount(row['amount'])!=0 for row in closed)}
+    except sqlite3.Error as error:
+        raise ValueError('Independent company finance metadata is unavailable') from error
+
+
 def income_artifact(record,run_id,suffix,declared_sha,*,required=False):
     """The first M3 manifest wins over a later seal or archive registration."""
     if declared_sha is None:
@@ -267,7 +284,7 @@ def compare_history(baseline,current,code_sha):
     return {'changed_closed':0,'changed_financial_records':0}
 
 
-def company_scope(month,report,period):
+def company_scope(month,report,period,company_source_lookup=None):
     """The independently requested monthly workflow fixes the company scope."""
     stores=month.get('stores')
     if not isinstance(stores,list) or not stores or any(not isinstance(row,dict) for row in stores):
@@ -292,7 +309,44 @@ def company_scope(month,report,period):
     for key,value in counts.items():
         if type(declared.get(key)) is not int or declared[key]!=value:
             raise ValueError('Monthly workflow counts differ from its actual store statuses')
-    expected_status='needs_decision' if counts['needs_decision'] else 'processing' if counts['processing'] else 'completed'
+    overhead=mapping(month.get('overhead'),'Monthly company basis')
+    finance=overhead.get('finance_decision')
+    groups=month.get('decision_groups')
+    if not isinstance(groups,list) or any(not isinstance(group,dict) for group in groups):
+        raise ValueError('Monthly company decisions are invalid')
+    company_groups=[group for group in groups if group.get('kind')=='company_finance']
+    if finance is not None:
+        finance=mapping(finance,'Company finance decision')
+        if (finance.get('kind')!='company_finance' or finance.get('scope')!='company_month'
+                or finance.get('period')!=period or finance.get('role')!='company_finance'
+                or finance.get('reason_code') not in {'overhead_legacy_frozen_basis','overhead_frozen_input_changed','overhead_frozen_basis_unverified'}
+                or finance.get('actions')!=[] or overhead.get('status')!='needs_decision'
+                or len(company_groups)!=1):
+            raise ValueError('Company finance decision has no valid monthly contract')
+        group=company_groups[0]
+        if (type(group.get('count')) is not int or group['count']!=1 or group.get('store_ids')!=identities
+                or any(group.get(key)!=value for key,value in finance.items())):
+            raise ValueError('Company finance card differs from its company basis')
+    elif company_groups:
+        raise ValueError('Company finance card has no underlying company decision')
+    if type(declared.get('company_finance_decisions')) is not int or declared['company_finance_decisions']!=int(finance is not None):
+        raise ValueError('Monthly company finance count differs from its decision')
+    finance_only=finance is not None and all(row['status']=='completed' or row['stage']=='company_finance' for row in stores)
+    if type(month.get('company_finance_only')) is not bool or month['company_finance_only']!=finance_only:
+        raise ValueError('Monthly company finance scope differs from its actual decision')
+    if company_source_lookup is not None:
+        independent=mapping(company_source_lookup(period),'Independent company finance source')
+        if (independent.get('period')!=period or type(independent.get('has_frozen_basis')) is not bool
+                or type(independent.get('legacy_decision_required')) is not bool
+                or not isinstance(independent.get('closed_allocations'),list)):
+            raise ValueError('Independent company finance metadata is incomplete')
+        legacy=independent['legacy_decision_required']
+        if legacy and (finance is None or finance.get('reason_code')!='overhead_legacy_frozen_basis'
+                       or finance.get('frozen') is not None or finance.get('closed_allocations')!=independent['closed_allocations']):
+            raise ValueError('Independent legacy company finance decision is missing or changed')
+        if not legacy and finance is not None and finance.get('reason_code')=='overhead_legacy_frozen_basis':
+            raise ValueError('Company legacy decision differs from its independent saved source')
+    expected_status='needs_decision' if counts['needs_decision'] or finance is not None else 'processing' if counts['processing'] else 'completed'
     if month.get('status')!=expected_status:raise ValueError('Monthly workflow status differs from its store statuses')
     scope=mapping(report.get('scope'),'Business report scope')
     if (scope.get('period')!=period or scope.get('level')!='store' or scope.get('managed')!='all'
@@ -305,7 +359,7 @@ def company_scope(month,report,period):
         raise ValueError('A partial or paginated company report cannot certify a release')
 
 
-def business_readback(base,period,code_sha,reader=read_json,source_lookup=None,expected_source_sha=None):
+def business_readback(base,period,code_sha,reader=read_json,source_lookup=None,expected_source_sha=None,company_source_lookup=None):
     parsed=urllib.parse.urlsplit(base)
     if parsed.scheme not in {'http','https'} or not parsed.netloc or parsed.query or parsed.fragment or parsed.username:
         raise ValueError('An explicit user-entry HTTP(S) base URL is required')
@@ -325,7 +379,7 @@ def business_readback(base,period,code_sha,reader=read_json,source_lookup=None,e
         raise ValueError('Business readback has no matching period/version identity')
     if not report.get('run_refs') or not report.get('rows'):
         raise ValueError('An empty business scope cannot certify a release')
-    company_scope(month,report,period)
+    company_scope(month,report,period,company_source_lookup)
     primitives=('receipts','refunds','net_income','goods_cost','promotion_cost','platform_cost','freight_cost','aftersales_cost','labor_cost')
     references={row.get('store_id'):row for row in report['run_refs']}
     rows={row.get('store_id'):row for row in report['rows']}
@@ -446,6 +500,7 @@ def main():
         protected=compare_history(baseline,current,accepted['code_sha'])
         readback=business_readback(args.readback_url,args.period,accepted['code_sha'],
                                    source_lookup=lambda run_id:saved_run(args.root,run_id),
+                                   company_source_lookup=lambda period:saved_company(args.root,period),
                                    expected_source_sha=accepted['source_code_sha'])
         print(json.dumps({'version':current['version'],'financial_history':protected,'business_readback':readback},ensure_ascii=False))
 

@@ -1,4 +1,5 @@
 from io import BytesIO
+import json
 
 import polars as pl
 import pytest
@@ -83,6 +84,28 @@ def test_changed_saved_payload_cannot_reuse_same_run_id(tmp_path, monkeypatch):
     ws.conn.commit()
     service.recompute(ws, model, model.store("s"))
     assert len(calls) == 2
+
+
+@pytest.mark.parametrize('change',['missing','different_source'])
+def test_eligible_reuse_requires_first_proof_of_the_same_source_bytes(tmp_path,monkeypatch,change):
+    ws,model,result,registry,calls=setup_calculation(tmp_path,monkeypatch)
+    first=service.recompute(ws,model,model.store('s'))
+    service.recompute(ws,model,model.store('s'))
+    assert not first.failure and len(calls)==1  # Prove the clean-only cache is eligible.
+    run=first.periods[0]['run_id']
+    with ws.conn:
+        # Explicit corruption simulation of a temporary database; production
+        # continues to protect the first immutable proof from these writes.
+        if change=='missing':
+            ws.conn.execute('DROP TRIGGER automation_run_proof_no_delete')
+            ws.conn.execute('DELETE FROM automation_run_proof WHERE run_id=?',(run,))
+        else:
+            row=ws.conn.execute('SELECT manifest_json FROM automation_run_proof WHERE run_id=?',(run,)).fetchone()
+            manifest=json.loads(row[0]);manifest['source_code_sha']='0'*64
+            ws.conn.execute('DROP TRIGGER automation_run_proof_no_update')
+            ws.conn.execute('UPDATE automation_run_proof SET manifest_json=? WHERE run_id=?',(json.dumps(manifest),run))
+    service.recompute(ws,model,model.store('s'))
+    assert len(calls)==2
 
 
 def test_value_digest_survives_parquet_roundtrip_and_preserves_nan(tmp_path):
