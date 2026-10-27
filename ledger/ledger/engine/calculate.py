@@ -334,6 +334,16 @@ def evaluate_metric(
             .then(col(LINK_KEY).cast(pl.Utf8)).otherwise(None).alias("coverage_key"),
             wanted.dt.strftime("%Y-%m-%d").alias("order_date"),
             col("internal_order_id").cast(pl.Utf8).alias("internal_order_id"),
+            col("internal_sub_order_id").cast(pl.String).alias("internal_sub_order_id"),
+            col("cost_source").cast(pl.String).alias("cost_source"),
+            col("cost_status").cast(pl.String).alias("cost_status"),
+            col("cost_as_of").cast(pl.String).alias("cost_as_of"),
+            col("failure_reason").cast(pl.String).alias("upstream_failure_reason"),
+            col("pricing_evidence").cast(pl.String).str.json_path_match('$.register_basis').alias('register_basis'),
+            col("pricing_evidence").cast(pl.String).str.json_path_match('$.cost_company_id').alias('cost_company_id'),
+            col("pricing_evidence").cast(pl.String).str.json_path_match('$.begin_date').alias('price_begin_date'),
+            col("pricing_evidence").cast(pl.String).str.json_path_match('$.end_date').alias('price_end_date'),
+            col("pricing_evidence").cast(pl.String).str.json_path_match('$.carry_days').alias('carry_days'),
             col("sku").cast(pl.Utf8).alias("sku"), pl.when(quantity.is_finite()).then(quantity).otherwise(None).alias("quantity"),
             pl.when(reference.is_finite()).then(reference).otherwise(None).alias("reference_unit_cost"),
             pl.when(col("failure_reason") == "invalid_original_components")
@@ -346,7 +356,13 @@ def evaluate_metric(
             .when(col('failure_reason') == 'original_quantity_conflict').then(pl.lit('原始数量与当前订单数量不一致，请核对后再计价'))
             .when(col('failure_reason') == 'item_identity_mismatch').then(pl.lit('成本证据与当前订单商品不一致，等待重新核实'))
             .when(col('failure_reason') == 'nonpositive_register_cost').then(pl.lit('登记成本为零或负数，尚不能作为有效成本'))
-            .when(col('cost_source').is_in(['register','register_first'])).then(pl.lit('登记价历史有效期未证实；保留参考，待核对'))
+            .when(col('cost_source') == 'register_first').then(pl.lit('首次登记价晚于下单日，需补历史成本凭据'))
+            .when((col('cost_source') == 'register') & (col('pricing_evidence').cast(pl.String).str.json_path_match('$.register_basis') == 'change_log_prior'))
+            .then(pl.lit('后续调价前的旧值不能证明下单日价格，需补历史凭据'))
+            .when((col('cost_source') == 'register') & (col('pricing_evidence').cast(pl.String).str.json_path_match('$.register_basis') == 'change_log'))
+            .then(pl.lit('登记价有变更记录，待核验原始调价凭据及历史有效期'))
+            .when(col('cost_source') == 'register').then(pl.lit('登记价历史有效期未证实；保留参考，待核对'))
+            .when(col('cost_source') == 'history_carry').then(pl.lit('沿用较早日期的成本，待取得覆盖下单日的历史价'))
             .when(col('failure_reason') == 'unresolved_item_risk').then(pl.lit('订单异常尚未查清，暂不计入成本'))
             .when(col('failure_reason') == 'component_unit_rounding_conflict').then(pl.lit('套餐组件合计与单价乘数量的结果不一致，请核对金额'))
             .when(col('pricing_source_suspect').cast(pl.Boolean).fill_null(False)).then(pl.lit('原订单商品信息待核对'))
@@ -370,6 +386,8 @@ def evaluate_metric(
             pl.col(ANCHOR_SHEET).alias("sheet"), pl.col(ANCHOR_ROW).alias("row_no"),
         )
         if not gaps.is_empty():
+            from ..pricing_categories import category_expr
+            gaps = gaps.with_columns(category_expr(gaps))
             notes.append(f"{metric.name} 有 {gaps.height} 条记录待核价，未用参考价格计入成本")
             if pricing_gaps is not None:
                 pricing_gaps.extend(gaps.to_dicts())

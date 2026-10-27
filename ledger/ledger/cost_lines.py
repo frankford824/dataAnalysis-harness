@@ -89,14 +89,32 @@ def current(ws, run_id: int, store_id: str, period: str) -> dict:
             'reviewed': reviewed}
 
 
-def page(ws, run_id: int, store_id: str, period: str, *, q: str = '',
+def page(ws, run_id: int, store_id: str, period: str, *, q: str = '', category: str = '',
          offset: int = 0, limit: int = 50) -> dict:
     result = current(ws, run_id, store_id, period)
+    from .pricing_categories import categorized, LABELS
+    from collections import defaultdict, Counter
+    by_key = defaultdict(set)
+    pricing = ws.pricing_gaps_path(run_id)
+    if pricing.exists() and verified(pricing):
+        frame = categorized(pl.scan_parquet(pricing))
+        if 'coverage_key' in frame.collect_schema().names():
+            for key, kind in frame.filter(pl.col('metric_id') == 'goods_cost').select('coverage_key','category').unique().collect().iter_rows():
+                if key: by_key[key].add(kind)
+    counts = Counter()
+    for item in result['items']:
+        kinds = sorted(by_key[item['coverage_key']])
+        item['categories'] = kinds or ['unmatched']
+        item['category'] = kinds[0] if len(kinds) == 1 else 'mixed' if kinds else 'unmatched'
+        item['category_label'] = LABELS.get(item['category'], {'mixed':'多种原因并存','unmatched':'订单或成本关联待核'}.get(item['category'],'其他待核对'))
+        counts[item['category']] += 1
     needle = q.strip().casefold()
     visible = [row for row in result['items']
-               if not needle or any(needle in str(row.get(key) or '').casefold()
-                                    for key in ('order_id','sub_order_id','coverage_key','product_ids'))]
+               if (not category or row['category'] == category)
+               and (not needle or any(needle in str(row.get(key) or '').casefold()
+                                    for key in ('order_id','sub_order_id','coverage_key','product_ids')))]
     return {key: value for key, value in result.items() if key not in ('items','reviewed')} | {
+        'category_counts': [{'category': key, 'label': LABELS.get(key, {'mixed':'多种原因并存','unmatched':'订单或成本关联待核'}.get(key,key)), 'count':count} for key,count in sorted(counts.items())],
         'matching': len(visible), 'items': visible[max(0,offset):max(0,offset)+max(1,min(limit,200))],
         'offset': max(0,offset),
     }

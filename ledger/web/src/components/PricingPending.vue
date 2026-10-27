@@ -41,18 +41,21 @@ async function loadProgress() {
 onMounted(() => { loadProgress(); progressTimer = setInterval(() => { if(document.visibilityState === 'visible')loadProgress() }, 20000) })
 onUnmounted(() => { clearInterval(progressTimer); progressRequest.cancel() })
 watch(() => props.runId, loadProgress)
-const show = ref(false), query = ref(''), search = ref(''), page = ref(1)
+const show = ref(false), query = ref(''), search = ref(''), page = ref(1), category = ref('')
 const data = ref({ total: 0, reference_count: 0, reason_counts: [], items: [] }), busy = ref(false), error = ref('')
 const request = useLatest()
 defineExpose({ open: () => { if (props.count || props.coverageRows) openGaps(); else overview.value=true } })
 let serial = 0
 const columns = [
-  { title: '平台订单号', key: 'order_id', width: 230 },
+  { title: '平台订单号', key: 'order_id', width: 230, fixed: 'left' },
   { title: '商品编码', key: 'sku', width: 210 },
   { title: '下单日期', key: 'order_date', width: 115 },
   { title: '数量', key: 'quantity', width: 80 },
   { title: '原因', key: 'reason', minWidth: 180, render: row => reasonName(row.reason) },
   { title: '聚水潭订单号', key: 'internal_order_id', width: 130 },
+  { title: '商品行ID', key: 'internal_sub_order_id', width: 120 },
+  { title: '来源 / 取价日', key: 'cost_source', width: 160, render: row => `${row.cost_source || '未提供'} / ${row.cost_as_of || '未提供'}` },
+  { title: '依据类型', key: 'register_basis', width: 130 },
 ]
 const download = computed(() => `/api/runs/${props.runId}/pricing-gaps.csv?${new URLSearchParams({ q: search.value })}`)
 const integer = value => Number(value || 0).toLocaleString('zh-CN')
@@ -72,12 +75,18 @@ watch(page, () => load())
 watch(show, value => { if (value) { if(props.count)load(); loadCoverage() } else { request.cancel(); ++serial; busy.value = false; coverageRequest.cancel(); editor.value=null } })
 watch(() => props.runId, () => { if(show.value)load(true) })
 const coveragePage=ref(1), coverageData=ref({total:null,matching:null,reviewed_count:0,supplement_total:0,items:[]})
+const sourceDetails=ref(null)
+function selectCategory(value) { category.value=value; coveragePage.value=1; loadCoverage() }
+function inspectMissingItems(row) {
+  query.value=row.coverage_key; submit();
+  if(sourceDetails.value){sourceDetails.value.open=true;sourceDetails.value.scrollIntoView({block:'start'})}
+}
 const coverageBusy=ref(false), coverageError=ref(''), coverageRequest=useLatest()
 async function loadCoverage() {
   coverageBusy.value=true;coverageError.value=''
   try {
     const response=await coverageRequest.run(signal=>api.coverageGaps(props.runId,
-      {q:search.value,offset:(coveragePage.value-1)*50,limit:50},{signal}))
+      {q:search.value,category:category.value,offset:(coveragePage.value-1)*50,limit:50},{signal}))
     if(response)coverageData.value=response.value
   } catch(error){coverageError.value=error.message}
   finally{coverageBusy.value=false}
@@ -130,12 +139,13 @@ async function saveLine(){
   finally{savingLine.value=false}
 }
 const coverageColumns=[
-  {title:'平台订单 / 子订单',key:'order_id',minWidth:230,render:row=>h('div',[h('strong',row.order_id||'订单号未提供'),h('small',{class:'coverage-secondary'},row.sub_order_id||'—')])},
+  {title:'平台订单 / 子订单',key:'order_id',width:230,fixed:'left',render:row=>h('div',[h('strong',row.order_id||'订单号未提供'),h('small',{class:'coverage-secondary'},row.sub_order_id||'—')])},
   {title:'商品链接 / 数量',key:'product_ids',minWidth:195,render:row=>h('div',[h('span',row.product_ids||'—'),h('small',{class:'coverage-secondary'},`数量 ${row.quantities||'未提供'}`)])},
   {title:'下单日',key:'order_date',width:112},
+  {title:'问题类型',key:'category_label',width:155},
   {title:'核对说明',key:'brushing_review',minWidth:280,render:row=>row.coverage_reason||row.brushing_review||'商品成本未覆盖，需核对来源成本'},
   {title:'人工补录总成本',key:'manual_amount',width:140,render:row=>row.manual_amount==null?'—':`${Number(row.manual_amount).toFixed(2)} 元`},
-  {title:'操作',key:'action',width:140,render:row=>props.closed?'已结账 · 只读':row.partial_cost?'请核对缺失商品':row.editable?h(NButton,{size:'small',type:'primary',text:true,onClick:()=>editLine(row)},()=>row.manual_amount==null?'添加金额':'修改金额'):'订单归属不唯一'},
+  {title:'操作',key:'action',width:140,render:row=>row.partial_cost?h(NButton,{size:'small',text:true,onClick:()=>inspectMissingItems(row)},()=> '查看缺失商品'):props.closed?'已结账 · 只读':row.editable?h(NButton,{size:'small',type:'primary',text:true,onClick:()=>editLine(row)},()=>row.manual_amount==null?'添加金额':'修改金额'):'订单归属不唯一'},
 ]
 </script>
 
@@ -208,20 +218,26 @@ const coverageColumns=[
         <n-button v-if="batchPreview?.valid" size="small" type="primary" :loading="batchBusy" :disabled="batchBusy || !!batchPreview.issue_count" @click="applyBatch">确认批量补录</n-button>
       </div>
       <n-alert v-if="coverageError" type="warning" style="margin-bottom:12px">{{ coverageError }} <n-button size="small" @click="emit('request-recompute')">重算后显示全部缺口</n-button></n-alert>
-      <n-data-table class="pricing-desktop" :columns="coverageColumns" :data="coverageData.items" :loading="coverageBusy" :scroll-x="1110" :max-height="480" size="small" />
+      <div class="pricing-category-filters" aria-label="按成本缺口类型筛选">
+        <n-button size="small" :type="category === '' ? 'primary' : 'default'" @click="selectCategory('')">全部原始缺口 {{ integer(coverageData.total) }}</n-button>
+        <n-button v-for="item in coverageData.category_counts || []" :key="item.category" size="small" :type="category === item.category ? 'primary' : 'default'" @click="selectCategory(item.category)">{{ item.label }} {{ integer(item.count) }}</n-button>
+      </div>
+      <p class="pricing-help">分类按未覆盖订单键去重；一个订单有多种问题时单列。人工补录记录仍保留，补录后指标以上方已计入结果为准。</p>
+      <n-data-table class="pricing-desktop" :columns="coverageColumns" :data="coverageData.items" :loading="coverageBusy" :scroll-x="1265" :max-height="480" size="small" />
       <div class="pricing-mobile" :aria-busy="coverageBusy">
         <p v-if="coverageBusy">正在加载订单缺口…</p>
         <article v-for="row in coverageData.items" :key="row.coverage_key">
           <strong>{{ row.order_id || '订单号未提供' }}</strong><span>{{ row.order_date || '日期未提供' }}</span>
           <p>子订单 {{ row.sub_order_id || '—' }} · 商品链接 {{ row.product_ids || '—' }} · 数量 {{ row.quantities || '未提供' }}</p>
           <p>人工总成本 {{ row.manual_amount == null ? '尚未补录' : `${Number(row.manual_amount).toFixed(2)} 元` }}</p>
+          <p>{{ row.category_label }}</p>
           <p v-if="row.coverage_reason" class="pricing-reason">{{ row.coverage_reason }}</p>
           <p v-if="row.brushing_review" class="pricing-reason">{{ row.brushing_review }}</p>
           <span v-if="closed" class="pricing-reason">已结账 · 只读</span><span v-else-if="row.partial_cost" class="pricing-reason">请核对缺失商品</span><n-button v-else-if="row.editable" size="small" @click="editLine(row)">{{ row.manual_amount == null ? '添加金额' : '修改金额' }}</n-button><span v-else class="pricing-reason">此键对应多个订单，需先确认归属</span>
         </article>
       </div>
       <div class="pricing-pages"><span>{{ coverageBusy ? '正在加载订单记录…' : `共 ${coverageData.matching ?? coverageData.total ?? summary.gaps} 笔` }}</span><n-pagination v-model:page="coveragePage" :item-count="coverageData.matching || 0" :page-size="50" :disabled="coverageBusy" simple /></div>
-      <details v-if="count" class="source-gap-details"><summary>查看 {{ integer(count) }} 条来源缺价记录与参考单价</summary>
+      <details v-if="count" ref="sourceDetails" class="source-gap-details"><summary>查看 {{ integer(count) }} 条来源缺价记录与参考单价</summary>
         <p class="pricing-help">这是聚水潭等来源行的逐条异常；覆盖缺口以完整订单清单为准，来源行不会重复补录金额。</p>
         <div v-if="data.reason_counts?.length" class="pricing-summary" aria-label="未覆盖原因汇总"><span v-for="item in data.reason_counts" :key="item.reason"><b>{{ integer(item.count) }}</b>{{ reasonName(item.reason) }}</span></div>
       <n-alert v-if="error" type="error" style="margin-bottom: 16px">{{ error }} <n-button size="small" @click="load()">重试</n-button></n-alert>
@@ -266,6 +282,7 @@ const coverageColumns=[
 .pricing-help { color: #657184; margin: 0 0 16px; }
 .pricing-search { display: flex; align-items: center; gap: 10px; margin-bottom: 16px; }
 .pricing-summary { display:flex;flex-wrap:wrap;gap:8px;margin:-4px 0 14px; }
+.pricing-category-filters {display:flex;flex-wrap:wrap;gap:8px;margin:12px 0;}
 .pricing-summary span { display:inline-flex;gap:5px;align-items:center;padding:6px 9px;border-radius:6px;background:#f5f7fa;color:#59667a;font-size:12px; }
 .pricing-summary b { color:#26364d;font-variant-numeric:tabular-nums; }
 .coverage-summary { display:flex;gap:9px;flex-wrap:wrap;margin-bottom:13px; }

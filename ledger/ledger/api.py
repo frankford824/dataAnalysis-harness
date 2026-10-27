@@ -1187,13 +1187,13 @@ class CostLineChange(BaseModel):
 
 
 @app.get('/api/runs/{run_id}/coverage-gaps')
-def coverage_gaps(run_id: int, q: str = '', offset: int = 0, limit: int = 50) -> dict:
+def coverage_gaps(run_id: int, q: str = '', category: str = '', offset: int = 0, limit: int = 50) -> dict:
     st = workspace().state_by_run(run_id)
     if st is None:
         raise HTTPException(404, '没有这次计算记录')
     try:
         return cost_lines.page(workspace(), run_id, st.store_id, st.period,
-                               q=q, offset=offset, limit=limit)
+                               q=q, category=category, offset=offset, limit=limit)
     except WorkspaceError as exc:
         raise HTTPException(409, str(exc)) from exc
 
@@ -1634,12 +1634,12 @@ def drill(run_id: int, node_id: str, limit: int = view.DRILL_LIMIT,
 
 
 @app.get("/api/runs/{run_id}/pricing-gaps")
-def pricing_gaps_page(run_id: int, q: str = "", offset: int = 0, limit: int = 100) -> dict:
+def pricing_gaps_page(run_id: int, q: str = "", category: str = '', offset: int = 0, limit: int = 100) -> dict:
     from . import pricing_gaps
     path = workspace().pricing_gaps_path(run_id)
     if not path.exists():
         raise HTTPException(404, "这次计算没有未覆盖成本明细")
-    return pricing_gaps.page(path, q=q, offset=offset, limit=limit)
+    return pricing_gaps.page(path, q=q, category=category, offset=offset, limit=limit)
 
 
 @app.get('/api/runs/{run_id}/order-issues/{issue_id}')
@@ -1709,12 +1709,12 @@ def pricing_progress(store_id: str, period: str) -> dict:
 
 
 @app.get("/api/runs/{run_id}/pricing-gaps.csv")
-def pricing_gaps_export(run_id: int, q: str = "") -> PlainTextResponse:
+def pricing_gaps_export(run_id: int, q: str = "", category: str = '') -> PlainTextResponse:
     from . import pricing_gaps
     path = workspace().pricing_gaps_path(run_id)
     if not path.exists():
         raise HTTPException(404, "这次计算没有未覆盖成本明细")
-    return PlainTextResponse("\ufeff" + pricing_gaps.csv(path, q), media_type="text/csv; charset=utf-8",
+    return PlainTextResponse("\ufeff" + pricing_gaps.csv(path, q, category), media_type="text/csv; charset=utf-8",
         headers={"Content-Disposition": f'attachment; filename="pricing-pending-{run_id}.csv"'})
 
 
