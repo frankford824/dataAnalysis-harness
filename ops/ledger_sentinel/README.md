@@ -29,6 +29,8 @@ M6命令为 `capture-observation sample.json`、`record-observation cycle.json`�
 
 本模块未连接生产、未安装计划任务、未执行真实服务恢复或发布，尚无两个周期的生产观察。财务政策、反结账、历史金额修改、实发核定继续由既有业务授权路径处理。
 
+本次上线另受 2026-10-27 已确认范围约束：只自动处理明确批准的新账期，历史分摊仅保全与列清单，不执行历史差额补扣、补发、结转或积压自动入账。历史只读回放不计实际观察周期；新账期范围不能凭服务器日期自动猜定。详见 [月度自动化执行合同](../../docs/automation-contract.md#本次上线范围只自动处理新账期)。
+
 ## AgentScope 隔离修复适配
 
 `repair.Repair(repo, home, config)` 的home必须在原checkout之外。`prepare(event, full_base_sha)`生成脱敏事件、独立detached worktree和原checkout身份。原来的已跟踪与未跟踪用户改动不会被覆盖。事件不含原始日志、业务行、会话或真实语料；模型初始上下文只能读取生成的`event.json`与被授权的代码。
