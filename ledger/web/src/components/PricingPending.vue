@@ -58,7 +58,9 @@ const columns = [
   { title: '依据类型', key: 'register_basis', width: 130 },
   { title: '还缺什么依据', key: 'required_evidence', minWidth: 260 },
 ]
-const download = computed(() => `/api/runs/${props.runId}/pricing-gaps.csv?${new URLSearchParams({ q: search.value })}`)
+const sourceCategory = computed(() => ['mixed','unmatched'].includes(category.value) ? '' : category.value)
+const sourceDownloadLabel = computed(() => sourceCategory.value ? '导出本类来源明细' : search.value ? '导出查询来源明细' : '导出全部来源明细')
+const download = computed(() => `/api/runs/${props.runId}/pricing-gaps.csv?${new URLSearchParams({ q: search.value, category:sourceCategory.value })}`)
 const integer = value => Number(value || 0).toLocaleString('zh-CN')
 async function load(preserve=false) {
   const current = ++serial
@@ -66,7 +68,7 @@ async function load(preserve=false) {
   if(!preserve)data.value = { ...data.value, items: [] }
   try {
     const result = await request.run(signal => api.pricingGaps(props.runId,
-      { q: search.value, offset: (page.value - 1) * 50, limit: 50 }, { signal }))
+      { q: search.value, category:sourceCategory.value, offset: (page.value - 1) * 50, limit: 50 }, { signal }))
     if (result) data.value = result.value
   } catch (e) { if (current === serial) error.value = e.message }
   finally { if (current === serial) busy.value = false }
@@ -77,9 +79,9 @@ watch(show, value => { if (value) { if(props.count)load(); loadCoverage() } else
 watch(() => props.runId, () => { if(show.value)load(true) })
 const coveragePage=ref(1), coverageData=ref({total:null,matching:null,reviewed_count:0,supplement_total:0,items:[]})
 const sourceDetails=ref(null)
-function selectCategory(value) { category.value=value; coveragePage.value=1; loadCoverage() }
+function selectCategory(value) { category.value=value; page.value=1; coveragePage.value=1; loadCoverage(); if(props.count)load() }
 function inspectMissingItems(row) {
-  query.value=row.coverage_key; submit();
+  category.value=''; query.value=row.coverage_key; submit();
   if(sourceDetails.value){sourceDetails.value.open=true;sourceDetails.value.scrollIntoView({block:'start'})}
 }
 const coverageBusy=ref(false), coverageError=ref(''), coverageRequest=useLatest()
@@ -200,7 +202,7 @@ const coverageColumns=[
       <form class="pricing-search" @submit.prevent="submit">
         <n-input v-model:value="query" clearable placeholder="搜索订单号、子订单号或商品链接" aria-label="搜索未覆盖成本明细" />
         <n-button attr-type="submit" :loading="busy">搜索</n-button>
-        <a v-if="count" :href="download" download>导出来源异常行</a>
+        <a v-if="count" :href="download" download>{{ sourceDownloadLabel }}</a>
         <a :href="`/api/runs/${runId}/coverage-gaps.xlsx`" download>导出全部订单缺口（Excel）</a>
       </form>
       <div v-if="!closed && summary.gaps" class="pricing-batch">
@@ -238,8 +240,9 @@ const coverageColumns=[
         </article>
       </div>
       <div class="pricing-pages"><span>{{ coverageBusy ? '正在加载订单记录…' : `共 ${coverageData.matching ?? coverageData.total ?? summary.gaps} 笔` }}</span><n-pagination v-model:page="coveragePage" :item-count="coverageData.matching || 0" :page-size="50" :disabled="coverageBusy" simple /></div>
-      <details v-if="count" ref="sourceDetails" class="source-gap-details"><summary>查看 {{ integer(count) }} 条待核价明细与参考单价</summary>
-        <p class="pricing-help">这是聚水潭等来源行的逐条异常；覆盖缺口以完整订单清单为准，来源行不会重复补录金额。</p>
+      <details v-if="count" ref="sourceDetails" class="source-gap-details"><summary>查看待核价明细与参考单价</summary>
+        <p class="pricing-help">覆盖缺口按订单键去重；下方按商品来源行展示，同类条数不等同于订单缺口笔数，来源行不会重复补录金额。</p>
+        <p v-if="['mixed','unmatched'].includes(category) && !search" class="pricing-help">本组需要逐单核对来源。下面暂显示全店来源明细，可输入订单号进一步查找。</p>
         <div v-if="data.reason_counts?.length" class="pricing-summary" aria-label="未覆盖原因汇总"><span v-for="item in data.reason_counts" :key="item.reason"><b>{{ integer(item.count) }}</b>{{ reasonName(item.reason) }}</span></div>
       <n-alert v-if="error" type="error" style="margin-bottom: 16px">{{ error }} <n-button size="small" @click="load()">重试</n-button></n-alert>
       <n-data-table class="pricing-desktop" :columns="columns" :data="data.items" :loading="busy" :scroll-x="1780" :max-height="560" size="small" />

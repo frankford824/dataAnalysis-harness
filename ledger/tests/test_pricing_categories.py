@@ -54,6 +54,14 @@ def test_gap_categories_count_unique_keys_and_keep_mixed_and_unmatched(tmp_path)
     assert {r['category']:r['count'] for r in result['category_counts']}=={'register_evidence':1,'mixed':1,'unmatched':1}
     filtered=cost_lines.page(ws,run,raw['store_id'],raw['period'],category='mixed')
     assert filtered['total']==3 and filtered['matching']==1 and filtered['items'][0]['coverage_key']=='S2'
+    exported=list(csv.DictReader(io.StringIO(cost_lines.export_csv(ws,run,raw['store_id'],raw['period']))))
+    assert {r['清单键']:r['问题类型'] for r in exported}=={'S1':'登记价依据待核','S2':'多种原因并存','S3':'订单或成本关联待核'}
+    import openpyxl
+    book=openpyxl.load_workbook(io.BytesIO(cost_lines.export_xlsx(ws,run,raw['store_id'],raw['period'])),data_only=True)
+    data=list(book.active.values);assert data[0][-1]=='问题类型' and data[2][-1]=='多种原因并存'
+    p.write_bytes(b'broken pricing artifact')
+    with pytest.raises(Exception,match='校验未通过'):
+        cost_lines.page(ws,run,raw['store_id'],raw['period'])
     ws.close()
 
 

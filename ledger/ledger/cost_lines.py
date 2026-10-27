@@ -89,32 +89,41 @@ def current(ws, run_id: int, store_id: str, period: str) -> dict:
             'reviewed': reviewed}
 
 
-def page(ws, run_id: int, store_id: str, period: str, *, q: str = '', category: str = '',
-         offset: int = 0, limit: int = 50) -> dict:
-    result = current(ws, run_id, store_id, period)
+def _classify_items(ws, run_id, items):
     from .pricing_categories import categorized, LABELS
     from collections import defaultdict, Counter
     by_key = defaultdict(set)
     pricing = ws.pricing_gaps_path(run_id)
-    if pricing.exists() and verified(pricing):
+    if pricing.exists() and not verified(pricing):
+        raise WorkspaceError('待核价明细校验未通过，暂不能分类，请重算本店')
+    if not pricing.exists() and any(item.get('pending_cost_rows',0) for item in items):
+        raise WorkspaceError('待核价明细尚不可读，暂不能分类，请重算本店')
+    if pricing.exists():
         frame = categorized(pl.scan_parquet(pricing))
         if 'coverage_key' in frame.collect_schema().names():
             for key, kind in frame.filter(pl.col('metric_id') == 'goods_cost').select('coverage_key','category').unique().collect().iter_rows():
                 if key: by_key[key].add(kind)
     counts = Counter()
-    for item in result['items']:
+    for item in items:
         kinds = sorted(by_key[item['coverage_key']])
         item['categories'] = kinds or ['unmatched']
         item['category'] = kinds[0] if len(kinds) == 1 else 'mixed' if kinds else 'unmatched'
         item['category_label'] = LABELS.get(item['category'], {'mixed':'多种原因并存','unmatched':'订单或成本关联待核'}.get(item['category'],'其他待核对'))
         counts[item['category']] += 1
+    return [{'category': key, 'label': LABELS.get(key, {'mixed':'多种原因并存','unmatched':'订单或成本关联待核'}.get(key,key)), 'count':count} for key,count in sorted(counts.items())]
+
+
+def page(ws, run_id: int, store_id: str, period: str, *, q: str = '', category: str = '',
+         offset: int = 0, limit: int = 50) -> dict:
+    result = current(ws, run_id, store_id, period)
+    counts = _classify_items(ws, run_id, result['items'])
     needle = q.strip().casefold()
     visible = [row for row in result['items']
                if (not category or row['category'] == category)
                and (not needle or any(needle in str(row.get(key) or '').casefold()
                                     for key in ('order_id','sub_order_id','coverage_key','product_ids')))]
     return {key: value for key, value in result.items() if key not in ('items','reviewed')} | {
-        'category_counts': [{'category': key, 'label': LABELS.get(key, {'mixed':'多种原因并存','unmatched':'订单或成本关联待核'}.get(key,key)), 'count':count} for key,count in sorted(counts.items())],
+        'category_counts': counts,
         'matching': len(visible), 'items': visible[max(0,offset):max(0,offset)+max(1,min(limit,200))],
         'offset': max(0,offset),
     }
@@ -132,11 +141,13 @@ def export_csv(ws, run_id: int, store_id: str, period: str) -> str:
               ('line_revision','修改版本'), ('brushing_review','刷单依据核对说明'),
               ('brushing_evidence_internal_id','相关聚水潭内部订单号'),
               ('coverage_reason','成本缺口说明'), ('posted_goods_cost','已计入商品成本'),
-              ('pending_cost_skus','待核价商品编码')]
+              ('pending_cost_skus','待核价商品编码'), ('category_label','问题类型')]
     output = io.StringIO()
     writer = csv.writer(output)
     writer.writerow([label for _, label in fields])
-    for row in current(ws, run_id, store_id, period)['items']:
+    items = current(ws, run_id, store_id, period)['items']
+    _classify_items(ws,run_id,items)
+    for row in items:
         writer.writerow([identifier(row.get(key)) if key in {
                             'order_id','sub_order_id','coverage_key','context_sha','brushing_evidence_internal_id'}
                          else row.get(key) if row.get(key) is not None else ''
@@ -155,7 +166,7 @@ def export_xlsx(ws, run_id: int, store_id: str, period: str) -> bytes:
               ('context_sha','核对版本'),('line_revision','修改版本'),
               ('brushing_review','刷单依据核对说明'), ('brushing_evidence_internal_id','相关聚水潭内部订单号'),
               ('coverage_reason','成本缺口说明'), ('posted_goods_cost','已计入商品成本'),
-              ('pending_cost_skus','待核价商品编码')]
+              ('pending_cost_skus','待核价商品编码'), ('category_label','问题类型')]
     workbook = openpyxl.Workbook()
     sheet = workbook.active
     sheet.title = '未覆盖订单成本'
@@ -166,7 +177,9 @@ def export_xlsx(ws, run_id: int, store_id: str, period: str) -> bytes:
         cell.font = Font(bold=True)
         cell.fill = header_fill
     text_fields = {'order_id','sub_order_id','product_ids','coverage_key','context_sha','brushing_evidence_internal_id'}
-    for source in current(ws, run_id, store_id, period)['items']:
+    items = current(ws, run_id, store_id, period)['items']
+    _classify_items(ws,run_id,items)
+    for source in items:
         values = []
         for key, _ in fields:
             value = source.get(key)
@@ -182,7 +195,7 @@ def export_xlsx(ws, run_id: int, store_id: str, period: str) -> bytes:
                 cell.fill = input_fill
     sheet.freeze_panes = 'A2'
     sheet.auto_filter.ref = sheet.dimensions
-    widths = [24,24,20,12,13,16,28,12,24,68,12,58,25,75,20,40]
+    widths = [24,24,20,12,13,16,28,12,24,68,12,58,25,75,20,40,28]
     for index, width in enumerate(widths, 1):
         sheet.column_dimensions[openpyxl.utils.get_column_letter(index)].width = width
     for column in ('I','J','K'):
