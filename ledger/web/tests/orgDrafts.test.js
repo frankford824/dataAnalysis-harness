@@ -31,3 +31,11 @@ test('empty numeric inputs remain distinct from explicit zero and returned objec
   assert.equal(next.accepted,false)
   next.draft.percent='changed';assert.equal(incoming.percent,0)
 })
+
+test('server-trimmed names acknowledge the save while exact notes and employee numbers remain drafts', () => {
+  const original={name:'old',note:'memo',employee_no:'001',revision:1}
+  const draft={...original,name:'  new  '},saved={...original,name:'new',revision:2}
+  assert.equal(reconcileOrgDraft(draft,original,saved,true).accepted,true)
+  assert.equal(reconcileOrgDraft({...original,note:' memo '},original,original,true).accepted,false)
+  assert.equal(reconcileOrgDraft({...original,employee_no:'1'},original,original,true).accepted,false)
+})

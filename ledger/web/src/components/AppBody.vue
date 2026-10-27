@@ -153,7 +153,7 @@ defineExpose({ take })
       </div>
       <router-link
         class="navlink"
-        :class="{ on: $route.name === 'board' && $route.query.review !== '1' }"
+        :class="{ on: $route.name === 'board' }"
         to="/"
         :title="readyCount ? `${readyCount} 个店期可以结账` : '总览'"
       >
