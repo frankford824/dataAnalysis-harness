@@ -56,6 +56,7 @@ const columns = [
   { title: '商品行ID', key: 'internal_sub_order_id', width: 120 },
   { title: '来源 / 取价日', key: 'cost_source', width: 160, render: row => `${row.cost_source || '未提供'} / ${row.cost_as_of || '未提供'}` },
   { title: '依据类型', key: 'register_basis', width: 130 },
+  { title: '还缺什么依据', key: 'required_evidence', minWidth: 260 },
 ]
 const download = computed(() => `/api/runs/${props.runId}/pricing-gaps.csv?${new URLSearchParams({ q: search.value })}`)
 const integer = value => Number(value || 0).toLocaleString('zh-CN')
@@ -233,7 +234,7 @@ const coverageColumns=[
           <p>{{ row.category_label }}</p>
           <p v-if="row.coverage_reason" class="pricing-reason">{{ row.coverage_reason }}</p>
           <p v-if="row.brushing_review" class="pricing-reason">{{ row.brushing_review }}</p>
-          <span v-if="closed" class="pricing-reason">已结账 · 只读</span><span v-else-if="row.partial_cost" class="pricing-reason">请核对缺失商品</span><n-button v-else-if="row.editable" size="small" @click="editLine(row)">{{ row.manual_amount == null ? '添加金额' : '修改金额' }}</n-button><span v-else class="pricing-reason">此键对应多个订单，需先确认归属</span>
+          <n-button v-if="row.partial_cost" size="small" @click="inspectMissingItems(row)">查看缺失商品</n-button><span v-else-if="closed" class="pricing-reason">已结账 · 只读</span><n-button v-else-if="row.editable" size="small" @click="editLine(row)">{{ row.manual_amount == null ? '添加金额' : '修改金额' }}</n-button><span v-else class="pricing-reason">此键对应多个订单，需先确认归属</span>
         </article>
       </div>
       <div class="pricing-pages"><span>{{ coverageBusy ? '正在加载订单记录…' : `共 ${coverageData.matching ?? coverageData.total ?? summary.gaps} 笔` }}</span><n-pagination v-model:page="coveragePage" :item-count="coverageData.matching || 0" :page-size="50" :disabled="coverageBusy" simple /></div>
@@ -241,7 +242,7 @@ const coverageColumns=[
         <p class="pricing-help">这是聚水潭等来源行的逐条异常；覆盖缺口以完整订单清单为准，来源行不会重复补录金额。</p>
         <div v-if="data.reason_counts?.length" class="pricing-summary" aria-label="未覆盖原因汇总"><span v-for="item in data.reason_counts" :key="item.reason"><b>{{ integer(item.count) }}</b>{{ reasonName(item.reason) }}</span></div>
       <n-alert v-if="error" type="error" style="margin-bottom: 16px">{{ error }} <n-button size="small" @click="load()">重试</n-button></n-alert>
-      <n-data-table class="pricing-desktop" :columns="columns" :data="data.items" :loading="busy" :scroll-x="995" :max-height="560" size="small" />
+      <n-data-table class="pricing-desktop" :columns="columns" :data="data.items" :loading="busy" :scroll-x="1780" :max-height="560" size="small" />
       <div class="pricing-mobile" :aria-busy="busy">
         <p v-if="busy">正在加载…</p>
         <p v-else-if="!data.items.length && !error">没有找到对应记录</p>
@@ -251,6 +252,7 @@ const coverageColumns=[
           <p>平台订单 {{ row.order_id || '未提供' }}</p>
           <p>聚水潭订单 {{ row.internal_order_id || '—' }}</p>
           <p class="pricing-reason">{{ reasonName(row.reason) }}</p>
+          <p v-if="row.required_evidence">还缺什么依据：{{ row.required_evidence }}</p>
         </article>
       </div>
       <div class="pricing-pages"><span>共 {{ data.total }} 条</span><n-pagination v-model:page="page" :item-count="data.total" :page-size="50" :disabled="busy" simple /></div>

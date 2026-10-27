@@ -32,8 +32,10 @@ def test_legacy_saved_gaps_remain_searchable_without_new_columns(tmp_path):
     pl.DataFrame([dict(order_id='o',internal_order_id='1',sku='s',reason='登记价历史有效期未证实；保留参考，待核对',reference_unit_cost=2.)]).write_parquet(p)
     result=pricing_gaps.page(p,category='register_evidence')
     assert result['total']==1
+    assert '历史有效期' in result['items'][0]['required_evidence']
     assert pricing_gaps.page(p,category='history_carry')['total']==0
-    assert len(list(csv.DictReader(io.StringIO(pricing_gaps.csv(p)))))==1
+    exported=list(csv.DictReader(io.StringIO(pricing_gaps.csv(p))))
+    assert len(exported)==1 and exported[0]['还缺什么依据']==result['items'][0]['required_evidence']
 
 
 def test_gap_categories_count_unique_keys_and_keep_mixed_and_unmatched(tmp_path):

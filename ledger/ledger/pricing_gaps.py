@@ -5,7 +5,7 @@ import polars as pl
 
 from .model.config import csv_cell
 from .view import _excel_identifier_cell
-from .pricing_categories import categorized, LABELS
+from .pricing_categories import categorized, LABELS, required_evidence
 
 
 def rows(path: Path, q: str = "", category: str = '') -> pl.LazyFrame:
@@ -31,7 +31,7 @@ def page(path: Path, *, q: str = "", category: str = '', offset: int = 0, limit:
     return {"total": summary["total"][0], "reference_count": summary["reference_count"][0],
             "category_counts": [{"category": r['category'], "label": LABELS.get(r['category'],r['category']), "count":r['len']} for r in categories.to_dicts()],
             "reason_counts": [{"reason": row["reason"], "count": row["len"]} for row in reasons.to_dicts()],
-            "offset": max(0, offset), "items": items.to_dicts()}
+            "offset": max(0, offset), "items": [{**r,'required_evidence':required_evidence(r)} for r in items.to_dicts()]}
 
 
 def csv(path: Path, q: str = "", category: str = '') -> str:
@@ -43,9 +43,10 @@ def csv(path: Path, q: str = "", category: str = '') -> str:
               ('internal_sub_order_id','聚水潭商品行ID'),('cost_source','成本来源'),('cost_status','来源状态'),
               ('cost_as_of','来源取价日'),('register_basis','登记价依据类型'),('cost_company_id','成本公司'),
               ('price_begin_date','历史价格开始日'),('price_end_date','历史价格截止日'),
-              ('carry_days','沿用天数'),('upstream_failure_reason','上游待核原因')]
+              ('carry_days','沿用天数'),('upstream_failure_reason','上游待核原因'),('required_evidence','还缺什么依据')]
     lines = [",".join(label for _, label in fields)]
     for row in rows(path, q, category).collect().iter_rows(named=True):
+        row['required_evidence'] = required_evidence(row)
         lines.append(",".join(_excel_identifier_cell(row.get(key)) if key.endswith("order_id")
                               else csv_cell(row.get(key)) for key, _ in fields))
     return "\n".join(lines) + "\n"

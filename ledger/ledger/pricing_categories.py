@@ -12,6 +12,25 @@ LABELS = {
     'other': '其他待核对',
 }
 
+def required_evidence(row):
+    category = row.get('category')
+    if category == 'register_evidence':
+        if row.get('cost_source') == 'register_first' or row.get('register_basis') == 'first':
+            return '与该订单或货号直接关联的首次成本原表及生效依据；不能用晚于下单日的首次登记价直接回填。'
+        if row.get('register_basis') == 'change_log_prior':
+            return '覆盖下单日的历史成本原表或调价回执；后续变更记录中的旧值不足以确定下单日价格。'
+        if row.get('register_basis') == 'change_log':
+            return '原始调价单和成功回执，需有公司、货号、前后单价及生效时间。'
+        return '首次导入成本原表或原始调价回执，明确公司、货号、单价与历史有效期。'
+    return {
+        'original_date': '原平台订单明细或拆合前独立原单，需能确认店铺、主子订单和下单日期。',
+        'history_carry': '覆盖下单日的历史价格区间或当日出入库台账日结；较早日期的价格仅作参考。',
+        'historical_price': '覆盖下单日的历史成本、首次成本原表或期初补算明细，需能核对货号和成本公司。',
+        'identity': '原订单商品清单及拆单、合单、替换记录，逐行核对子订单、SKU和数量。',
+        'amount': '原始商品数量和成本计价凭据，核对异常金额的来源。',
+        'sync': '先完成上游取价及同步，再核算；暂不重复补录金额。',
+    }.get(category, '核对来源明细与原始成本凭据；未查到不能视为不存在。')
+
 
 def category_expr(frame):
     names = frame.columns if hasattr(frame, 'columns') else frame.names()
