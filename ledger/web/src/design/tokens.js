@@ -35,11 +35,13 @@ export function uiTheme(dark = false) {
       fontFamily: tokens.fonts.body, fontFamilyMono: tokens.fonts.numbers,
     },
     Card: { borderRadius: px(tokens.space['2']) },
-    Button: { heightMedium: px(tokens.geometry['control-height']), heightSmall: px(tokens.geometry['control-height']), heightTiny: px(tokens.space['8']), fontWeight: String(tokens.weights.medium) },
-    Input: { heightMedium: px(tokens.geometry['control-height']), heightSmall: px(tokens.geometry['control-height']) },
-    Select: { peers: { InternalSelection: { heightMedium: px(tokens.geometry['control-height']), heightSmall: px(tokens.geometry['control-height']) } } },
+    Button: { heightMedium: px(tokens.geometry['control-height']), heightSmall: px(tokens.geometry['control-height']), heightTiny: px(tokens.space['8']), fontSizeSmall: px(tokens.type.body), fontWeight: String(tokens.weights.medium) },
+    Input: { heightMedium: px(tokens.geometry['control-height']), heightSmall: px(tokens.geometry['control-height']), fontSizeSmall: px(tokens.type.body), color: c.paper, colorFocus: c.paper, textColor: c.ink, placeholderColor: c.muted },
+    Select: { peers: { InternalSelection: { heightMedium: px(tokens.geometry['control-height']), heightSmall: px(tokens.geometry['control-height']), fontSizeSmall: px(tokens.type.body), color: c.paper, colorActive: c.paper, textColor: c.ink, placeholderColor: c.muted } } },
     Tabs: { tabFontSizeMedium: px(tokens.type.body), tabFontSizeSmall: px(tokens.type.body), tabGapMedium: px(tokens.space['6']) },
     DataTable: { thColor: c.surface, thTextColor: c.muted, thFontWeight: String(tokens.weights.medium), tdColorHover: c.surface, borderColor: c.line, fontSizeSmall: px(tokens.type.body) },
     Layout: { siderColor: c.paper, headerColor: c.paper },
+    Empty: { textColor: c.muted, extraTextColor: c.ink, iconColor: c.muted },
+    Badge: { color: c.danger, colorError: c.danger, colorWarning: c.warning, colorSuccess: c.success, colorInfo: c.action, fontSize: px(tokens.type.caption) },
   }
 }

@@ -15,6 +15,7 @@ const emit = defineEmits(['update:modelValue'])
 
 const OTHER = '其他'
 const picker=ref(false),small=ref(false)
+function closePicker(event){if(!picker.value)return;picker.value=false;event.preventDefault();event.stopPropagation()}
 let screen
 function resize(){small.value=screen.matches}
 onMounted(()=>{screen=window.matchMedia('(max-width:600px)');resize();screen.addEventListener('change',resize)})
@@ -89,17 +90,17 @@ const nearby=computed(()=>{
 </script>
 
 <template>
-  <div v-if="list.length" class="month-strip" :class="{compact}">
+  <div v-if="list.length" class="month-strip" :class="{compact}" @keydown.esc="closePicker">
     <MonthGrip :periods="list.map(item=>item.period)" :model-value="modelValue" @select="go" @open="picker=true" />
     <div class="month-nearby"><button class="month-step" :disabled="index<0||index>=list.length-1" aria-label="上一个月" @click="step(1)"><ChevronLeft :size="15"/></button><button v-for="item in nearby" :key="item.period" class="month-shortcut" :class="{selected:item.period===modelValue}" :title="`${pretty(item.period)} · ${statusOf(item).text}`" :aria-pressed="item.period===modelValue" @click="go(item.period)"><i :class="statusOf(item).mark"/>{{item.period}}</button><button class="month-step" :disabled="index<=0" aria-label="下一个月" @click="step(-1)"><ChevronRight :size="15"/></button></div>
     <n-popover trigger="click" :show="picker" :show-arrow="false" raw placement="bottom-end" @update:show="picker=$event"><template #trigger><button class="month-calendar" :aria-expanded="picker"><CalendarDays :size="15"/><span>全部月份</span></button></template>
-      <div class="month-picker"><LedgerTabs v-model="shownYear" :options="years.map(y=>({key:y,label:y,count:yearCounts.get(y)}))" label="选择年份"/><div class="ps-grid" :class="{free:shownYear===OTHER}"><button v-for="month in months" :key="month.key" class="ps-cell" :class="[month.status.mark,{on:month.period===modelValue,off:!month.has}]" :disabled="!month.has" @click="go(month.period)"><span class="ps-m">{{month.label}}<em v-if="shownYear!==OTHER">月</em></span><span v-if="month.has" class="ps-s">{{month.status.text}}</span></button></div><div class="ps-legend"><span class="closed">已结账 {{statusCounts.closed}}</span><span class="ready">可确认 {{statusCounts.ready}}</span><span class="pending">待补资料 {{statusCounts.pending}}</span><span class="evidence">有新资料 {{statusCounts.evidence}}</span></div></div>
+      <div class="month-picker" @keydown.esc="closePicker"><LedgerTabs v-model="shownYear" :options="years.map(y=>({key:y,label:y,count:yearCounts.get(y)}))" label="选择年份"/><div class="ps-grid" :class="{free:shownYear===OTHER}"><button v-for="month in months" :key="month.key" class="ps-cell" :class="[month.status.mark,{on:month.period===modelValue,off:!month.has}]" :disabled="!month.has" @click="go(month.period)"><span class="ps-m">{{month.label}}<em v-if="shownYear!==OTHER">月</em></span><span v-if="month.has" class="ps-s">{{month.status.text}}</span></button></div><div class="ps-legend"><span class="closed">已结账 {{statusCounts.closed}}</span><span class="ready">可确认 {{statusCounts.ready}}</span><span class="pending">待补资料 {{statusCounts.pending}}</span><span class="evidence">有新资料 {{statusCounts.evidence}}</span></div></div>
     </n-popover>
   </div>
 </template>
 
 <style scoped>
-.month-strip{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:12px 0;margin-bottom:16px;border-bottom:1px solid var(--n3)}.month-nearby{display:flex;align-items:center;gap:7px;min-width:0;overflow:auto}.month-shortcut,.month-step,.month-calendar{display:flex;align-items:center;justify-content:center;gap:6px;flex:none;border:1px solid var(--n3);background:var(--n0);border-radius:5px;color:#667992;min-height:34px;padding:6px 10px;font-size:var(--sk-type-caption);cursor:pointer}.month-shortcut.selected{color:var(--accent);background:var(--accent-bg);border-color:#b8cdf8}.month-shortcut i{width:5px;height:5px;border-radius:50%;background:#9daabb}.month-shortcut i.closed{background:#3a986b}.month-shortcut i.evidence,.month-shortcut i.pending{background:#d3a252}.month-shortcut i.ready{background:var(--accent)}.month-step{padding:5px}.month-step:disabled{opacity:.4;cursor:default}.month-calendar{border-color:transparent;background:transparent;white-space:nowrap;color:var(--accent)}.month-picker{width:min(490px,calc(100vw - 24px));background:var(--n0);border:1px solid #dfe6f0;border-radius:8px;padding:10px 12px;box-shadow:0 10px 32px #233b5e20}.month-picker .ps-grid{padding:12px 0}.month-picker .ps-legend{padding:10px 0 0;background:var(--n0)}.month-picker :deep(.ledger-tabs){padding:0 4px}@media(max-width:600px){.month-strip{gap:4px}.month-step{display:none}.month-shortcut{padding:6px 8px;font-size:var(--sk-type-caption)}.month-nearby{gap:5px}.month-calendar{padding:5px;font-size:var(--sk-type-caption);gap:4px}.month-picker .ps-grid{grid-template-columns:repeat(3,minmax(0,1fr))}}
+.month-strip{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:12px 0;margin-bottom:16px;border-bottom:1px solid var(--n3)}.month-nearby{display:flex;align-items:center;gap:7px;min-width:0;overflow:auto}.month-shortcut,.month-step,.month-calendar{display:flex;align-items:center;justify-content:center;gap:6px;flex:none;border:1px solid var(--n3);background:var(--n0);border-radius:5px;color:var(--sk-color-muted);min-height:34px;padding:6px 10px;font-size:var(--sk-type-caption);cursor:pointer}.month-shortcut.selected{color:var(--accent);background:var(--accent-bg);border-color:var(--sk-color-action)}.month-shortcut i{width:5px;height:5px;border-radius:50%;background:var(--sk-color-surface)}.month-shortcut i.closed{background:var(--sk-color-success)}.month-shortcut i.evidence,.month-shortcut i.pending{background:var(--sk-color-warning)}.month-shortcut i.ready{background:var(--accent)}.month-step{padding:5px}.month-step:disabled{opacity:.4;cursor:default}.month-calendar{border-color:transparent;background:transparent;white-space:nowrap;color:var(--accent)}.month-picker{width:min(490px,calc(100vw - 24px));background:var(--n0);border:1px solid var(--sk-color-line);border-radius:8px;padding:10px 12px;box-shadow:0 10px 32px var(--sk-color-shadow)}.month-picker .ps-grid{padding:12px 0}.month-picker .ps-legend{padding:10px 0 0;background:var(--n0)}.month-picker :deep(.ledger-tabs){padding:0 4px}@media(max-width:600px){.month-strip{gap:4px}.month-step{display:none}.month-shortcut{padding:6px 8px;font-size:var(--sk-type-caption)}.month-nearby{gap:5px}.month-calendar{padding:5px;font-size:var(--sk-type-caption);gap:4px}.month-picker .ps-grid{grid-template-columns:repeat(3,minmax(0,1fr))}}
 
 .ps { margin-bottom: var(--s5); padding: var(--s3) 0 var(--s4); border-bottom: 1px solid var(--n2); }
 .ps.compact { margin-top: var(--s4); }
@@ -115,7 +116,7 @@ const nearby=computed(()=>{
 }
 .ps-pager button:hover:not(:disabled) { color: var(--n9); border-color: var(--n5); }
 .ps-pager button:disabled { opacity: .35; cursor: default; }
-.ps-when { font-family: var(--num); font-size: var(--t-xl); font-weight: 620; letter-spacing: -.01em; }
+.ps-when { font-family: var(--num); font-size: var(--t-xl); font-weight: var(--sk-weight-medium); letter-spacing: -.01em; }
 .ps-badge {
   display: flex; align-items: center; gap: 6px;
   font-size: var(--t-sm); padding: 3px 10px;
@@ -145,7 +146,7 @@ const nearby=computed(()=>{
   transition: color .12s, border-color .12s; margin-bottom: -1px;
 }
 .ps-years button:hover { color: var(--n8); }
-.ps-years button.on { color: var(--n9); font-weight: 640; border-bottom-color: var(--n9); }
+.ps-years button.on { color: var(--n9); font-weight: var(--sk-weight-medium); border-bottom-color: var(--n9); }
 .ps-years button small { font-family: var(--font); font-size:var(--sk-type-caption); font-weight: 400; color: var(--n4); }
 .ps-years button.on small { color: var(--n6); }
 
@@ -162,24 +163,24 @@ const nearby=computed(()=>{
 }
 .ps-cell:hover:not(:disabled):not(.on) { border-color: var(--n5); background: var(--n1); }
 
-.ps-m { font-family: var(--num); font-size: var(--t-base); font-weight: 640; line-height: 1.2; color: var(--n8); }
+.ps-m { font-family: var(--num); font-size: var(--t-base); font-weight: var(--sk-weight-medium); line-height: 1.2; color: var(--n8); }
 .ps-m em { font-style: normal; font-family: var(--font); font-size:var(--sk-type-caption); font-weight: 400; margin-left: 1px; color: var(--n5); }
-.ps-s { font-size:var(--sk-type-caption); font-weight: 500; line-height: 1; white-space: nowrap; }
+.ps-s { font-size:var(--sk-type-caption); font-weight: var(--sk-weight-medium); line-height: 1; white-space: nowrap; }
 
 /* 状态色 */
-.ps-cell.closed { border-color: #c8e6d4; background: var(--ok-bg); }
+.ps-cell.closed { border-color: var(--sk-color-action); background: var(--ok-bg); }
 .ps-cell.closed .ps-m { color: var(--ok); }
 .ps-cell.closed .ps-s { color: var(--ok); }
 
-.ps-cell.ready { border-color: #c2d4f7; background: var(--accent-bg); }
+.ps-cell.ready { border-color: var(--sk-color-line); background: var(--accent-bg); }
 .ps-cell.ready .ps-m { color: var(--accent); }
 .ps-cell.ready .ps-s { color: var(--accent); }
 
-.ps-cell.pending { border-color: #f0d8a8; background: var(--warn-bg); }
+.ps-cell.pending { border-color: var(--sk-color-action); background: var(--warn-bg); }
 .ps-cell.pending .ps-m { color: var(--warn); }
 .ps-cell.pending .ps-s { color: var(--warn); }
 
-.ps-cell.evidence { border-color: #c8e6d4; background: var(--ok-bg); }
+.ps-cell.evidence { border-color: var(--sk-color-action); background: var(--ok-bg); }
 .ps-cell.evidence .ps-m { color: var(--ok); }
 .ps-cell.evidence .ps-s { color: var(--ok); }
 

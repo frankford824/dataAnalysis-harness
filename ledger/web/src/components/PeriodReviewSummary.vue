@@ -18,7 +18,7 @@ const hint=computed(()=>closed.value?(props.snapshot.stale?'有新资料，当�
   </n-drawer>
 </template>
 <style scoped>
-.period-review-summary{display:flex;align-items:center;justify-content:space-between;gap:20px;padding:16px 20px;background:var(--n0);border:1px solid #e2e5eb;border-radius:8px;margin-bottom:20px}
-.period-review-summary strong{font-size:var(--sk-type-body);color:#17623f}.period-review-summary strong.attention{color:#9e3d13}.period-review-summary p{font-size:var(--sk-type-body);color:var(--n6);margin:4px 0 0;line-height:1.7}
+.period-review-summary{display:flex;align-items:center;justify-content:space-between;gap:20px;padding:16px 20px;background:var(--n0);border:1px solid var(--sk-color-line);border-radius:8px;margin-bottom:20px}
+.period-review-summary strong{font-size:var(--sk-type-body);color:var(--sk-color-success)}.period-review-summary strong.attention{color:var(--sk-color-warning)}.period-review-summary p{font-size:var(--sk-type-body);color:var(--n6);margin:4px 0 0;line-height:1.7}
 @media(max-width:600px){.period-review-summary{align-items:flex-start;flex-direction:column;gap:12px}.period-review-summary :deep(button){min-height:44px}}
 </style>

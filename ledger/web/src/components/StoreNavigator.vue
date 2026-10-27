@@ -208,129 +208,129 @@ function renderExtra(option) {
    的一屏高撑满，右边只有十行文件时底下空出四百多像素白，看起来像表没加载完。
    减掉的那 208px 是顶栏、页面标题区和上下留白——它们都在这一栏上方，是固定的。 */
 .store-nav {
-  display: flex;
-  flex-direction: column;
-  min-width: 0;
-  min-height: 380px;
-  max-height: calc(100vh - 208px);
-  background: var(--n0);
-  border: 1px solid var(--n3);
-  border-radius: var(--r-lg);
-  overflow: hidden;
+  display:flex;
+  flex-direction:column;
+  min-width:0;
+  min-height:380px;
+  max-height:calc(100vh - 208px);
+  background:var(--n0);
+  border:1px solid var(--n3);
+  border-radius:var(--r-lg);
+  overflow:hidden;
 }
 
 .store-nav-head {
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: var(--s2);
-  padding: var(--s4) var(--s4) var(--s3);
+  display:flex;
+  align-items:baseline;
+  justify-content:space-between;
+  gap:var(--s2);
+  padding:var(--s4) var(--s4) var(--s3);
 }
 
 /* 数字看得见、单位退一档。上一版整句都是 11px 的浅灰，「52」和「家」一样重，
    扫过去只是一团灰字，看不出这里报的是两个数。 */
 .store-nav-stat {
-  display: inline-flex;
-  gap: 5px;
-  font-size: var(--t-xs);
-  color: var(--n5);
-  white-space: nowrap;
+  display:inline-flex;
+  gap:5px;
+  font-size:var(--t-xs);
+  color:var(--n5);
+  white-space:nowrap;
 }
-.store-nav-stat .n { font-weight: 620; color: var(--n7); }
-.store-nav-stat .sep { color: var(--n4); }
+.store-nav-stat .n { font-weight:var(--sk-weight-medium); color:var(--n7); }
+.store-nav-stat .sep { color:var(--n4); }
 
 /* 用组件库默认的 34px 高，和这套界面里别的输入框一样（design.css 的 input 是
    13px 字加 7px 内边距，也是 33 上下）。上一版写了 size="small"，28px 高——比
    底下 33px 一行的店铺还矮，是一屏里最小的那个可点区域，而它是搜索框。 */
-.store-nav-search { padding: 0 var(--s4) var(--s3); }
+.store-nav-search { padding:0 var(--s4) var(--s3); }
 /* 图标和占位符之间原本只有 4px，放大镜几乎贴着字。 */
-.store-nav-search :deep(.n-input__prefix) { margin-right: 7px; }
+.store-nav-search:deep(.n-input__prefix) { margin-right:7px; }
 .store-nav-search svg {
-  width: 15px;
-  height: 15px;
-  fill: none;
-  stroke: currentColor;
-  stroke-width: 1.8;
-  stroke-linecap: round;
-  color: var(--n5);
+  width:15px;
+  height:15px;
+  fill:none;
+  stroke:currentColor;
+  stroke-width:1.8;
+  stroke-linecap:round;
+  color:var(--n5);
 }
 
 .store-nav-list {
-  flex: 1 1 auto;
-  min-height: 0;
-  overflow-y: auto;
-  border-top: 1px solid var(--n2);
-  scrollbar-width: thin;
+  flex:1 1 auto;
+  min-height:0;
+  overflow-y:auto;
+  border-top:1px solid var(--n2);
+  scrollbar-width:thin;
 }
 
-.store-nav-blank { padding: var(--s5) var(--s4); border-top: 1px solid var(--n2); }
+.store-nav-blank { padding:var(--s5) var(--s4); border-top:1px solid var(--n2); }
 
 /* 组件库那套配色已经从 design.css 映过来了，选中态直接改它的变量就行——上一版是拿
-   `!important` 盖 ::before 的底色，每次升级组件库都得回来看还灵不灵。 */
-:deep(.n-menu) { padding: var(--s2) var(--s2) var(--s3); }
+   `!important` 盖::before 的底色，每次升级组件库都得回来看还灵不灵。 */
+:deep(.n-menu) { padding:var(--s2) var(--s2) var(--s3); }
 :deep(.n-menu-item) {
-  --n-item-height: 33px;
-  --n-item-color-active: var(--accent-bg);
-  --n-item-color-active-hover: var(--accent-bg);
-  margin: 1px 0;
+  --n-item-height:33px;
+  --n-item-color-active:var(--accent-bg);
+  --n-item-color-active-hover:var(--accent-bg);
+  margin:1px 0;
 }
-:deep(.n-menu-item-content) { border-radius: var(--r-sm); }
-:deep(.n-menu-item-content::before) { left: 0; right: 0; border-radius: var(--r-sm); }
-:deep(.n-menu-item-content--selected::before) { box-shadow: inset 3px 0 0 var(--accent); }
+:deep(.n-menu-item-content) { border-radius:var(--r-sm); }
+:deep(.n-menu-item-content::before) { left:0; right:0; border-radius:var(--r-sm); }
+:deep(.n-menu-item-content--selected::before) { box-shadow:inset 3px 0 0 var(--accent); }
 
 /* 行内是「名字 + 张数」。上一版这里是 display:block，里头的名字又是块级 flex，
    于是组件库那个贴行尾的 extra 被挤到了下一行——选中的店底下就多出一个孤零零的
    「10 张」，比店名还靠左。 */
 :deep(.n-menu-item-content-header) {
-  display: flex;
-  align-items: center;
-  gap: var(--s2);
-  min-width: 0;
+  display:flex;
+  align-items:center;
+  gap:var(--s2);
+  min-width:0;
 }
-:deep(.n-menu-item-content-header__extra) { flex: 0 0 auto; margin-left: auto; }
+:deep(.n-menu-item-content-header__extra) { flex:0 0 auto; margin-left:auto; }
 
 :deep(.platform-label) {
-  font-size: var(--t-xs);
-  font-weight: 600;
-  letter-spacing: .02em;
-  color: var(--n6);
+  font-size:var(--t-xs);
+  font-weight:var(--sk-weight-medium);
+  letter-spacing:.02em;
+  color:var(--n6);
 }
-:deep(.n-menu-item-content--child-active .platform-label) { color: var(--accent); }
+:deep(.n-menu-item-content--child-active .platform-label) { color:var(--accent); }
 
 /* 计数。数字那一格定宽右对齐，一列 19 / 2 / 6 / 17 的十位数才对得齐，
    不然「2」和「17」的起笔错开，比不出哪个平台店多。 */
 :deep(.count-tag) {
-  display: inline-flex;
-  align-items: baseline;
-  gap: 2px;
-  font-size: var(--t-xs);
-  color: var(--n6);
+  display:inline-flex;
+  align-items:baseline;
+  gap:2px;
+  font-size:var(--t-xs);
+  color:var(--n6);
 }
-:deep(.count-num) { min-width: 2ch; text-align: right; }
-:deep(.count-unit) { font-size:var(--sk-type-caption); color: var(--n5); }
+:deep(.count-num) { min-width:2ch; text-align:right; }
+:deep(.count-unit) { font-size:var(--sk-type-caption); color:var(--n5); }
 :deep(.n-menu-item-content--selected .count-tag),
-:deep(.n-menu-item-content--selected .count-unit) { color: var(--accent); }
+:deep(.n-menu-item-content--selected .count-unit) { color:var(--accent); }
 
-:deep(.store-label) { display: flex; align-items: center; gap: var(--s2); flex: 1 1 auto; min-width: 0; }
+:deep(.store-label) { display:flex; align-items:center; gap:var(--s2); flex:1 1 auto; min-width:0; }
 :deep(.store-name) {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  font-size: var(--t-md);
+  overflow:hidden;
+  text-overflow:ellipsis;
+  white-space:nowrap;
+  font-size:var(--t-md);
 }
-:deep(.n-menu-item-content--selected .store-name) { font-weight: 620; }
+:deep(.n-menu-item-content--selected .store-name) { font-weight:var(--sk-weight-medium); }
 
 :deep(.store-dot) {
-  width: 7px;
-  height: 7px;
-  flex: 0 0 auto;
-  border-radius: 50%;
+  width:7px;
+  height:7px;
+  flex:0 0 auto;
+  border-radius:50%;
 }
-:deep(.store-dot.is-closed) { background: var(--ok); }
-:deep(.store-dot.is-open) { background: var(--warn); }
-:deep(.store-dot.is-none) { border: 1.5px solid var(--n4); }
+:deep(.store-dot.is-closed) { background:var(--ok); }
+:deep(.store-dot.is-open) { background:var(--warn); }
+:deep(.store-dot.is-none) { border:1.5px solid var(--n4); }
 
-@media (max-width: 900px) {
-  .store-nav { min-height: 0; max-height: 44vh; }
+@media (max-width:900px) {
+  .store-nav { min-height:0; max-height:44vh; }
 }
 </style>

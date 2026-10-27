@@ -637,7 +637,7 @@ const initials = computed(() => (activePerson.value?.name || '?').slice(0, 1))
               <label>本次生效时间（可空，空则立即生效）</label>
               <input v-model="dutyFrom" type="datetime-local" step="1" class="org-input" />
             </div>
-            <p v-if="dutyError" class="org-section-desc" style="color:#b42318">{{ dutyError }}</p>
+            <p v-if="dutyError" class="org-section-desc" style="color:var(--sk-color-danger)">{{ dutyError }}</p>
             <div v-if="!storeDuties.length" class="org-no-store-tip">先保存负责店铺后，再设置做货 / 抽点</div>
             <div v-else class="org-duty-list">
               <div v-for="row in storeDuties" :key="row.store_id" class="org-duty-row">

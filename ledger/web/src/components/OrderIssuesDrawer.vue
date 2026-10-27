@@ -97,7 +97,7 @@ async function copyOrders(ids, label) {
 
 <style scoped>
 .controls { flex-wrap: wrap; gap: var(--s2); }
-.summary { margin-top: var(--s3); font-weight: 600; }
+.summary { margin-top: var(--s3); font-weight: var(--sk-weight-medium); }
 .issue-table { min-width: 1000px; }
 .identifier { white-space: nowrap; font-variant-numeric: tabular-nums; }
 .issue-table td { vertical-align: top; }

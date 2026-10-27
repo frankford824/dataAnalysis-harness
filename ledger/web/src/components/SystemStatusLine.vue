@@ -59,28 +59,28 @@ const sentence = computed(() => {
 
 <style scoped>
 .system-line {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  min-height: 32px;
-  color: var(--n7);
-  font-size: var(--t-sm);
+  display:flex;
+  align-items:center;
+  gap:8px;
+  min-height:32px;
+  color:var(--n7);
+  font-size:var(--t-sm);
 }
 .system-line-dot {
-  width: 8px;
-  height: 8px;
-  flex: 0 0 auto;
-  border-radius: 50%;
-  background: var(--n5);
-  box-shadow: 0 0 0 3px var(--n2);
+  width:8px;
+  height:8px;
+  flex:0 0 auto;
+  border-radius:50%;
+  background:var(--n5);
+  box-shadow:0 0 0 3px var(--n2);
 }
-.system-line.ok .system-line-dot { background: var(--ok); box-shadow: 0 0 0 3px var(--ok-bg); }
-.system-line.warn .system-line-dot { background: var(--warn); box-shadow: 0 0 0 3px var(--warn-bg); }
+.system-line.ok .system-line-dot { background:var(--ok); box-shadow:0 0 0 3px var(--ok-bg); }
+.system-line.warn .system-line-dot { background:var(--warn); box-shadow:0 0 0 3px var(--warn-bg); }
 .system-line.working .system-line-dot {
-  background: var(--accent);
-  box-shadow: 0 0 0 3px var(--accent-bg);
-  animation: status-breathe 1.4s ease-in-out infinite;
+  background:var(--accent);
+  box-shadow:0 0 0 3px var(--accent-bg);
+  animation:status-breathe 1.4s ease-in-out infinite;
 }
-.system-line-detail { margin-left: 6px; }
-@keyframes status-breathe { 50% { opacity: .45; } }
+.system-line-detail { margin-left:6px; }
+@keyframes status-breathe { 50% { opacity:.45; } }
 </style>

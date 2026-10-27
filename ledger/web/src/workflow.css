@@ -1,27 +1,27 @@
-.workflow-shell.shell .side{background:#20364d;border-right:1px solid #20364d;color:#e4edf6}
-.workflow-shell.shell .side .brand{color:#f3f7fc;font-weight:600}
-.workflow-shell.shell .side .brand-scope{color:#92a7be}
-.workflow-shell.shell .side .navlink{color:#c4d3e3}
-.workflow-shell.shell .side .navlink:hover{background:#2a435d}
-.workflow-shell.shell .side .navlink.on{background:#2c4e76;color:#fff}
-.workflow-shell.shell .side .navlink .count{color:#8fa9c6}
-.workflow-shell.shell .side .commission-subnav{border-color:#405b77}
-.workflow-shell.shell .side .commission-subnav a{color:#b8cbe0}
-.workflow-shell.shell .side .commission-subnav a:hover{background:#2a435d}
-.workflow-shell.shell .side .commission-subnav a.router-link-exact-active{color:#fff;background:var(--accent);border-left-color:#749aff}
+.workflow-shell.shell .side{background:var(--sk-color-surface);border-right:1px solid var(--sk-color-action);color:var(--sk-color-action)}
+.workflow-shell.shell .side .brand{color:var(--sk-color-on-action);font-weight:var(--sk-weight-medium)}
+.workflow-shell.shell .side .brand-scope{color:var(--sk-color-muted)}
+.workflow-shell.shell .side .navlink{color:var(--sk-color-muted)}
+.workflow-shell.shell .side .navlink:hover{background:var(--sk-color-surface)}
+.workflow-shell.shell .side .navlink.on{background:var(--sk-color-surface);color:var(--sk-color-on-action)}
+.workflow-shell.shell .side .navlink .count{color:var(--sk-color-muted)}
+.workflow-shell.shell .side .commission-subnav{border-color:var(--sk-color-action)}
+.workflow-shell.shell .side .commission-subnav a{color:var(--sk-color-muted)}
+.workflow-shell.shell .side .commission-subnav a:hover{background:var(--sk-color-surface)}
+.workflow-shell.shell .side .commission-subnav a.router-link-exact-active{color:var(--sk-color-on-action);background:var(--accent);border-left-color:var(--sk-color-action)}
 .workflow-shell.shell .commission-heading{min-height:64px;padding:12px 24px}
 .workflow-shell.shell .commission-heading h1{font-size:var(--sk-type-title)}
 .workflow-heading-actions{display:flex;gap:10px;align-items:center}
-.workflow-updated{font-size:var(--sk-type-caption);color:#8a97a9;margin-right:10px}
+.workflow-updated{font-size:var(--sk-type-caption);color:var(--sk-color-muted);margin-right:10px}
 .workflow-scope{padding:14px 24px 13px;border-bottom:1px solid var(--n3);background:var(--n0)}
 .workflow-scope-controls{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
 .workflow-shell.shell .workflow-product-search{width:300px;max-width:100%;flex:none}
 .workflow-refresh{margin-left:auto}
 .workflow-applied{display:flex;align-items:center;flex-wrap:wrap;gap:7px;margin-top:10px}
-.workflow-active-chip{display:inline-flex;align-items:center;gap:6px;max-width:300px;background:#edf2f8;color:#536780;border:0;border-radius:4px;padding:4px 8px;font:inherit;font-size:var(--sk-type-caption);cursor:pointer}
+.workflow-active-chip{display:inline-flex;align-items:center;gap:6px;max-width:300px;background:var(--sk-color-surface);color:var(--sk-color-muted);border:0;border-radius:4px;padding:4px 8px;font:inherit;font-size:var(--sk-type-caption);cursor:pointer}
 .workflow-active-chip span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .workflow-active-chip svg{flex:none}
-.workflow-active-chip:hover{background:#e2eafa}
+.workflow-active-chip:hover{background:var(--sk-color-action-soft)}
 .workflow-applied>.text-button{margin-left:4px;font-size:var(--sk-type-caption)}
 .workflow-shell.shell .commission-content{padding:14px 24px 22px}
 .workflow-shell.shell .commission-toolbar{margin-bottom:12px;gap:12px}
@@ -31,7 +31,7 @@
 .workflow-shell.shell .report-months{min-height:54px;padding:9px 0}
 .workflow-shell.shell .report-overview{min-height:84px;padding:15px 0;gap:0}
 .workflow-shell.shell .report-total{min-width:unset;display:flex;align-items:baseline;gap:14px;padding-right:26px}
-.workflow-shell.shell .report-total>span{color:#566780;font-size:var(--sk-type-body)}
+.workflow-shell.shell .report-total>span{color:var(--sk-color-muted);font-size:var(--sk-type-body)}
 .workflow-shell.shell .report-total strong{font-size:var(--sk-type-title);letter-spacing:-.5px;margin:0}
 .workflow-shell.shell .report-total small{font-size:var(--sk-type-heading)}
 .workflow-shell.shell .report-count{border-left:0;padding:2px 16px;gap:6px}
@@ -74,7 +74,7 @@
 .workflow-shell.shell .report-attention{font-size:var(--sk-type-caption)}
 .workflow-shell.shell .ledger-data-table .n-data-table-th,.workflow-shell.shell .ledger-data-table .n-data-table-td{padding:9px 8px!important}
 .workflow-shell.shell .report-tabs-row{padding:8px 0 12px}
-.workflow-shell.shell .side .navlink{color:#d1deeb}
+.workflow-shell.shell .side .navlink{color:var(--sk-color-muted)}
 }
 
 

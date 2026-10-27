@@ -71,9 +71,9 @@ const columns = computed(() => [
     key:'sales', width:112, mobile:false, align:'right',
     render:row => h('span', {title:'仅使用明确生效的商品身份或归档身份；缺少依据时不猜测'}, row.sales_pending?'归属待确认':money(row.sales))},
   {title:'原核算成本状态', key:'cost_status', width:164, mobileWidth:140,
-    render:row => h('span', {title:costStatusNote(row), style:row.cost_pending?'color:#a16207':undefined},row.cost_snapshot_status || costStatusLabel(row))},
+    render:row => h('span', {title:costStatusNote(row), style:row.cost_pending?'color:var(--sk-color-warning)':undefined},row.cost_snapshot_status || costStatusLabel(row))},
   {title:'当前成本状态', key:'cost_current_status', width:180, mobileWidth:160,
-    render:row => h('span', {title:costStatusNote(row), style:row.cost_current_status==='后续试算已补齐'?'color:#15803d':row.cost_pending?'color:#a16207':undefined},row.cost_current_status || '当前状态暂无法核实')},
+    render:row => h('span', {title:costStatusNote(row), style:row.cost_current_status==='后续试算已补齐'?'color:var(--sk-color-success)':row.cost_pending?'color:var(--sk-color-warning)':undefined},row.cost_current_status || '当前状态暂无法核实')},
   {title:() => h('div', {class:'profit-col-title'}, [h('span', '做货成本'), h('small', '非托管身份归属')]),
     key:'creator_cost', width:112, mobile:false, align:'right', render:row => row.cost_pending?'原核算有缺口':row.creator_pending?'归属待确认':money(row.creator_cost)},
   {title:() => h('div', {class:'profit-col-title'}, [h('span', '做货毛利'), h('small', '非托管身份归属')]),
@@ -211,7 +211,7 @@ function exportTable() {
           <div class="spread"><strong>{{ products.find(row => row.product_id === opened)?.product_name || '商品' }} 的订单</strong>
             <button type="button" class="text-button" @click="opened=''">收起</button></div>
           <div v-for="line in openedOrders" :key="line.sub_order_id || line.order_id" class="profit-order">
-            <span>主单 {{ line.order_id }}<small v-if="line.sub_order_id" style="display:block">子单 {{ line.sub_order_id }}</small><small v-if="line.cost_pending" :title="line.cost_status_note" style="display:block;color:#a16207">{{line.cost_status}} · 原核算利润保留原金额</small></span>
+            <span>主单 {{ line.order_id }}<small v-if="line.sub_order_id" style="display:block">子单 {{ line.sub_order_id }}</small><small v-if="line.cost_pending" :title="line.cost_status_note" style="display:block;color:var(--sk-color-warning)">{{line.cost_status}} · 原核算利润保留原金额</small></span>
             <span class="num">非托管创造利润 ¥{{ money(line.creator_profit) }} · 旧阶梯利润 ¥{{ money(line.profit) }}</span>
           </div>
           <p v-if="ordersLoading" class="muted">正在加载订单…</p>
@@ -234,37 +234,37 @@ function exportTable() {
   </n-drawer>
 </template>
 <style scoped>
-.profit-scope{font-size:var(--sk-type-caption);color:#8390a3;margin:0 0 12px;line-height:1.6}
+.profit-scope{font-size:var(--sk-type-caption);color:var(--sk-color-muted);margin:0 0 12px;line-height:1.6}
 .profit-basis{margin:0 0 14px}
-.profit-basis :deep(.n-alert__content){font-size:var(--sk-type-caption);line-height:1.7;color:#3d4a5c}
+.profit-basis :deep(.n-alert__content){font-size:var(--sk-type-caption);line-height:1.7;color:var(--sk-color-ink)}
 .profit-kpis{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:10px;margin-bottom:16px}
-.profit-basis-more{margin-top:6px}.profit-basis-more summary{cursor:pointer;color:#3560d6}
-.profit-kpis>div{background:#f4f7fc;border-radius:8px;padding:12px 14px}
+.profit-basis-more{margin-top:6px}.profit-basis-more summary{cursor:pointer;color:var(--sk-color-action)}
+.profit-kpis>div{background:var(--sk-color-action-soft);border-radius:8px;padding:12px 14px}
 .profit-kpis span{display:block;font-size:var(--sk-type-caption);color:var(--n6)}
-.profit-kpis small{display:block;margin-top:2px;font-size:var(--sk-type-caption);color:#8a94a3}
-.profit-kpis strong{display:block;margin-top:6px;font-size:var(--sk-type-heading);font-weight:650;letter-spacing:-.4px;font-variant-numeric:tabular-nums}
-.profit-kpis .cut{background:#fff4f2}
-.profit-kpis .cut strong{color:#b45248}
-.profit-kpis .keep{background:#eef4ff}
+.profit-kpis small{display:block;margin-top:2px;font-size:var(--sk-type-caption);color:var(--sk-color-muted)}
+.profit-kpis strong{display:block;margin-top:6px;font-size:var(--sk-type-heading);font-weight:var(--sk-weight-medium);letter-spacing:-.4px;font-variant-numeric:tabular-nums}
+.profit-kpis .cut{background:var(--bad-bg)}
+.profit-kpis .cut strong{color:var(--sk-color-danger)}
+.profit-kpis .keep{background:var(--sk-color-action-soft)}
 .profit-kpis .keep strong{color:var(--accent)}
 .profit-toolbar{display:flex;align-items:center;gap:14px;margin:0 0 10px}
 .profit-toolbar .commission-search{min-width:0;flex:1;max-width:360px}
-.profit-hint{margin-left:auto;font-size:var(--sk-type-caption);color:#8a94a3}
-.profit-filter{font-size:var(--sk-type-caption);color:#7a8595;margin:0 0 10px}
-.profit-orders-panel{margin:12px 0 4px;padding:12px 14px;background:#f7f9fc;border-radius:8px}
+.profit-hint{margin-left:auto;font-size:var(--sk-type-caption);color:var(--sk-color-muted)}
+.profit-filter{font-size:var(--sk-type-caption);color:var(--sk-color-muted);margin:0 0 10px}
+.profit-orders-panel{margin:12px 0 4px;padding:12px 14px;background:var(--sk-color-surface);border-radius:8px}
 .profit-orders-panel strong{font-size:var(--sk-type-body)}
-.profit-order{display:flex;justify-content:space-between;gap:12px;padding:7px 0;border-bottom:1px solid #e9edf2;font-size:var(--sk-type-caption)}
+.profit-order{display:flex;justify-content:space-between;gap:12px;padding:7px 0;border-bottom:1px solid var(--sk-color-line);font-size:var(--sk-type-caption)}
 .profit-order:last-child{border-bottom:0}
-.profit-labor,.profit-foot{font-size:var(--sk-type-caption);color:#5b6a80;line-height:1.7;margin:14px 0 10px}
+.profit-labor,.profit-foot{font-size:var(--sk-type-caption);color:var(--sk-color-muted);line-height:1.7;margin:14px 0 10px}
 .profit-foot strong{font-size:var(--sk-type-body);color:var(--n9);font-variant-numeric:tabular-nums}
 .n-alert{margin-bottom:12px}
 :deep(.profit-product),:deep(.profit-orders){border:0;background:transparent;padding:0;text-align:left;cursor:pointer;color:inherit;font:inherit}
 :deep(.profit-product){display:grid;gap:3px}
-:deep(.profit-product) strong{font-weight:550;color:#233247}
-:deep(.profit-product) small{color:#8390a2;font-size:var(--sk-type-caption)}
+:deep(.profit-product) strong{font-weight:var(--sk-weight-medium);color:var(--sk-color-ink)}
+:deep(.profit-product) small{color:var(--sk-color-muted);font-size:var(--sk-type-caption)}
 :deep(.profit-orders){color:var(--accent)}
 :deep(.profit-col-title){display:grid;gap:2px;line-height:1.2}
-:deep(.profit-col-title) small{color:#8a94a3;font-weight:400;font-size:var(--sk-type-caption)}
+:deep(.profit-col-title) small{color:var(--sk-color-muted);font-weight:400;font-size:var(--sk-type-caption)}
 @media(max-width:940px){.profit-kpis{grid-template-columns:repeat(3,minmax(0,1fr))}}
 @media(max-width:720px){
   .profit-kpis{grid-template-columns:repeat(2,minmax(0,1fr))}

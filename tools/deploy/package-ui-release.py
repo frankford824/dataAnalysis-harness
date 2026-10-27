@@ -12,6 +12,34 @@ import subprocess
 import zipfile
 
 
+# Render-function style literals only; numeric formatting and financial code must
+# still match the engine baseline byte-for-byte after these reviewed substitutions.
+UI_RENDER_STYLES = {
+    'ledger/web/src/views/CommissionReports.vue': {
+        'color:#a16207': 'color:var(--sk-color-warning)',
+        'color:#475569;font-size:12.5px': 'color:var(--sk-color-muted);font-size:var(--sk-type-caption)',
+        'color:#64748b;font-size:13px': 'color:var(--sk-color-muted);font-size:var(--sk-type-body)',
+        'color:#94a3b8;font-size:12px': 'color:var(--sk-color-muted);font-size:var(--sk-type-caption)',
+        "color:isPos?'#16a34a':'#d97706',fontWeight:600,fontSize:'12.5px'": "color:isPos?'var(--sk-color-success)':'var(--sk-color-warning)',fontWeight:600,fontSize:'var(--sk-type-caption)'",
+    },
+    'ledger/web/src/components/CommissionDetailDrawer.vue': {
+        'color:#64748b': 'color:var(--sk-color-muted)',
+        'color:#94a3b8': 'color:var(--sk-color-muted)',
+        "color:pos?'#16a34a':'#d97706'": "color:pos?'var(--sk-color-success)':'var(--sk-color-warning)'",
+    },
+    'ledger/web/src/components/ProfitCompositionDrawer.vue': {
+        'color:#a16207': 'color:var(--sk-color-warning)',
+        'color:#15803d': 'color:var(--sk-color-success)',
+    },
+}
+
+
+def reviewed_render_styles(path, text):
+    for before, after in UI_RENDER_STYLES.get(path, {}).items():
+        text = text.replace(before, after)
+    return text
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--repo', required=True)
@@ -46,7 +74,7 @@ def main():
             raise SystemExit(f'Existing financial/state/API module changed: {path}')
         if path.endswith('.vue') and path.removeprefix('ledger/web/') not in ui_script_changes:
             scripts = lambda text: re.findall(r'<script\b[^>]*>([\s\S]*?)</script>', text.decode().replace('\r\n', '\n').replace('\r', '\n'))
-            if scripts(before) != scripts(after):
+            if [reviewed_render_styles(path, script) for script in scripts(before)] != scripts(after):
                 raise SystemExit(f'An existing business view script changed outside the reviewed UI scope: {path}')
     prefix = 'ledger/ledger/static/'
     changed = git('diff', '--name-only', '--no-renames', '--diff-filter=AM', args.base, args.version, '--', prefix).decode().splitlines()

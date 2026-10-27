@@ -244,7 +244,7 @@ defineExpose({ reload: load })
       <div class="org-nav-left">
         <div class="org-nav-brand">
           <Building2 :size="18" class="text-indigo-600" />
-          <h1>销售组织架构</h1>
+          <h2>销售组织架构</h2>
           <p class="org-nav-hint">人员、上下级、负责店铺与默认做货/抽点都在这里维护</p>
         </div>
         <div class="org-stat-pills">

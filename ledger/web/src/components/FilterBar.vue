@@ -10,7 +10,7 @@
  * 检索在这里而不是单开一页：人要查一个订单号的时候，手上正开着某一页，不该被
  * 赶去另一个地方再回来。
  */
-import { computed, defineAsyncComponent, ref } from 'vue'
+import { computed, defineAsyncComponent, nextTick, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 
 import { prettyPeriod } from '../format'
@@ -30,6 +30,8 @@ const backable = computed(() => canBack.value && route.name !== 'board')
 
 const searching = ref(false)
 const monthMenu = ref(false)
+const monthSelect = ref(null)
+function openMonthMenu(){monthMenu.value=true;nextTick(()=>monthSelect.value?.focus())}
 const term = ref('')
 
 const platformOptions = computed(() => [
@@ -102,18 +104,18 @@ function submit() {
       ← 返回
     </n-button>
 
-    <label v-if="route.name!=='onboard'" class="locator-field platform">
-      <span class="locator-label">{{route.name==='fees'?'默认平台':'平台'}}</span>
+    <div v-if="route.name!=='onboard'" class="locator-field platform" role="group" aria-labelledby="locator-platform-label">
+      <span id="locator-platform-label" class="locator-label">{{route.name==='fees'?'默认平台':'平台'}}</span>
       <n-select
         :value="app.platform"
         :options="platformOptions"
         size="small"
         @update:value="onPlatform"
       />
-    </label>
+    </div>
     <span class="locator-sep" aria-hidden="true">›</span>
-    <label v-if="route.name!=='onboard'" class="locator-field store">
-      <span class="locator-label">{{route.name==='fees'?'试算店铺':'店铺'}}</span>
+    <div v-if="route.name!=='onboard'" class="locator-field store" role="group" aria-labelledby="locator-store-label">
+      <span id="locator-store-label" class="locator-label">{{route.name==='fees'?'试算店铺':'店铺'}}</span>
       <n-select
         :value="app.storeId"
         :options="storeOptions"
@@ -121,12 +123,13 @@ function submit() {
         filterable
         @update:value="onStore"
       />
-    </label>
+    </div>
     <span class="locator-sep" aria-hidden="true">›</span>
-    <label v-if="!['fees','onboard'].includes(route.name)" class="locator-field period">
-      <span class="locator-label">月份</span>
-      <div class="locator-month-control">
+    <div v-if="!['fees','onboard'].includes(route.name)" class="locator-field period" role="group" aria-labelledby="locator-period-label">
+      <span id="locator-period-label" class="locator-label">月份</span>
+      <div class="locator-month-control" @keydown.esc="monthMenu=false">
       <n-select
+        ref="monthSelect"
         :value="app.period"
         :options="periodOptions"
         :show="monthMenu"
@@ -135,9 +138,9 @@ function submit() {
         @update:show="monthMenu=$event"
         @update:value="onPeriod"
       />
-      <MonthGrip compact :periods="app.periods" :model-value="app.period" @select="onPeriod" @open="monthMenu=true" />
+      <MonthGrip compact :periods="app.periods" :model-value="app.period" @select="onPeriod" @open="openMonthMenu" />
       </div>
-    </label>
+    </div>
 
     <div class="locator-search">
       <span class="locator-label">搜索</span>

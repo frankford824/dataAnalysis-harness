@@ -53,7 +53,7 @@ watch(() => [state.storeIds, state.personIds, state.start, state.end, state.repo
 <template>
   <section class="commission-area workflow-area">
     <header class="commission-heading" data-region="hero"><h1>{{titles[route.name]||'提成设置'}}</h1></header>
-    <section class="commission-functions" data-region="function">
+    <section v-if="section!=='org'" class="commission-functions" data-region="function">
     <div class="workflow-heading-actions ui-control-bar"><span class="workflow-updated" aria-live="polite">{{state.loading[section]?'正在更新…':stamp?`更新于 ${stamp}`:''}}</span><template v-if="section==='settings'"><n-button :disabled="!page||!state.ready||page.busy" @click="page?.menu('import')">导入表格</n-button><n-button type="primary" :disabled="!page||!state.ready||page.busy" @click="page?.edit()">新增设置</n-button></template></div>
     <nav class="commission-mobile-nav" aria-label="提成菜单"><router-link :to="{name:'commission',query:route.query}">提成设置</router-link><router-link :to="{name:'commission-reports',query:route.query}">金额汇总</router-link><router-link :to="{name:'commission-org',query:route.query}">组织架构</router-link></nav>
     <div v-if="section!=='org'" class="workflow-scope">

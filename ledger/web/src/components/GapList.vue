@@ -97,7 +97,7 @@ function can(g) {
 
 .tick {
   color: var(--ok);
-  font-weight: 640;
+  font-weight: var(--sk-weight-medium);
 }
 
 .head {
@@ -108,7 +108,7 @@ function can(g) {
 }
 
 .head .name {
-  font-weight: 620;
+  font-weight: var(--sk-weight-medium);
   font-size: var(--t-sm);
 }
 
@@ -156,7 +156,7 @@ function can(g) {
 
 .title {
   font-size: var(--t-sm);
-  font-weight: 560;
+  font-weight: var(--sk-weight-medium);
 }
 
 .amt {

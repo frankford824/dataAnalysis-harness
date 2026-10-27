@@ -14,16 +14,16 @@ const columns=computed(()=>[
   ...(['stores', 'teams'].includes(current.value?.kind)?[{title:'人员',key:'person',minWidth:120,mobileWidth:100}]:[]),
   {title:'店铺',key:'store',minWidth:180,mobileWidth:130},
   {title:'月份',key:'period',width:90,mobileWidth:75},
-  ...(current.value?.kind==='store_people'?[{title:()=>h('div',{style:'white-space:normal',title:COMMISSION_BASE_LABEL},['提成计算基数',h('small',{style:'display:block;color:#64748b'},'按计提规则')]),key:'base',width:145,mobileWidth:140,align:'right',render:row=>money(row.base)}]:[]),
-  {title:'系统应发',key:'trial_amount',width:105,mobileWidth:90,align:'right',render:row=>h('span',{style:'color:#64748b'},money(row.trial_amount))},
+  ...(current.value?.kind==='store_people'?[{title:()=>h('div',{style:'white-space:normal',title:COMMISSION_BASE_LABEL},['提成计算基数',h('small',{style:'display:block;color:var(--sk-color-muted)'},'按计提规则')]),key:'base',width:145,mobileWidth:140,align:'right',render:row=>money(row.base)}]:[]),
+  {title:'系统应发',key:'trial_amount',width:105,mobileWidth:90,align:'right',render:row=>h('span',{style:'color:var(--sk-color-muted)'},money(row.trial_amount))},
   {title:'参考提成金额',key:'amount',width:115,mobileWidth:95,align:'right',render:row=>money(row.amount)},
   {title:'已核定实发',key:'confirmed_amount',width:115,mobileWidth:95,align:'right',render:row=>money(row.confirmed_amount)},
   {title:'核定状态',key:'confirmation_state',width:95,render:row=>({pending:'待核定',partial:'部分核定',confirmed:'已核定实发'}[row.confirmation_state]||'历史记录')},
   {title:'调整差额',key:'diff_amount',width:100,mobileWidth:85,align:'right',render:row=>{
     if(!row.confirmed_count)return '—'
-    if(!row.diff_amount || Math.abs(row.diff_amount)<0.001)return h('span',{style:'color:#94a3b8'},'0.00')
+    if(!row.diff_amount || Math.abs(row.diff_amount)<0.001)return h('span',{style:'color:var(--sk-color-muted)'},'0.00')
     const pos = row.diff_amount > 0
-    return h('span',{style:{color:pos?'#16a34a':'#d97706',fontWeight:600}},`${pos?'+':''}${money(row.diff_amount)}`)
+    return h('span',{style:{color:pos?'var(--sk-color-success)':'var(--sk-color-warning)',fontWeight:600}},`${pos?'+':''}${money(row.diff_amount)}`)
   }}
 ])
 async function load(){
@@ -72,4 +72,4 @@ async function download(){
     <template #footer><n-space><n-button :disabled="!data||loading||mismatch" :loading="downloading" @click="download">导出明细</n-button><n-button type="primary" @click="emit('close')">关闭</n-button></n-space></template>
   </n-drawer-content></n-drawer>
 </template>
-<style scoped>.detail-scope{font-size:var(--sk-type-caption);color:#8390a3;margin-bottom:18px}.detail-total{padding:18px 20px;background:#f4f7fc;border-radius:7px;margin-bottom:20px}.detail-total span{color:var(--n6);font-size:var(--sk-type-caption)}.detail-total strong{display:block;font-size:var(--sk-type-title);font-weight:600;color:var(--accent);font-variant-numeric:tabular-nums;margin-top:4px}.n-alert{margin-bottom:14px}</style>
+<style scoped>.detail-scope{font-size:var(--sk-type-caption);color:var(--sk-color-muted);margin-bottom:18px}.detail-total{padding:18px 20px;background:var(--sk-color-action-soft);border-radius:7px;margin-bottom:20px}.detail-total span{color:var(--n6);font-size:var(--sk-type-caption)}.detail-total strong{display:block;font-size:var(--sk-type-title);font-weight:var(--sk-weight-medium);color:var(--accent);font-variant-numeric:tabular-nums;margin-top:4px}.n-alert{margin-bottom:14px}</style>

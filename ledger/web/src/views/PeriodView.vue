@@ -418,7 +418,8 @@ watch(
   <n-spin :show="!failed && ((loading && !info) || (!!info && !scopeCurrent))">
     <n-alert v-if="failed" type="error" :bordered="false">{{ failed }}</n-alert>
 
-    <section v-if="!failed && info && !scopeCurrent" class="card period-scope-loading" role="status" aria-live="polite"><p>正在加载 {{period}} 的账期资料…</p><n-skeleton text :repeat="5"/></section>
+    <section v-if="!failed && !info" class="card period-scope-loading" role="status" aria-live="polite"><p>正在加载 {{period}} 的账期资料…</p><n-skeleton text :repeat="5"/></section>
+    <section v-else-if="!failed && info && !scopeCurrent" class="card period-scope-loading" role="status" aria-live="polite"><p>正在加载 {{period}} 的账期资料…</p><n-skeleton text :repeat="5"/></section>
     <template v-else-if="!failed && info && scopeCurrent">
       <PageHead
         kicker="店铺账期"
