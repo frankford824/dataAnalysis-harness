@@ -1,6 +1,6 @@
 <script setup>
 import { useMessage } from 'naive-ui'
-import { LayoutDashboard, Store, Coins, Tags, RefreshCw, Truck, Ruler, ScanLine } from '@lucide/vue'
+import { LayoutDashboard, Store, Coins, Tags, RefreshCw, Truck } from '@lucide/vue'
 import { computed, defineAsyncComponent, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 
@@ -185,8 +185,6 @@ defineExpose({ take })
       </router-link>
       <router-link class="navlink" :class="{on:$route.name==='freight-review'}" to="/freight"><Truck class="nav-icon" aria-hidden="true"/>运费复核</router-link>
       <router-link class="navlink" :class="{on:$route.name==='labor'}" to="/labor"><Coins class="nav-icon" aria-hidden="true"/>兼职人工费用</router-link>
-      <router-link class="navlink appearance-link" :class="{on:$route.name==='board' && $route.query.review==='1'}" :to="{name:'board',query:{review:'1'}}" @click="app.noted('board.tab','here').value='gaps'"><ScanLine class="nav-icon" aria-hidden="true"/>核对工作台</router-link>
-      <router-link class="navlink" :class="{on:$route.name==='appearance'}" to="/appearance"><Ruler class="nav-icon" aria-hidden="true"/>样式规范</router-link>
       <div class="grow" />
     </nav>
 

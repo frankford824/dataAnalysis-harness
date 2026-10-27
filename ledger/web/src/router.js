@@ -40,7 +40,7 @@ export const router = createRouter({
       name: 'fees',
       component: () => import('./views/FeesView.vue'),
     },
-    { path: '/appearance', name: 'appearance', component: () => import('./views/AppearanceView.vue') },
+    ...(import.meta.env.DEV ? [{ path: '/appearance', name: 'appearance', component: () => import('./views/AppearanceView.vue') }] : []),
     {
       path: '/onboard/:sha',
       name: 'onboard',

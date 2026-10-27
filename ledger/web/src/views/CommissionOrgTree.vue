@@ -27,6 +27,7 @@ const selectedId = ref('')
 const adding = ref(null)
 const newName = ref('')
 const products = ref([])
+const columns = ref(null)
 
 // Smart Auto-Organize Modal state
 const showSmartModal = ref(false)
@@ -87,7 +88,8 @@ function select(node) {
   adding.value = null
 }
 
-function startAdd(parent) {
+async function startAdd(parent) {
+  if(columns.value && !await columns.value.canDiscard())return
   adding.value = parent || { id: '', name: '根节点' }
   newName.value = ''
   if (parent?.id) selectedId.value = parent.id
@@ -306,6 +308,7 @@ defineExpose({ reload: load })
     <!-- MAIN WORKSPACE: Column Hierarchy View -->
     <main class="org-main-area" :class="{ loading }">
       <OrgColumnView
+        ref="columns"
         :tree="tree"
         :people="people"
         :products="products"

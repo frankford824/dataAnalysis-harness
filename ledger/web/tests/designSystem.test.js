@@ -1,13 +1,24 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
-import { tokens, tokenCss, uiTheme } from '../src/design/tokens.js'
+import { tokens, tokenCss, uiTheme, palette } from '../src/design/tokens.js'
 import { advanceSpring, createSpring } from '../src/components/ui/springMotion.js'
 import { createReviewGroups } from '../src/components/ui/reviewGroups.js'
 
 test('native and component-library colors/type resolve from the same committed tokens', () => {
   assert.equal(readFileSync(new URL('../src/design/tokens.css',import.meta.url),'utf8').replace(/\r\n/g,'\n'),tokenCss())
   for(const dark of [false,true]){const theme=uiTheme(dark),mode=dark?'dark':'light';assert.equal(theme.common.primaryColor,tokens.colors.action[mode]);assert.equal(theme.common.cardColor,tokens.colors.paper[mode]);assert.equal(theme.common.fontSize,`${tokens.type.body}px`)}
+})
+
+test('both palettes retain readable text, semantic states and visible control boundaries',()=>{
+  const luminance=hex=>hex.slice(1).match(/../g).slice(0,3).map(v=>parseInt(v,16)/255).map(v=>v<=.04045?v/12.92:((v+.055)/1.055)**2.4).reduce((sum,v,i)=>sum+v*[.2126,.7152,.0722][i],0)
+  const contrast=(a,b)=>{const x=luminance(a),y=luminance(b);return(Math.max(x,y)+.05)/(Math.min(x,y)+.05)}
+  for(const dark of [false,true]){
+    const c=palette(dark)
+    for(const background of ['canvas','paper','surface'])for(const text of ['ink','muted','action','success','warning','danger'])assert.ok(contrast(c[text],c[background])>=4.5,`${dark?'dark':'light'} ${text} on ${background}`)
+    assert.ok(contrast(c.pencil,c.paper)>=3)
+    assert.ok(contrast(c['on-action'],c.action)>=4.5)
+  }
 })
 test('the UI publisher avoids PowerShell automatic variables and never restarts the engine',()=>{
   const publisher=readFileSync(new URL('../../../tools/deploy/win/deploy-static-ui.ps1',import.meta.url),'utf8')

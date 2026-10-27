@@ -304,6 +304,11 @@ function dropAt(i) {
   draft.value = draft.value.filter((_, j) => j !== i)
 }
 
+function cancelChanges(){
+  draft.value=JSON.parse(JSON.stringify(data.value?.rules || []))
+  editing.value=null;preview.value=null;previewSignature.value='';submitAttempt.value=null;picked.value={}
+}
+
 function move(i, dir) {
   const j = i + dir
   if (j < 0 || j >= draft.value.length) return
@@ -420,6 +425,7 @@ onBeforeRouteLeave(()=>{
       <n-button type="primary" :disabled="!dirty || !preview || loading || !!app.busy || jobActive" :loading="!!app.busy" @click="apply">
         保存并后台重算
       </n-button>
+      <n-button :disabled="!dirty || !!app.busy" @click="cancelChanges">取消全部修改</n-button>
     </template>
   </PageHead>
 

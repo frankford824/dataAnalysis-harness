@@ -66,7 +66,9 @@ def main():
     for path in changed_paths:
         if not path.startswith(('ledger/web/', 'ledger/ledger/static/')) and path not in allowed_tools:
             raise SystemExit(f'UI-only release includes an unrelated file: {path}')
-    ui_script_changes = {'src/App.vue', 'src/components/AppBody.vue', 'src/components/GapList.vue', 'src/components/FilterBar.vue', 'src/components/PeriodStrip.vue', 'src/views/BoardView.vue', 'src/views/LaborView.vue', 'src/views/PeriodView.vue'}
+    # These views contain reviewed UI draft/cancellation and selection changes.
+    # Calculation/state/API modules and every deployed backend/model file remain protected.
+    ui_script_changes = {'src/App.vue', 'src/components/AppBody.vue', 'src/components/GapList.vue', 'src/components/FilterBar.vue', 'src/components/PeriodStrip.vue', 'src/components/OrgColumnView.vue', 'src/views/CommissionOrgTree.vue', 'src/views/FeesView.vue', 'src/views/FreightReview.vue', 'src/views/BoardView.vue', 'src/views/LaborView.vue', 'src/views/PeriodView.vue'}
     for path in git('ls-tree', '-r', '--name-only', args.base, '--', 'ledger/web/src').decode().splitlines():
         before = git('show', args.base + ':' + path)
         after = git('show', args.version + ':' + path)

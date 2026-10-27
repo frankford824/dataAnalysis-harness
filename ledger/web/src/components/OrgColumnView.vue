@@ -1,5 +1,6 @@
 <script setup>
 import { computed, ref, watch } from 'vue'
+import { onBeforeRouteLeave } from 'vue-router'
 import {
   Crown,
   User,
@@ -15,8 +16,9 @@ import {
 } from '@lucide/vue'
 import { useApp } from '../store'
 import { useCommission } from '../commissionStore'
-import { useMessage } from 'naive-ui'
+import { useDialog, useMessage } from 'naive-ui'
 import { DUTY_OPTIONS, dutyLabel, loadStoreMembers, saveStoreMembers } from '../storeMembers'
+import { reconcileOrgDraft } from './ui/orgDrafts'
 
 const props = defineProps({
   tree: { type: Array, default: () => [] },
@@ -31,10 +33,13 @@ const emit = defineEmits(['select', 'save-person', 'save-stores', 'move', 'add-c
 const app = useApp()
 const shared = useCommission()
 const message = useMessage()
+const dialog = useDialog()
 const storeDuties = ref([])
 const dutyFrom = ref('')
 const dutySaving = ref(false)
 const dutyError = ref('')
+const dutyLoading = ref(false), personOriginal = ref(''), storesOriginal = ref(''), dutiesOriginal = ref('')
+let dutyRead = 0
 const teamSearch = ref('')
 const selectedTeamId = ref('')
 const activePersonId = ref('')
@@ -85,7 +90,7 @@ const activePerson = computed(() => {
 })
 
 // When external selectedId changes, sync
-watch(() => props.selectedId, id => {
+watch(() => [props.selectedId, nodeMap.value], ([id]) => {
   if (id && nodeMap.value[id]) {
     activePersonId.value = id
     // Find which team this person belongs to
@@ -105,9 +110,11 @@ watch(activePerson, person => {
   if (!person) {
     form.value = blankForm()
     formStoreIds.value = []
+    personOriginal.value = '';storesOriginal.value = '';dutiesOriginal.value = ''
     return
   }
-  form.value = {
+  const samePerson=form.value.id===person.id
+  const incoming = {
     id: person.id,
     name: person.name || '',
     alias: person.alias || '',
@@ -118,8 +125,32 @@ watch(activePerson, person => {
     archived: !!person.archived,
     revision: person.revision || 0,
   }
-  formStoreIds.value = (person.stores || []).map(s => s.id)
+  const next=reconcileOrgDraft(form.value,personOriginal.value?JSON.parse(personOriginal.value):{},incoming,samePerson)
+  if(next.accepted){form.value=next.draft;personOriginal.value=JSON.stringify(next.original)}
+  const incomingStores=(person.stores || []).map(s => s.id).sort()
+  const currentStores=[...formStoreIds.value].sort()
+  const storeDraft=reconcileOrgDraft(currentStores,storesOriginal.value?JSON.parse(storesOriginal.value):[],incomingStores,samePerson)
+  if(storeDraft.accepted){
+    if(!samePerson || JSON.stringify(currentStores)!==JSON.stringify(storeDraft.draft))formStoreIds.value=storeDraft.draft
+    storesOriginal.value=JSON.stringify(storeDraft.original)
+  }
+  if(!samePerson)dutyFrom.value=''
 }, { immediate: true })
+
+const personDirty = computed(() => !!personOriginal.value && JSON.stringify(form.value) !== personOriginal.value)
+const storesDirty = computed(() => !!storesOriginal.value && JSON.stringify([...formStoreIds.value].sort()) !== storesOriginal.value)
+const dutiesDirty = computed(() => !!dutiesOriginal.value && JSON.stringify({rows:storeDuties.value,from:dutyFrom.value}) !== dutiesOriginal.value)
+const dirty = computed(() => personDirty.value || storesDirty.value || dutiesDirty.value)
+function resetPerson(){if(personOriginal.value)form.value=JSON.parse(personOriginal.value)}
+function resetStores(){if(storesOriginal.value)formStoreIds.value=JSON.parse(storesOriginal.value)}
+function resetDuties(){if(dutiesOriginal.value){const previous=JSON.parse(dutiesOriginal.value);storeDuties.value=previous.rows;dutyFrom.value=previous.from}}
+function canDiscard(){
+  if(props.saving || dutySaving.value)return Promise.resolve(false)
+  if(!dirty.value)return Promise.resolve(true)
+  return new Promise(resolve=>dialog.warning({title:'修改尚未保存',content:'切换后，当前人员、负责店铺或默认身份的未保存修改将丢失。',positiveText:'放弃修改',negativeText:'继续编辑',onPositiveClick:()=>resolve(true),onNegativeClick:()=>resolve(false),onClose:()=>resolve(false),onMaskClick:()=>resolve(false)}))
+}
+onBeforeRouteLeave(canDiscard)
+defineExpose({canDiscard})
 
 function blankForm() {
   return { id: '', name: '', alias: '', employee_no: '', parent_id: null, default_cut_rate: null, note: '', archived: false, revision: 0 }
@@ -133,13 +164,15 @@ const parentOptions = computed(() => {
 
 const storeOptions = computed(() => app.stores.map(s => ({ value: s.id, label: s.name })))
 
-function selectTeam(team) {
+async function selectTeam(team) {
+  if (team.id === activePerson.value?.id || !await canDiscard()) return
   selectedTeamId.value = team.id
   activePersonId.value = team.id
   emit('select', team)
 }
 
-function selectMember(person) {
+async function selectMember(person) {
+  if (person.id === activePerson.value?.id || !await canDiscard()) return
   activePersonId.value = person.id
   emit('select', person)
 }
@@ -196,15 +229,20 @@ function submitStores() {
 }
 
 async function loadDuties() {
+  const ticket=++dutyRead
   dutyError.value = ''
+  dutyLoading.value = true
+  dutiesOriginal.value = ''
+  storeDuties.value = []
   const personId = form.value.id
   const ids = [...formStoreIds.value]
   if (!personId || !ids.length) {
-    storeDuties.value = []
+    dutyLoading.value = false
     return
   }
   try {
     const members = await loadStoreMembers(ids)
+    if(ticket!==dutyRead || form.value.id!==personId)return
     storeDuties.value = ids.map(sid => {
       const mine = members.find(m => m.person_id === personId && m.store_id === sid)
       return {
@@ -213,10 +251,11 @@ async function loadDuties() {
         segments: mine?.segments || [],
       }
     })
+    dutiesOriginal.value=JSON.stringify({rows:storeDuties.value,from:dutyFrom.value})
   } catch (e) {
+    if(ticket!==dutyRead || form.value.id!==personId)return
     dutyError.value = e.message
-    storeDuties.value = ids.map(sid => ({ store_id: sid, duty: 'produce', segments: [] }))
-  }
+  } finally {if(ticket===dutyRead)dutyLoading.value=false}
 }
 
 watch([formStoreIds, () => form.value.id], loadDuties, { deep: true })
@@ -565,15 +604,18 @@ const initials = computed(() => (activePerson.value?.name || '?').slice(0, 1))
                 <input v-model="form.archived" type="checkbox" />
                 <span>停用此账号</span>
               </label>
+              <div class="org-save-actions">
+              <n-button size="small" :disabled="saving || !personDirty" @click="resetPerson">取消修改</n-button>
               <n-button
                 type="primary"
                 size="small"
                 :loading="saving"
-                :disabled="!form.name.trim()"
+                :disabled="!form.name.trim() || !personDirty"
                 @click="submitPerson"
               >
                 保存人员信息
               </n-button>
+              </div>
             </div>
           </div>
 
@@ -618,10 +660,12 @@ const initials = computed(() => (activePerson.value?.name || '?').slice(0, 1))
                 size="small"
                 type="default"
                 :loading="saving"
+                :disabled="!storesDirty"
                 @click="submitStores"
               >
                 保存店铺
               </n-button>
+              <n-button size="small" :disabled="saving || !storesDirty" @click="resetStores">取消店铺修改</n-button>
             </div>
           </div>
 
@@ -637,15 +681,16 @@ const initials = computed(() => (activePerson.value?.name || '?').slice(0, 1))
               <label>本次生效时间（可空，空则立即生效）</label>
               <input v-model="dutyFrom" type="datetime-local" step="1" class="org-input" />
             </div>
-            <p v-if="dutyError" class="org-section-desc" style="color:var(--sk-color-danger)">{{ dutyError }}</p>
-            <div v-if="!storeDuties.length" class="org-no-store-tip">先保存负责店铺后，再设置做货 / 抽点</div>
+            <p v-if="dutyError" class="org-section-desc" style="color:var(--sk-color-danger)">{{ dutyError }} <n-button text size="small" @click="loadDuties">重试读取身份</n-button></p>
+            <p v-if="dutyLoading" class="org-section-desc" role="status">正在读取店铺身份…</p>
+            <div v-else-if="!storeDuties.length && !dutyError" class="org-no-store-tip">先保存负责店铺后，再设置做货 / 抽点</div>
             <div v-else class="org-duty-list">
               <div v-for="row in storeDuties" :key="row.store_id" class="org-duty-row">
                 <span class="org-duty-store">{{ storeOptions.find(o => o.value === row.store_id)?.label || row.store_id }}</span>
                 <n-select v-model:value="row.duty" :options="DUTY_OPTIONS" size="small" style="width:168px" />
                 <span class="org-duty-seg">{{ row.segments?.length ? row.segments.map(s => `${dutyLabel(s.duty)} ${s.valid_from?.slice(0,10) || ''}`).join('；') : '尚未分段' }}</span>
               </div>
-              <n-button size="small" type="primary" :loading="dutySaving" @click="saveDuties">保存身份</n-button>
+              <div class="org-save-actions"><n-button size="small" :disabled="dutySaving || !dutiesDirty" @click="resetDuties">取消身份修改</n-button><n-button size="small" type="primary" :disabled="dutyLoading || !!dutyError || storesDirty || !dutiesDirty" :loading="dutySaving" @click="saveDuties">保存身份</n-button></div>
             </div>
           </div>
 
