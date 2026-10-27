@@ -8,12 +8,14 @@ import sys
 
 import pytest
 
+REPO=Path(__file__).resolve().parents[2]
+sys.path.insert(0,str(REPO))
+
 from ledger.release_gate import digest
 from ops.ledger_sentinel.financial_oracle import implementation_sha
 from ops.ledger_sentinel.repair import Repair
 from test_release_package import package_case,sources,seal
 
-REPO=Path(__file__).resolve().parents[2]
 GATE='1'*64
 
 
