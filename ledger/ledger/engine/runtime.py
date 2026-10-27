@@ -147,6 +147,7 @@ class Slice:
     deduplication: list[dict] = field(default_factory=list)
     order_issue_rows: pl.DataFrame = field(default_factory=pl.DataFrame)
     cost_line_posting: dict = field(default_factory=dict)
+    operations_evidence: pl.DataFrame = field(default_factory=pl.DataFrame)
 
     @property
     def can_close(self) -> bool:
@@ -1438,6 +1439,11 @@ def _build_slice(
     unavailable = {
         m.id for m in model.metrics if m.source in completeness.missing
     }
+    # The sales goods-cost coverage reference cannot certify an unrelated
+    # replacement/return component's missing price as zero.
+    other_pricing_metrics=(set(own_gaps['metric_id'].drop_nulls().unique().to_list())-{'goods_cost'}
+                           if not own_gaps.is_empty() else set())
+    unavailable.update(other_pricing_metrics)
     pending_statement = _statement_pending_scope(facts,
         [m for original in model.metrics if (m := original.for_platform(platform)) is not None], store, period)
     if pending_statement.height:
@@ -1463,11 +1469,12 @@ def _build_slice(
         for node in nodes.values():
             if not node.available and 'settlement' in node.missing_sources:
                 node.unavailable_reason = '本月相关对账流水身份待核对，争议行已隔离，尚不能核定完整金额'
-    if pricing_blocks:
+    if pricing_blocks or other_pricing_metrics:
         for node in nodes.values():
             if "order_cost" in node.missing_sources:
                 node.value = None
-                node.unavailable_reason = "已算现有成本，支持人工确认金额"
+                node.unavailable_reason = ("补发或其他成本尚缺有效价格凭据，金额仍待核对"
+                                           if other_pricing_metrics else "已算现有成本，支持人工确认金额")
     result = audit(model, scoped, scoped_reports, own, completeness, nodes)
     if integrity:
         from .types import Finding
@@ -1521,6 +1528,9 @@ def _build_slice(
         scoped = pl.concat([scoped, shared_pending], how="vertical_relaxed")
     own_pending=[x for x in allocation_pending or [] if x.get('store')==store and x.get('period')==period]
     allocation_evidence=pl.DataFrame()
+    from ..operations_readmodel import capture_projection
+    operations_context = spine if 'spine_row' in spine.columns else spine.with_row_index('spine_row')
+    operations_evidence = capture_projection(scoped_spine, operations_context)
     ratio_metrics=[m.id for original in model.metrics if (m:=original.for_platform(platform)) is not None and m.link
                    and (m.allocate is None or m.allocate.mode=='ratio')]
     ratio_facts=scoped_spine.filter(pl.col('metric_id').is_in(ratio_metrics)) if not scoped_spine.is_empty() else scoped_spine
@@ -1604,6 +1614,7 @@ def _build_slice(
         coverage_gap_rows=coverage_rows,
         allocation_pending=own_pending,
         allocation_evidence=allocation_evidence,
+        operations_evidence=operations_evidence,
         calculation_inputs={
             "metric_totals": totals,
             "unavailable_metrics": sorted(unavailable),

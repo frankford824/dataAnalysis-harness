@@ -101,16 +101,21 @@ def test_syncing_blocks_close_and_status_explains_saved_result(tmp_path):
     ws.close()
 
 
-def test_syncing_can_be_acknowledged_for_manual_close(tmp_path):
+def test_syncing_is_a_hard_block_even_with_manual_acknowledgement(tmp_path):
     ws = Workspace(tmp_path); feed_db(tmp_path)
+    from finance_fixture import monthly_model
+    from ledger.automation_checker import bind_model
+    from ledger.workspace import WorkspaceError
+    bind_model(ws,monthly_model(_model(),'s1','2026-06',0))
     run_id = ws.record('s1', '2026-06', {
         'can_close': True, 'findings': [], 'missing_sources': [],
+        'statement':[{'id':'n_receipt','value':100,'available':True}],
     }, [])
-    state = ws.close_period(
-        's1', '2026-06', by='人工操作', note='按已保存结果结账',
-        ignored_blockers=('source_sync_pending',), expected_run_id=run_id,
-    )
-    assert state.closed and '订单数据仍在同步' in state.note
+    with pytest.raises(WorkspaceError,match='积压|同步'):
+        ws.close_period(
+            's1', '2026-06', by='人工操作', note='按已保存结果结账',
+            ignored_blockers=('source_sync_pending',), expected_run_id=run_id)
+    assert not ws.state('s1','2026-06').closed
 
 
 def test_manual_recompute_reports_phase_and_clears_on_failure(tmp_path, monkeypatch):

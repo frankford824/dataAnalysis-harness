@@ -604,10 +604,15 @@ def apply_plan(
             model_revision=model_revision,
             input_fingerprint=fingerprint,
         )
-        state = workspace.close_period(
+        from .automation_checker import register_legacy_source
+        register_legacy_source(workspace,run_id,nas_root/'90_历史版本'/cell.source_sha256[:2]/cell.source_sha256/'payload',
+            cutoff=cutoff,reference=f'终态导入计划 {cell.source_sha256}',actor=OPERATOR)
+        state = workspace.close_historical_period(
             cell.store_id,
             cell.period,
             by=OPERATOR,
+            cutoff=cutoff,
+            reference=f'终态原件 {cell.source_sha256}',
             note=f"台账上线前已完成；只读归档 {cell.source.name} {cell.sheet}",
         )
         imported += 1
@@ -629,6 +634,10 @@ def apply_plan(
         if not re.fullmatch(r"\d{4}-\d{2}", state.period or ""):
             continue
         if state.period > cutoff or state.state == CLOSED:
+            continue
+        # A cutoff alone is not terminal financial evidence. Old unmatched
+        # failed snapshots remain open for investigation; never invent finality.
+        if (state.result or {}).get('archive',{}).get('kind')!='legacy_final_summary':
             continue
         workspace.close_historical_period(
             state.store_id,

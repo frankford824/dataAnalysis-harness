@@ -18,6 +18,16 @@ from ledger.workspace import CLOSED, OPEN, Workspace, WorkspaceError
 @pytest.fixture()
 def ws(tmp_path):
     w = Workspace(tmp_path / "space")
+    # State-machine tests still exercise real close prerequisites: one declared
+    # operating store, known revenue, and an explicit zero monthly overhead.
+    from test_commission import _model
+    from ledger.model.schema import Overhead
+    from ledger.automation_checker import bind_model
+    model=_model()
+    model=model.model_copy(update={
+        'statement':tuple(n.model_copy(update={'headline':'revenue'}) if n.id=='n_receipt' else n for n in model.statement),
+        'overheads':tuple(Overhead(period=p,amount=0) for p in ('2024-12','2025-05','2026-06'))})
+    bind_model(w,model)
     yield w
     w.close()
 
@@ -205,7 +215,8 @@ def test_empty_name_refused(ws):
 
 
 def _result(can_close: bool = True, **extra):
-    return {"can_close": can_close, "findings": [], "missing_sources": [], **extra}
+    return {"can_close": can_close, "findings": [], "missing_sources": [],
+            'statement':[{'id':'n_receipt','value':100,'available':True}],**extra}
 
 
 def test_record_creates_open_period(ws):
@@ -421,6 +432,10 @@ def test_reopen_preserves_old_close_evidence_and_next_close_freezes_new_labor(ws
     assert actions[0]["reason"] == "补入兼职公摊后统一重算"
     assert ws.state("s1", "2026-06").labor_cut is None
     updated = ws.record("s1", "2026-06", _result(profit=200), ["b"])
+    from ledger.automation_checker import bind_model,resolve_model
+    from ledger.model.schema import Overhead
+    model=resolve_model(ws)
+    bind_model(ws,model.model_copy(update={'overheads':tuple(x for x in model.overheads if x.period!='2026-06')+(Overhead(period='2026-06',amount=12.34),)}))
     frozen = ws.close_period("s1", "2026-06", by="新结账人", labor_cut="12.34")
     assert frozen.run_id == updated and frozen.labor_cut == "12.34"
     assert [(row["run_id"], row["amount"]) for row in ws.conn.execute(
@@ -543,17 +558,14 @@ def test_reopen_then_close_again_uses_new_numbers(ws):
     assert ws.state("s1", "2025-05").result["profit"] == 200
 
 
-def test_historical_close_freezes_failed_snapshot_only_before_cutoff(ws):
+def test_historical_close_cannot_turn_a_plain_failed_snapshot_into_terminal_evidence(ws):
     ws.record("s1", "2024-12", _result(can_close=False), ["a"], evidence_ready=True)
 
-    state = ws.close_historical_period(
-        "s1", "2024-12", cutoff="2026-05", by="迁移员",
-        note="历史政策关账", reference="财务确认截止期",
-    )
-
-    assert state.state == CLOSED
-    assert state.result["can_close"] is False
-    assert "财务确认截止期" in state.note
+    with pytest.raises(WorkspaceError,match='终态原件'):
+        ws.close_historical_period(
+            "s1", "2024-12", cutoff="2026-05", by="迁移员",
+            note="历史政策关账", reference="财务确认截止期")
+    assert ws.state('s1','2024-12').state==OPEN
     ws.record("s1", "2026-06", _result(), ["b"], evidence_ready=True)
     with pytest.raises(WorkspaceError, match="晚于"):
         ws.close_historical_period(

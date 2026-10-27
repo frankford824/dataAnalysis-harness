@@ -1,0 +1,67 @@
+# 月度自动化执行合同
+
+所有财务终态仍由已认证人工确认。服务身份不能批准规则授权、营业范围、公摊总额、月结、反结账或实发。经营页和专家页的 `can_close` 是当前最终 Checker 的读视图；封存原核算的引擎标记保留为 `engine_can_close`，不能用它判定最终就绪。
+
+## 原生确定性规则
+
+`GET /api/automation/rules` 返回规则语义及 `rule_sha`。`LEDGER_DETERMINISTIC_AUTOMATION_ENABLED` 默认关闭。开启后仍需人工用现有决定 preview/apply 流程批准 `kind=rule_grant`；服务无权自行授权。
+
+授权值包含 `rule_id`、`rule_sha`、`enabled`、带时区的执行有效期 `valid_from` / `valid_until`。可另外指定业务账期范围 `period_from` / `period_until`（`YYYY-MM`，两端包含）。不填写业务账期范围时仅作用于决定的本月；执行时间有效不等于可处理任何历史月。授权失效、撤销或规则版本变化后拒绝新效果。
+
+已实现规则：
+
+- `statement_unique_candidate.v1`：同一原始流水组完整、金额时间科目互证，且只有一个候选有原订单关联证据时关联。原始金额、日期、科目和订单号不编辑。
+- `history_cost_single_component.v1`：当前封存成本缺口仅一个正常销售 ERP 组件，无已入账部分成本或已有决定；原订单、店铺、平台成员、SKU、公司、原始日及数量与固定上游重取结果一致，再使用服务器受信历史价源计算补录。只有原始数量乘原始单价已恰好到分时才能自动入现有成本协议。部分成本、组合单位转换、补发、合并/拆分、赠品、异常件、多组件、含厘金额或冲突仍待核实，不以零或逐单舍入补录。
+
+现有 Manager 在文件/feed 入队成功核算后执行已批准规则，通过同事务回执和 outbox 回到同一个 Registry pending 队列，下一次原服务引擎重算。模型关闭时也执行该规则。`month.advance` 供首次或主动推进，不是正常逐店必点步骤，也不会隐式批准规则。暂时来源不可用的原生检查通过同一队列延迟重试；新文件/feed 不受该延迟阻挡。
+
+## 受信历史成本服务入口
+
+`POST /api/automation/service-actions` 仅接受已认证服务身份，要求 `business` scope 与 `approved_action` capability。请求额外字段拒绝，合同为：
+
+```json
+{
+  "request_id": "由案件与输入稳定生成的请求编号",
+  "rule_id": "history_cost_single_component.v1",
+  "case_id": "当前案件",
+  "store_id": "目标店",
+  "period": "2026-06",
+  "run_id": 123,
+  "coverage_key": "封存缺口键",
+  "context_sha": "封存订单上下文指纹",
+  "expected_line_revision": 0,
+  "input_sha": "当前Checker输入指纹"
+}
+```
+
+请求没有金额、数量、任意 URL 或模型自称可信的证据引用。后端从当前封存资料取数量，从配置的订单台和历史价接口重新取证，按 `Decimal` 保留原始乘积。v1 仅在乘积本身恰好到分且其他条件全部成立时进入现有 cost-line 审计链，不改变人工两位金额格式或原核算舍入政策。例如 `2 × 3.335 = 6.670` 可自动入 `6.67`，`1 × 3.335 = 3.335` 返回 `historical_amount_not_exact_cents` 待核实并留存原始报价及精确乘积证据，不能自动舍为 `3.34`。100 笔后一种来源的原始总额为 `333.5`，不会被自动补成 `334`。以后支持来源完整小数精度需另立业务 schema，不能凭执行者名称前缀放宽人工金额校验。
+
+成功返回 `status=applied`、`receipt_id`、非空 `source_refs` 与 `recompute_required=true`，只表示凭据补录成功，不能表示月结完成。相同请求成功重放返回同一回执，不重复写成本。来源暂不可用返回 `status=pending` 与 `reason_codes`；检查回执不占据最终成功幂等键，同一输入和请求可在来源恢复后重试。输入/决定版本已过期返回 409；身份或授权不足返回 403。
+
+服务器配置 `LEDGER_HISTORY_COST_API_BASE`（默认 `https://yongbo.cloud`）、`LEDGER_HISTORY_COST_API_TOKEN`、可选 `LEDGER_HISTORY_COST_API_TIMEOUT`。只请求固定 `/api/cost/history`，不采纳 current/register 替代价，不把 token 提供给模型或 Worker。原始响应与哈希原件保存在 Workspace，模型仅获取所需的脱敏引用；本机模型网关可能向外部模型服务发送上下文，不能因此宣称所有模型数据留在本机。
+
+## 营业范围与冻结
+
+`kind=store_scope` 的值为 `included`，可带 `valid_from` / `valid_until`（`YYYY-MM`，两端包含）。省略时只确认本月，不擅自扩大未来授权。接口 preview 显示实际 `effective_month_range`；重叠时最新适用的有效决定优先，撤销为追加记录并回落到此前仍有效决定。
+
+当前模型的 archived 标记不是历史开闭店日期，也不从最早同步月推断营业起点。历史未确认营业范围和无资料店保留缺口。任何范围决定不能改变已冻结月的营业店池；公司收入与兼职总额未确定不能冻结公摊。所有已闭账或实发金额继续使用原冻结记录。
+
+## 证据与账期复用边界
+
+原引擎继续全店核算，之后比较该店月结果、证据和适用配置摘要。结果金额相同但订单/数量/原件、适用人员/规则或引擎代码变化不能只按金额复用。跨月退款、补发、共享池等完整依赖仍保留。已证明无关月份变化可复用原 run，并追加当前输入等价验证凭据。
+
+当前上游只提供全局源头水位，尚无可证明最新的源侧店级 head。最终 Checker 仍保守阻止来源积压/错误及未核算新输入；有限全局 H 不能被宣传为完整数据库 as-of 快照，也不能仅凭本店已消费水位宣布已追平。
+
+## 缺什么、等待谁
+
+Worker 的 host `fail` 终端可附加顶层 `tool_outcomes`。只有当前服务身份、当前租约与输入版本可提交，每项仅有固定工具、来源、原因枚举和本机证据 `path` / `sha256`；金额、自由诊断文字、远端 URL 及模型声称的诊断一律不能作为等待分类输入。`result` 内的模型叙述不会被当成工具结果。
+
+固定原因是 `source_unavailable`、`login_required`、`original_evidence_missing`、`sku_contract_unknown`、`technical_failure`。前两类及 SKU 合同/执行故障归系统或来源维护；确实缺原件时按模型数据源的 `owner_role` 归资料提供角色。没有具体人员配置时明确返回 `role_unconfigured`，不会从做货、提成人员或店名猜负责人。证据引用标为 `worker_local`，是已认证执行器的本机观察记录，不能替代财务 Checker 的独立凭据验证。
+
+等待为追加记录，同一资料需求与原因保留首个 `since`、handoff ID 和稳定 `notification_key`；不重复建档或重新认领，未完成也不会显示成 completed。没有发送外部通知。月度响应提供 `counts.waiting`、每店 `waiting` 和按原因、证据类型及角色合并的 `waiting_groups`，一组可包含多个店月。公司兼职总额仍需确认时，等待摘要与该真实业务决定同时保留。
+
+提交时仍以当前财务输入 SHA 和租约严格隔离旧 Worker；等待是否继续则使用独立的本店资料需求摘要，包含缺口/context、SKU、公司、原始日与数量，不包含别店收入、公摊总额、人员分配或队列投递/ack。原服务核算后的账期证明同时保留此资料摘要：无关财务变化换 run 不会令同一缺件重查；当前缺口消失、相关原件/来源健康或合同变化时旧等待失效，现有 Manager/claim 恢复处理。它不放宽任何结账、证据、金额或源头水位阻断。
+
+本机 Collector 的 `trusted_outcomes(case)` 只读取私有、哈希绑定且与案件/输入/规则上下文一致的工具回执。Worker 可据此直接交接已知等待，避免再次调用模型重查同一未登录来源；后续真实 found、已进入现有同步流程或已接受补录会清除相应旧阻塞。SDK runtime/state 和模型消息不参与该诊断通道。
+
+心跳可附运行时与来源配置的单向 SHA，服务器不接收凭据明文。来源维护等待仅跟随该执行器的来源配置，SDK 执行维护仅跟随运行时配置，互不因无关配置变化重置等待；真实配置变化会隔离旧租约并恢复核查。本机 Collector 缓存也绑定来源 Config SHA，同配置重启复用等待，新凭据或地址不会沿用旧登录结论。冻结 SDK 包装器产生的维护/未配置状态可被 Worker 记录为本机技术回执，模型回复伪装成相同文字不能获得该诊断权限。外部来源恢复通过现有 feed 的健康标志或新的资料/规则事件反映，探测时间戳本身不唤醒等待。

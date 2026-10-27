@@ -1,7 +1,11 @@
 """Manual close and payout confirmation must agree about allocation risk."""
 import json
+import pytest
 
 from test_commission_reports import fixture
+from finance_fixture import monthly_model,preexisting_closed
+from test_commission import _model
+from ledger.workspace import WorkspaceError
 
 
 def _pending_run(ws, people, *, blocking=True):
@@ -19,7 +23,7 @@ def _pending_run(ws, people, *, blocking=True):
                                    'amount': 10, 'base': 100}],
                        'total': 10, 'amount_complete': False,
                        'unassigned_orders': 0},
-        'statement': [],
+        'statement': [{'id':'n_receipt','value':100,'available':True}],
     }, [])
 
 
@@ -32,8 +36,11 @@ def _decision(context, people):
 def test_payout_requires_separate_ack_for_same_run_manual_close(tmp_path):
     ws, registry, people, client = fixture(tmp_path)
     run = _pending_run(ws, people)
-    ws.close_period('s1', '2026-06', by='财务', note='核对后承担分配风险',
-                    ignored_blockers=('allocation_basis',), expected_run_id=run)
+    with pytest.raises(WorkspaceError,match='待核对'):
+        ws.close_period('s1', '2026-06', by='财务', note='当前流程不允许忽略分配阻断',
+                        ignored_blockers=('allocation_basis',), expected_run_id=run,
+                        model=monthly_model(_model(),'s1','2026-06'))
+    preexisting_closed(ws,run,note='核对后承担分配风险',ignored=('allocation_basis',))
     context = client.get('/api/commission-v2/payout-confirmations/context', params={
         'store_id': 's1', 'period': '2026-06', 'run_id': run}).json()
     risk = context['allocation_risk']
@@ -71,7 +78,10 @@ def test_payout_requires_separate_ack_for_same_run_manual_close(tmp_path):
 def test_closed_period_without_recorded_override_cannot_ack_missing_basis(tmp_path):
     ws, registry, people, client = fixture(tmp_path)
     run = _pending_run(ws, people, blocking=False)
-    ws.close_period('s1', '2026-06', by='财务', note='普通结账', expected_run_id=run)
+    with pytest.raises(WorkspaceError,match='金额依据仍未完整'):
+        ws.close_period('s1', '2026-06', by='财务', note='当前流程不能提前结账', expected_run_id=run,
+                        model=monthly_model(_model(),'s1','2026-06'))
+    preexisting_closed(ws,run,note='旧版普通结账记录、没有分配风险override')
     context = client.get('/api/commission-v2/payout-confirmations/context', params={
         'store_id': 's1', 'period': '2026-06', 'run_id': run}).json()
     assert context['allocation_risk']['can_confirm'] is False

@@ -18,6 +18,21 @@ import pytest
 from ledger import version
 
 
+def test_actual_source_drift_changes_identity_even_when_version_stamp_does_not(tmp_path,monkeypatch):
+    folder=tmp_path/'ledger/ledger';folder.mkdir(parents=True)
+    source=folder/'example.py';source.write_text('value = 1\n')
+    stamp=tmp_path/'VERSION';stamp.write_text('abcdef7')
+    monkeypatch.setattr(version,'_STAMP',stamp)
+    monkeypatch.setattr(version,'_git',lambda *args: (_ for _ in ()).throw(OSError('no repository')))
+    label=version.engine_version();before=version.source_code_sha(tmp_path)
+    source.write_text('value = 2\n')
+    assert version.engine_version()==label=='abcdef7'
+    assert version.source_code_sha(tmp_path)!=before
+    after=version.source_code_sha(tmp_path)
+    (folder/'unexpected_module.py').write_text('value = 3\n')
+    assert version.source_code_sha(tmp_path)!=after
+
+
 @pytest.fixture
 def no_git(monkeypatch):
     """模拟机器上没装 git。"""
@@ -93,3 +108,25 @@ class TestTheStampLandsWhereTheCodeIs:
         """真跑一次。不管走的是 git 还是 VERSION，结果都得能塞进一列数据库字段。"""
         v = version.engine_version()
         assert v and len(v.split()) == 1
+
+
+def test_api_version_exposes_actual_and_approved_source_status(monkeypatch):
+    from ledger import api
+    monkeypatch.setattr(api,'engine_version',lambda:'a'*40)
+    monkeypatch.setattr(api,'_model_revision',lambda:'model-fixture')
+    monkeypatch.setattr(api,'code_integrity',lambda:{'healthy':False,'source_code_sha':'b'*64,
+        'approved_source_code_sha':'c'*64,'source_code_status':'source_drift'})
+    result=api.version_info()
+    assert result['version']=='a'*40 and result['source_code_sha']=='b'*64
+    assert result['approved_source_code_sha']=='c'*64 and result['source_code_status']=='source_drift'
+
+
+def test_packaged_approval_uses_full_version_stamp_over_leftover_git(monkeypatch,tmp_path):
+    (tmp_path/'RELEASE-ACCEPTANCE.json').write_text('{}')
+    stamp=tmp_path/'VERSION';stamp.write_text('a'*40+'\n')
+    monkeypatch.setattr(version,'_ROOT',tmp_path);monkeypatch.setattr(version,'_STAMP',stamp)
+    monkeypatch.setattr(version,'_git',lambda *args:'old1234-dirty')
+    assert version.engine_version()=='a'*40
+    # The label alone is not authority: malformed approval remains unhealthy.
+    source=tmp_path/'ledger/ledger';source.mkdir(parents=True);(source/'module.py').write_text('VALUE=1\n')
+    assert version.CodeIntegrityMonitor(tmp_path).state()['healthy'] is False

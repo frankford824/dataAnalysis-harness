@@ -9,12 +9,16 @@ from ledger.storage_integrity import digest
 
 def setup(tmp_path):
     w=Workspace(tmp_path/'home')
+    from test_commission import _model
+    from ledger.model.schema import Store
+    from finance_fixture import monthly_model
+    model=monthly_model(_model(stores=(Store(id='s',name='存储夹具店',platform='taobao'),)),'s','2026-06')
     for i in range(5):
-        rid=w.record('s','2026-06',{'can_close':True},[])
+        rid=w.record('s','2026-06',{'can_close':True,'statement':[{'id':'n_receipt','value':12.34,'available':True}]},[])
         path=w.facts_path(rid);path.parent.mkdir(exist_ok=True)
         pl.DataFrame({'amount':[12.34]}).write_parquet(path)
         os.utime(path,(time.time()-4*86400,)*2)
-        if i==0:w.close_period('s','2026-06',by='test',note='closed')
+        if i==0:w.close_period('s','2026-06',by='test',note='closed',model=model)
     return w,{'archive_root':str(tmp_path/'archive'),'hot_days':2,'hot_versions':2,'max_files':100}
 
 

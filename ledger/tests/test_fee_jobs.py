@@ -5,7 +5,7 @@ from types import SimpleNamespace
 
 import pytest
 from fastapi.testclient import TestClient
-from conftest import MODELS
+from conftest import MODELS, login_client
 from ledger import fee_jobs, service
 from ledger.commission_registry import Registry
 from ledger.model.loader import load_model
@@ -142,10 +142,12 @@ def test_api_fast_response_status_and_conflict(setup,monkeypatch):
     ws,root,model=setup
     monkeypatch.setattr(api,'DEFAULT_MODEL',root)
     monkeypatch.setattr(api,'workspace',lambda:ws)
+    monkeypatch.setattr(api,'WORKSPACE_ROOT',ws.root)
     monkeypatch.setattr(api,'_model',model)
     monkeypatch.setattr(api,'_invalidate_model',lambda:None)
     monkeypatch.setattr(service,'recompute',lambda *a,**k:pytest.fail('request must return before calculation'))
     client=TestClient(api.app)
+    login_client(client,ws.root)
     body=dict(rules=[*[r.model_dump() for r in model().fee_rules],FeeRule(value='z',platform='douyin',major='software_fee').model_dump()],
               expected_fee_revision=fee_jobs.revision(model().fee_rules),request_id=str(uuid.uuid4()))
     response=client.post('/api/fees',json=body)

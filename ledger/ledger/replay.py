@@ -25,6 +25,8 @@ from __future__ import annotations
 
 import json
 import math
+import hashlib
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable
@@ -35,8 +37,9 @@ from .model.schema import Model
 from .version import engine_version
 from .view import slice_dict
 
-#: 一分钱以内算没变。和 accept.py 同一个口径。
-TOLERANCE = 0.005
+# Six-decimal ledger amounts and dimensionless ratios have different units.
+TOLERANCE = 0.0000005
+RATIO_TOLERANCE = 0.0000000005
 
 #: 基线文件。放在仓库里，跟着代码走。
 BASELINE = Path(__file__).resolve().parent.parent / "tests" / "baseline" / "statements.json"
@@ -74,7 +77,9 @@ class Change:
 
     @property
     def numeric(self) -> bool:
-        return isinstance(self.before, (int, float)) and isinstance(self.after, (int, float))
+        return (not isinstance(self.before, bool) and not isinstance(self.after, bool)
+                and isinstance(self.before, (int, float)) and isinstance(self.after, (int, float))
+                and math.isfinite(self.before) and math.isfinite(self.after))
 
     @property
     def money(self) -> bool:
@@ -121,7 +126,7 @@ class Replay:
 
     @property
     def clean(self) -> bool:
-        return not self.changes and not self.vanished and not self.appeared
+        return bool(self.current) and any(self.current.values()) and not self.changes and not self.vanished and not self.appeared
 
     @property
     def money_changes(self) -> list[Change]:
@@ -270,18 +275,51 @@ def load_baseline(path: Path = BASELINE) -> dict[str, Any]:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
-def write_baseline(current: dict[str, dict[str, Any]], path: Path = BASELINE, note: str = "") -> None:
+def input_manifest(model_root: Path, corpus: Path, current: dict[str, dict[str, Any]]) -> dict:
+    """Content identities, not mutable filenames or mtimes. Legacy replay is explicit."""
+    def files(root, pattern):
+        return [{"path": p.relative_to(root).as_posix(), "sha256": hashlib.sha256(p.read_bytes()).hexdigest()}
+                for p in sorted(root.rglob(pattern)) if p.is_file()]
+    return {"schema": 1, "execution_path": "legacy_ingest",
+            "model": files(model_root, "*"), "inputs": files(corpus, "*.xlsx"),
+            "scope": {s: sorted(periods) for s, periods in sorted(current.items())}}
+
+
+def write_baseline(current: dict[str, dict[str, Any]], path: Path = BASELINE, note: str = "", *,
+                   manifest: dict | None = None, scope_change_reason: str = "") -> None:
     """录基线。带引擎版本，好回答「这份基线是哪一版录的」。"""
+    version = engine_version()
+    if not re.fullmatch(r"[0-9a-f]{7,40}", version):
+        raise ValueError("正式基线拒绝 dirty、unknown 或无效代码版本")
+    if not current or not all(periods for periods in current.values()):
+        raise ValueError("正式基线不能是空范围")
+    json.dumps(current, allow_nan=False)
+    expected_scope = {s: sorted(periods) for s, periods in sorted(current.items())}
+    if not manifest or manifest.get("scope") != expected_scope or not manifest.get("inputs") or not manifest.get("model"):
+        raise ValueError("正式基线必须提供完整输入、规则清单与相同店期范围")
+    for item in [*manifest["inputs"], *manifest["model"]]:
+        if not item.get("path") or not re.fullmatch(r"[0-9a-f]{64}", item.get("sha256", "")):
+            raise ValueError("输入清单缺少文件身份")
+    previous = load_baseline(path).get("stores", {})
+    removed = {f"{s}:{p}" for s, periods in previous.items() for p in periods
+               if p not in current.get(s, {})}
+    if removed and not scope_change_reason.strip():
+        raise ValueError("正式基线拒绝未声明的范围缩减：" + ", ".join(sorted(removed)))
     path.parent.mkdir(parents=True, exist_ok=True)
     payload = {
-        "engine_version": engine_version(),
+        "schema": 2,
+        "engine_version": version,
         "note": note,
+        "input_manifest": manifest,
+        "scope_change_reason": scope_change_reason,
         "stores": current,
     }
-    path.write_text(
-        json.dumps(payload, ensure_ascii=False, indent=1, sort_keys=True) + "\n",
+    temporary = path.with_name(path.name + '.tmp')
+    temporary.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=1, sort_keys=True, allow_nan=False) + "\n",
         encoding="utf-8",
     )
+    temporary.replace(path)
 
 
 def _strip(payload: dict[str, Any]) -> Any:
@@ -289,7 +327,7 @@ def _strip(payload: dict[str, Any]) -> Any:
     return {k: v for k, v in payload.items() if k not in VOLATILE}
 
 
-def _walk(store: str, period: str, path: str, before: Any, after: Any) -> list[Change]:
+def _walk(store: str, period: str, path: str, before: Any, after: Any, numeric_kind: str = '') -> list[Change]:
     """递归比两份结构。字典按键比，列表优先按名字配对、配不上才退回按下标。
 
     报表行、自检项、分桶都是有名字的列表。按下标比会在增删一项时把后面全部错位：
@@ -308,7 +346,8 @@ def _walk(store: str, period: str, path: str, before: Any, after: Any) -> list[C
             elif key not in before:
                 out.append(Change(store, period, sub, None, after[key], "added"))
             else:
-                out.extend(_walk(store, period, sub, before[key], after[key]))
+                kind = 'ratio' if key == 'value' and (before.get('display') == 'percent' or after.get('display') == 'percent') else ''
+                out.extend(_walk(store, period, sub, before[key], after[key], kind))
         return out
 
     if isinstance(before, list) and isinstance(after, list):
@@ -330,12 +369,20 @@ def _walk(store: str, period: str, path: str, before: Any, after: Any) -> list[C
     if isinstance(before, bool) or isinstance(after, bool):
         # bool 是 int 的子类，不先挡住的话 True/1 会被判成相等。
         # `can_close` 从 True 变 1 无所谓，从 True 变 False 是天大的事。
-        return [] if bool(before) == bool(after) else [Change(store, period, path, before, after)]
+        return [] if type(before) is type(after) and before == after else [Change(store, period, path, before, after)]
 
     if isinstance(before, (int, float)) and isinstance(after, (int, float)):
-        if math.isnan(before) and math.isnan(after):
+        if not math.isfinite(before) or not math.isfinite(after):
+            return [Change(store, period, path, before, after)]
+        leaf = path.rsplit(".", 1)[-1]
+        identifier = re.search(r"(^|[_.])(id|seq|count|rows|row|number|revision)($|[_.])", leaf)
+        ratio = re.search(r"coverage|ratio|rate|margin|factor|percent|份额|利润率|覆盖率", path, re.I)
+        if identifier:
+            return [] if type(before) is type(after) and before == after else [Change(store, period, path, before, after)]
+        tolerance = RATIO_TOLERANCE if numeric_kind == 'ratio' or ratio or leaf not in MONEY_FIELDS else TOLERANCE
+        if not identifier and not (isinstance(before, int) and isinstance(after, int)) and abs(float(after) - float(before)) < tolerance:
             return []
-        if abs(float(after) - float(before)) < TOLERANCE:
+        if before == after:
             return []
         return [Change(store, period, path, before, after)]
 

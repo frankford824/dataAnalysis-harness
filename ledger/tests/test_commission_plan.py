@@ -68,14 +68,20 @@ def model(tmp_path, monkeypatch):
 
 
 @pytest.fixture
-def client(model, monkeypatch):
+def client(model, monkeypatch, tmp_path):
     """接口跑在假工作区上：四个商品，三个查得到归属，一个查不到。"""
     products = [_product("P1", 1000.0), _product("P2", 500.0),
                 _product("P3", 300.0), _product("P9", 200.0)]
     ws = _Workspace([_State(STORE, "2026-05",
                             {"commission": {"products": products, "base_total": 2000.0}})])
     monkeypatch.setattr(api, "workspace", lambda: ws)
+    monkeypatch.setattr(api, "WORKSPACE_ROOT", tmp_path / 'authenticated-book')
+    from ledger.commission_registry import Registry
+    registry = Registry(tmp_path / 'authenticated-book')
+    registry.operator_add('test-finance', 'synthetic-test-password')
+    token = registry.login('test-finance', 'synthetic-test-password')
     with TestClient(api.app) as c:
+        c.cookies.set('commission_session', token)
         yield c
 
 

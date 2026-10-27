@@ -108,6 +108,9 @@ def normalize(table: RawTable, template: Template) -> tuple[pl.DataFrame, list[s
     )
 
     frame = _drop_total_rows(frame, template, notes)
+    if template.identifier_extractions:
+        from .identifier_extraction import apply
+        frame = apply(frame, template, notes)
     frame = _normalize_amounts(frame, template, notes)
     frame = _normalize_time(frame, template, notes)
     if template.source == 'promotion':

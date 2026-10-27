@@ -28,7 +28,12 @@ from ledger.workspace import PeriodState
 def client(tmp_path, monkeypatch):
     monkeypatch.setattr(api, "WORKSPACE_ROOT", tmp_path / "space")
     monkeypatch.setattr(api, "_ws", None)
+    from ledger.commission_registry import Registry
+    registry = Registry(tmp_path / 'space')
+    registry.operator_add('test-finance', 'synthetic-test-password')
+    token = registry.login('test-finance', 'synthetic-test-password')
     with TestClient(api.app) as c:
+        c.cookies.set('commission_session', token)
         yield c
 
 
@@ -408,7 +413,9 @@ class TestOverview:
             cell("alibaba1688_xingze", "2026-05"),
             cell("taobao_xibishun", "2026-08"),
         ]
-        monkeypatch.setattr(api, "workspace", lambda: _FakeWorkspace(rows))
+        ws=api.workspace()
+        for row in rows:
+            ws.record(row.store_id,row.period,row.result,[])
         body = client.get("/api/overview").json()
         assert "(未知账期)" in body["periods"]
         assert body["periods"][0] == "2026-08"

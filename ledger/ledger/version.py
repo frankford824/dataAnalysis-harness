@@ -19,6 +19,10 @@
 from __future__ import annotations
 
 import subprocess
+import hashlib
+import json
+import re
+import threading
 from pathlib import Path
 
 #: 仓库根。从这个文件往上两层：ledger/ledger/version.py → ledger/ → 仓库根。
@@ -44,12 +48,16 @@ UNKNOWN = "unknown"
 def engine_version() -> str:
     """引擎的版本标识：git 提交号 + 工作区是否有未提交改动。
 
-    先问 git，问不出来再读部署时留下的 `VERSION`。顺序不能反：开发机上代码随时在动，
-    git 说的才是当下这一刻的真话，而 `VERSION` 是打包那一刻的快照，早就过时了。
+    带发行批准收据的目录使用 `VERSION` 的完整部署身份，健康由独立源码护栏判断。
+    开发目录先问 git，问不出来再读 `VERSION`；开发机的旧版本印不能覆盖当前 Git 状态。
 
     两个都问不出来返回 `unknown`。这种情况下不抛异常：算账不该因为版本号取不到就
     停下来，取不到本身也是一条要如实记下的信息。
     """
+    # A packaged approval owns the full deployed label, even if stale Git
+    # metadata was left beside it. Integrity is independently checked below.
+    approval=_ROOT/'RELEASE-ACCEPTANCE.json'
+    if approval.exists() or approval.is_symlink():return _stamped()
     try:
         sha = _git("rev-parse", "--short", "HEAD")
         dirty = _git("status", "--porcelain", "--", *_WATCHED)
@@ -77,6 +85,162 @@ def reproducible(version: str) -> bool:
     return bool(version) and version != UNKNOWN and not version.endswith("-dirty")
 
 
+def source_code_manifest(root: Path | None = None) -> list[dict]:
+    """Actual deployed Python bytes, independently of the mutable VERSION label."""
+    root=Path(root or _ROOT).resolve()
+    folder=root/'ledger/ledger'
+    if not folder.is_dir():raise ValueError('Ledger source tree is missing')
+    if folder.is_symlink() or getattr(folder,'is_junction',lambda:False)():
+        raise ValueError('Ledger source root is symbolic')
+    result=[]
+    for path in sorted(folder.rglob('*'),key=lambda path:path.relative_to(root).as_posix()):
+        if path.is_symlink() or getattr(path,'is_junction',lambda:False)():
+            raise ValueError('Ledger source contains a symbolic path')
+        if path.suffix=='.py' and path.is_file():
+            result.append({'path':path.relative_to(root).as_posix(),
+                           'sha256':hashlib.sha256(path.read_bytes()).hexdigest()})
+    if not result:raise ValueError('Ledger source identity is empty')
+    return result
+
+
+def source_code_sha(root: Path | None = None) -> str:
+    return hashlib.sha256(json.dumps(source_code_manifest(root),sort_keys=True,
+        ensure_ascii=False,separators=(',',':'),allow_nan=False).encode()).hexdigest()
+
+
+CODE_MAINTENANCE = '系统源码或批准身份不可验证，已暂停业务写入与核算发布，请交技术维护恢复批准代码并重启服务'
+
+
+class CodeIntegrityError(RuntimeError):
+    def __init__(self, integrity=None):
+        super().__init__(CODE_MAINTENANCE)
+        self.integrity=dict(integrity or {})
+
+
+class _IntegrityFault(ValueError):
+    pass
+
+
+def _canonical_sha(value):
+    return hashlib.sha256(json.dumps(value,sort_keys=True,ensure_ascii=False,
+        separators=(',',':'),allow_nan=False).encode()).hexdigest()
+
+
+def _development_checkout(root):
+    if not (root/'.git').exists():return False
+    try:
+        found=subprocess.run(['git','-C',str(root),'rev-parse','--show-toplevel'],capture_output=True,
+            text=True,check=True,timeout=5).stdout.strip()
+        return bool(found) and Path(found).resolve()==root
+    except (OSError,subprocess.SubprocessError,ValueError):return False
+
+
+class CodeIntegrityMonitor:
+    """A process-start identity, never an approval reset from a later request.
+
+    An approved deployment has VERSION and an immutable receipt anchor. A real
+    source checkout without either release marker may use its startup bytes for
+    development. Any observed mismatch remains maintenance until a new process.
+    """
+    def __init__(self, root):
+        self.root=Path(root).resolve();self.receipt=self.root/'RELEASE-ACCEPTANCE.json';self.stamp=self.root/'VERSION'
+        self._lock=threading.Lock();self._fault=None;self._approved=None;self._receipt_bytes=None
+        self._had_receipt=self.receipt.exists() or self.receipt.is_symlink()
+        self._had_stamp=self.stamp.exists() or self.stamp.is_symlink()
+        self._initial_stamp=None;self._mode='approved'
+        try:self._initial_source=source_code_sha(self.root)
+        except (OSError,ValueError):self._initial_source=None;self._fault='source_unavailable'
+        try:self._initial_stamp=self._stamp_value()
+        except (OSError,ValueError):self._fault=self._fault or 'version_mismatch'
+        if self._had_receipt:
+            try:
+                self._receipt_bytes=self._receipt_value()
+                self._approved=self._approval(self._receipt_bytes,self._initial_stamp)
+            except _IntegrityFault as error:self._fault=self._fault or str(error)
+            except (OSError,ValueError,TypeError,KeyError,AttributeError,ImportError):self._fault=self._fault or 'receipt_invalid'
+            if self._approved is not None and self._initial_source!=self._approved:
+                self._fault=self._fault or 'source_drift'
+        elif not self._had_stamp and _development_checkout(self.root):
+            self._mode='development';self._approved=self._initial_source
+        else:self._fault=self._fault or 'receipt_missing'
+
+    def _stamp_value(self):
+        if self.stamp.is_symlink():raise ValueError('Version stamp is symbolic')
+        if not self.stamp.exists():return None
+        return self.stamp.read_text(encoding='utf-8-sig').strip()
+
+    def _receipt_value(self):
+        if self.receipt.is_symlink():raise ValueError('Release receipt is symbolic')
+        with self.receipt.open('rb') as stream:raw=stream.read(4*1024*1024+1)
+        if len(raw)>4*1024*1024:raise ValueError('Release receipt is not bounded')
+        return raw
+
+    @staticmethod
+    def _approval(raw,stamp):
+        value=json.loads(raw.decode('utf-8-sig'))
+        if not isinstance(value,dict):raise _IntegrityFault('receipt_invalid')
+        code=value.get('code_sha')
+        if not isinstance(code,str) or not re.fullmatch('[0-9a-f]{40}',code) or stamp!=code:
+            raise _IntegrityFault('version_mismatch')
+        from .release_gate import validate
+        validate(value,version=code)
+        approved=value.get('source_code_sha');manifest=value.get('source_code_manifest')
+        if not isinstance(approved,str) or not re.fullmatch('[0-9a-f]{64}',approved) or not isinstance(manifest,list) or not manifest:
+            raise _IntegrityFault('receipt_invalid')
+        paths=[]
+        for entry in manifest:
+            if (not isinstance(entry,dict) or set(entry)!={'path','sha256'} or not isinstance(entry.get('path'),str)
+                    or not entry['path'].startswith('ledger/ledger/') or not entry['path'].endswith('.py')
+                    or '..' in Path(entry['path']).parts or not isinstance(entry.get('sha256'),str)
+                    or not re.fullmatch('[0-9a-f]{64}',entry['sha256'])):
+                raise _IntegrityFault('receipt_invalid')
+            paths.append(entry['path'])
+        if paths!=sorted(set(paths)) or _canonical_sha(manifest)!=approved:
+            raise _IntegrityFault('receipt_invalid')
+        declared=value.get('receipt_sha')
+        if not isinstance(declared,str) or not re.fullmatch('[0-9a-f]{64}',declared) or declared!=_canonical_sha({key:item for key,item in value.items() if key!='receipt_sha'}):
+            raise _IntegrityFault('receipt_invalid')
+        return approved
+
+    def state(self):
+        try:actual=source_code_sha(self.root)
+        except (OSError,ValueError):actual=None
+        with self._lock:
+            fault=self._fault
+            if fault is None:
+                if actual is None:fault='source_unavailable'
+                elif actual!=self._approved:fault='source_drift'
+                elif self._had_receipt:
+                    if not self.receipt.exists():fault='receipt_missing'
+                    else:
+                        try:
+                            if self._receipt_value()!=self._receipt_bytes:fault='receipt_changed'
+                        except (OSError,ValueError):fault='receipt_invalid'
+                    try:
+                        if self._stamp_value()!=self._initial_stamp:fault=fault or 'version_mismatch'
+                    except (OSError,ValueError):fault=fault or 'version_mismatch'
+                elif self.receipt.exists() or self.receipt.is_symlink():fault='receipt_changed'
+                elif self.stamp.exists() or self.stamp.is_symlink():fault='version_mismatch'
+            self._fault=fault
+            return {'healthy':fault is None,'source_code_sha':actual,'approved_source_code_sha':self._approved,
+                'source_code_status':fault or self._mode,'restart_required':fault is not None}
+
+
+# Eager import-time capture: a drift before the first HTTP request is still a
+# drift. This object is never re-baselined by code_integrity() or a business API.
+_CODE_MONITOR=CodeIntegrityMonitor(_ROOT)
+
+
+def code_integrity():
+    return _CODE_MONITOR.state()
+
+
+def assert_code_integrity():
+    status=code_integrity()
+    if status.get('healthy') is not True:raise CodeIntegrityError(status)
+    return status
+
+
 def _git(*args: str) -> str:
     return subprocess.run(
         ["git", "-C", str(_ROOT), *args],
@@ -84,5 +248,6 @@ def _git(*args: str) -> str:
     ).stdout.strip()
 
 
-__all__ = ["UNKNOWN", "engine_version", "reproducible"]
+__all__ = ["UNKNOWN", "engine_version", "reproducible", "source_code_manifest", "source_code_sha",
+    "code_integrity", "assert_code_integrity", "CodeIntegrityError", "CodeIntegrityMonitor"]
 

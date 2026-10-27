@@ -41,11 +41,13 @@ def registered_archive_link(root, source, expected_sha):
     from contextlib import closing
     try:
         relative=source.relative_to(root)
-        if '..' in relative.parts or not source.is_symlink():return False
+        if '..' in relative.parts:return False
         db=root/'storage.db'
-        if not db.is_file():return False
-        with closing(sqlite3.connect(db.as_uri()+'?mode=ro',uri=True)) as c:
-            row=c.execute('SELECT target,sha,state FROM artifact_archive WHERE source=?',(str(relative),)).fetchone()
-        return bool(row and row[1]==expected_sha and row[2] in {'copied','archived'}
-                    and Path(row[0]).resolve()==source.resolve())
+        if db.is_file() and source.is_symlink():
+            with closing(sqlite3.connect(db.as_uri()+'?mode=ro',uri=True)) as c:
+                row=c.execute('SELECT target,sha,state FROM artifact_archive WHERE source=?',(str(relative),)).fetchone()
+            if (row and row[1]==expected_sha and row[2] in {'copied','archived'}
+                and Path(row[0]).resolve()==source.resolve()):return True
+        from .run_artifacts import registered_file
+        return registered_file(root,source,expected_sha)
     except (OSError,ValueError,sqlite3.Error):return False

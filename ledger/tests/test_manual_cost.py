@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 
 import pytest
+from conftest import login_client
 
 from ledger import manual_cost
 from ledger.commission_registry import Registry
@@ -15,9 +16,21 @@ from ledger.workspace import Workspace, WorkspaceError
 
 def model():
     base = ModelRepository(Path(__file__).resolve().parents[2] / 'models' / 'cn-ecommerce').get().model
-    return base.model_copy(update={'overheads': (
+    return base.model_copy(update={'stores':(base.store('taobao_mt9sjmls'),),
+        'commission':tuple(r for r in base.commission if r.store=='taobao_mt9sjmls'),'overheads': (
         Overhead(period='2026-06', amount=100, name='兼职人工费用'),
     )})
+
+
+def recorded(ws,m,raw):
+    """Isolated declared-summary fixture, not a substitute for service replay."""
+    from ledger.automation_checker import bind_model
+    from automation_fixtures import capture_synthetic_summary_fixture
+    rid=ws.record(raw['store_id'],raw['period'],raw,[],
+        model_revision=hashlib.sha256(m.model_dump_json().encode()).hexdigest())
+    bind_model(ws,m)
+    capture_synthetic_summary_fixture(ws,m,rid)
+    return rid
 
 
 def result(m, person):
@@ -45,11 +58,11 @@ def result(m, person):
 
 
 def test_manual_close_uses_model_preview_and_preserves_raw_run(tmp_path):
-    m = model(); ws = Workspace(tmp_path); registry = Registry(tmp_path)
+    m = model().model_copy(update={'overheads':(Overhead(period='2026-06',amount=30),)})
+    ws = Workspace(tmp_path); registry = Registry(tmp_path)
     person = registry.person_save({'name': '甲'}, 'test', '登记')
     raw = result(m, person)
-    run = ws.record(raw['store_id'], raw['period'], raw, [],
-                    model_revision=hashlib.sha256(m.model_dump_json().encode()).hexdigest())
+    run = recorded(ws,m,raw)
     confirmed = {'goods': '700.00', 'dropship': '20.00', 'reshipment': '10.00'}
     preview = manual_cost.preview(m, raw, confirmed)
     assert preview['observed'] == {'goods': 600.0, 'dropship': 0.0, 'reshipment': 0.0}
@@ -94,7 +107,8 @@ def test_manual_preview_and_payout_refuse_unverified_or_ambiguous_values():
 
 
 def test_payout_only_freezes_confirmed_amount_without_changing_profit_or_raw_run(tmp_path):
-    m = model(); ws = Workspace(tmp_path); registry = Registry(tmp_path)
+    m = model().model_copy(update={'overheads':(Overhead(period='2026-06',amount=30),)})
+    ws = Workspace(tmp_path); registry = Registry(tmp_path)
     person = registry.person_save({'name': '甲'}, 'test', '登记')
     raw = result(m, person)
     raw.update(can_close=True, findings=[], statement=[
@@ -105,8 +119,7 @@ def test_payout_only_freezes_confirmed_amount_without_changing_profit_or_raw_run
                              amount_complete=False, unassigned_orders=2401,
                              unassigned_base=16087.19)
     raw['commission']['people'][0]['amount'] = -140.95
-    run = ws.record(raw['store_id'], raw['period'], raw, [],
-                    model_revision=hashlib.sha256(m.model_dump_json().encode()).hexdigest())
+    run = recorded(ws,m,raw)
     with pytest.raises(WorkspaceError, match='全部提成人员'):
         manual_cost.payout_only(raw, run, [{'person_id': 'other', 'amount': '17.00'}],
                                 False, '核对提成')
@@ -140,13 +153,13 @@ def test_http_preview_and_manual_close_require_current_run(tmp_path, monkeypatch
     registry = Registry(tmp_path)
     person = registry.person_save({'name':'甲'}, 'test', '登记')
     raw = result(m, person)
-    rid = ws.record(raw['store_id'], raw['period'], raw, [],
-                    model_revision=hashlib.sha256(m.model_dump_json().encode()).hexdigest())
+    rid = recorded(ws,m,raw)
     monkeypatch.setattr(api, 'WORKSPACE_ROOT', tmp_path)
     monkeypatch.setattr(api, '_ws', ws)
     monkeypatch.setattr(api, '_model', lambda: m)
     monkeypatch.setattr(transaction, 'model_lock', lambda _: nullcontext())
     client = TestClient(api.app)
+    login_client(client,tmp_path)
     path = f"/api/stores/{raw['store_id']}/periods/{raw['period']}"
     costs = {'goods':'700.00','dropship':'20.00','reshipment':'10.00'}
     assert client.post(path+'/manual-cost-preview', json={'run_id':rid-1,'costs':costs}).status_code == 409
@@ -179,13 +192,13 @@ def test_http_payout_only_rejects_stale_run_and_does_not_change_store_profit(tmp
     raw['commission'].update(total=-140.95, base_total=13269.90,
                              amount_complete=False, unassigned_orders=2401)
     raw['commission']['people'][0]['amount'] = -140.95
-    run = ws.record(raw['store_id'], raw['period'], raw, [],
-                    model_revision=hashlib.sha256(m.model_dump_json().encode()).hexdigest())
+    run = recorded(ws,m,raw)
     monkeypatch.setattr(api, 'WORKSPACE_ROOT', tmp_path)
     monkeypatch.setattr(api, '_ws', ws)
     monkeypatch.setattr(api, '_model', lambda: m)
     monkeypatch.setattr(transaction, 'model_lock', lambda _: nullcontext())
     client = TestClient(api.app)
+    login_client(client,tmp_path)
     endpoint = f"/api/stores/{raw['store_id']}/periods/{raw['period']}/close"
     body = {'run_id': run, 'payout_only': True,
             'note': '核对未分配商品后人工确认本人提成',
@@ -221,8 +234,7 @@ def test_accepting_raw_trial_payouts_deducts_labor_before_freeze(tmp_path):
     raw['commission'].update(engine='commission-v2', total=25, base_total=500,
                              amount_complete=False)
     raw['commission']['people'][0]['amount'] = 25
-    run = ws.record(raw['store_id'], raw['period'], raw, [],
-                    model_revision=hashlib.sha256(m.model_dump_json().encode()).hexdigest())
+    run = recorded(ws,m,raw)
     decided, _ = manual_cost.payout_only(
         raw, run, [{'person_id': person['id'], 'amount': '25.00'}], False,
         '接受系统试算', labor_cut='100.00')
@@ -264,8 +276,7 @@ def test_period_snapshot_exposes_after_labor_trial_for_manual_close(tmp_path, mo
                               'covered': 10, 'expected': 10, 'uncovered': 0})
     raw['commission'].update(engine='commission-v2', total=25, base_total=500)
     raw['commission']['people'][0]['amount'] = 25
-    run = ws.record(raw['store_id'], raw['period'], raw, [],
-                    model_revision=hashlib.sha256(m.model_dump_json().encode()).hexdigest())
+    run = recorded(ws,m,raw)
     snap = api._build_period_detail(ws, m, raw['store_id'], raw['period'],
                                     ws.state(raw['store_id'], raw['period']))
     assert snap['pending_labor_cut'] == 100
@@ -276,6 +287,7 @@ def test_period_snapshot_exposes_after_labor_trial_for_manual_close(tmp_path, mo
     monkeypatch.setattr(api, '_model', lambda: m)
     monkeypatch.setattr(transaction, 'model_lock', lambda _: nullcontext())
     client = TestClient(api.app)
+    login_client(client,tmp_path)
     closed = client.post(f"/api/stores/{raw['store_id']}/periods/{raw['period']}/close", json={
         'run_id': run, 'payout_only': True, 'note': '接受系统试算',
         'payouts': [{'person_id': person['id'], 'amount': '25.00'}],

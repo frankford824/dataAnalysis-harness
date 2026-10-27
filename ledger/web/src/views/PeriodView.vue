@@ -29,6 +29,7 @@ import { suggestedManualPayout } from '../commissionPayout'
 import { periodDrillTarget } from '../periodDrill'
 import { count, money, percent, stamp } from '../format'
 import { useApp } from '../store'
+import { finalCloseIssues,needsMonthWorkspace } from '../closeView'
 
 const props = defineProps({ id: { type: String, required: true } })
 const reviewingStatement=ref(false)
@@ -50,8 +51,12 @@ const drill = ref(null)
 const orderIssue = ref(null)
 const pricingPanel = ref(null)
 const checksPanel = ref(null)
+const finalIssues=computed(()=>finalCloseIssues(snap.value))
+const needsCompanyDecision=computed(()=>needsMonthWorkspace(finalIssues.value,period.value))
+function openMonthWorkspace(){app.pick({store:'',platform:'',period:period.value});router.push({name:'board'})}
 
 async function beginClose() {
+  if(needsCompanyDecision.value){reviewingPeriod.value=true;return}
   if (snap.value?.cost_review?.requires_human || snap.value?.cost_review?.line_count) return openManualClose()
   if (snap.value?.commission?.unassigned_orders) return openManualClose()
   if (snap.value?.can_close) return close()
@@ -424,7 +429,7 @@ watch(
           <n-button v-if="snap?.run_id" size="small" @click="reviewingStatement=true">流水关联核对</n-button>
           <n-button v-if="app.ingestMode !== 'nas'" size="small" :loading="!!app.busy" :disabled="loading" @click="recompute">重算</n-button>
           <n-tag v-else size="small" :type="refreshFailed?'warning':'info'" :bordered="false">{{refreshFailed?'更新失败，请刷新重试':'结果自动更新'}}</n-tag>
-          <n-button v-if="!closed && snap?.run_id && !snap?.cost_review?.requires_human" size="small" :disabled="loading || !!app.busy" @click="openManualClose">人工确认金额</n-button>
+          <n-button v-if="!closed && snap?.run_id && !snap?.cost_review?.requires_human" size="small" :disabled="loading || !!app.busy || needsCompanyDecision" @click="openManualClose">人工确认金额</n-button>
           <n-button
             v-if="!closed"
             type="primary"
@@ -432,7 +437,7 @@ watch(
             :title="snap?.cost_review?.requires_human || snap?.cost_review?.line_count ? '人工确认成本后结账' : snap?.can_close ? `结账 ${period}` : '查看本月尚未完成的结账条件'"
             @click="beginClose"
           >
-            {{ snap?.cost_review?.requires_human || snap?.cost_review?.line_count ? '人工确认成本' : snap?.commission?.unassigned_orders ? '人工确认提成' : snap?.can_close ? `结账 ${period}` : '查看结账条件' }}
+            {{ needsCompanyDecision ? '查看本月结账条件' : snap?.cost_review?.requires_human || snap?.cost_review?.line_count ? '人工确认成本' : snap?.commission?.unassigned_orders ? '人工确认提成' : snap?.can_close ? `结账 ${period}` : '查看结账条件' }}
           </n-button>
           <n-button v-else size="small" :disabled="loading || !!app.busy" @click="asking = true">反结账</n-button>
         </template>
@@ -446,6 +451,10 @@ watch(
 
       <template v-if="snap">
         <PeriodReviewSummary v-model:show="reviewingPeriod" :snapshot="snap" :blockers="blockers">
+      <n-alert v-if="!closed && finalIssues.length" type="warning" :bordered="false" title="本月结账条件尚未满足" style="margin-bottom:16px">
+        <p v-for="issue in finalIssues" :key="issue.code">{{issue.message}}</p>
+        <n-button v-if="needsCompanyDecision" size="small" @click="openMonthWorkspace">去月度工作台处理</n-button>
+      </n-alert>
       <n-alert v-if="snap?.deduplication?.length" :type="snap.deduplication.some(d => d.status === 'conflict') ? 'error' : 'info'" :bordered="false" style="margin-bottom:16px">
         <strong>原始流水与费用表核查</strong>
         <p>去重统计覆盖本店已上传的来源表；待核对提示按实际受影响账期列出。重复来源只计一次，不同流水号的后续到账仍保留；原文件不修改。争议行不计入账目，核对后才能结账。</p>

@@ -28,7 +28,7 @@ const assert=(x,msg)=>{if(!x)throw Error(msg)}
 try{
   await wait(()=>document.querySelectorAll('.profit-product').length===(creator?1:50))
   if(creator){
-    assert(document.body.textContent.includes('做货创造利润'),'Creator metric must be visible')
+    assert(document.body.textContent.includes('非托管创造利润'),'Non-managed creator metric must be visible')
     assert(document.body.textContent.includes(cut?'2,412.45':'4,020.76'),'Creator and original profit must stay separate')
     assert(document.body.textContent.includes('旧阶梯利润'),'Old profit must remain available for exclusions')
     assert(document.body.textContent.includes(cut?'120.58':'80.67'),'Commission trial must stay unchanged')

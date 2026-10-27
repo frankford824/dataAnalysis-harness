@@ -12,6 +12,7 @@ import io
 import openpyxl
 import pytest
 from fastapi.testclient import TestClient
+from conftest import login_client
 
 import ledger.api as api
 from ledger import progress
@@ -23,6 +24,7 @@ def client(tmp_path, monkeypatch):
     monkeypatch.setattr(api, "WORKSPACE_ROOT", tmp_path / "space")
     monkeypatch.setattr(api, "_ws", None)
     with TestClient(api.app) as c:
+        login_client(c,tmp_path/'space')
         yield c
 
 

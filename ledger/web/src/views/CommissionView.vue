@@ -246,7 +246,7 @@ const payStores = computed(() =>
   (pay.value?.stores || []).filter((s) => !app.storeId || s.store_id === app.storeId),
 )
 const payTotal = computed(() =>
-  app.storeId ? payPeople.value.reduce((a, p) => a + (p.amount || 0), 0) : pay.value?.total,
+  app.storeId ? payStore.value?.total ?? null : pay.value?.total,
 )
 
 //: 兼职费用怎么摊的。它是唯一一张摊出来的公共表——没有订单号也没有运单号，
@@ -478,7 +478,7 @@ function open(id) {
                     </tbody>
                   </n-table>
                 </div>
-                <n-empty v-else description="这个月没有人拿到提成" size="small">
+                <n-empty v-else description="暂无完整的人员提成明细" size="small">
                   <template #extra>
                     <n-button size="small" @click="goTab('config')">去配</n-button>
                   </template>

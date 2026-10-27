@@ -14,8 +14,9 @@ from test_reship_period_and_cost_drill import item
 @pytest.mark.parametrize('platform',['taobao','douyin'])
 @pytest.mark.parametrize('source,day,evidence_day,available',[
     ('history','2026-06-05','2026-06-05',True),
-    ('register','2026-06-05','2026-06-05',True),
-    ('register_first','2026-06-05','2026-06-05',True),
+    # A supplied JSON day is not an original historical price record.
+    ('register','2026-06-05','2026-06-05',False),
+    ('register_first','2026-06-05','2026-06-05',False),
     ('register_first','2026-06-05','2026-07-02',False),
     ('register_first','2026-07-02','2026-06-05',False),
     ('history','2026-07-02','2026-06-05',False),

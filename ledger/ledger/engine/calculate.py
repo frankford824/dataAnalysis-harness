@@ -297,7 +297,8 @@ def evaluate_metric(
         source_note = pl.coalesce(source_note, pl.concat_str([pl.lit("发生日期："), pl.col(slot).dt.strftime("%Y-%m-%d")]))
     keep = pl.col(AMOUNT) != 0.0
     pricing_eligible = pl.lit(True)
-    if (require_historical_pricing or require_pricing) and metric.source == "order_cost" and "unit_cost" in metric.value.of:
+    fact_bound=template.id.startswith('order_console_') and '__ledger_history_fact_period' in frame.columns
+    if (require_historical_pricing or require_pricing or fact_bound) and metric.source == "order_cost" and "unit_cost" in metric.value.of:
         col = lambda name: pl.col(name) if name in frame.columns else pl.lit(None)
         key_columns = [pl.col(k).cast(pl.Utf8).replace("", None) for k in ("original_order_id", "order_id", LINK_KEY) if k in frame.columns]
         key = pl.coalesce(key_columns) if key_columns else pl.lit(None, dtype=pl.Utf8)
@@ -323,6 +324,9 @@ def evaluate_metric(
             known = (unit.is_finite() & (unit >= 0) & quantity.is_finite() & (quantity >= 0)
                      & ~col("pricing_missing").cast(pl.Boolean).fill_null(False)
                      & ((col("cost_status") == "priced") | col("cost_status").is_null()))
+        fact_scope=(col('__ledger_history_fact_period').is_null() |
+            (col('__ledger_history_fact_period')==period)) if fact_bound else pl.lit(True)
+        known=(known & fact_scope) if (require_historical_pricing or require_pricing) else fact_scope
         pending = (~known.fill_null(False) | col("pricing_suspect").cast(pl.Boolean).fill_null(False)) & ((quantity != 0) | quantity.is_null())
         pending = pending & ~erp_exempt
         gaps = frame.filter(pending).select(
@@ -339,9 +343,14 @@ def evaluate_metric(
             col("cost_status").cast(pl.String).alias("cost_status"),
             col("cost_as_of").cast(pl.String).alias("cost_as_of"),
             col("source_pricing_day").cast(pl.String).alias("source_pricing_day"),
+            col('pricing_source_suspect').cast(pl.Boolean).fill_null(False).alias('legacy_quantity_guard_pending'),
             col("failure_reason").cast(pl.String).alias("upstream_failure_reason"),
             col("pricing_evidence").cast(pl.String).str.json_path_match('$.register_basis').alias('register_basis'),
-            col("pricing_evidence").cast(pl.String).str.json_path_match('$.cost_company_id').alias('cost_company_id'),
+            pl.when(col('cost_company_id').is_not_null()
+                & col('pricing_evidence').cast(pl.String).str.json_path_match('$.cost_company_id').is_not_null()
+                & (col('cost_company_id').cast(pl.String)!=col('pricing_evidence').cast(pl.String).str.json_path_match('$.cost_company_id')))
+            .then(None).otherwise(pl.coalesce(col('cost_company_id').cast(pl.String),
+                col('pricing_evidence').cast(pl.String).str.json_path_match('$.cost_company_id'))).alias('cost_company_id'),
             col("pricing_evidence").cast(pl.String).str.json_path_match('$.begin_date').alias('price_begin_date'),
             col("pricing_evidence").cast(pl.String).str.json_path_match('$.end_date').alias('price_end_date'),
             col("pricing_evidence").cast(pl.String).str.json_path_match('$.carry_days').alias('carry_days'),
@@ -376,6 +385,7 @@ def evaluate_metric(
                 pl.lit('，但台账未匹配原销售订单明细；请补齐原单资料，不能计入补发月份')]))
             .when(wanted.is_null()).then(pl.lit("原订单日期待核对"))
             .when(~quantity.is_finite().fill_null(False) | (quantity < 0)).then(pl.lit("原订单数量待核对"))
+            .when(~fact_scope).then(pl.lit('历史报价事实尚未获得本账期授权，保留原日与原金额待核'))
             .when(col("cost_status") == "pending").then(pl.lit("成本明细尚未同步"))
             .when(col("failure_reason") == "missing_original_order_date").then(pl.lit("原订单日期待核对"))
             .when(col("failure_reason") == "missing_cost_company").then(pl.lit("成本所属公司待核对"))

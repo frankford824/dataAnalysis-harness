@@ -15,6 +15,7 @@ from ledger.commission_registry import Registry
 from ledger.model.schema import Overhead, StatementNode, Store
 from ledger.workspace import Workspace
 from test_commission import _model
+from finance_fixture import monthly_model,company_model,preexisting_closed
 
 
 def fixture(tmp_path):
@@ -65,7 +66,7 @@ def test_cut_payout_survives_producer_only_performance_attribution(tmp_path, pro
     assert (suggestions[owner['id']],suggestions[cut['id']])==expected
 
 
-def record(ws, people, store, period, amounts, *, complete=True, legacy=False):
+def record(ws, people, store, period, amounts, *, complete=True, legacy=False,revenue=None):
     rows = [{'person_id': p['id'], 'person': p['name'], 'amount': amount, 'base': 100}
             for p, amount in zip(people, amounts)]
     if legacy:
@@ -73,6 +74,7 @@ def record(ws, people, store, period, amounts, *, complete=True, legacy=False):
             row.pop('person_id')
     from decimal import Decimal
     return ws.record(store, period, {'can_close': True, 'findings': [], 'missing_sources': [],
+        **({'statement':[{'id':'n_receipt','value':revenue,'available':True}]} if revenue is not None else {}),
         'commission': {'engine': 'legacy' if legacy else 'commission-v2', 'people': rows,
                        'total': float(sum((Decimal(str(a)) for a in amounts), Decimal(0))),
                        'amount_complete': complete, 'base_name': '利润', 'unassigned_orders': 0 if complete else 2}}, [])
@@ -144,15 +146,17 @@ def test_people_and_store_filters_intersect_without_duplicate_runs(tmp_path, sto
 
 def test_export_pins_viewed_runs_and_never_replaces_closed_result(tmp_path):
     ws, _, people, c = fixture(tmp_path)
-    closed = record(ws, people, 's1', '2026-06', [12.34])
-    ws.close_period('s1', '2026-06', by='test', note='结账')
+    closed = record(ws, people, 's1', '2026-06', [12.34],revenue=100)
+    opened = record(ws, people, 's2', '2026-06', [-1.23],revenue=100)
+    model=_model(stores=tuple(Store(id=f's{i}',name=f'店铺{i}',platform='taobao') for i in (1,2)))
+    close_model=company_model(model,('s1','s2'),'2026-06')
+    ws.close_period('s1', '2026-06', by='test', note='结账',model=close_model)
     record(ws, people, 's1', '2026-06', [999])
-    opened = record(ws, people, 's2', '2026-06', [-1.23])
     scope = {'start': '2026-06', 'end': '2026-06', 'store_ids': ['s1', 's2']}
     report = c.post('/api/commission-v2/reports/query', json=scope).json()
     assert report['total'] == 11.11
     assert report['run_ids'] == [closed, opened]
-    record(ws, people, 's2', '2026-06', [888])
+    record(ws, people, 's2', '2026-06', [888],revenue=100)
     export_scope = {**scope, 'run_ids': report['run_ids'], 'fingerprint': report['fingerprint']}
     for kind, amount_column in [('people', '提成金额'), ('stores', '提成金额'),
                                 ('breakdown', '提成金额'), ('coverage', '筛选范围提成金额')]:
@@ -165,7 +169,7 @@ def test_export_pins_viewed_runs_and_never_replaces_closed_result(tmp_path):
         if kind == 'people':
             assert rows[0]['工号'] == "'0000"
     assert ws.state('s1', '2026-06').run_id == closed
-    ws.close_period('s2', '2026-06', by='test', note='状态变化')
+    ws.close_period('s2', '2026-06', by='test', note='状态变化',model=close_model)
     # The displayed open record remains historical; it must not silently become a closed payout.
     # Closing to a newer run doesn't change its open status or amounts, so export is still safe.
     assert c.post('/api/commission-v2/export/reports/people', json=export_scope).status_code == 200
@@ -173,13 +177,13 @@ def test_export_pins_viewed_runs_and_never_replaces_closed_result(tmp_path):
 
 def test_missing_zero_legacy_names_and_changed_state(tmp_path):
     ws, registry, people, c = fixture(tmp_path)
-    zero = record(ws, people, 's1', '2026-06', [])
+    zero = record(ws, people, 's1', '2026-06', [],revenue=100)
     scope = {'start': '2026-06', 'end': '2026-06'}
     report = c.post('/api/commission-v2/reports/query', json=scope).json()
     assert report['total'] == 0
     assert report['stores'][1]['amount'] is None
     assert report['missing_periods'] == 2
-    ws.close_period('s1', '2026-06', by='test', note='结账')
+    ws.close_period('s1', '2026-06', by='test', note='结账',model=monthly_model(_model(),'s1','2026-06'))
     assert c.post('/api/commission-v2/export/reports/people', json={
         **scope, 'run_ids': [zero], 'fingerprint': report['fingerprint']}).status_code == 409
     record(ws, people, 's1', '2026-07', [1], legacy=True)
@@ -850,7 +854,7 @@ def test_closed_store_uses_frozen_labor_share(tmp_path):
                            {'person_id': person['id'], 'person': '甲', 'amount': 10, 'base': 100},
                        ]},
     }, [])
-    ws.close_period('s1', '2026-06', by='test', note='结账')
+    preexisting_closed(ws,run_id,note='旧版CSV公摊已冻结20元的既有数据库记录')
     (model_root / 'labor-closed-shares.csv').write_text(
         f'period,store_id,run_id,amount\n2026-06,s1,{run_id},20\n', encoding='utf-8',
     )
@@ -880,7 +884,7 @@ def test_new_close_labor_cut_overrides_old_csv_and_later_config(tmp_path):
                            {'person_id': person['id'], 'person': '甲', 'amount': 10},
                        ]},
     }, [])
-    ws.close_period('s1', '2026-06', labor_cut='30.00')
+    ws.close_period('s1', '2026-06', labor_cut='30.00',model=monthly_model(model,'s1','2026-06',30))
     (root / 'labor-closed-shares.csv').write_text(
         f'period,store_id,run_id,amount\n2026-06,s1,{run_id},20\n', encoding='utf-8',
     )
@@ -1022,8 +1026,11 @@ def test_every_report_tab_receives_confirmation_scope_relationships(tmp_path):
 
 def test_incomplete_store_close_stays_pending_until_person_payout_is_confirmed(tmp_path):
     ws, _, people, client = fixture(tmp_path)
-    run = record(ws, people, 's1', '2026-06', [10], complete=False)
-    ws.close_period('s1', '2026-06', by='test', note='店铺经营账已人工确认')
+    run = record(ws, people, 's1', '2026-06', [10], complete=False,revenue=100)
+    from ledger.workspace import WorkspaceError
+    with pytest.raises(WorkspaceError,match='金额依据仍未完整'):
+        ws.close_period('s1', '2026-06', by='test', note='当前流程不得提前关闭',model=monthly_model(_model(),'s1','2026-06'))
+    preexisting_closed(ws,run,note='旧版经营账已经冻结、个人实发尚未核定的既有数据库记录')
     scope = {'start': '2026-06', 'end': '2026-06',
              'store_ids': ['s1'], 'view': 'store_people'}
     report = client.post('/api/commission-v2/reports/query', json=scope).json()

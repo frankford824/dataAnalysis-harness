@@ -196,7 +196,9 @@ def test_closed_report_and_pending_export_share_sales_resolution(tmp_path):
         'people':[{'person_id':a,'person':'甲','amount':121.18},{'person_id':b,'person':'乙','amount':181.78}],
         'total':302.96,'amount_complete':True}},[])
     assert run==1
-    ws.close_period('s1','2026-06',by='test',note='冻结')
+    from finance_fixture import monthly_model
+    from test_commission import _model
+    ws.close_period('s1','2026-06',by='test',note='冻结',model=monthly_model(_model(),'s1','2026-06'))
     scope={'start':'2026-06','end':'2026-06','store_ids':['s1']}
     before=client.post('/api/commission-v2/reports/query',json=scope).json()
     assert before['sales_pending_scopes']

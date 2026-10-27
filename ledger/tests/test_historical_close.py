@@ -116,9 +116,16 @@ def test_apply_archives_sources_and_preserves_june_state(tmp_path: Path) -> None
     old = {"can_close": False, "findings": [], "missing_sources": [], "statement": []}
     workspace.record("taobao_mt8egr48", "2024-12", old, ["old"], evidence_ready=True)
     workspace.record("douyin_mszr2dhn", "2025-02", old, ["old-2025"], evidence_ready=True)
-    june = {"can_close": True, "findings": [], "missing_sources": [], "statement": []}
+    revenue=next(n.id for n in model.statement if n.headline=='revenue')
+    june = {"can_close": True, "findings": [], "missing_sources": [],
+            "statement": [{'id':revenue,'value':100,'available':True}]}
     workspace.record("taobao_xibishun", "2026-06", june, ["june"], evidence_ready=True)
-    workspace.close_period("taobao_xibishun", "2026-06", by="test")
+    from ledger.automation_checker import bind_model
+    from ledger.model.schema import Overhead
+    june_model=model.model_copy(update={'stores':(model.store('taobao_xibishun'),),
+        'overheads':tuple(x for x in model.overheads if x.period!='2026-06')+(Overhead(period='2026-06',amount=0),)})
+    bind_model(workspace,june_model)
+    workspace.close_period("taobao_xibishun", "2026-06", by="test",model=june_model)
     first = plan.cells[0]
     old_body = payload(first, model, "old-model-revision")
     old_body = deepcopy(old_body)
@@ -131,7 +138,11 @@ def test_apply_archives_sources_and_preserves_june_state(tmp_path: Path) -> None
     old_run = workspace.record(
         first.store_id, first.period, old_body, [first.source_sha256], evidence_ready=True,
     )
-    workspace.close_period(first.store_id, first.period, by="old-import")
+    # Represent a genuinely pre-existing old-schema frozen database. The new
+    # runtime must not expose a general note/reference bypass to create it.
+    with workspace.conn as conn:
+        conn.execute("UPDATE period SET state='closed',run_id=?,by='old-import' WHERE store_id=? AND period=?",
+                     (old_run,first.store_id,first.period))
 
     result = apply_plan(
         workspace,
@@ -144,9 +155,9 @@ def test_apply_archives_sources_and_preserves_june_state(tmp_path: Path) -> None
 
     assert result["counts"]["imported"] == 5
     assert result["counts"]["enriched"] == 1
-    assert result["counts"]["policy_closed"] == 2
-    assert workspace.state("taobao_mt8egr48", "2024-12").state == CLOSED
-    assert workspace.state("douyin_mszr2dhn", "2025-02").state == CLOSED
+    assert result["counts"]["policy_closed"] == 0
+    assert workspace.state("taobao_mt8egr48", "2024-12").state == 'open'
+    assert workspace.state("douyin_mszr2dhn", "2025-02").state == 'open'
     assert workspace.state("taobao_mt8egr48", "2025-01").state == CLOSED
     enriched = workspace.state(first.store_id, first.period)
     assert enriched.run_id != old_run

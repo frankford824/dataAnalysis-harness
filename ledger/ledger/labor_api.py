@@ -33,6 +33,14 @@ def frozen_shares(root):
 
 def share_at_close(workspace, model, period: str, store_id: str) -> str | None:
     """Calculate the current monthly allocation before freezing a period in SQLite."""
+    if hasattr(workspace,'conn'):
+        from .automation_checker import company_basis
+        company=company_basis(workspace,model,period)
+        if company['issues']:
+            raise WorkspaceError('；'.join(row['message'] for row in company['issues']))
+        if store_id not in company['shares']:
+            raise WorkspaceError('本店不在本月已确认营业范围')
+        return company['shares'][store_id]
     total = model.overhead(period)
     if total is None:
         return None
@@ -113,6 +121,11 @@ def install(app, workspace, model, model_root, invalidate, actor):
     @app.post('/api/commission-v2/labor')
     def update(body: LaborChange, request: Request):
         who=actor(request);ws=workspace()
+        if hasattr(ws,'conn'):
+            frozen=ws.conn.execute('SELECT total FROM automation_overhead_close WHERE period=? ORDER BY rowid DESC LIMIT 1',(body.period,)).fetchone()
+            closed=ws.conn.execute("SELECT 1 FROM period WHERE period=? AND state='closed' LIMIT 1",(body.period,)).fetchone()
+            if frozen and closed and Decimal(str(body.amount))!=Decimal(frozen['total']):
+                raise HTTPException(409,'本月公摊已随月结冻结，不能直接改变兼职总额')
         before=read(body.period)
         save(model_root,body,[row for row in before['rows'] if row['closed']]);invalidate()
         ws.log_config('labor-overhead','修改兼职人工费用',by=who.get('name','本机操作'),

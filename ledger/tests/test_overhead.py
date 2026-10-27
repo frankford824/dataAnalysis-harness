@@ -203,12 +203,11 @@ class TestItReachesThePayout:
     def paid(self, tmp_path, monkeypatch):
         import ledger.api as api
         from fastapi.testclient import TestClient
-        from ledger.workspace import PeriodState
+        from ledger.workspace import Workspace
 
         def snap(store_id, revenue, base, person, amount):
-            return PeriodState(
-                store_id=store_id, period="2026-05", run_id=1,
-                result={
+            return {
+                    'can_close': True,
                     "statement": [{"id": "n_receipt", "value": revenue, "available": True}],
                     "commission": {
                         "base_name": "利润", "base_total": base, "total": amount,
@@ -216,27 +215,27 @@ class TestItReachesThePayout:
                         "people": [{"person": person, "amount": amount, "base": base,
                                     "rate": 0.05, "products": 3}],
                     },
-                },
-            )
-
-        class _WS:
-            def overview(self):
-                return [snap("taobao_xibishun", 900.0, 100.0, "张三", 5.0),
-                        snap("alibaba1688_xingze", 100.0, 100.0, "李四", 5.0)]
-
-            def state(self, store_id, period):
-                return None
+                }
 
         monkeypatch.setattr(api, "WORKSPACE_ROOT", tmp_path / "space")
         monkeypatch.setattr(api, "_ws", None)
-        monkeypatch.setattr(api, "workspace", lambda: _WS())
+        ws=Workspace(tmp_path/'space')
+        for store_id,revenue,person in [('taobao_xibishun',900.0,'张三'),('alibaba1688_xingze',100.0,'李四')]:
+            ws.record(store_id,'2026-05',snap(store_id,revenue,100.0,person,5.0),[])
+        monkeypatch.setattr(api, "workspace", lambda: ws)
+        model_root=tmp_path/'model';model_root.mkdir()
+        monkeypatch.setattr(api,'DEFAULT_MODEL',model_root)
         model = load_model(MODELS / "cn-ecommerce")
         with_overhead = model.model_copy(update={
             "overheads": (Overhead(period="2026-05", amount=20.0),),
+            'stores': tuple(store for store in model.stores if store.id in {'taobao_xibishun','alibaba1688_xingze'}),
         })
         monkeypatch.setattr(api, "_model", lambda: with_overhead)
-        with TestClient(api.app) as c:
-            yield c
+        # This is a persisted read-model fixture, not a service/lifespan replay.
+        c=TestClient(api.app)
+        yield c
+        c.close()
+        ws.close()
 
     def test_the_total_is_split_by_revenue_share(self, paid):
         body = paid.get("/api/commission").json()
@@ -265,3 +264,111 @@ class TestItReachesThePayout:
         """页面上按人汇总的合计必须等于按店汇总的合计。两处不一致就没人敢照着发钱。"""
         body = paid.get("/api/commission").json()
         assert body["total"] == pytest.approx(sum(s["total"] for s in body["stores"]))
+
+    def test_unknown_total_is_not_an_approved_zero(self,paid,monkeypatch):
+        import ledger.api as api
+        model=api._model();monkeypatch.setattr(api,'_model',lambda:model.model_copy(update={'overheads':()}))
+        body=paid.get('/api/commission').json()
+        assert body['overhead']['total'] is None and body['overhead']['settled'] is False
+        assert body['total'] is None
+        assert all(row['overhead'] is None and row['base_after'] is None and row['total'] is None for row in body['stores'])
+        assert all(row['amount'] is None for row in body['people'])
+
+    def test_a_missing_operating_store_is_not_zero_income(self,paid,monkeypatch):
+        import ledger.api as api
+        model=api._model();extra=model.stores[0].model_copy(update={'id':'not_received','name':'未到资料店'})
+        model=model.model_copy(update={'stores':(*model.stores,extra)})
+        monkeypatch.setattr(api,'_model',lambda:model)
+        body=paid.get('/api/commission').json()
+        assert body['overhead']['basis_total'] is None
+        assert body['overhead']['missing_store_ids']==['not_received']
+        assert body['total'] is None
+        assert all(row['overhead'] is None for row in body['stores'])
+
+    @staticmethod
+    def decide(kind,values,store_id=''):
+        import ledger.api as api
+        from ledger import automation_actions as actions
+        actor={'id':'approved-fixture-human','kind':'human','authenticated':True}
+        proposal=actions.decision_preview(api.workspace(),api._model(),request_id='preview-'+kind,period='2026-05',store_id=store_id,
+            kind=kind,values=values,reason='合成夹具中的已核实业务决定',actor=actor)
+        actions.decision_apply(api.workspace(),api._model(),request_id='apply-'+kind,
+            proposal_id=proposal['proposal_id'],proposal_sha=proposal['proposal_sha'],input_sha=proposal['input_sha'],actor=actor)
+
+    def test_approved_total_overrides_the_raw_model(self,paid):
+        self.decide('overhead_total',{'amount':'40.00'})
+        body=paid.get('/api/commission').json()
+        assert body['overhead']['total']==40
+        cuts={row['store_id']:row['overhead'] for row in body['stores']}
+        assert cuts=={'taobao_xibishun':36,'alibaba1688_xingze':4}
+        assert body['total']==8
+
+    def test_approved_zero_is_a_known_amount(self,paid):
+        self.decide('overhead_total',{'amount':'0.00'})
+        body=paid.get('/api/commission').json()
+        assert body['overhead']['total']==0 and body['overhead']['settled'] is True
+        assert body['total']==10
+        assert all(row['overhead']==0 for row in body['stores'])
+
+    def test_explicit_scope_decision_resolves_only_the_missing_store(self,paid,monkeypatch):
+        import ledger.api as api
+        model=api._model();extra=model.stores[0].model_copy(update={'id':'not_received','name':'未营业店'})
+        model=model.model_copy(update={'stores':(*model.stores,extra)});monkeypatch.setattr(api,'_model',lambda:model)
+        assert paid.get('/api/commission').json()['total'] is None
+        self.decide('store_scope',{'included':False},'not_received')
+        body=paid.get('/api/commission').json()
+        assert body['overhead']['missing_store_ids']==[]
+        assert body['overhead']['basis_total']==1000
+        assert body['total']==9
+
+    @pytest.mark.parametrize('frozen_amount',['7.00',None])
+    def test_closed_shares_are_preserved_and_never_rebuilt_from_current_weights(self,paid,frozen_amount):
+        import ledger.api as api
+        ws=api.workspace();state=ws.state('taobao_xibishun','2026-05')
+        with ws.conn:
+            ws.conn.execute("UPDATE period SET state='closed',run_id=? WHERE store_id=? AND period=?",(state.run_id,state.store_id,state.period))
+            if frozen_amount is not None:
+                ws.conn.execute('INSERT INTO run_labor(run_id,store_id,period,amount,at,by) VALUES(?,?,?,?,?,?)',
+                    (state.run_id,state.store_id,state.period,frozen_amount,'2026-06-01T00:00:00','legacy-approved-fixture'))
+        body=paid.get('/api/commission').json()
+        closed=next(row for row in body['stores'] if row['store_id']==state.store_id)
+        assert closed['overhead']==(7 if frozen_amount is not None else None)
+        assert closed['total']==(4.65 if frozen_amount is not None else None)
+        assert next(row for row in body['stores'] if row['store_id']!='taobao_xibishun')['overhead'] is None
+        assert body['total'] is None and body['overhead']['settled'] is False
+
+    def test_manually_confirmed_after_labor_amounts_are_not_scaled_twice(self,paid):
+        import ledger.api as api
+        ws=api.workspace();state=ws.state('taobao_xibishun','2026-05')
+        payload=state.result;payload['commission']['manual_amounts_after_labor']=True
+        ws.record(state.store_id,state.period,payload,[])
+        body=paid.get('/api/commission').json()
+        row=next(row for row in body['stores'] if row['store_id']==state.store_id)
+        assert row['overhead']==18 and row['total']==5 and row['people'][0]['amount']==5
+        assert row['total_before'] is None
+        assert body['total']==9.9
+
+    @pytest.mark.parametrize('field',['base_total','person_amount'])
+    def test_missing_saved_money_does_not_become_zero(self,paid,field):
+        import ledger.api as api
+        ws=api.workspace();state=ws.state('taobao_xibishun','2026-05');payload=state.result
+        if field=='base_total':payload['commission']['base_total']=None
+        else:payload['commission']['people'][0]['amount']=None
+        ws.record(state.store_id,state.period,payload,[])
+        body=paid.get('/api/commission').json()
+        person=next(row for row in body['people'] if row['person']=='张三')
+        assert person['amount'] is None and body['total'] is None
+
+    def test_person_rounding_preserves_the_store_trial_total(self,paid):
+        from decimal import Decimal
+        import ledger.api as api
+        ws=api.workspace();state=ws.state('taobao_xibishun','2026-05');payload=state.result
+        payload['commission'].update(base_total=27,total=100,people=[
+            {'person_id':'a','person':'甲','amount':50,'base':13.5,'products':1},
+            {'person_id':'b','person':'乙','amount':50,'base':13.5,'products':1}])
+        ws.record(state.store_id,state.period,payload,[])
+        body=paid.get('/api/commission').json()
+        row=next(row for row in body['stores'] if row['store_id']==state.store_id)
+        assert row['total']==33.33
+        assert sum(Decimal(str(person['amount'])) for person in row['people'])==Decimal('33.33')
+        assert Decimal(str(body['total']))==sum(Decimal(str(person['amount'])) for person in body['people'])

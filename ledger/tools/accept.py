@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 from dataclasses import dataclass, field
 import math
 import sys
@@ -23,7 +24,7 @@ from ledger.engine.normalize import to_number  # noqa: E402
 from ledger.engine.parse import ParseOptions, parse  # noqa: E402
 from ledger.model import load_model  # noqa: E402
 
-DATA = Path("/home/wsfwk/data/platform")
+DATA = Path(os.environ.get("LEDGER_ACCEPTANCE_CORPUS", "/home/wsfwk/data/platform"))
 MODEL = Path(__file__).resolve().parents[2] / "models/cn-ecommerce"
 
 #: 人工表里这些列存的是正数但含义是费用，对账时要取反才能和引擎口径比。
@@ -174,6 +175,8 @@ class Case:
     key: str
     #: 人工表列名 → 损益节点。
     columns: dict[str, str]
+    #: 人工表对应的唯一账期；禁止按结果排序猜月份。
+    period: str = ""
     #: 已查明原因的差异：列名 → (引擎减人工的差额, 原因)。
     #:
     #: 不是所有差异都该被消掉。有的是引擎比人工更完整，有的是人工表链接的外部
@@ -186,7 +189,7 @@ class Case:
 
 CASES = {
     "淘宝喜必顺": Case(
-        store="淘宝喜必顺", platform="taobao",
+        store="淘宝喜必顺", platform="taobao", period="2026-05",
         detail="订单明细/订单明细-淘宝喜必顺.xlsx", sheet="5月", key="子订单编号",
         columns={
             "销售收入": "n_receipt", "销售退款": "n_refund",
@@ -221,7 +224,7 @@ CASES = {
         },
     ),
     "1688星泽气球派对": Case(
-        store="1688星泽气球派对", platform="alibaba1688",
+        store="1688星泽气球派对", platform="alibaba1688", period="2026-05",
         detail="订单明细/订单明细-1688星泽气球派对.xlsx", sheet="Sheet1", key="订单号",
         columns={
             # 含 14 行订单售后退款，金额为负，引擎也归在同一个科目上。
@@ -245,7 +248,7 @@ CASES = {
         },
     ),
     "抖音浅花涧节日装饰": Case(
-        store="抖音浅花涧节日装饰", platform="douyin",
+        store="抖音浅花涧节日装饰", platform="douyin", period="2026-05",
         detail="订单明细/订单详情-抖音浅花涧节日装饰.xlsx", sheet="订单明细", key="子订单编号",
         columns={
             "销售收入": "n_receipt",
@@ -272,7 +275,9 @@ def human_totals(path: Path, sheet: str, key_column: str, wanted: dict[str, str]
     if not tables:
         raise SystemExit(f"{path.name} 里没有工作表 {sheet}")
     table = tables[0]
-    key_idx = table.headers.index(key_column) if key_column in table.headers else 0
+    if key_column not in table.headers:
+        raise ValueError(f"人工对照表缺少身份列：{key_column}")
+    key_idx = table.headers.index(key_column)
     sums: dict[str, float] = {}
     for row in table.rows:
         key = str(row.cells[key_idx]).strip() if key_idx < len(row.cells) else ""
@@ -307,15 +312,59 @@ def main() -> int:
             known = math.fsum(abs(a) for a in items.values())
             tail = f"，另有已解释差异 {known:,.2f}（{len(items)} 项）" if items else ""
             print(f"  {store:<22} 未解释 {gap:>10,.2f}{tail}")
-    return 0
+    return 0 if gaps and all(math.isfinite(gap) and gap < 0.02 for gap in gaps.values()) else 1
+
+
+def compare_case(case: Case, target, human: dict[str, float], model) -> float:
+    """Shared fail-closed verdict for CLI and pytest; derived totals are assertions too."""
+    gaps = []
+    for name, node_id in case.columns.items():
+        nv = target.nodes.get(node_id)
+        if name not in human or nv is None or not nv.available:
+            print(f"  验收失败：必需指标 {name} 缺失或未出数")
+            return float("inf")
+        h, actual = human[name], nv.value
+        if not isinstance(h, (int, float)) or not isinstance(actual, (int, float)):
+            return float("inf")
+        if not math.isfinite(h) or not math.isfinite(actual):
+            return float("inf")
+        if name in STORED_POSITIVE_COSTS:
+            h = -h
+        expected = h + case.explained.get(name, (0, ""))[0]
+        delta = abs(actual - expected)
+        # Do not add tolerated float noise across dozens of columns.
+        if delta >= 0.02:
+            gaps.append(delta)
+    # Verify formulas independently of the human cache and explained differences.
+    for node in model.statement:
+        expr = getattr(node, "formula", None)
+        if expr is None or node.id not in ("gross_profit", "net_profit"):
+            continue
+        actual = target.nodes.get(node.id)
+        parts = [target.nodes.get(key) for key in expr.of]
+        if actual is None or not actual.available or any(p is None or not p.available for p in parts):
+            return float("inf")
+        if expr.op != "add" or not all(math.isfinite(p.value) for p in parts):
+            return float("inf")
+        expected = math.fsum(p.value for p in parts)
+        if not math.isfinite(actual.value) or abs(actual.value - expected) >= 0.000001:
+            print(f"  验收失败：{node.id} 派生公式不成立")
+            return float("inf")
+    return math.fsum(gaps)
 
 
 def run_case(case: Case) -> float:
+    if not case.period:
+        print("验收失败：案例必须显式指定账期")
+        return float("inf")
     print("\n" + "#" * 96)
     print(f"# {case.store}（{case.platform}）")
     print("#" * 96)
 
     files = sorted(p for p in DATA.rglob("*.xlsx") if case.store in p.name)
+    if not files:
+        print("验收失败：没有输入材料")
+        return float("inf")
     print(f"输入 {len(files)} 个文件：")
     for p in files:
         print(f"   {p.parent.name}/{p.name}  {p.stat().st_size / 1024:,.0f} KB")
@@ -374,7 +423,17 @@ def run_case(case: Case) -> float:
     # ------------------------------------------------------------------ #
     print("\n" + "=" * 96 + "\n与人工 Excel 表逐项对账\n" + "=" * 96)
     human = human_totals(DATA / case.detail, case.sheet, case.key, case.columns)
-    target = next(iter(sorted(result.slices.items(), key=lambda kv: (kv[0][0] or "", kv[0][1] or ""))))[1]
+    matches = [store for store in model.stores
+               if case.store in (store.id, store.name, *store.aliases)]
+    if len(matches) != 1:
+        print("验收失败：案例未绑定唯一模型店铺身份")
+        return float("inf")
+    candidates = [sl for (store, period), sl in result.slices.items()
+                  if store == matches[0].name and period == case.period]
+    if len(candidates) != 1:
+        print(f"验收失败：缺少唯一的 {case.store} · {case.period} 切片")
+        return float("inf")
+    target = candidates[0]
 
     print(f"  {'项目':<16}{'人工表':>16}{'引擎':>16}{'差':>14}   ")
     print("  " + "-" * 66)
@@ -408,7 +467,8 @@ def run_case(case: Case) -> float:
                 total_gap += abs(gap)
         print(f"  {name:<16}{h:>16,.2f}{e:>16,.2f}{gap:>14,.2f}{mark}")
     print("  " + "-" * 66)
-    print(f"  未解释的分项绝对差合计 {total_gap:,.2f}")
+    verdict = compare_case(case, target, human, model)
+    print(f"  未解释差异（含派生项独立断言） {verdict:,.2f}")
     # 同一个原因往往一次影响好几个科目，按原因归组，说明只写一遍。
     groups: dict[str, list[str]] = {}
     for name, (amount, why) in case.explained.items():
@@ -416,7 +476,7 @@ def run_case(case: Case) -> float:
     for why, items in groups.items():
         print(f"\n  已解释：{'、'.join(items)}")
         print(f"    {why}")
-    return total_gap
+    return verdict
 
 
 if __name__ == "__main__":

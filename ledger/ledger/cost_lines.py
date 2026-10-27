@@ -36,6 +36,18 @@ def revision(ws, store_id: str, period: str) -> int:
     return int(row[0])
 
 
+def posted_current(ws,run_id,store_id,period):
+    """All approved lines are already in this exact run; no period override needed."""
+    row=ws.conn.execute('SELECT result FROM run WHERE id=? AND store_id=? AND period=?',(run_id,store_id,period)).fetchone()
+    if not row:return False
+    payload=json.loads(row['result']);posting=payload.get('cost_line_posting') or {}
+    if posting.get('line_revision')!=revision(ws,store_id,period):return False
+    current_rows=current(ws,run_id,store_id,period)
+    def identity(items):
+        return sorted((r['coverage_key'],r.get('context_sha'),r.get('revision'),str(_cents(r['amount']))) for r in items)
+    return identity(posting.get('reviews',[]))==identity(current_rows['reviewed'])
+
+
 def _latest(ws, store_id: str, period: str, run_id: int, *, max_revision: int = 2**63-1) -> dict[str, dict]:
     rows = ws.conn.execute('''
         SELECT l.* FROM cost_line_log l JOIN (
@@ -385,8 +397,7 @@ def save(ws, store_id: str, period: str, run_id: int, *, coverage_key: str,
     if action == 'save' and source.get('partial_cost', False):
         raise WorkspaceError('已有部分商品成本计入，请先核对缺失商品明细，不能重复补录整单成本')
     conn = ws.conn
-    with conn:
-        conn.execute('BEGIN IMMEDIATE')
+    with ws.transaction():
         active = conn.execute('SELECT id FROM run WHERE store_id=? AND period=? ORDER BY id DESC LIMIT 1',
                               (store_id, period)).fetchone()
         state = conn.execute('SELECT state FROM period WHERE store_id=? AND period=?',

@@ -6,8 +6,9 @@ import { useRouter } from 'vue-router'
 
 import { useApp } from '../store'
 import { useCommission } from '../commissionStore'
-import { api } from '../api'
+import { api,startClientTelemetry,recordTelemetry } from '../api'
 import FilterBar from './FilterBar.vue'
+import OperatorSession from './OperatorSession.vue'
 
 const IntakeResult = defineAsyncComponent(() => import('./IntakeResult.vue'))
 const UploadPanel = defineAsyncComponent(() => import('./UploadPanel.vue'))
@@ -19,6 +20,9 @@ const app = useApp()
 const commission = useCommission()
 const message = useMessage()
 const router = useRouter()
+let stopTelemetry=()=>{},stopPageMeasure=()=>{}
+const telemetryContext=()=>({view:telemetryView(router.currentRoute.value.name),store_id:app.storeId,period:app.period})
+function telemetryView(name){if(String(name).startsWith('commission'))return 'commission';return name==='freight-review'?'freight':name==='onboard'?'deliver':name||'board'}
 function refreshCurrent(){app.uiRefresh++;app.loadNavigation(true).catch(e=>message.error(e.message))}
 
 // 懒加载页面时给导航一个明确反馈。保留很短的最小展示时间，避免快请求只闪一下；
@@ -44,9 +48,6 @@ function preloadDeliver() {
   import('../views/DeliverView.vue').catch(() => {})
 }
 
-const readyCount = computed(
-  () => (app.overview?.cells || []).filter((c) => c.can_close && c.state !== 'closed').length,
-)
 const workJobs = ref([])
 const progressMinimized = ref(true)
 const highestProgress = computed(() => Math.max(0,...workJobs.value.map(job => job.percent || 0)))
@@ -95,6 +96,7 @@ watch(
   },
 )
 onUnmounted(() => {
+  stopTelemetry();stopPageMeasure()
   clearInterval(tick)
   clearInterval(workTimer)
   clearTimeout(routeTimer)
@@ -132,6 +134,9 @@ watch(
 const explaining = ref(false)
 
 onMounted(() => {
+  stopTelemetry=startClientTelemetry(telemetryContext)
+  stopPageMeasure=router.afterEach(to=>{recordTelemetry({kind:'page_open',action:'view_open',view:telemetryView(to.name)});if(to.name==='period')recordTelemetry({kind:'store_period_open',action:'store_period_open',store_id:String(to.params.id||''),period:String(to.query.period||app.period||'')})})
+  if(router.currentRoute.value.name==='period')recordTelemetry({kind:'store_period_open',action:'store_period_open'})
   try { progressMinimized.value = localStorage.getItem('ledger-progress-minimized') !== 'false' } catch {}
   window.addEventListener('ledger:page-load-error',pageFailed)
   app.loadNavigation().catch((e) => message.error(e.message, { duration: 6000 }))
@@ -155,9 +160,9 @@ defineExpose({ take })
         class="navlink"
         :class="{ on: $route.name === 'board' }"
         to="/"
-        :title="readyCount ? `${readyCount} 个店期可以结账` : '总览'"
+        title="月度工作台"
       >
-        <LayoutDashboard class="nav-icon" aria-hidden="true"/>总览<span v-if="readyCount" class="count">{{ readyCount }}</span>
+        <LayoutDashboard class="nav-icon" aria-hidden="true"/>月度工作台
       </router-link>
       <router-link
         class="navlink"
@@ -189,6 +194,7 @@ defineExpose({ take })
     </nav>
 
     <div class="body">
+      <OperatorSession />
       <header v-if="!['commission', 'commission-reports', 'commission-org', 'labor'].includes($route.name)" class="topbar">
         <FilterBar />
         <n-button quaternary size="small" :disabled="app.loading || !!app.busy" aria-label="刷新当前页面" title="刷新当前页面" @click="refreshCurrent"><RefreshCw :size="16"/></n-button>

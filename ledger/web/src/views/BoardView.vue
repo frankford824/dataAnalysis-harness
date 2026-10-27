@@ -1,786 +1,235 @@
 <script setup>
-/* 展板。
- *
- * 这一页要回答的是站在门口那一眼的问题：这个月挣了多少、哪几家店还没结上账、
- * 卡在哪。上一版把它做成了一张平铺的表，十几家店三个月就是几百个格子，
- * 什么都看得见等于什么都看不见。
- *
- * 所以顺序是：先四个数（全公司这个月），再一张所有店的明细表。月份对比是同一批
- * 数字的另一种排法，收在标签页后面——两张表竖着摆的话，一屏之内看不完，人会以为
- * 下面那张是别的东西。
- */
-import { computed, onMounted, ref, watch } from 'vue'
-import { useRouter } from 'vue-router'
-
-import { useLatest } from '../components/ui/useLatest'
-import { api } from '../api'
-import { count, money, percent, prettyPeriod, signed, signedPct } from '../format'
-import { useApp } from '../store'
-import DropZone from '../components/DropZone.vue'
-import GapList from '../components/GapList.vue'
+import {computed,onMounted,onUnmounted,ref,watch} from 'vue'
+import {useRouter} from 'vue-router'
+import {useMessage} from 'naive-ui'
+import {api} from '../api'
+import {useApp} from '../store'
+import {money,percent,prettyPeriod,stamp} from '../format'
+import {useLatest} from '../components/ui/useLatest'
 import PageHead from '../components/PageHead.vue'
+import CompanyFinanceCard from '../components/CompanyFinanceCard.vue'
+import {onlyCompanyHistoryRemains} from '../companyFinanceView'
+import {operationLevels,workflowLabels,comparisonCopy,sortedOperations} from '../operationsView'
+import {clientRequestId,recordTelemetry} from '../telemetry'
+import {policyStatusLabels,shiftedMonth,localDateTime,policyDecisionValues} from '../policyView'
 
-const app = useApp()
-const router = useRouter()
-
-onMounted(() => app.loadOverview().catch(() => {}))
-watch(()=>app.uiRefresh,()=>app.loadOverview(true).catch(()=>{}))
-
-const period = computed(
-  () => app.period || app.overview?.default_period || app.periods[0] || '',
-)
-
-const cells = computed(() =>
-  (app.overview?.cells || []).filter((c) => {
-    if (app.platform && c.platform !== app.platform) return false
-    if (app.storeId && c.store_id !== app.storeId) return false
-    return true
-  }),
-)
-
-const here = computed(() => cells.value.filter((c) => c.period === period.value))
-
-const totals = computed(() => {
-  const rows = here.value.filter((c) => c.revenue !== null && c.profit !== null)
-  const revenue = rows.reduce((a, c) => a + c.revenue, 0)
-  const profit = rows.reduce((a, c) => a + c.profit, 0)
-  const ready = rows.length
-  return {
-    revenue: ready ? revenue : null,
-    profit: ready ? profit : null,
-    margin: ready && revenue ? profit / revenue : null,
-    closed: here.value.filter((c) => c.state === 'closed').length,
-    stuck: here.value.filter((c) => c.state !== 'closed' && !c.can_close).length,
-    incomplete: here.value.length - ready,
-    ready,
+const app=useApp(),router=useRouter(),message=useMessage()
+const report=ref(null),workflow=ref(null),loading=ref(false),error=ref(''),workflowError=ref('')
+const tab=ref('results'),level=ref('store'),managed=ref('all'),scope=ref({}),trail=ref([])
+const expanded=ref(false),sortKey=ref('profit_after_labor'),sortDirection=ref('desc'),compare=ref('current')
+const page=ref(1)
+const request=useLatest(),workflowRequest=useLatest()
+const period=computed(()=>app.period||app.periods[0]||'')
+const params=computed(()=>({period:period.value,level:level.value,platform:app.platform,store_id:app.storeId,...scope.value,managed:managed.value,offset:(page.value-1)*50,limit:50,sort_key:sortKey.value,sort_direction:sortDirection.value,sort_basis:compare.value}))
+const companyFinance=computed(()=>workflow.value?.decision_groups?.find(group=>group.kind==='company_finance')||null)
+const monthAdvanceBlocked=computed(()=>onlyCompanyHistoryRemains(workflow.value))
+const businessDecisionGroups=computed(()=>(workflow.value?.decision_groups||[]).filter(group=>group.kind!=='company_finance'))
+const waitingGroups=computed(()=>workflow.value?.waiting_groups||[])
+const waitingCount=computed(()=>workflow.value?.counts?.waiting??0)
+const status=computed(()=>workflowError.value?'状态暂未更新':workflowLabels[workflow.value?.status]||'正在读取状态')
+const rows=computed(()=>sortedOperations(report.value?.rows||[],sortKey.value,sortDirection.value))
+const core=new Set(['net_income','goods_cost','gross_profit','promotion_cost','platform_cost','freight_cost','aftersales_cost','labor_cost','profit_after_labor'])
+const columns=computed(()=>(report.value?.metrics||[]).filter(item=>expanded.value||core.has(item.key)))
+const exportUrl=computed(()=>api.operationsExport({...params.value,expected_input_sha:report.value?.input_sha,comparison:compare.value}))
+const busy=ref(false),preview=ref(null),modal=ref(false),decision=ref(null),decisionAmount=ref(''),decisionReason=ref(''),included=ref(true),selectedStore=ref(''),modalError=ref('')
+const ruleContracts=ref(null),ruleError=ref(''),selectedRule=ref(''),scopeMode=ref('month'),businessFrom=ref(''),businessUntil=ref(''),executionFrom=ref(''),executionUntil=ref('')
+const ruleOptions=computed(()=>(ruleContracts.value?.rules||[]).map(rule=>({label:rule.label,value:rule.id})))
+const currentRule=computed(()=>(ruleContracts.value?.rules||[]).find(rule=>rule.id===selectedRule.value))
+const storeOptions=computed(()=>(workflow.value?.stores||[]).map(row=>({label:row.store,value:row.store_id})))
+const revocation=ref(null),revocationReason=ref(''),revocationSnapshot=ref(null),revocationError=ref('')
+const actionId=clientRequestId
+let timer,reportSerial=0
+async function loadReport(quiet=false){
+  if(!period.value)return
+  const serial=++reportSerial
+  if(!quiet)loading.value=true
+  error.value=''
+  try{const response=await request.run(signal=>api.operationsReport(params.value,{signal}));if(response)report.value=response.value}
+  catch(reason){if(serial===reportSerial)error.value=reason.message}finally{if(serial===reportSerial)loading.value=false}
+}
+async function loadWorkflow(){
+  if(!period.value)return
+  try{const response=await workflowRequest.run(signal=>api.automationMonth(period.value,{signal}));if(response){workflow.value=response.value;workflowError.value=''}}
+  catch(reason){workflowError.value=reason.message}
+}
+async function loadRules(){try{ruleContracts.value=await api.automationRuleContracts();ruleError.value=''}catch(reason){ruleError.value=reason.message}}
+async function reload(){await Promise.all([loadReport(),loadWorkflow()])}
+onMounted(async()=>{
+  await app.loadNavigation().catch(()=>{});await Promise.all([reload(),loadRules()])
+  timer=setInterval(()=>{if(!document.hidden&&!busy.value&&!modal.value&&!revocation.value){loadWorkflow();if(workflow.value?.status==='processing')loadReport(true)}},15000)
+})
+onUnmounted(()=>{clearInterval(timer);request.cancel();workflowRequest.cancel()})
+watch(params,()=>loadReport(),{deep:true})
+watch(period,()=>{workflow.value=null;report.value=null;modal.value=false;revocation.value=null;scope.value={};trail.value=[];page.value=1;loadWorkflow()})
+watch([level,managed,scope,()=>app.storeId,()=>app.platform,sortKey,sortDirection,compare],()=>{page.value=1},{deep:true})
+watch(()=>app.uiRefresh,reload)
+function changeLevel(value){level.value=value;scope.value={};trail.value=[]}
+function sort(key){if(sortKey.value===key)sortDirection.value=sortDirection.value==='desc'?'asc':'desc';else{sortKey.value=key;sortDirection.value='desc'}}
+function reset(){app.pick({store:'',platform:''});scope.value={};trail.value=[];level.value='store'}
+function openRow(row){
+  if(level.value==='order'){openEvidence(row);return}
+  const next={...scope.value}
+  if(level.value==='team'){if(!row.team_id)return;next.team_id=row.team_id;level.value='person'}
+  else if(level.value==='person'){if(!row.person_id)return;next.person_id=row.person_id;level.value='store'}
+  else if(level.value==='store'){next.store_id=row.store_id;level.value='product'}
+  else if(level.value==='product'){if(!row.product_id)return;next.store_id=row.store_id;next.product_id=row.product_id;level.value='order'}
+  trail.value.push(row.name);scope.value=next
+}
+function periodDetail(id){if(!id)return;app.pick({store:id,period:period.value});router.push({name:'period',params:{id},query:{period:period.value}})}
+function waitingStoreNames(group){return (group.store_ids||[]).map(id=>workflow.value?.stores?.find(store=>store.store_id===id)?.store||id).join('、')}
+function noteWaitingSummary(){if(waitingCount.value)recordTelemetry({kind:'operation_complete',action:'waiting_summary_open',view:'board',period:period.value,store_id:app.storeId||'',duration_ms:0,outcome:'observed'})}
+function openWaitingSummary(){tab.value='decisions';noteWaitingSummary()}
+async function openWaitingDelivery(group){
+  if(group.kind!=='source')return
+  const storeId=group.store_ids?.length===1?group.store_ids[0]:'',wantedPeriod=period.value
+  app.pick({store:storeId,platform:'',period:wantedPeriod});app.noted('deliver.section','work').value='work'
+  try{
+    await router.push({name:'deliver'})
+    recordTelemetry({kind:'operation_complete',action:'waiting_deliver_open',view:'deliver',period:wantedPeriod,store_id:storeId,duration_ms:0,outcome:'observed'})
+  }catch{message.error('资料入口暂未打开，请重试')}
+}
+async function advance(){
+  if(busy.value)return
+  busy.value=true
+  try{workflow.value=await api.automationAdvance(period.value,{request_id:actionId()});message.success('已安排本月处理');await loadReport(true)}
+  catch(reason){message.error(reason.message)}finally{busy.value=false}
+}
+function noteCompanyEvidence(){recordTelemetry({kind:'operation_complete',action:'view_open',view:'board',period:period.value,store_id:'',duration_ms:0,outcome:'observed'})}
+function openDecision(group){
+  if(group.kind==='company_finance')return
+  if(group.kind==='close'){previewClose();return}
+  if(!['store_scope','overhead_total','rule_grant'].includes(group.kind)){periodDetail(group.store_ids?.[0]);return}
+  scopeMode.value='month';businessFrom.value=period.value;businessUntil.value=shiftedMonth(period.value);selectedRule.value=ruleContracts.value?.rules?.[0]?.id||''
+  const now=new Date(),end=new Date(now);end.setFullYear(end.getFullYear()+1);executionFrom.value=localDateTime(now);executionUntil.value=localDateTime(end)
+  decision.value=group;decisionAmount.value=workflow.value?.overhead?.total??'';decisionReason.value='';selectedStore.value=group.store_ids?.[0]||storeOptions.value[0]?.value||'';included.value=true;preview.value=null;modalError.value='';modal.value=true
+}
+async function previewDecision(){
+  if(busy.value)return
+  busy.value=true;modalError.value=''
+  try{
+    const kind=decision.value.kind
+    const values=kind==='overhead_total'?{amount:String(decisionAmount.value)}:policyDecisionValues({kind,included:included.value,mode:scopeMode.value,period:period.value,from:businessFrom.value,until:businessUntil.value,rule:currentRule.value,executionFrom:executionFrom.value,executionUntil:executionUntil.value})
+    preview.value=await api.automationDecisionPreview({request_id:actionId(),period:period.value,store_id:kind==='overhead_total'?'':selectedStore.value,kind,values,reason:decisionReason.value.trim()})
   }
-})
-
-const blankMonth = computed(
-  () => here.value.length > 0 && totals.value.ready === 0,
-)
-
-const lastNumbered = computed(() => {
-  for (const p of app.periods) {
-    const ready = cells.value.some(
-      (c) => c.period === p && c.revenue !== null && c.profit !== null,
-    )
-    if (ready) return p
-  }
-  return ''
-})
-
-const boardTitle = computed(() => {
-  if (app.currentStore) return app.currentStore.name
-  return prettyPeriod(period.value) || app.platformName
-})
-
-/** 按平台分组，组内按利润从低到高——要人管的都在上面。 */
-const groups = computed(() => {
-  const by = new Map()
-  for (const c of here.value) {
-    const key = c.platform || '(未分平台)'
-    if (!by.has(key)) by.set(key, [])
-    by.get(key).push(c)
-  }
-  for (const list of by.values()) {
-    list.sort((a, b) => (a.profit ?? 0) - (b.profit ?? 0))
-  }
-  return [...by].map(([platform, list]) => ({
-    platform,
-    name: app.platforms.find((p) => p.id === platform)?.name || platform,
-    list,
-  }))
-})
-
-//: 月份对比里的账期，新的在上。
-//:
-//: 这一块返工过两次，两次都错在同一个地方。第一版横着摆六列矩阵，金额只能缩写成
-//: 「15.2 万」——对账的人要的是 152,392.61。第二版把金额写全了，代价是三张表竖着
-//: 摞起来，页面拉得比原来还长，等于用「翻不完」换了「看不清」。
-//:
-//: 现在只留一张表：一个账期一行，一屏看完。细节全在点开之后的弹框里——利润项、
-//: 各店、和上个月差多少。要看细节的人本来就要点一下，不看细节的人不该被迫滚过去。
-const shown = computed(() => app.periods)
-
-/** 一行月份对比：钱、利润率、和上个月差多少。 */
-function line(period, list) {
-  const done = list.filter((c) => c.revenue !== null && c.profit !== null)
-  const revenue = done.reduce((a, c) => a + c.revenue, 0)
-  const profit = done.reduce((a, c) => a + c.profit, 0)
-  return {
-    period,
-    revenue: done.length ? revenue : null,
-    profit: done.length ? profit : null,
-    margin: revenue ? profit / revenue : null,
-    stores: list.length,
-    closed: list.filter((c) => c.state === 'closed').length,
-    pending: list.length - done.length,
-    cell: list.length === 1 ? list[0] : null,
-  }
+  catch(reason){modalError.value=reason.message}finally{busy.value=false}
 }
-
-/** 上一行（更早那个月）到这一行差了多少。表格是新的在上，所以看的是下一行。 */
-function withDelta(rows) {
-  return rows.map((r, i) => {
-    const before = rows[i + 1]
-    const from = before?.profit
-    const to = r.profit
-    const can = typeof from === 'number' && typeof to === 'number'
-    return {
-      ...r,
-      delta: can ? to - from : null,
-      // 上个月是零或者亏的，百分比没有意义（除以零、或者「增长了 -300%」）。
-      // 这种时候只给金额差。
-      deltaPct: can && from > 0 ? (to - from) / from : null,
-    }
-  })
+async function previewClose(){
+  if(busy.value)return
+  decision.value=null;preview.value=null;modalError.value='';modal.value=true;busy.value=true
+  try{preview.value=await api.automationClosePreview({request_id:actionId(),period:period.value,store_ids:workflow.value?.close?.eligible_store_ids||[]})}
+  catch(reason){modalError.value=reason.message}finally{busy.value=false}
 }
-
-/** 全公司逐月。 */
-const companyMonths = computed(() =>
-  withDelta(shown.value.map((p) => line(p, cells.value.filter((c) => c.period === p)))),
-)
-
-/** 所有账期加起来。 */
-const span = computed(() => {
-  const revenue = companyMonths.value.reduce((a, r) => a + (r.revenue || 0), 0)
-  const profit = companyMonths.value.reduce((a, r) => a + (r.profit || 0), 0)
-  return { revenue, profit, margin: revenue ? profit / revenue : null }
-})
-
-/** 涨了绿、跌了红。零和空不着色——不是好消息也不是坏消息。 */
-function delta(v) {
-  return { up: typeof v === 'number' && v > 0, neg: typeof v === 'number' && v < 0 }
+async function applyPreview(){
+  if(!preview.value||busy.value)return
+  busy.value=true;modalError.value=''
+  const body={request_id:actionId(),proposal_id:preview.value.proposal_id,proposal_sha:preview.value.proposal_sha,input_sha:preview.value.input_sha}
+  try{
+    const result=decision.value?await api.automationDecisionApply(body):await api.automationCloseConfirm(body)
+    if(result.unfinished?.length)message.warning(`已完成 ${result.completed?.length||0} 家，${result.unfinished.length} 家继续保留待处理`)
+    else message.success(decision.value?'决定已保存，系统继续核算':'本次结账已处理')
+    modal.value=false;app.invalidate();await reload()
+  }catch(reason){modalError.value=reason.message}finally{busy.value=false}
 }
-
-//: 记住上次看的是哪个标签。切走再回来跳回默认，等于把人刚才翻到的地方扔了。
-const tab = app.noted('board.tab', 'here')
-
-/* 一个月的细账。
- *
- * 「这个月比上个月少了八万」这句话本身没有用，有用的是少在哪一项上。所以点开一个
- * 账期，弹框里给两张表：整张损益表这个月和上个月各是多少、差多少；以及这个月各家店
- * 分别是多少。两张表都写全额，因为它们已经不占主页面的位置了。 */
-
-const trend = ref(null)
-const trendBusy = ref(false)
-
-const pullTrendRequest=useLatest()
-const pullTrendError=ref('')
-let pullTrendSerial=0
-async function pullTrend() {
-  const serial=++pullTrendSerial
-  trendBusy.value=true;pullTrendError.value=''
-  try {
-    const response=await pullTrendRequest.run(signal=>api.trend({store_id:app.storeId,platform:app.platform},{signal}))
-    if(response)trend.value=response.value
-  }catch(e){if(serial===pullTrendSerial)pullTrendError.value=e.message}
-  finally{if(serial===pullTrendSerial)trendBusy.value=false}
+function openRevocation(policy){
+  revocation.value=policy;revocationReason.value='';revocationSnapshot.value=null;revocationError.value=''
 }
-
-watch(
-  [tab, () => app.storeId, () => app.platform, () => app.overview],
-  () => {
-    if (tab.value === 'months') pullTrend()
-  },
-  { immediate: true },
-)
-
-const trendPeriods = computed(() => trend.value?.periods || [])
-
-/* 点开的是哪个月。
- *
- * 开关和账期是两个值，不能合成一个。合成一个的话，关弹框就得把账期清掉，而弹框
- * 退场还有一段动画——那段时间里标题会变成「 · 全公司」，看着像是弹出了第二个空框。 */
-const detail = ref('')
-const detailOpen = ref(false)
-
-function openMonth(period) {
-  detail.value = period
-  detailOpen.value = true
-  if (!trend.value && !trendBusy.value) pullTrend()
+async function previewRevocation(){
+  if(busy.value||!revocation.value||!revocationReason.value.trim())return
+  busy.value=true;revocationError.value=''
+  try{revocationSnapshot.value=await api.automationDecision(revocation.value.decision_id)}
+  catch(reason){revocationError.value=reason.message}finally{busy.value=false}
 }
-
-/** 弹框顶上那一行数：这个月的收入、利润、利润率、比上月。 */
-const detailHead = computed(() =>
-  companyMonths.value.find((r) => r.period === detail.value) || null,
-)
-
-//: 上一个月。差额都是跟它比出来的。
-const detailPrev = computed(() => {
-  const i = shown.value.indexOf(detail.value)
-  return i >= 0 ? shown.value[i + 1] || '' : ''
-})
-
-/** 损益表逐项：这个月、上个月、差多少。 */
-const detailItems = computed(() => {
-  const now = detail.value
-  const before = detailPrev.value
-  if (!now) return []
-  const all = trend.value?.stores?.[now] || 0
-  return (trend.value?.rows || [])
-    .map((r) => {
-      const to = r.cells?.[now]?.value ?? null
-      const from = before ? r.cells?.[before]?.value ?? null : null
-      const can = typeof to === 'number' && typeof from === 'number'
-      const stores = r.cells?.[now]?.stores ?? 0
-      return {
-        ...r,
-        now: to,
-        before: from,
-        delta: can ? to - from : null,
-        // 费用项是负数，「多花了钱」是往下走。百分比按绝对值算，不然会出现
-        // 「推广费涨了 -30%」这种要在脑子里绕一圈的说法。比率行不算百分比，
-        // 它的差额本来就是百分点。
-        deltaPct:
-          can && r.display !== 'percent' && Math.abs(from) > 0
-            ? (Math.abs(to) - Math.abs(from)) / Math.abs(from)
-            : null,
-        // 这一项不是所有店都有。不说的话，人会把它当成完整的合计。
-        partial: to !== null && all > 1 && stores < all ? `${all} 家店里 ${stores} 家有这一项` : '',
-      }
-    })
-    .filter((r) => r.now !== null || r.before !== null)
-})
-
-/** 这个月各家店，利润高的在上。 */
-const detailStores = computed(() => {
-  const now = detail.value
-  const before = detailPrev.value
-  if (!now) return []
-  return cells.value
-    .filter((c) => c.period === now)
-    .map((c) => {
-      const was = before
-        ? cells.value.find((x) => x.store_id === c.store_id && x.period === before)
-        : null
-      const can = typeof c.profit === 'number' && typeof was?.profit === 'number'
-      return {
-        ...c,
-        delta: can ? c.profit - was.profit : null,
-        deltaPct: can && was.profit > 0 ? (c.profit - was.profit) / was.profit : null,
-      }
-    })
-    .sort((a, b) => (b.profit ?? -Infinity) - (a.profit ?? -Infinity))
-})
-
-/** 比率行的差额单位是百分点，跟金额行不是一回事，写出来免得被当成涨跌幅。 */
-function deltaText(r) {
-  if (r.delta === null) return '—'
-  return r.display === 'percent' ? `${signedPct(r.delta)} 个点` : signed(r.delta)
+async function confirmRevocation(){
+  if(busy.value||!revocationSnapshot.value)return
+  busy.value=true;revocationError.value=''
+  try{
+    await api.automationDecisionRevoke(revocation.value.decision_id,{request_id:actionId(),reason:revocationReason.value.trim(),input_sha:revocationSnapshot.value.input_sha})
+    revocation.value=null;message.success('决定已撤销，历史记录保留');app.invalidate();await reload()
+  }catch(reason){revocationError.value=reason.message;revocationSnapshot.value=null}finally{busy.value=false}
 }
-
-function amount(v, display) {
-  if (v === null || v === undefined) return '—'
-  return display === 'percent' ? percent(v) : money(v)
+const evidence=ref(null),evidenceOpen=ref(false),evidenceBusy=ref(false),evidenceError=ref('')
+async function openEvidence(row){
+  if(!row.store_id)return
+  evidenceOpen.value=true;evidence.value=null;evidenceError.value='';evidenceBusy.value=true
+  try{evidence.value=await api.operationsEvidence({period:period.value,store_id:row.store_id,product_id:row.product_id,order_id:row.order_id,sub_order_id:row.sub_order_id,expected_input_sha:report.value.input_sha})}
+  catch(reason){evidenceError.value=reason.message}finally{evidenceBusy.value=false}
 }
-
-function label(c) {
-  if (!c) return ''
-  if (c.state === 'closed') return c.stale ? '已结账 · 有新数据' : '已结账'
-  if (c.cost_review?.requires_human) return '成本待人工确认'
-  if (c.blocking?.length) return `${c.blocking.length} 项待处理`
-  if (c.missing?.length) return `缺 ${c.missing.length} 项`
-  if (c.can_close) return '可结账'
-  return '进行中'
-}
-
-/** 平台分组拉平成一张表。分组抬头留着，但不再各占一张卡。 */
-const rows = computed(() =>
-  groups.value.flatMap((g) => [{ head: g.name, size: g.list.length }, ...g.list]),
-)
-
-/* 待处理：所有店 × 所有账期的空值项和异常项。
- *
- * 这一块补的是之前一直缺的那一步。空值项和异常项本来只在单个账期页面里，等于
- * 「哪个店哪个月有问题」这个问题只能靠逐店逐月点开来回答——十几家店三个月是
- * 几百次点击，实际上没人会去点，于是等到对账那天才发现有一项一直是 0。
- *
- * 所以这里一次把所有店期的缺口列出来，重的在上。一屏之内先看到「哪几格要处理」，
- * 点开才是「这一格具体缺什么」。
- */
-const flaws = ref(null)
-const flawsBusy = ref(false)
-
-const pullGapsRequest=useLatest()
-const pullGapsError=ref('')
-let pullGapsSerial=0
-async function pullGaps() {
-  const serial=++pullGapsSerial
-  flawsBusy.value=true;pullGapsError.value=''
-  try {
-    const response=await pullGapsRequest.run(signal=>api.gaps({store_id:app.storeId,platform:app.platform},{signal}))
-    if(response)flaws.value=response.value
-  }catch(e){if(serial===pullGapsSerial)pullGapsError.value=e.message}
-  finally{if(serial===pullGapsSerial)flawsBusy.value=false}
-}
-
-watch(
-  [tab, () => app.storeId, () => app.platform, () => app.overview],
-  () => {
-    if (tab.value === 'gaps') pullGaps()
-  },
-  { immediate: true },
-)
-
-/** 有缺口的店期，重的在上。没有缺口的不列——这一页是待处理清单，不是台账。 */
-const flawCells = computed(() => (flaws.value?.cells || []).filter((c) => c.count > 0))
-
-const flawTotals = computed(() => {
-  const list = flawCells.value
-  return {
-    cells: list.length,
-    empty: list.reduce((a, c) => a + c.empty, 0),
-    odd: list.reduce((a, c) => a + c.odd, 0),
-    blocking: list.filter((c) => c.worst === 'blocking').length,
-  }
-})
-
-//: 展开的是哪一格。一次只开一格：同时摊开五格等于又回到了平铺一长页。
-const openCell = ref('')
-
-function toggleCell(c) {
-  const key = `${c.store_id}/${c.period}`
-  openCell.value = openCell.value === key ? '' : key
-}
-
-function isOpen(c) {
-  return openCell.value === `${c.store_id}/${c.period}`
-}
-
-/** 本月各店那张表上的缺口数。总览一格摆不下清单，摆得下「这里有 3 处」。 */
-function gapText(c) {
-  const g = c.gaps
-  if (!g || !g.count) return ''
-  const parts = []
-  if (g.empty) parts.push(`缺项 ${g.empty}`)
-  if (g.odd) parts.push(`异常 ${g.odd}`)
-  return parts.join(' · ')
-}
-
-function open(c) {
-  if (!c) return
-  // 从弹框里点进去要先关掉它。留着的话，浏览器一按返回，页面底下先冒出一个
-  // 上次开着的弹框，人得先关掉它才看得见自己回到了哪。
-  detailOpen.value = false
-  app.pick({ store: c.store_id, period: c.period })
-  router.push({ name: 'period', params: { id: c.store_id }, query: { period: c.period } })
-}
-
-//: 换店、换平台之后，弹框里那个月的数已经不是刚才看的那批了，关掉重来。
-watch([() => app.storeId, () => app.platform], () => {
-  detailOpen.value = false
-})
+const value=(key,amount)=>(report.value?.metrics||[]).find(item=>item.key===key)?.kind==='rate'?percent(amount):money(amount)
+const compareText=item=>comparisonCopy(item,money)
+const policyLabel=policy=>policy.kind==='store_scope'?'营业范围':ruleContracts.value?.rules?.find(rule=>rule.id===policy.values?.rule_id)?.label||'历史自动处理授权'
+const policyRange=policy=>`${policy.effective_month_range?.from||policy.anchor_period} 至 ${policy.effective_month_range?.until||policy.anchor_period}`
+const executionRange=policy=>`${stamp(policy.values?.valid_from)||'未留档'} 至 ${stamp(policy.values?.valid_until)||'未留档'}（当前设备时区）`
+const previewRange=computed(()=>scopeMode.value==='month'?period.value:`${businessFrom.value} 至 ${businessUntil.value}`)
+const metricChange=(key,item)=>comparisonCopy(item,(report.value?.metrics||[]).find(column=>column.key===key)?.kind==='rate'?amount=>`${(Number(amount)*100).toFixed(2)} 个百分点`:money)
 </script>
 
 <template>
-  <n-spin :show="app.loading">
-    <n-alert v-if="app.error" type="error" class="ledger-page-error">{{app.error}} <n-button text @click="app.loadOverview(true).catch(()=>{})">重试</n-button></n-alert>
-    <n-alert v-if="tab==='months' && pullTrendError || tab==='gaps' && pullGapsError" type="error" class="ledger-page-error">{{tab==='months'?pullTrendError:pullGapsError}} <n-button text @click="tab==='months'?pullTrend():pullGaps()">重试</n-button></n-alert>
-    <div v-if="!app.overview && app.loading" class="card" aria-label="正在加载总览"><n-skeleton text :repeat="5" /></div>
-    <div v-else-if="!app.error && !app.overview?.cells?.length" class="card">
-      <n-empty description="暂无台账">
-        <template #extra>
-          <div class="small muted" style="max-width: 420px; margin-bottom: var(--s4)">
-            把一个月的表拖进来就行——订单明细、对账、运费、推广，有几张交几张。
-            店铺和账期从文件名认，不用先建店。
-          </div>
-          <DropZone />
-        </template>
-      </n-empty>
-    </div>
-
-    <template v-else>
-      <PageHead
-        title="月度总览"
-        :scope="app.scopeParts"
-      >
-        <template #actions>
-          <n-button
-            v-if="blankMonth && lastNumbered && lastNumbered !== period"
-            @click="app.pick({ period: lastNumbered })"
-          >
-            看 {{ prettyPeriod(lastNumbered) }}
-          </n-button>
-          <n-button
-            v-if="app.storeId && here[0]"
-            type="primary"
-            @click="open(here[0])"
-          >
-            打开 {{ prettyPeriod(period) }}
-          </n-button>
-        </template>
-      </PageHead>
-
-      <div v-if="blankMonth" class="banner warn" style="margin-bottom: var(--s4)">
-        <strong>{{ prettyPeriod(period) }} 还没有算出损益</strong>
-        销售收入与利润暂未计算。
-        {{ here.length }} 家店都待补金额。
+  <PageHead title="月度工作台" :scope="[prettyPeriod(period),app.currentStore?.name||app.platformName].filter(Boolean)" hint="资料到齐后自动核算，只处理需要你决定的事项。">
+    <template #actions><n-button :loading="loading" @click="reload">刷新</n-button><n-button type="primary" :loading="busy" :disabled="!period||monthAdvanceBlocked" @click="advance">继续处理本月</n-button></template>
+  </PageHead>
+  <p v-if="monthAdvanceBlocked" class="small muted month-alert" aria-label="本月处理入口说明">重算不能解除历史冻结差异，请公司财务核对已保存依据。</p>
+  <n-alert v-if="error||workflowError" type="warning" class="month-alert">{{error||workflowError}}<n-button text @click="reload">重试</n-button></n-alert>
+  <section class="month-progress" :class="workflowError?'unavailable':workflow?.status" aria-label="本月工作状态">
+    <div><strong>{{status}}</strong><p>{{workflowError?'未取得最新处理状态，以下保留上次保存的结果。':waitingCount?`有 ${waitingCount} 个店月仍在等待资料或维护跟进，点击“其中等待”查看缺项与跟进角色。`:workflow?.status==='processing'?'系统正在收集、核算或复核，无需逐店重算。':workflow?.status==='completed'?'本月工作已完成，可以查看结果和依据。':workflow?.status==='needs_decision'?'以下事项需要决定，确认后系统继续推进。':'尚未取得后台工作状态，当前金额保留供查看。'}}</p></div>
+    <div v-if="workflow" class="month-counts"><span>完成 <b>{{workflow.counts?.completed??0}}</b></span><span>处理中 <b>{{workflow.counts?.processing??0}}</b></span><button v-if="waitingCount" title="等待事项仍未完成" @click="openWaitingSummary">其中等待 <b>{{waitingCount}}</b></button><button @click="tab='decisions'">需决定 <b>{{workflow.counts?.needs_decision??0}}</b></button></div>
+  </section>
+  <div class="month-kpis" v-if="report">
+    <div class="kpi"><span class="label">销售收入（到账）</span><b class="value">{{money(report.summary.net_income)}}</b><span class="foot">已扣销售退款</span></div>
+    <div class="kpi"><span class="label">商品毛利</span><b class="value">{{money(report.summary.gross_profit)}}</b><span class="foot">毛利率 {{percent(report.summary.gross_margin)}}</span></div>
+    <div class="kpi"><span class="label">利润额（扣兼职后）</span><b class="value" :class="{negative:Number(report.summary.profit_after_labor)<0}">{{money(report.summary.profit_after_labor)}}</b><span class="foot" :class="report.mom?.profit_after_labor?.direction">{{compareText(report.mom?.profit_after_labor)}}</span></div>
+    <button class="kpi decision-kpi" @click="tab='decisions'"><span class="label">需要你的决定</span><b class="value">{{workflow?.decision_groups?.length??'—'}}</b><span class="foot">同类事项合并处理</span></button>
+  </div>
+  <n-spin :show="loading"><div class="card month-card"><n-tabs v-ledger-tabs v-model:value="tab" type="line" @update:value="value=>{if(value==='decisions')noteWaitingSummary()}">
+    <n-tab-pane name="results" tab="经营分析">
+      <div class="operations-controls">
+        <label>查看维度<n-select :value="level" :options="operationLevels" @update:value="changeLevel" aria-label="经营分析维度"/></label>
+        <label>经营范围<n-select v-model:value="managed" :options="[{label:'全部（互斥合计）',value:'all'},{label:'托管',value:'managed'},{label:'非托管',value:'standard'}]" aria-label="托管范围"/></label>
+        <label>显示<n-select v-model:value="compare" :options="[{label:'本期数值',value:'current'},{label:'环比变化',value:'mom'},{label:'同比变化',value:'yoy'}]" aria-label="比较月份"/></label>
+        <n-button @click="expanded=!expanded">{{expanded?'收起比率':'全部18项指标'}}</n-button><a :href="exportUrl" download class="export-link" aria-label="导出当前经营范围">导出当前范围</a>
       </div>
-
-      <div v-if="!here.length" class="card">
-        <n-empty :description="`${app.currentStore?.name || '当前筛选'} 在 ${period || '这个账期'} 暂无台账`">
-          <template #extra>
-            <p class="small muted" style="max-width: 420px; margin-bottom: var(--s3)">
-              换一个账期，或到「数据与店铺」看有没有表进来。
-            </p>
-            <n-button size="small" @click="router.push('/deliver')">去数据与店铺</n-button>
-          </template>
-        </n-empty>
-      </div>
-
-      <template v-else>
-      <div class="board-kpis">
-        <div class="kpi">
-          <div class="label">销售收入</div>
-          <div class="value">{{ money(totals.revenue) }}</div>
-          <div class="foot">
-            <template v-if="blankMonth">暂无金额</template>
-            <template v-else>
-              {{ prettyPeriod(period) }}
-              <template v-if="!app.storeId"> · {{ totals.ready }}/{{ here.length }} 家已算出</template>
-            </template>
-          </div>
-        </div>
-        <div class="kpi">
-          <div class="label">利润</div>
-          <div class="value" :class="{ neg: totals.profit < 0 }">{{ money(totals.profit) }}</div>
-          <div class="foot">{{ blankMonth ? '暂无金额' : `利润率 ${percent(totals.margin)}` }}</div>
-        </div>
-        <div class="kpi">
-          <div class="label">已结账</div>
-          <div class="value">{{ totals.closed }} / {{ here.length }}</div>
-          <div class="foot">{{ totals.incomplete ? `${totals.incomplete} 家待补金额` : '金额已齐' }}</div>
-        </div>
-        <div class="kpi tap" role="button" tabindex="0" aria-label="查看待处理事项" @keydown.enter="tab='gaps'" @keydown.space.prevent="tab='gaps'" title="查看待处理事项" @click="tab = 'gaps'">
-          <div class="label">待处理</div>
-          <div class="value" :class="{ neg: totals.stuck > 0 }">{{ totals.stuck }}</div>
-          <div class="foot">{{ totals.stuck ? '查看待处理事项' : '暂无待处理事项' }}</div>
-        </div>
-      </div>
-
-      <div class="card" style="margin-top: var(--s4)">
-        <n-tabs v-ledger-tabs v-model:value="tab" type="line" size="small">
-          <n-tab-pane name="here" :tab="`本月店铺（${here.length}）`">
-            <div class="scroll tall">
-              <n-table size="small" :bordered="false" :single-line="false">
-                <thead>
-                  <tr>
-                    <th>店铺</th>
-                    <th class="right">销售收入</th>
-                    <th class="right">利润</th>
-                    <th class="right">利润率</th>
-                    <th>待处理</th>
-                    <th>状态</th>
-                    <th></th>
-                  </tr>
-                </thead>
-                <tbody>
-                  <template v-for="r in rows">
-                    <tr v-if="r.head" :key="`h-${r.head}`" class="quiet">
-                      <td colspan="7" class="xs muted" style="padding-top: var(--s3)">
-                        {{ r.head }} · {{ r.size }} 家店
-                      </td>
-                    </tr>
-                    <tr v-else :key="r.store_id" class="board-row" tabindex="0" @keydown.enter="open(r)" @keydown.space.prevent="open(r)" @click="open(r)">
-                      <td>{{ r.store }}</td>
-                      <td class="right num">{{ money(r.revenue) }}</td>
-                      <td class="right num" :class="{ neg: r.profit < 0 }">{{ money(r.profit) }}</td>
-                      <td class="right num">
-                        {{ r.revenue ? percent(r.profit / r.revenue) : '—' }}
-                      </td>
-                      <td class="nowrap">
-                        <n-tag
-                          v-if="gapText(r)"
-                          size="small"
-                          :bordered="false"
-                          :type="r.gaps.worst === 'blocking' ? 'error' : 'warning'"
-                        >
-                          {{ gapText(r) }}
-                        </n-tag>
-                        <span v-else class="xs muted">—</span>
-                      </td>
-                      <td>
-                        <n-tag
-                          size="small"
-                          :type="r.state === 'closed' ? 'success' : r.blocking?.length ? 'error' : r.can_close ? 'info' : 'default'"
-                          :bordered="false"
-                        >
-                          {{ label(r) }}
-                        </n-tag>
-                      </td>
-                      <td class="right xs go nowrap">打开</td>
-                    </tr>
-                  </template>
-                </tbody>
-              </n-table>
-            </div>
-          </n-tab-pane>
-
-          <n-tab-pane name="months" :tab="`月份对比（${shown.length} 个账期）`">
-            <div class="months">
-              <div class="scroll">
-                <table>
-                  <thead>
-                    <tr>
-                      <th>账期</th>
-                      <th class="right">销售收入</th>
-                      <th class="right">利润</th>
-                      <th class="right">利润率</th>
-                      <th class="right">比上月</th>
-                      <th class="right">结账</th>
-                      <th></th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    <tr
-                      v-for="r in companyMonths"
-                      :key="r.period"
-                      class="tap"
-                      :class="{ now: r.period === period }"
-                      tabindex="0" @keydown.enter="openMonth(r.period)" @keydown.space.prevent="openMonth(r.period)" @click="openMonth(r.period)"
-                    >
-                      <td class="num nowrap">
-                        {{ r.period }}
-                        <span v-if="r.period === period" class="tagline">本月</span>
-                      </td>
-                      <td class="right num big-num">{{ money(r.revenue) }}</td>
-                      <td class="right num big-num" :class="{ neg: r.profit < 0 }">
-                        {{ money(r.profit) }}
-                      </td>
-                      <td class="right num">{{ percent(r.margin) }}</td>
-                      <td class="right num nowrap" :class="delta(r.delta)">
-                        {{ signed(r.delta) }}
-                        <span v-if="r.deltaPct !== null" class="pct">
-                          {{ signedPct(r.deltaPct) }}
-                        </span>
-                      </td>
-                      <td class="right num nowrap">
-                        {{ r.closed }} / {{ r.stores }}
-                        <span v-if="r.pending" class="warn xs">· {{ r.pending }} 家没数</span>
-                      </td>
-                      <td class="right xs go">看明细</td>
-                    </tr>
-                  </tbody>
-                  <tfoot>
-                    <tr>
-                      <td class="num">合计</td>
-                      <td class="right num big-num">{{ money(span.revenue) }}</td>
-                      <td class="right num big-num" :class="{ neg: span.profit < 0 }">
-                        {{ money(span.profit) }}
-                      </td>
-                      <td class="right num">{{ percent(span.margin) }}</td>
-                      <td colspan="3" class="right xs muted">
-                        {{ shown.length }} 个账期 · {{ count(cells.length) }} 个店期 ·
-                        点一行看这个月的利润项和各店明细
-                      </td>
-                    </tr>
-                  </tfoot>
-                </table>
-              </div>
-            </div>
-          </n-tab-pane>
-
-          <n-tab-pane name="gaps">
-            <template #tab>
-              待处理
-              <n-badge
-                v-if="flawTotals.cells"
-                :value="flawTotals.empty + flawTotals.odd"
-                :type="flawTotals.blocking ? 'error' : 'warning'"
-                style="margin-left: 6px"
-              />
-            </template>
-
-            <n-spin :show="flawsBusy">
-              <p class="xs muted" style="margin-bottom: var(--s3)">
-                <template v-if="flawTotals.cells">
-                  {{ flawTotals.cells }} 个店期里有事要处理：空值项
-                  {{ flawTotals.empty }} 处、异常项 {{ flawTotals.odd }} 处。
-                  空值项是没有数、要补表；异常项是有数但看着不对、要查。点一行展开看是哪几项。
-                </template>
-                <template v-else-if="!flawsBusy">
-                  所有店期都没找到空值项和异常项。
-                </template>
-              </p>
-
-              <div v-if="flawCells.length" class="flaws">
-                <div v-for="c in flawCells" :key="`${c.store_id}/${c.period}`" class="flaw">
-                  <div class="bar" :class="c.worst" @click="toggleCell(c)">
-                    <span class="who">
-                      <span class="store">{{ c.store }}</span>
-                      <span class="num period">{{ c.period }}</span>
-                      <span v-if="c.state === 'closed'" class="xs muted">已结账</span>
-                    </span>
-                    <span class="tags">
-                      <n-tag v-if="c.empty" size="small" :bordered="false" type="warning">
-                        空值项 {{ c.empty }}
-                      </n-tag>
-                      <n-tag
-                        v-if="c.odd"
-                        size="small"
-                        :bordered="false"
-                        :type="c.worst === 'blocking' ? 'error' : 'default'"
-                      >
-                        异常项 {{ c.odd }}
-                      </n-tag>
-                      <span class="xs muted">{{ isOpen(c) ? '收起' : '展开' }}</span>
-                    </span>
-                  </div>
-                  <div v-if="isOpen(c)" class="body">
-                    <GapList :gaps="c.gaps" />
-                    <div class="foot">
-                      <n-button size="tiny" @click="open(c)">
-                        去 {{ c.store }} 的 {{ c.period }} 处理
-                      </n-button>
-                    </div>
-                  </div>
-                </div>
-              </div>
-            </n-spin>
-          </n-tab-pane>
-        </n-tabs>
-      </div>
-      </template>
-    </template>
-
-    <!-- 一个月的细账。主页面只放一行一个月，细节都收在这里。 -->
-    <n-modal
-      v-model:show="detailOpen"
-      preset="card"
-      class="month-detail"
-      :style="{ maxWidth: '960px' }"
-      :title="`${detail} · ${trend?.scope || '全公司'}`"
-    >
-      <template #header-extra>
-        <span class="xs muted">
-          {{ detailPrev ? `跟 ${detailPrev} 比` : '没有上一个账期可比' }}
-        </span>
-      </template>
-
-      <div v-if="detailHead" class="sum">
-        <div>
-          <div class="label">销售收入</div>
-          <div class="value">{{ money(detailHead.revenue) }}</div>
-        </div>
-        <div>
-          <div class="label">利润</div>
-          <div class="value" :class="{ neg: detailHead.profit < 0 }">
-            {{ money(detailHead.profit) }}
-          </div>
-        </div>
-        <div>
-          <div class="label">利润率</div>
-          <div class="value">{{ percent(detailHead.margin) }}</div>
-        </div>
-        <div>
-          <div class="label">比上月</div>
-          <div class="value" :class="delta(detailHead.delta)">
-            {{ signed(detailHead.delta) }}
-            <span v-if="detailHead.deltaPct !== null" class="pct">
-              {{ signedPct(detailHead.deltaPct) }}
-            </span>
-          </div>
-        </div>
-      </div>
-
-      <n-tabs v-ledger-tabs type="segment" size="small" default-value="items" style="margin-top: var(--s4)">
-        <n-tab-pane name="items" tab="利润项">
-          <n-spin :show="trendBusy">
-            <div v-if="detailItems.length" class="scroll tall">
-              <table class="items">
-                <thead>
-                  <tr>
-                    <th class="pin">项目</th>
-                    <th class="right">{{ detail }}</th>
-                    <th v-if="detailPrev" class="right">{{ detailPrev }}</th>
-                    <th v-if="detailPrev" class="right">差额</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  <tr
-                    v-for="r in detailItems"
-                    :key="r.id"
-                    :class="{ lv1: r.level === 1, lv2: r.level > 1, total: r.is_total }"
-                  >
-                    <td class="pin">
-                      {{ r.name }}
-                      <span v-if="r.partial" class="warn" :title="r.partial">*</span>
-                    </td>
-                    <td class="right num big-num" :class="{ neg: r.now < 0, na: r.now === null }">
-                      {{ amount(r.now, r.display) }}
-                    </td>
-                    <td
-                      v-if="detailPrev"
-                      class="right num muted"
-                      :class="{ na: r.before === null }"
-                    >
-                      {{ amount(r.before, r.display) }}
-                    </td>
-                    <td v-if="detailPrev" class="right num nowrap" :class="delta(r.delta)">
-                      {{ deltaText(r) }}
-                      <span v-if="r.deltaPct !== null" class="pct">
-                        {{ signedPct(r.deltaPct) }}
-                      </span>
-                    </td>
-                  </tr>
-                </tbody>
-              </table>
-            </div>
-            <p v-else class="small muted">这个账期还没有算出损益表。</p>
-          </n-spin>
-          <p v-if="detailItems.some((r) => r.partial)" class="xs muted" style="margin-top: var(--s2)">
-            带 <span class="warn">*</span> 的项不是所有店都有，鼠标停在星号上看是几家。
-            费用项写成负数，和损益表一致。
-          </p>
-        </n-tab-pane>
-
-        <n-tab-pane name="stores" :tab="`各店（${detailStores.length}）`">
-          <div class="scroll tall">
-            <table>
-              <thead>
-                <tr>
-                  <th>店铺</th>
-                  <th class="right">销售收入</th>
-                  <th class="right">利润</th>
-                  <th class="right">利润率</th>
-                  <th class="right">比上月</th>
-                  <th>状态</th>
-                </tr>
-              </thead>
-              <tbody>
-                <tr v-for="c in detailStores" :key="c.store_id" class="tap" @click="open(c)">
-                  <td class="nowrap">{{ c.store }}</td>
-                  <td class="right num big-num">{{ money(c.revenue) }}</td>
-                  <td class="right num big-num" :class="{ neg: c.profit < 0 }">
-                    {{ money(c.profit) }}
-                  </td>
-                  <td class="right num">
-                    {{ c.revenue ? percent(c.profit / c.revenue) : '—' }}
-                  </td>
-                  <td class="right num nowrap" :class="delta(c.delta)">
-                    {{ signed(c.delta) }}
-                    <span v-if="c.deltaPct !== null" class="pct">
-                      {{ signedPct(c.deltaPct) }}
-                    </span>
-                  </td>
-                  <td>
-                    <n-tag
-                      size="small"
-                      :type="c.state === 'closed' ? 'success' : c.blocking?.length ? 'error' : c.can_close ? 'info' : 'default'"
-                      :bordered="false"
-                    >
-                      {{ label(c) }}
-                    </n-tag>
-                  </td>
-                </tr>
-              </tbody>
-            </table>
-          </div>
-          <p class="xs muted" style="margin-top: var(--s2)">点一行进这家店这个月的账。</p>
-        </n-tab-pane>
-      </n-tabs>
-    </n-modal>
-  </n-spin>
+      <div v-if="trail.length" class="operations-trail"><n-button text @click="reset">全公司</n-button><span v-for="(name,index) in trail" :key="index"> / {{name}}</span></div>
+      <p class="small muted operations-note">{{report?.is_final?'当前为已结账依据的完整经营结果。':'当前为阶段结果，缺少依据的金额显示“—”。'}} 点击名称继续查看人员、店铺、宝贝或订单；红色表示上升，绿色表示下降。</p>
+      <n-alert v-if="report?.classification_pending_count&&managed!=='all'" type="warning" :bordered="false" class="month-alert">还有 {{report.classification_pending_count}} 项尚未确定托管分类，未计入当前分类小计。</n-alert>
+      <div class="scroll operations-table" v-if="report?.rows?.length"><table>
+        <thead><tr><th class="sticky-name">{{operationLevels.find(item=>item.value===level)?.label}}</th><th class="right">订单数</th><th v-for="column in columns" :key="column.key" class="right"><button class="column-sort" @click="sort(column.key)">{{column.label}}<span v-if="sortKey===column.key">{{sortDirection==='desc'?' ↓':' ↑'}}</span></button></th><th v-if="compare==='current'" class="right">环比利润额</th></tr></thead>
+        <tbody><tr v-for="row in rows" :key="row.id" :class="{unclaimed:row.unclaimed}"><td class="sticky-name"><button class="row-drill" @click="openRow(row)">{{row.rank&&['person','team'].includes(level)&&sortKey==='profit_after_labor'?`${row.rank}. `:''}}{{row.name}}</button><small v-if="row.unclaimed">业绩待认领</small></td><td class="right num">{{row.order_count??'—'}}</td><td v-for="column in columns" :key="column.key" class="right num" :class="compare==='current'?'':row[compare]?.[column.key]?.direction">{{compare==='current'?value(column.key,row.metrics[column.key]):metricChange(column.key,row[compare]?.[column.key])}}</td><td v-if="compare==='current'" class="right num comparison" :class="row.mom?.profit_after_labor?.direction">{{compareText(row.mom?.profit_after_labor)}}</td></tr></tbody>
+        <tfoot><tr><th>当前范围合计</th><td></td><td v-for="column in columns" :key="column.key" class="right num" :class="compare==='current'?'':report[compare]?.[column.key]?.direction">{{compare==='current'?value(column.key,report.summary[column.key]):metricChange(column.key,report[compare]?.[column.key])}}</td><td v-if="compare==='current'" class="right comparison" :class="report.mom?.profit_after_labor?.direction">{{compareText(report.mom?.profit_after_labor)}}</td></tr></tfoot>
+      </table></div><n-empty v-else-if="!loading" description="当前范围尚无经营结果"/>
+      <p v-if="Object.keys(report?.display_rounding||{}).length" class="small muted operations-note">当前范围全部记录按两位显示时有尾差：<span v-for="(item,key) in report.display_rounding" :key="key">{{item.label}} {{item.difference}} 元（逐项显示合计 {{item.displayed_rows_total}}，范围显示合计 {{item.displayed_scope_total}}）；</span>汇总与导出保留原始精度，以上仅作显示说明。</p>
+      <div v-if="report?.total>50" class="operations-pages"><span>共 {{report.total}} 项，每页 50 项；导出包含当前范围全部记录。</span><n-pagination v-model:page="page" :item-count="report.total" :page-size="50" :disabled="loading" simple/></div>
+      <details v-if="report?.reference_rows?.length" class="operations-details"><summary>抽点提成参考（{{report.reference_total??report.reference_rows.length}} 项，不累加到业绩）</summary><p v-if="report.reference_total>report.reference_rows.length">本页展示前 {{report.reference_rows.length}} 项，导出包含当前范围全部参考记录。</p><table><thead><tr><th>抽点人</th><th>店铺</th><th>宝贝ID</th><th>参考收入</th><th>已保存提成</th></tr></thead><tbody><tr v-for="(row,index) in report.reference_rows" :key="index"><td>{{row.person}}</td><td>{{row.store}}</td><td>{{row.product_id}}</td><td class="num">{{money(row.metrics.net_income)}}</td><td class="num">{{money(row.metrics.commission)}}</td></tr></tbody></table></details>
+      <details v-if="report" class="operations-details"><summary>口径、来源与核算版本</summary><p>本页经营口径 {{report.version}}。提成使用已经保存的结果；组织分组按当前组织版本展示。兼职按未扣退款、含托管的已认领做货收入分配。</p><p v-if="report.labor_unallocated&&Number(report.labor_unallocated)!==0">还有兼职费用 {{money(report.labor_unallocated)}} 元未分配到个人，店铺费用仍保留。</p><ul><li v-for="issue in report.issues" :key="issue">{{issue}}</li></ul><p class="fingerprint">输入 {{report.input_sha}}<br/>范围 {{report.scope_sha}}</p><ul><li v-for="run in report.run_refs" :key="run.store_id">{{run.store_id}} · 核算 {{run.run_id??'未生成'}} · {{run.at||'时间未留档'}} <span v-if="run.stale">· 有新增资料</span></li></ul></details>
+    </n-tab-pane>
+    <n-tab-pane name="decisions" :tab="`需你决定（${workflow?.decision_groups?.length??0}）${waitingCount?` · 等待 ${waitingCount}`:''}`">
+      <div v-if="waitingGroups.length" class="decision-list" aria-label="等待资料与维护摘要"><h3>等待资料或维护跟进</h3><article v-for="group in waitingGroups" :key="group.id" :data-waiting-kind="group.kind"><div><h3>{{group.missing_material}}</h3><p>{{group.summary}}</p><p>跟进角色：{{group.role_label||'角色未配置'}}<span v-if="group.assignee_status==='role_unconfigured'&&group.role_label">（角色未配置）</span> · 开始等待：{{stamp(group.since)||'未留档'}}</p><p>影响店铺：{{waitingStoreNames(group)}} · {{group.count}} 个店月</p><p>{{group.delivery_hint}}</p></div><n-button v-if="group.kind==='source'" @click="openWaitingDelivery(group)">去资料入口</n-button><span v-else-if="group.kind==='maintenance'">已交维护</span></article></div>
+      <CompanyFinanceCard v-if="companyFinance" :group="companyFinance" :stores="workflow?.stores||[]" @open="noteCompanyEvidence"/>
+      <div class="decision-list"><article v-for="(group,index) in businessDecisionGroups" :key="`${group.kind}:${index}`"><div><h3>{{group.title}}</h3><p>{{group.count}} 项 · {{group.store_ids?.length||0}} 家店</p></div><n-button @click="openDecision(group)">{{group.kind==='close'?'预览月结':['store_scope','overhead_total'].includes(group.kind)?'查看并决定':'查看需要的依据'}}</n-button></article></div>
+      <n-empty v-if="workflow&&!workflow.decision_groups?.length&&!waitingGroups.length" :description="workflow.status==='processing'?'系统处理中，暂时没有需要你的决定':'暂无待决定事项'"/>
+      <div class="decision-list"><article><div><h3>固定规则自动处理授权</h3><p>选择一店一规则及适用月份，一次确认后按有效范围执行。</p><p v-if="ruleContracts&&!ruleContracts.enabled">自动处理开关未启用，授权会保存，启用后才执行。</p></div><n-button :disabled="!ruleOptions.length" @click="openDecision({kind:'rule_grant',title:'授权固定规则自动处理'})">授权固定规则</n-button></article></div>
+      <n-alert v-if="ruleError" type="warning" :bordered="false">{{ruleError}}<n-button text @click="loadRules">重试读取规则</n-button></n-alert>
+      <details v-if="workflow?.policies?.length" class="operations-details" open><summary>本月适用的范围与授权历史（{{workflow.policies.length}}）</summary><ul><li v-for="policy in workflow.policies" :key="policy.decision_id" :data-policy-id="policy.decision_id"><strong>{{policyLabel(policy)}}</strong> · {{storeOptions.find(item=>item.value===policy.store_id)?.label||policy.store_id}} · {{policyStatusLabels[policy.status]||'状态待读取'}}<br/>业务月份：{{policyRange(policy)}}<span v-if="policy.kind==='store_scope'"> · {{policy.values?.included?'纳入处理':'排除处理'}}</span><br v-if="policy.kind==='rule_grant'"/><span v-if="policy.kind==='rule_grant'">执行有效期：{{executionRange(policy)}}</span><p>{{policy.reason}}</p><n-button v-if="policy.can_revoke" text size="small" :disabled="busy" @click="openRevocation(policy)">预览撤销</n-button><span v-else-if="policy.revoke_blocker">{{policy.revoke_blocker}}</span></li></ul></details>
+      <div class="month-close"><div><strong>本月全公司结账</strong><p>{{workflow?.close?.eligible_store_ids?.length??0}} 家可进入预览，{{workflow?.close?.blocked_store_ids?.length??0}} 家保留待处理。</p></div><n-button type="primary" :disabled="!workflow?.close?.can_preview||busy" @click="previewClose">预览本月全公司结账</n-button></div>
+      <details class="operations-details" v-if="workflow?.stores?.length"><summary>各店处理进度</summary><ul><li v-for="store in workflow.stores" :key="store.case_id||store.store_id"><button class="link" @click="periodDetail(store.store_id)">{{store.store}}</button> · {{workflowLabels[store.status]||store.status}} · {{store.message}} <n-button v-if="store.actions?.some(action=>action.kind==='store_scope')" text size="small" @click="openDecision({kind:'store_scope',title:'确认本月店铺范围',store_ids:[store.store_id]})">调整本月范围</n-button></li></ul></details>
+    </n-tab-pane>
+  </n-tabs></div></n-spin>
+  <n-modal v-model:show="modal" preset="card" :title="decision?decision.title:'本月全公司结账预览'" style="max-width:640px;width:calc(100vw - 32px)"><n-spin :show="busy">
+    <template v-if="decision&&!preview"><div class="policy-form">
+      <label v-if="decision.kind!=='overhead_total'">适用店铺<n-select v-model:value="selectedStore" :options="storeOptions" aria-label="决定适用店铺"/></label>
+      <n-checkbox v-if="decision.kind==='store_scope'" v-model:checked="included">纳入处理</n-checkbox>
+      <template v-if="decision.kind==='rule_grant'"><label>固定业务规则<n-select v-model:value="selectedRule" :options="ruleOptions" aria-label="固定业务规则"/></label><p>{{currentRule?.description}}</p><n-alert v-if="ruleContracts&&!ruleContracts.enabled" type="info" :bordered="false">自动处理开关当前未启用。授权会保存，启用后才会按固定规则执行。</n-alert></template>
+      <template v-if="decision.kind!=='overhead_total'"><label>适用业务月份<n-radio-group v-model:value="scopeMode" name="policy-month-scope" aria-label="适用业务月份"><n-space><n-radio value="month">仅本月</n-radio><n-radio value="range">持续生效（指定起止月）</n-radio></n-space></n-radio-group></label><div v-if="scopeMode==='range'" class="policy-dates"><label>业务开始月<input v-model="businessFrom" type="month" aria-label="业务开始月"/></label><label>业务结束月<input v-model="businessUntil" type="month" aria-label="业务结束月"/></label></div></template>
+      <div v-if="decision.kind==='rule_grant'" class="policy-dates"><label>执行开始时间<input v-model="executionFrom" type="datetime-local" aria-label="执行开始时间"/></label><label>执行结束时间<input v-model="executionUntil" type="datetime-local" aria-label="执行结束时间"/></label></div>
+      <n-input v-if="decision.kind==='overhead_total'" v-model:value="decisionAmount" inputmode="decimal" placeholder="本月兼职费用总额" aria-label="兼职费用总额" :input-props="{'aria-label':'兼职费用总额','inputmode':'decimal'}"/>
+      <n-input v-model:value="decisionReason" type="textarea" placeholder="填写此次决定的依据" aria-label="决定依据" :input-props="{'aria-label':'决定依据'}"/>
+      <n-button type="primary" :disabled="!decisionReason.trim()||busy||decision.kind!=='overhead_total'&&!selectedStore" @click="previewDecision">预览影响</n-button></div></template>
+    <template v-if="preview"><p v-if="!decision">本次可确认 {{preview.eligible?.length??0}} 家；{{preview.blocked?.length??0}} 家继续保留，原已结账结果不变。</p><template v-else><p v-if="decision.kind==='overhead_total'">本月兼职总额确认 {{money(decisionAmount)}} 元，系统按本月公司收入分摊后继续核算。</p><template v-else><p>{{storeOptions.find(item=>item.value===selectedStore)?.label||selectedStore}} · 业务月份 {{previewRange}}</p><template v-if="decision.kind==='rule_grant'"><strong>{{currentRule?.label}}</strong><p>{{currentRule?.description}}</p><p>执行有效期：{{executionFrom.replace('T',' ')}} 至 {{executionUntil.replace('T',' ')}}（当前设备时区）</p><p v-if="!ruleContracts?.enabled" class="small muted">全局开关尚未启用；本次仅保存人工授权。</p></template><p v-else>将{{included?'纳入':'排除于'}}以上月份的处理范围。</p></template></template><ul v-if="preview.blocked?.length"><li v-for="(item,index) in preview.blocked" :key="index">{{typeof item==='string'?item:item.store||item.store_id}} {{item.message||item.reason||''}}</li></ul><p class="small muted">资料或结果变化时，本次预览将失效，需要重新预览。</p><n-button type="primary" :disabled="busy||(!decision&&!preview.eligible?.length)" @click="applyPreview">{{decision?'确认本次决定':'确认本次结账'}}</n-button></template>
+    <n-alert v-if="modalError" type="error" style="margin-top:12px">{{modalError}}</n-alert>
+  </n-spin></n-modal>
+  <n-modal :show="!!revocation" @update:show="value=>{if(!value&&!busy)revocation=null}" preset="card" title="撤销范围或规则授权" style="max-width:640px;width:calc(100vw - 32px)"><n-spin :show="busy"><template v-if="revocation"><strong>{{policyLabel(revocation)}}</strong><p>{{storeOptions.find(item=>item.value===revocation.store_id)?.label||revocation.store_id}} · 业务月份 {{policyRange(revocation)}}</p><p v-if="revocation.kind==='rule_grant'">撤回此规则后续自动执行的权限。已完成处理和冻结金额继续保留，后台将再次核对当前依据。</p><p v-else>撤销本次营业范围或兼职总额决定后，后台重新判断未结月份。生效范围已有冻结账时不可撤销，请另设未来范围。</p><n-input v-model:value="revocationReason" type="textarea" :disabled="!!revocationSnapshot" placeholder="填写撤销依据" :input-props="{'aria-label':'撤销依据'}"/><n-button v-if="!revocationSnapshot" type="primary" :disabled="busy||!revocationReason.trim()" @click="previewRevocation" style="margin-top:16px">预览此次撤销</n-button><template v-else><p>已读取当前决定。确认撤销上述范围，理由：{{revocationReason}}</p><n-button type="primary" :disabled="busy" @click="confirmRevocation">确认此次撤销</n-button></template><n-alert v-if="revocationError" type="error" style="margin-top:12px">{{revocationError}}</n-alert></template></n-spin></n-modal>
+  <n-drawer v-model:show="evidenceOpen" :width="920" style="max-width:100vw"><n-drawer-content title="订单核算与原始依据" closable><n-spin :show="evidenceBusy"><n-alert v-if="evidenceError" type="error">{{evidenceError}}</n-alert><template v-if="evidence"><p>核算 {{evidence.run_id}} · 来源事实 {{evidence.total}} 行</p><p v-if="!evidence.evidence_complete" class="small muted">本次旧核算的完整分摊证据未留档，以下仅展示已保存来源。</p><div class="scroll"><table><thead><tr><th>来源</th><th>工作表/行</th><th>科目</th><th class="right">入账贡献</th><th>说明</th></tr></thead><tbody><tr v-for="(row,index) in evidence.items" :key="index"><td>{{row.file_name}}</td><td>{{row.sheet}} / {{row.row_no}}</td><td>{{row.metric_id}}</td><td class="right num">{{money(row.contribution)}}</td><td>{{row.source_note}}</td></tr></tbody></table></div><p class="fingerprint">{{evidence.input_sha}}</p></template></n-spin></n-drawer-content></n-drawer>
 </template>
+
+<style scoped>
+.month-alert{margin-bottom:16px}.month-progress{display:flex;justify-content:space-between;gap:24px;align-items:center;border:1px solid #e2e5eb;border-radius:8px;background:white;padding:18px 20px;margin-bottom:20px}.month-progress strong{font-size:18px;color:#35669a}.month-progress.needs_decision strong{color:#8b5914}.month-progress.completed strong{color:#17623f}.month-progress p{font-size:13px;color:#657184;margin:5px 0 0}.month-counts{display:flex;gap:20px;white-space:nowrap;font-size:13px}.month-counts b{margin-left:5px;font-size:18px}.month-counts button{border:0;background:none;cursor:pointer;color:#8b5914}.month-kpis{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:16px;margin-bottom:20px}.month-kpis .kpi{display:flex;flex-direction:column;gap:10px;text-align:left;padding:20px;background:white;border:1px solid #e2e5eb;border-radius:8px}.month-kpis .value{font-size:26px;font-variant-numeric:tabular-nums}.month-kpis .foot{font-size:12px;color:#657184}.decision-kpi{cursor:pointer}.month-card{margin-top:0}.operations-controls{display:flex;gap:12px;flex-wrap:wrap;align-items:flex-end;margin:12px 0 16px}.operations-controls label{font-size:12px;color:#657184;display:flex;flex-direction:column;gap:5px;min-width:150px}.export-link{margin-left:auto;padding:8px 0;color:#356bc6}.operations-note{margin:12px 0 18px}.operations-trail{font-size:13px}.operations-table{max-height:620px}.operations-table table{min-width:1200px;width:100%;border-collapse:separate;border-spacing:0}.operations-table th,.operations-table td{padding:13px 12px;white-space:nowrap}.operations-table th{font-size:12px;background:#f7f8fa;position:sticky;top:0;z-index:1}.sticky-name{position:sticky!important;left:0;z-index:2!important;background:#fff;min-width:150px;max-width:240px;white-space:normal!important}.row-drill{border:0;background:none;color:#356bc6;font:inherit;text-align:left;cursor:pointer;padding:0}.sticky-name small{display:block;font-size:11px;color:#8b5914;margin-top:4px}.column-sort{border:0;background:none;color:inherit;font:inherit;cursor:pointer}.operations-table tfoot{font-weight:600;background:#f8fafc}.comparison{font-size:12px}.up,.month-kpis .foot.up{color:#c04040}.down,.month-kpis .foot.down{color:#188052}.negative{color:#b74444}.unclaimed{background:#fffaf0}.operations-details{font-size:12px;color:#657184;margin:20px 0;overflow-wrap:anywhere}.operations-details summary{cursor:pointer;color:#356bc6}.operations-details p{margin:12px 0}.operations-details ul{padding-left:20px}.operations-details li{margin:8px 0}.operations-details table{width:100%;margin:14px 0}.fingerprint{font-size:11px;overflow-wrap:anywhere;margin-top:16px}.decision-list{display:flex;flex-direction:column;gap:12px;margin:16px 0}.decision-list article,.month-close{display:flex;align-items:center;justify-content:space-between;gap:20px;padding:18px;border:1px solid #e2e5eb;border-radius:8px}.decision-list h3{font-size:15px}.decision-list p,.month-close p{font-size:12px;color:#657184;margin-top:6px}.month-close{margin-top:24px;background:#f8fafc}.policy-form{display:flex;flex-direction:column;gap:16px}.policy-form>label,.policy-dates label{display:flex;flex-direction:column;gap:8px;font-size:13px}.policy-dates{display:flex;gap:16px;flex-wrap:wrap}.policy-dates input{font:inherit;border:1px solid #dce1e8;border-radius:4px;padding:8px;max-width:100%;background:white}.policy-form p{font-size:13px;line-height:1.6;margin:0}.decision-effect{white-space:pre-wrap;font-size:12px;background:#f7f8fa;padding:14px;border-radius:6px;overflow-wrap:anywhere}
+@media(max-width:760px){.month-kpis{grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}.month-kpis .kpi{padding:15px}.month-kpis .value{font-size:21px}.month-progress{align-items:flex-start;flex-direction:column;gap:15px}.month-counts{gap:15px}.operations-controls label{min-width:130px;flex:1}.export-link{margin-left:0}.decision-list article,.month-close{align-items:flex-start;flex-direction:column;gap:12px}.operations-table .sticky-name{min-width:130px;max-width:180px}.operations-controls :deep(button),.decision-list :deep(button){min-height:40px}}
+</style>

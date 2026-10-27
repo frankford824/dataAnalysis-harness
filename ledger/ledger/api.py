@@ -54,7 +54,7 @@ from .model.loader import ModelError
 from .model.repository import ModelRepository, ModelSnapshot
 from .model.schema import FeeRule, Model, SourceContract, Store, Template
 from .money import decimal_amount, money_float
-from .version import engine_version
+from .version import engine_version,source_code_sha,code_integrity
 from .web import STATIC, HashedStaticFiles, page
 from .workspace import (
     SHARED_STORE_ID, PeriodState, Workspace, WorkspaceError, default_root,
@@ -253,6 +253,15 @@ def _warm_commission_report_slices() -> None:
 
 
 _commission_actor = commission_api.install(app, lambda: workspace(), lambda: _model(), DEFAULT_MODEL)
+from . import automation_api, operations_api, write_auth, telemetry_api, worker_control_api, sentinel_api
+write_auth.install(app, lambda: Path(WORKSPACE_ROOT or default_root()))
+automation_api.install(app, lambda: workspace(), lambda: _model(),
+    lambda request: write_auth.strict_actor(request, workspace()), model_root=lambda: DEFAULT_MODEL)
+operations_api.install(app, lambda: workspace(), lambda: _model())
+telemetry_api.install(app, lambda: workspace(), lambda request: write_auth.strict_actor(request, workspace()))
+worker_control_api.install(app, lambda: workspace(), lambda: _model(),
+    lambda request: write_auth.strict_actor(request, workspace()))
+sentinel_api.install(app, lambda: workspace().root)
 freight_review_api.install(app, lambda: workspace(), lambda: _model(),
     lambda: {store.id: _display_store(store)['name'] for store in _model().stores})
 from . import labor_api
@@ -384,7 +393,11 @@ def storage_status() -> dict:
 
 @app.get("/api/version")
 def version_info() -> dict:
-    return {"version": engine_version(), "model_revision": _model_revision()}
+    integrity=code_integrity()
+    return {"version": engine_version(), "model_revision": _model_revision(),
+        "source_code_sha":integrity['source_code_sha'],
+        "approved_source_code_sha":integrity['approved_source_code_sha'],
+        "source_code_status":integrity['source_code_status']}
 
 
 # --------------------------------------------------------------------------- #
@@ -526,7 +539,7 @@ def upload(files: Annotated[list[UploadFile], File()], token: str = "") -> dict:
     progress.open(token)
     try:
         result = service.intake(
-            ws, model, uploads, by=ANONYMOUS, report=progress.Reporter(token),
+            ws, model, uploads, by=write_auth.current_actor_name(), report=progress.Reporter(token),
         )
     except Exception as exc:
         progress.close(token, "出错了")
@@ -591,22 +604,46 @@ def overview(
     model = snapshot.model
     ws = workspace()
     generation = ws.generation()
-    data_revision = f"{snapshot.revision}:{generation}"
-    tag = _etag("overview", data_revision, period, platform, store_id)
-    not_modified = _conditional_headers(request, response, tag, data_revision)
-    if not_modified is not None:
-        return not_modified
-
     cache_key = (
         str(ws.root.resolve()), snapshot.revision, generation,
         period, platform, store_id,
     )
-    return _bounded_cache(
+    business = _bounded_cache(
         _overview_cache,
         cache_key,
-        lambda: _build_overview(ws, model, snapshot.revision, period, platform, store_id),
+        lambda: _build_overview(ws, model, snapshot.revision, period, platform, store_id, decorate=False),
         _READ_CACHE_MAX,
     )
+    value = _decorate_overview_close(ws, model, business)
+    data_revision = f"{snapshot.revision}:{generation}:{_close_view_identity(value['cells'])}"
+    tag = _etag("overview", data_revision, period, platform, store_id)
+    not_modified = _conditional_headers(request, response, tag, data_revision)
+    return not_modified if not_modified is not None else value
+
+
+def _close_contexts(ws, model, periods):
+    from .automation_checker import company_basis
+    return {period: company_basis(ws, model, period) for period in sorted(set(periods))}
+
+
+def _close_view_identity(rows):
+    from .automation_store import digest
+    return digest([(row.get('store_id'), row.get('period'), row.get('run_id'),
+                    row.get('close_verification')) for row in rows])
+
+
+def _decorate_overview_close(ws, model, business):
+    from .automation_checker import close_view
+    contexts = _close_contexts(ws, model, [row['period'] for row in business['cells']])
+    cells = []
+    for row in business['cells']:
+        value = close_view(ws, model, row['store_id'], row['period'], row,
+                           company_context=contexts[row['period']])
+        # Existing compact callers can still explain why this store is blocked.
+        value['blocking'] = list(dict.fromkeys([*row.get('blocking', []),
+            *(issue['message'] for issue in value['close_verification']['issues'] if issue['code'] != 'already_closed')]))
+        cells.append(value)
+    return {**business, 'cells': cells}
 
 
 def _build_overview(
@@ -616,6 +653,7 @@ def _build_overview(
     period: str,
     platform: str,
     store_id: str,
+    *, decorate: bool = True,
 ) -> dict:
     by_id = {s.id: s for s in model.stores}
     headline = {n.headline: n.id for n in model.statement if n.headline}
@@ -665,7 +703,7 @@ def _build_overview(
             "gaps": _cached_gap_summary(ws, st, prev, model, revision) if payload else None,
         })
     periods = sorted({c["period"] for c in cells}, reverse=True)
-    return {
+    value = {
         "cells": cells,
         "periods": periods,
         "default_period": working_period(periods, cells),
@@ -683,6 +721,7 @@ def _build_overview(
         ],
         "totals": _totals(cells),
     }
+    return _decorate_overview_close(ws, model, value) if decorate else value
 
 
 def _cached_gap_summary(
@@ -892,20 +931,26 @@ async def store_detail(store_id: str, request: Request, response: Response) -> A
     store = _store(model, store_id)
     ws = workspace()
     generation = ws.read_generation(store_id=store_id) if hasattr(ws,'read_generation') else ws.generation()
-    data_revision = f"{snapshot.revision}:{generation}"
+    key = ("store", str(ws.root.resolve()), snapshot.revision, generation, store_id)
+    def read_view():
+        business = _bounded_parallel_cache(
+            _payload_cache, key, lambda: _build_store_detail(ws, store, model, decorate=False), _READ_CACHE_MAX)
+        return _decorate_store_close(ws, model, store_id, business)
+    value = await anyio.to_thread.run_sync(read_view)
+    data_revision = f"{snapshot.revision}:{generation}:{_close_view_identity(value['periods'])}"
     tag = _etag("store", store_id, data_revision)
     not_modified = _conditional_headers(request, response, tag, data_revision)
-    if not_modified is not None:
-        return not_modified
-    key = ("store", str(ws.root.resolve()), snapshot.revision, generation, store_id)
-    return await anyio.to_thread.run_sync(
-        lambda: _bounded_parallel_cache(
-            _payload_cache, key, lambda: _build_store_detail(ws, store), _READ_CACHE_MAX,
-        )
-    )
+    return not_modified if not_modified is not None else value
 
 
-def _build_store_detail(ws: Workspace, store: Store) -> dict:
+def _decorate_store_close(ws, model, store_id, business):
+    from .automation_checker import close_view
+    contexts = _close_contexts(ws, model, [row['period'] for row in business['periods']])
+    return {**business, 'periods': [close_view(ws, model, store_id, row['period'], row,
+                company_context=contexts[row['period']]) for row in business['periods']]}
+
+
+def _build_store_detail(ws: Workspace, store: Store, model=None, *, decorate=True) -> dict:
     headers = getattr(ws, "period_headers", None)
     periods = headers(store.id) if callable(headers) else [
         {
@@ -916,11 +961,12 @@ def _build_store_detail(ws: Workspace, store: Store) -> dict:
         }
         for st in _periods_of_store(ws, store.id)
     ]
-    return {
+    value = {
         "store": _display_store(store),
         "periods": periods,
         "files": ws.submissions(store.id),
     }
+    return _decorate_store_close(ws, model or _model(), store.id, value) if decorate else value
 
 
 @app.get("/api/stores/{store_id}/periods/{period}")
@@ -932,15 +978,16 @@ async def period_detail(
     model = snapshot.model
     _store(model, store_id)
     ws = workspace()
-    generation = ws.read_generation(store_id=store_id,period=period) if hasattr(ws,'read_generation') else ws.generation()
-    data_revision = f"{snapshot.revision}:{generation}"
-    tag = _etag("period", store_id, period, data_revision)
-    not_modified = _conditional_headers(request, response, tag, data_revision)
-    if not_modified is not None:
-        return not_modified
-    return await anyio.to_thread.run_sync(
+    # This cache owns this store's financial payload. Other stores' income is
+    # evaluated below as a separate readiness dependency, never a finance run.
+    generation = ws.read_generation(store_id=store_id) if hasattr(ws,'read_generation') else ws.generation()
+    value = await anyio.to_thread.run_sync(
         _period_detail_cached, ws, model, snapshot.revision, generation, store_id, period,
     )
+    data_revision = f"{snapshot.revision}:{generation}:{_close_view_identity([value])}"
+    tag = _etag("period", store_id, period, data_revision)
+    not_modified = _conditional_headers(request, response, tag, data_revision)
+    return not_modified if not_modified is not None else value
 
 
 def _period_detail_cached(ws, model, revision, generation, store_id, period):
@@ -949,16 +996,32 @@ def _period_detail_cached(ws, model, revision, generation, store_id, period):
         st = ws.state(store_id, period)
         if st is None or st.result is None:
             raise HTTPException(404, f"{period} 还没算过账")
-        return _build_period_detail(ws, model, store_id, period, st)
-    return _bounded_parallel_cache(
+        return _build_period_detail(ws, model, store_id, period, st, decorate=False)
+    business = _bounded_parallel_cache(
         _payload_cache, key,
         build_detail,
         _READ_CACHE_MAX,
     )
+    return _decorate_period_close(ws, model, store_id, period, business)
+
+
+def _decorate_period_close(ws, model, store_id, period, business, st=None):
+    from copy import deepcopy
+    from .automation_checker import close_view, company_basis
+    value = deepcopy(business)
+    context = company_basis(ws, model, period)
+    _annotate_commission_after_labor(value, ws, model, store_id, period, st,
+                                    company_context=context)
+    value = close_view(ws, model, store_id, period, value, company_context=context)
+    commission = value.get('commission')
+    if isinstance(commission, dict) and 'products' in commission:
+        value['commission'] = {key: item for key, item in commission.items() if key != 'products'}
+    return value
 
 
 def _build_period_detail(
     ws: Workspace, model: Model, store_id: str, period: str, st: PeriodState,
+    *, decorate: bool = True,
 ) -> dict:
     payload = {
         "state": st.state, "stale": st.stale, "at": st.at, "run_id": st.run_id,
@@ -966,7 +1029,7 @@ def _build_period_detail(
         "labor_cut": st.labor_cut,
         "history": ws.history(store_id, period),
         "period_actions": ws.period_actions(store_id, period),
-        "gaps": gaps.gaps(st.result, model, _previous(store_id, period)),
+        "gaps": gaps.gaps(st.result, model, ws.previous_gap_basis(store_id, period)),
         **_period_payload(st.result, model),
     }
     payload['accounting_store'] = payload.get('store')
@@ -989,15 +1052,18 @@ def _build_period_detail(
             except WorkspaceError as exc:
                 review['line_error'] = str(exc)
         payload['cost_review'] = review
-    _annotate_commission_after_labor(payload, ws, model, store_id, period, st)
     commission = payload.get("commission")
     if isinstance(commission, dict) and "products" in commission:
-        payload["commission"] = {key: value for key, value in commission.items() if key != "products"}
-    return payload
+        # The cached business view keeps only rate evidence needed by the
+        # after-labor suggestion; product/order trees never leave this view.
+        from .commission_slice import slim_products
+        payload["commission"] = {**commission, 'products': slim_products(commission['products'])}
+    return _decorate_period_close(ws, model, store_id, period, payload, st) if decorate else payload
 
 
 def _annotate_commission_after_labor(
     payload: dict, ws: Workspace, model: Model, store_id: str, period: str, st: PeriodState,
+    *, company_context=None,
 ) -> None:
     """Expose after-labor trial payouts so the close dialog cannot accept the raw trial."""
     from . import commission_reports
@@ -1005,12 +1071,21 @@ def _annotate_commission_after_labor(
     people = commission.get('people') if isinstance(commission, dict) else None
     if not people:
         return
-    labor = st.labor_cut if st.state == 'closed' and st.labor_cut is not None else None
-    if labor is None:
-        try:
-            labor = labor_api.share_at_close(ws, model, period, store_id)
-        except WorkspaceError:
+    closed = payload.get('state') == 'closed'
+    labor = payload.get('labor_cut') if closed else None
+    if closed and labor is None:
+        saved = labor_api.frozen_shares(DEFAULT_MODEL).get((period, store_id, str(payload.get('run_id'))))
+        labor = saved['amount'] if saved else None
+        if labor is None:
             return
+    if labor is None:
+        if company_context is not None:
+            labor = company_context.get('shares', {}).get(store_id)
+        else:
+            try:
+                labor = labor_api.share_at_close(ws, model, period, store_id)
+            except WorkspaceError:
+                return
         if labor is None:
             return
         payload['pending_labor_cut'] = money_float(labor)
@@ -1313,7 +1388,7 @@ def _line_snapshot(ws: Workspace, run_id: int, store_id: str, period: str,
         lines = {'line_revision': cost_lines.revision(ws, store_id, period),
                  'reviewed_count': 0, 'supplement_total': 0.0, 'reviewed': [], 'total': 0}
     if expected_revision not in (None, lines['line_revision']) or (
-        expected_revision is None and lines['reviewed_count']):
+        expected_revision is None and lines['reviewed_count'] and not cost_lines.posted_current(ws, run_id, store_id, period)):
         raise WorkspaceError('人工补录明细已有新修改，请刷新金额后再确认')
     if lines['reviewed_count']:
         cost_lines._source_rows(ws, run_id, for_edit=True)
@@ -1353,6 +1428,8 @@ def close_period(store_id: str, period: str, action: PeriodAction) -> dict:
             _store(model, store_id)
             ws = workspace()
             manual_result = manual_decision = None
+            if ws.state(store_id, period) is None:
+                raise WorkspaceError("这个账期还没算过账，不能结账")
             labor_cut = labor_api.share_at_close(ws, model, period, store_id)
             if action.payout_only and action.costs is not None:
                 raise WorkspaceError("只确认提成时不能同时修改成本")
@@ -1373,8 +1450,8 @@ def close_period(store_id: str, period: str, action: PeriodAction) -> dict:
             elif action.payout_only:
                 run = _manual_source_run(ws, model, store_id, period, action.run_id)
                 lines = _line_snapshot(ws, run['id'], store_id, period, action.line_revision)
-                if lines['reviewed_count']:
-                    raise WorkspaceError("已有人工补录成本，请同时预览并确认成本与提成")
+                if lines['reviewed_count'] and not cost_lines.posted_current(ws, run['id'], store_id, period):
+                    raise WorkspaceError("人工补录成本尚未进入本次核算，请等待自动重算后再确认")
                 manual_result, manual_decision = manual_cost.payout_only(
                     json.loads(run['result']), run['id'], action.payouts,
                     action.no_payout, action.note, labor_cut=labor_cut)
@@ -1382,7 +1459,7 @@ def close_period(store_id: str, period: str, action: PeriodAction) -> dict:
             st = ws.close_period(
                 store_id,
                 period,
-                by="人工操作" if action.ignored_blockers or manual_result else ANONYMOUS,
+                by=write_auth.current_actor_name(),
                 note=action.note,
                 ignored_blockers=tuple(action.ignored_blockers),
                 expected_run_id=action.run_id,
@@ -1863,6 +1940,18 @@ def commission_summary(period: str = "") -> dict:
     ws = workspace()
     by_id = {s.id: s for s in model.stores}
 
+    def known(value):
+        if value is None or isinstance(value, bool):
+            return None
+        try:
+            return decimal_amount(value)
+        except (ValueError, TypeError, ArithmeticError):
+            return None
+
+    def complete_sum(values):
+        values = [known(value) for value in values]
+        return money_float(sum(values, decimal_amount(0))) if values and all(value is not None for value in values) else None
+
     states = _summary_states(ws)
     periods = sorted({st.period for st in states}, reverse=True)
     chosen = period or (periods[0] if periods else "")
@@ -1871,14 +1960,29 @@ def commission_summary(period: str = "") -> dict:
     # 卖了多少。放进快照的话，别家店重算一次，这家店已经冻住的数就悄悄地不对了。
     # 这一页是「这个月要发多少」，所有店都在手上，正是摊它的地方。
     here = [st for st in states if st.period == chosen]
-    revenue_node = next((n.id for n in model.statement if n.headline == "revenue"), "")
-    spread = overhead.allocate(
-        chosen,
-        model.overhead(chosen),
-        [(st.store_id, _node(st.result or {}, revenue_node) or 0.0) for st in here],
-    )
+    from .automation_checker import company_basis
+    company = company_basis(ws, model, chosen) if chosen else {
+        'total': None, 'basis_total': None, 'shares': {}, 'basis': [],
+        'missing_store_ids': [store.id for store in model.stores if not store.archived], 'issues': [],
+    }
+    shares = company['shares']
+    company_total = known(company['total'])
+    missing_stores = company['missing_store_ids']
 
     closed_overhead = labor_api.frozen_shares(DEFAULT_MODEL)
+    frozen_cuts = {}
+    for state in here:
+        if state.state != 'closed':
+            continue
+        saved = closed_overhead.get((chosen, state.store_id, str(state.run_id)))
+        value = getattr(state, 'labor_cut', None)
+        frozen_cuts[state.store_id] = known(value if value is not None else saved['amount'] if saved else None)
+    incompatible_frozen = any(state.state != 'closed' for state in here) and any(
+        value is None or shares.get(store_id) is not None and value != known(shares[store_id])
+        for store_id, value in frozen_cuts.items())
+    overhead_notes = [issue['message'] for issue in company['issues']]
+    if incompatible_frozen:
+        overhead_notes.append('本月冻结份额与当前公司公摊依据不一致，保留冻结金额，开放账期份额待核对')
     people: dict[str, dict[str, Any]] = {}
     stores: list[dict[str, Any]] = []
     for st in here:
@@ -1889,11 +1993,32 @@ def commission_summary(period: str = "") -> dict:
         # 提成利润 = 店铺利润 − 兼职，提成按提成利润算；每人按自己那份等比例缩，
         # 等价于先减后分，而且各人加起来仍然等于缩过的合计。
         saved_cut = closed_overhead.get((chosen, st.store_id, str(st.run_id))) if st.state == 'closed' else None
-        cut = (float(st.labor_cut) if st.state == 'closed' and st.labor_cut is not None
-               else float(saved_cut['amount']) if saved_cut else spread.of(st.store_id))
-        base_total = c.get("base_total", 0.0)
-        after = money_float(decimal_amount(base_total) - decimal_amount(cut))
-        keep = (after / base_total) if base_total else 1.0
+        frozen_cut = getattr(st, 'labor_cut', None)
+        if st.state == 'closed':
+            cut = known(frozen_cut if frozen_cut is not None else saved_cut['amount'] if saved_cut else None)
+        else:
+            cut = None if incompatible_frozen else known(shares.get(st.store_id))
+        base_total = known(c.get('base_total'))
+        after = money_float(base_total - cut) if base_total is not None and cut is not None else None
+        keep = (known(after) / base_total if base_total else decimal_amount(1)) if after is not None else None
+        already_after_labor = c.get('manual_amounts_after_labor') is True
+        before = known(c.get('total'))
+        adjusted = before if already_after_labor else before * keep if before is not None and keep is not None else None
+        person_rows = []
+        for person in c.get('people') or []:
+            amount = known(person.get('amount'))
+            scaled = amount if already_after_labor else amount * keep if amount is not None and keep is not None else None
+            person_rows.append({**person, 'amount': money_float(scaled) if scaled is not None else None})
+        original_people = [known(person.get('amount')) for person in c.get('people') or []]
+        if (not already_after_labor and adjusted is not None and person_rows
+                and all(value is not None for value in original_people)
+                and all(person['amount'] is not None for person in person_rows)
+                and sum(original_people, decimal_amount(0)) == before):
+            target = known(money_float(adjusted))
+            residue = target - sum((known(person['amount']) for person in person_rows), decimal_amount(0))
+            recipient = min(range(len(person_rows)), key=lambda index: (
+                -abs(original_people[index]), str(person_rows[index].get('person_id') or person_rows[index].get('person') or index)))
+            person_rows[recipient]['amount'] = money_float(known(person_rows[recipient]['amount']) + residue)
         stores.append({
             "store_id": st.store_id,
             "store": _display_store(store)['name'] if store else st.store_id,
@@ -1907,44 +2032,43 @@ def commission_summary(period: str = "") -> dict:
             # 逐店记基数名，因为口径可以逐店配。整页共用一个表头的话，一家按毛利
             # 提、一家按利润提的时候，其中一列的标题就是错的。
             "base_name": c.get("base_name") or "",
-            "base_total": base_total,
+            "base_total": money_float(base_total) if base_total is not None else None,
             # 摊到的兼职、扣完之后的基数、扣完之后要发的钱。三个数都给出来，
             # 因为「为什么这个月比店铺利润算出来的少」这句话只有并排摆着才回答得了。
-            "overhead": cut,
+            "overhead": money_float(cut) if cut is not None else None,
+            "overhead_status": 'frozen' if st.state == 'closed' and cut is not None else 'allocated' if cut is not None else 'pending',
             "base_after": after,
-            "total": money_float(decimal_amount(c.get("total", 0.0)) * decimal_amount(keep)),
-            "total_before": c.get("total", 0.0),
-            "unassigned_base": c.get("unassigned_base", 0.0),
-            "fallback_base": c.get("fallback_base", 0.0),
-            "negative_orders": c.get("negative_orders", 0),
-            "negative_base": c.get("negative_base", 0.0),
-            "on_loss": c.get("on_loss", "deduct"),
-            "skipped_loss_base": c.get("skipped_loss_base", 0.0),
+            "total": money_float(adjusted) if adjusted is not None else None,
+            "total_before": money_float(before) if before is not None and not already_after_labor else None,
+            "amounts_after_labor": already_after_labor,
+            "unassigned_base": c.get("unassigned_base"),
+            "fallback_base": c.get("fallback_base"),
+            "negative_orders": c.get("negative_orders"),
+            "negative_base": c.get("negative_base"),
+            "on_loss": c.get("on_loss") or '',
+            "skipped_loss_base": c.get("skipped_loss_base"),
             "configured": bool(c.get("configured")),
             "notes": c.get("notes") or [],
-            "people": [
-                p | {"amount": money_float(decimal_amount(p.get("amount") or 0.0)
-                                           * decimal_amount(keep))}
-                for p in c.get("people") or []
-            ],
+            "people": person_rows,
         })
         for p in stores[-1]["people"]:
-            slot = people.setdefault(p["person"], {"person": p["person"], "amount": 0.0,
-                                                   "base": 0.0, "products": 0, "stores": []})
-            slot["amount"] += p.get("amount") or 0.0
-            slot["base"] += p.get("base") or 0.0
+            identity = p.get('person_id') or p.get('person') or f'unknown:{st.store_id}'
+            slot = people.setdefault(identity, {"person": p.get('person') or '归属待确认', "person_id": p.get('person_id'), "amount": 0.0,
+                                                "base": 0.0, "products": 0, "stores": []})
+            slot["amount"] = complete_sum([slot['amount'], p.get('amount')])
+            slot["base"] = complete_sum([slot['base'], p.get('base')])
             # 商品是逐店的，跨店直接相加不会重复计数。
             slot["products"] += int(p.get("products") or 0)
             slot["stores"].append({
                 "store": _display_store(store)['name'] if store else st.store_id,
                 "store_id": st.store_id,
-                "amount": p.get("amount") or 0.0,
+                "amount": p.get("amount"),
             })
 
-    ranked = sorted(people.values(), key=lambda p: -p["amount"])
+    ranked = sorted(people.values(), key=lambda p: (p['amount'] is None, -p['amount'] if p['amount'] is not None else 0, p['person']))
     for p in ranked:
-        p["amount"] = money_float(p["amount"])
-        p["base"] = money_float(p["base"])
+        p["amount"] = money_float(p["amount"]) if p['amount'] is not None else None
+        p["base"] = money_float(p["base"]) if p['base'] is not None else None
 
     # 各店口径不一致时不给整页表头编一个名字。「毛利合计」这个标题底下加着几家
     # 按利润算的钱，是那种看一年都看不出来的错。
@@ -1955,25 +2079,27 @@ def commission_summary(period: str = "") -> dict:
         "base_name": names[0] if len(names) == 1 else _base_name(model),
         "base_mixed": len(names) > 1,
         "people": ranked,
-        "stores": sorted(stores, key=lambda s: -s["total"]),
-        "total": money_float(sum(p["amount"] for p in ranked)),
-        "unassigned_base": money_float(sum(s["unassigned_base"] for s in stores)),
+        "stores": sorted(stores, key=lambda s: (s['total'] is None, -s['total'] if s['total'] is not None else 0, s['store_id'])),
+        "total": complete_sum(s['total'] for s in stores) if stores and all(s['computed'] for s in stores) and all(p['amount'] is not None for p in ranked) else None,
+        "unassigned_base": complete_sum(s['unassigned_base'] for s in stores),
         "rules": len(model.commission),
         # 兼职费用怎么摊的。摊了多少、按什么摊、有没有摊出来，都要写在页面上：
         # 这一步会让每个人到手的钱变少，不说清楚的话没人对得上账。
         "overhead": {
             "name": next((x.name for x in model.overheads if x.period == chosen), "兼职人工费用"),
-            "total": spread.total,
-            "settled": spread.settled,
+            "total": money_float(company_total) if company_total is not None else None,
+            "settled": bool(stores) and not missing_stores and not company['issues'] and all(s['overhead'] is not None for s in stores),
             "basis_name": _base_label(model, "revenue") or "交易收款",
-            "basis_total": spread.basis_total,
+            "basis_total": money_float(known(company['basis_total'])) if not missing_stores and known(company['basis_total']) is not None else None,
+            "missing_store_ids": missing_stores,
             "shares": [
-                {"store_id": s.store_id, "store": by_id[s.store_id].name
-                 if s.store_id in by_id else s.store_id,
-                 "basis": s.basis, "amount": s.amount}
-                for s in spread.shares
+                {"store_id": row['store_id'], "store": by_id[row['store_id']].name
+                 if row['store_id'] in by_id else row['store_id'],
+                 "basis": money_float(known(row['revenue'])) if known(row['revenue']) is not None else None,
+                 "amount": next((s['overhead'] for s in stores if s['store_id'] == row['store_id']), None)}
+                for row in company['basis']
             ],
-            "notes": list(spread.notes),
+            "notes": overhead_notes,
         },
     }
 
@@ -2539,7 +2665,7 @@ def fees_apply(body: FeeRulesBody) -> dict:
     from . import fee_jobs
     try:
         job=fee_jobs.submit(workspace(),DEFAULT_MODEL,[_fee_rule(r) for r in body.rules],
-            expected=body.expected_fee_revision,request_id=body.request_id,note=body.note,actor=ANONYMOUS,recompute=body.recompute)
+            expected=body.expected_fee_revision,request_id=body.request_id,note=body.note,actor=write_auth.current_actor_name(),recompute=body.recompute)
     except fee_jobs.Conflict as exc:
         raise HTTPException(409,str(exc)) from exc
     except (ModelError, ValidationError, ValueError) as exc:
@@ -2727,7 +2853,7 @@ def onboard_commit(commit: OnboardCommit) -> dict:
         source = SourceContract(**commit.new_source) if commit.new_source else None
         landed = onboard.land(
             DEFAULT_MODEL, workspace(), template, source=source,
-            by=ANONYMOUS, expected_revision=commit.model_revision,
+            by=write_auth.current_actor_name(), expected_revision=commit.model_revision,
         )
     except (ModelError, ValueError) as exc:
         raise HTTPException(400, str(exc)) from exc

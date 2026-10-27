@@ -94,19 +94,26 @@ def test_api_uses_closed_snapshot_not_later_supplements_or_new_run(tmp_path,monk
     ws=Workspace(tmp_path);m=model();reg=Registry(tmp_path)
     person=reg.person_save({'name':'甲'},'test','test')
     raw=result(m,person);sid=raw['store_id'];period='2026-06'
+    from finance_fixture import monthly_model
+    from automation_fixtures import capture_synthetic_summary_fixture
+    from ledger.storage_integrity import seal
+    m=monthly_model(m,sid,period,0)
     run=ws.record(sid,period,raw,[])
     facts([('goods_cost',-600.,True)]).write_parquet(ws.facts_path(run))
+    seal(ws.facts_path(run))
+    capture_synthetic_summary_fixture(ws,m,run)
     original_sha=hashlib.sha256(ws.facts_path(run).read_bytes()).hexdigest()
     confirmed,audit=manual_cost.certified(m,raw,run,{'goods':'700','dropship':'0','reshipment':'0'},
         [{'person_id':person['id'],'amount':'10'}],False,'已确认')
     audit['line_reviews']=[{'coverage_key':'5120605334958025518','order_id':'5120605334958016336','amount':'100','reason':'冻结时补录','revision':1}]
-    ws.close_period(sid,period,note='已确认',expected_run_id=run,manual_result=confirmed,manual_decision=audit)
+    ws.close_period(sid,period,note='已确认',expected_run_id=run,manual_result=confirmed,manual_decision=audit,model=m)
     with ws.conn as conn:
         conn.execute('INSERT INTO cost_line_log(store_id,period,coverage_key,context_sha,source_run_id,action,amount,reason,at,by) VALUES(?,?,?,?,?,?,?,?,?,?)',
                      (sid,period,'5120605334958025518','x'*64,run,'save','9999','后续修改','later','test'))
     ws.reopen_period(sid,period,note='后续核算')
     new=ws.record(sid,period,raw,[])
     facts([('goods_cost',-888.,True)]).write_parquet(ws.facts_path(new))
+    seal(ws.facts_path(new))
     monkeypatch.setattr(api,'workspace',lambda:ws)
     monkeypatch.setattr(api,'_model',lambda:m)
     client=TestClient(api.app)

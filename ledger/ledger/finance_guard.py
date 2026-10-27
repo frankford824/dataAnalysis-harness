@@ -12,7 +12,7 @@ _local=threading.local()
 
 
 @contextmanager
-def guard(root,store_id,period):
+def _scope_guard(root,store_id,period):
     key=sha256((store_id+'\0'+period).encode()).hexdigest()
     path=Path(root).resolve()/'financial-decisions'/(key+'.lock')
     identity=str(path)
@@ -30,6 +30,23 @@ def guard(root,store_id,period):
             finally:
                 _local.held=held
                 _file_unlock(file)
+
+
+@contextmanager
+def authority(root):
+    """Serialize authoritative registry publication with financial freezing.
+
+    Lock order is model -> authority -> store/period -> SQLite writer.
+    Read-only registry access does not take this lock.
+    """
+    with _scope_guard(root,'__company__','__financial_authority__'):
+        yield
+
+
+@contextmanager
+def guard(root,store_id,period):
+    with authority(root),_scope_guard(root,store_id,period):
+        yield
 
 
 def locked(method):

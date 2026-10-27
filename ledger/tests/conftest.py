@@ -26,7 +26,7 @@ if str(ROOT) not in sys.path:
 MODELS = ROOT.parent / "models"
 
 #: 真实平台数据。不在仓库里，只有本机有。
-PLATFORM_DATA = Path("/home/wsfwk/data/platform")
+PLATFORM_DATA = Path(os.environ.get("LEDGER_ACCEPTANCE_CORPUS", "/home/wsfwk/data/platform"))
 
 #: 明确声明这台机器没有语料。
 #:
@@ -40,6 +40,18 @@ PLATFORM_DATA = Path("/home/wsfwk/data/platform")
 #: 所以跳过必须是一个显式动作：设 `LEDGER_NO_CORPUS=1`。设了就等于签字承认
 #: 「我这次没有验证引擎算得对不对」，这句话应该说出口，不该由缺省行为替人说。
 NO_CORPUS = os.environ.get("LEDGER_NO_CORPUS") == "1"
+
+
+def login_client(client, root):
+    """Real temporary operator/session for business API tests; never an auth bypass."""
+    from ledger.commission_registry import Registry
+    registry = Registry(root)
+    name, password = 'test-auth-fixture', 'synthetic-fixture-password'
+    with registry.connect() as db:
+        exists = db.execute('SELECT 1 FROM operator WHERE id=?',(name,)).fetchone()
+    if not exists:
+        registry.operator_add(name,password)
+    client.cookies.set('commission_session',registry.login(name,password))
 
 
 def needs_real_data(fn):

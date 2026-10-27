@@ -7,6 +7,7 @@ from pathlib import Path
 
 import polars as pl
 import pytest
+from conftest import login_client
 
 from ledger import cost_lines, manual_cost
 from ledger.model.repository import ModelRepository
@@ -231,6 +232,12 @@ def test_close_freezes_source_line_amount_and_profit_without_double_count(tmp_pa
         {'goods':'612.00','dropship':'0.00','reshipment':'0.00'},[],True,'已确认行金额')
     audit.update(line_revision=lines['line_revision'],line_reviews=lines['reviewed'])
     decided['manual_cost']['line_supplement']=12
+    from finance_fixture import monthly_model
+    from ledger.automation_checker import bind_model
+    from automation_fixtures import capture_synthetic_summary_fixture
+    closing_model=monthly_model(m,raw['store_id'],raw['period'],0)
+    bind_model(ws,closing_model)
+    capture_synthetic_summary_fixture(ws,closing_model,run)
     closed=ws.close_period(raw['store_id'],raw['period'],note='已确认行金额',
                             expected_run_id=run,manual_result=decided,manual_decision=audit)
     assert closed.closed and closed.result['manual_cost']['confirmed']['goods']==612
@@ -251,15 +258,22 @@ def test_http_edit_is_visible_in_all_missing_orders_and_store_preview(tmp_path,m
     from fastapi.testclient import TestClient
     from ledger import api
     from ledger.model import transaction
-    m=model();ws=Workspace(tmp_path);raw=payload()
+    from finance_fixture import monthly_model
+    from automation_fixtures import capture_synthetic_summary_fixture
+    from ledger.automation_checker import bind_model
+    ws=Workspace(tmp_path);raw=payload()
+    m=monthly_model(model(),raw['store_id'],raw['period'],0)
+    bind_model(ws,m)
     run=ws.record(raw['store_id'],raw['period'],raw,[],
                   model_revision=hashlib.sha256(m.model_dump_json().encode()).hexdigest())
     first=archive(ws,run).row(0,named=True)
+    capture_synthetic_summary_fixture(ws,m,run)
     monkeypatch.setattr(api,'WORKSPACE_ROOT',tmp_path)
     monkeypatch.setattr(api,'_ws',ws)
     monkeypatch.setattr(api,'_model',lambda:m)
     monkeypatch.setattr(transaction,'model_lock',lambda _:nullcontext())
     client=TestClient(api.app)
+    login_client(client,tmp_path)
     rows=client.get(f'/api/runs/{run}/coverage-gaps')
     assert rows.status_code==200 and rows.json()['total']==2
     saved=client.post(f"/api/stores/{raw['store_id']}/periods/{raw['period']}/cost-lines",json={
@@ -284,13 +298,12 @@ def test_http_edit_is_visible_in_all_missing_orders_and_store_preview(tmp_path,m
     closed=client.post(f"/api/stores/{raw['store_id']}/periods/{raw['period']}/close",json={
         **body,'note':'财务逐行核实，无提成人员','no_payout':True,
     })
-    assert closed.status_code==200,closed.text
-    assert ws.state(raw['store_id'],raw['period']).result['manual_cost']['confirmed']['goods']==612
+    # This endpoint has just created durable accounting work. A preview proves
+    # its monetary effect, but cannot consume or bypass that pending work.
+    assert closed.status_code==409 and '自动核算' in closed.text,closed.text
+    assert ws.state(raw['store_id'],raw['period']).state=='open'
+    assert not ws.conn.execute('SELECT 1 FROM manual_finance WHERE run_id=?',(run,)).fetchone()
     assert cost_lines.current(ws,run,raw['store_id'],raw['period'])['supplement_total']==12
-    assert client.post(f"/api/stores/{raw['store_id']}/periods/{raw['period']}/cost-lines",json={
-        'run_id':run,'coverage_key':'S2','context_sha':first['context_sha'],
-        'amount':'20.00','reason':'结账后试图修改','expected_line_revision':1,
-    }).status_code==409
     ws.close()
 
 
@@ -305,6 +318,7 @@ def test_http_batch_preview_then_apply_preserves_audited_cost_rows(tmp_path, mon
     monkeypatch.setattr(api, '_ws', ws)
     monkeypatch.setattr(api, '_model', lambda: m)
     client = TestClient(api.app)
+    login_client(client,tmp_path)
     xlsx = client.get(f'/api/runs/{run}/coverage-gaps.xlsx')
     assert xlsx.status_code == 200
     assert xlsx.headers['content-type'].startswith(

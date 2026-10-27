@@ -29,6 +29,7 @@ from .commission_registry import Registry
 from . import progress
 from . import order_feed
 from . import recompute_reuse
+from . import automation_period_proof
 from .engine.runtime import Ingestion, RunResult, Slice, ingest, run
 from .model.schema import Model, Store
 from .view import commission_dict, slice_dict
@@ -202,7 +203,18 @@ def intake(
         out.unknown_tables.extend(done.unknown_tables)
         if done.failure:
             out.failures.append(done.failure)
+    _refresh_close_views(ws,model,out.periods)
     return out
+
+
+def _refresh_close_views(ws,model,periods):
+    from .automation_checker import close_view,company_basis
+    companies={}
+    for index,payload in enumerate(periods):
+        sid,period=payload.get('store_id'),payload.get('period')
+        if not sid or not period:continue
+        if period not in companies:companies[period]=company_basis(ws,model,period)
+        periods[index]=close_view(ws,model,sid,period,payload,company_context=companies[period])
 
 
 def intake_assigned(
@@ -267,6 +279,7 @@ def intake_assigned(
         out.unknown_tables.extend(done.unknown_tables)
         if done.failure:
             out.failures.append(done.failure)
+    _refresh_close_views(ws,model,out.periods)
     return out
 
 
@@ -306,6 +319,7 @@ def _commission(result: RunResult, model: Model, store: Store, period: str,
         return {
             "base_node": "", "base_name": "", "base_total": 0.0, "total": 0.0,
             "configured": False, "unassigned_base": 0.0, "fallback_base": 0.0,
+            "amount_complete": False,
             "negative_orders": 0, "negative_base": 0.0,
             "people": [], "products": [],
             "notes": [f"提成算不出来：{exc}"],
@@ -320,6 +334,12 @@ def recompute(
     note: str = "",
 ) -> Recomputed:
     """同店串行、全局最多两个重算，避免目录竞态和内存失控。"""
+    from .version import assert_code_integrity,CodeIntegrityError,CODE_MAINTENANCE
+    def maintenance():
+        return Recomputed(store_id=store.id,failure={'store':store.name,'kind':'maintenance',
+            'code':'code_source_drift','why':CODE_MAINTENANCE})
+    try:assert_code_integrity()
+    except CodeIntegrityError:return maintenance()
     lock = _store_lock(store.id)
     with _store_locks_guard:
         _recompute_waiters[store.id] = _recompute_waiters.get(store.id, 0) + 1
@@ -347,7 +367,14 @@ def recompute(
                         "started": current.get("started", time.monotonic()),
                     }
                 return report(phase, *args, **kwargs)
-            return _recompute_locked(ws, model, store, report=tracked, note=note)
+            try:
+                assert_code_integrity()
+                result=_recompute_locked(ws, model, store, report=tracked, note=note)
+                assert_code_integrity()
+            except CodeIntegrityError:
+                return maintenance()
+            _refresh_close_views(ws,model,result.periods)
+            return result
         finally:
             with _store_locks_guard:
                 _recompute_running.pop(store.id, None)
@@ -369,6 +396,9 @@ def _recompute_locked(
     账已经报出去了，系统不能因为字典补了一条就把数字悄悄改掉。
     """
     out = Recomputed(store_id=store.id)
+    from .automation_checker import bind_model
+    bind_model(ws,model)
+    captured_source = automation_period_proof.source_manifest(ws,store.id)
     reserve = 2 * 1024**3
     storage_failure = {"store": store.name, "kind": "storage",
                        "why": "服务器可用空间不足，已暂停重算。释放空间后重试，原账期结果保留。"}
@@ -391,7 +421,12 @@ def _recompute_locked(
     if order_feed.enabled():
         try:
             report(f"关联订单与历史成本 · {where}")
-            order_feed.OrderFeed(ws.root).append_to(ing, store)
+            captured_feed = order_feed.OrderFeed(ws.root)
+            captured_feed.append_to(ing, store)
+            captured_source['feed'] = {
+                'snapshot_id':getattr(captured_feed,'_captured_snapshot_id',''),
+                'consumed_seq':getattr(captured_feed,'_captured_seq',0),
+                'source_latest_seq':getattr(captured_feed,'_captured_source_latest_seq',0)}
         except order_feed.OrderFeedError as exc:
             out.failure = {"store": store.name, "why": f"订单台证据未就绪：{exc}"}
             return out
@@ -514,10 +549,34 @@ def _recompute_locked(
                     c["notes"].append(f"提成基数与损益节点相差{delta:.2f}元，需核对后结算提成")
             allocation[2]["summary_json"] = json.dumps(c, ensure_ascii=False)
         from .storage_integrity import verified, digest
+        period_proof = automation_period_proof.prepare(
+            ws,model,store,ing,sl,payload,allocation,captured_source)
+        from .version import assert_code_integrity
+        assert_code_integrity()
+        reused = (automation_period_proof.reusable(ws,store.id,sl.period,period_proof,registry)
+                  if period_proof else None)
+        if reused:
+            assert_code_integrity()
+            from .automation_shared_fee import capture as capture_shared_fees
+            capture_shared_fees(ws,reused['id'],model=model,payload=json.loads(reused['result']))
+            state=ws.state(store.id,sl.period)
+            shown=state.result if state and state.result else json.loads(reused['result'])
+            out.periods.append({**shown,'run_id':reused['id'],'state':state.state if state else 'open',
+                                'stale':bool(state and state.stale)})
+            continue
         same = ws.identical_run(store.id, sl.period, payload, fingerprint)
         if same:
             previous_id, previous_payload = same
             reusable = (sl.facts.is_empty() or verified(ws.facts_path(previous_id)))
+            if period_proof:
+                # A matching summary cannot establish an old archive's first
+                # expected hash, nor re-bless a changed and resealed sidecar.
+                previous_proof=ws.conn.execute('SELECT * FROM automation_run_proof WHERE run_id=?',(previous_id,)).fetchone()
+                reusable=reusable and bool(previous_proof and all(previous_proof[key]==period_proof[key]
+                    for key in ('dependency_sha','result_sha','evidence_sha')))
+                if previous_proof:
+                    reusable=reusable and all(automation_period_proof.valid_artifact(ws,artifact)
+                        for artifact in json.loads(previous_proof['manifest_json']).get('artifacts',[]))
             if not sl.pricing_gaps.is_empty():
                 reusable = reusable and verified(ws.pricing_gaps_path(previous_id))
             if not getattr(sl, "coverage_gap_rows", pl.DataFrame()).is_empty():
@@ -525,6 +584,10 @@ def _recompute_locked(
             if not getattr(sl, "order_issue_rows", pl.DataFrame()).is_empty():
                 from .order_issues import path_for
                 reusable = reusable and verified(path_for(ws, previous_id))
+            if not getattr(sl,'allocation_evidence',pl.DataFrame()).is_empty():
+                reusable = reusable and verified(ws.facts_path(previous_id).with_suffix('.allocation.parquet'))
+            if not getattr(sl,'operations_evidence',pl.DataFrame()).is_empty():
+                reusable = reusable and verified(ws.facts_path(previous_id).with_suffix('.operations.parquet'))
             if allocation:
                 previous_calc=(previous_payload.get('commission') or {}).get('calculation_id')
                 with registry.connect() as conn:
@@ -533,22 +596,35 @@ def _recompute_locked(
                 candidate=registry.root/'calculations'/Path(proof['path']).name if proof else None
                 reusable = reusable and bool(candidate and candidate.is_file() and digest(candidate)==proof['sha'])
             if reusable:
-                state=ws.state(store.id,sl.period)
-                shown=state.result if state and state.result else previous_payload
-                out.periods.append({**shown,'run_id':previous_id,'state':state.state if state else 'open',
-                                    'stale':bool(state and state.stale)})
+                from .finance_guard import guard as financial_reuse
+                with financial_reuse(ws.root,store.id,sl.period):
+                    assert_code_integrity()
+                    if period_proof:automation_period_proof.save(ws,previous_id,period_proof)
+                    from .automation_shared_fee import capture as capture_shared_fees
+                    capture_shared_fees(ws,previous_id,model=model,payload=previous_payload)
+                    state=ws.state(store.id,sl.period)
+                    shown=state.result if state and state.result else previous_payload
+                    out.periods.append({**shown,'run_id':previous_id,'state':state.state if state else 'open',
+                                        'stale':bool(state and state.stale)})
                 continue
-        run_id = ws.record(
-            store.id, sl.period, payload, shas, evidence_ready=False,
-            model_revision=model_revision, input_fingerprint=fingerprint,
-        )
-        if allocation:
-            try:
-                commission_engine.persist(registry, run_id, allocation[1], allocation[2])
-            except Exception as exc:
-                ws.mark_evidence(run_id, ready=False, error=f"提成明细留档失败：{exc}")
-                raise
-        _keep_facts(ws, run_id, sl)
+        from .finance_guard import guard as financial_publish
+        with financial_publish(ws.root,store.id,sl.period):
+            assert_code_integrity()
+            run_id = ws.record(
+                store.id, sl.period, payload, shas, evidence_ready=False,
+                model_revision=model_revision, input_fingerprint=fingerprint,
+            )
+            if allocation:
+                try:
+                    commission_engine.persist(registry, run_id, allocation[1], allocation[2])
+                except Exception as exc:
+                    ws.mark_evidence(run_id, ready=False, error=f"提成明细留档失败：{exc}")
+                    raise
+            _keep_facts(ws, run_id, sl)
+            if period_proof:
+                automation_period_proof.save(ws,run_id,period_proof)
+            from .automation_shared_fee import capture as capture_shared_fees
+            capture_shared_fees(ws,run_id,model=model,payload=payload)
         state = ws.state(store.id, sl.period)
         shown = state.result if state and state.result else payload
         out.periods.append({
@@ -600,7 +676,16 @@ def _keep_facts(ws: Workspace, run_id: int, sl: Slice) -> None:
     allocation_path = path.with_suffix('.allocation.parquet')
     from .order_issues import path_for
     issues_path = path_for(ws, run_id)
+    operations_path = path.with_suffix('.operations.parquet')
+    raw_pricing_path = path.with_suffix('.pricing-raw.parquet')
     try:
+        from .operations_readmodel import keep_projection
+        keep_projection(ws,run_id,sl)
+        raw_pricing=getattr(sl,'raw_pricing_gaps',pl.DataFrame())
+        if not raw_pricing.is_empty():
+            raw_pricing.write_parquet(raw_pricing_path)
+            from .storage_integrity import seal
+            seal(raw_pricing_path)
         issues = getattr(sl, 'order_issue_rows', pl.DataFrame())
         if not issues.is_empty():
             issues.write_parquet(issues_path)
@@ -645,6 +730,8 @@ def _keep_facts(ws: Workspace, run_id: int, sl: Slice) -> None:
         coverage_path.unlink(missing_ok=True)
         allocation_path.unlink(missing_ok=True)
         issues_path.unlink(missing_ok=True)
+        operations_path.unlink(missing_ok=True)
+        raw_pricing_path.unlink(missing_ok=True)
         ws.mark_evidence(run_id, ready=False, error=str(exc))
 
 

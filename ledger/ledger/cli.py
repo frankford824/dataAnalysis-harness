@@ -447,17 +447,19 @@ def cmd_replay(args: argparse.Namespace) -> int:
         return 2
 
     if args.record:
-        from .replay import BASELINE, engine_version
+        from .replay import BASELINE, input_manifest
 
-        version = engine_version()
-        write_baseline(current, note=args.note or "")
+        try:
+            if args.store and not getattr(args, 'scope_change_reason', ''):
+                raise ValueError("按店录制必须用 --scope-change-reason 显式声明范围")
+            write_baseline(current, note=args.note or "",
+                           manifest=input_manifest(args.model, corpus, current),
+                           scope_change_reason=getattr(args, 'scope_change_reason', '') or '')
+        except ValueError as exc:
+            print(str(exc), file=sys.stderr)
+            return 2
         n = sum(len(p) for p in current.values())
         print(f"已录基线：{len(current)} 家店 {n} 个账期 → {BASELINE}")
-        if version.endswith("-dirty"):
-            print(
-                "注意：工作区有未提交的改动，这份基线对应的代码不在版本库里。\n"
-                "     提交之后再录一次，否则将来没法回答「这份基线是哪一版录的」。"
-            )
         print("把它和这次的代码改动一起提交，那份 diff 就是改动对账上数字的全部影响。")
         return 0
 
@@ -589,6 +591,7 @@ def build_parser() -> argparse.ArgumentParser:
     rp.add_argument("--record", action="store_true",
                     help="把当前结果录成新基线。只在确认变化是想要的之后用")
     rp.add_argument("--note", help="录基线时写一句为什么变，进基线文件")
+    rp.add_argument("--scope-change-reason", help="显式声明按店录制或范围缩减的原因")
     rp.set_defaults(func=cmd_replay)
 
     f = sub.add_parser("fees", help="列出引擎认识的全部费项，或和外部对照表比差集")

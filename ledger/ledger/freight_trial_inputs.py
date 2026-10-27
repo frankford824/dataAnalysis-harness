@@ -132,7 +132,7 @@ def _materialize(root, shadow_root, record):
     return target
 
 
-def parse_sources(root, shadow_root, model, inputs, progress=lambda *_: None):
+def parse_sources(root, shadow_root, model, inputs, progress=lambda *_: None, *, retain_unidentified=False):
     """Use the accounting parser but never its posting/deduplication runtime."""
     from .engine.runtime import _ingest_file_cached, _header_row_candidates, engine_version
     from .model.schema import ColumnBinding
@@ -198,7 +198,7 @@ def parse_sources(root, shadow_root, model, inputs, progress=lambda *_: None):
         for ordinal, row in enumerate(frame.iter_rows(named=True)):
             raw_tracking = str(row.get('tracking_no') or '')
             tracking = _norm(raw_tracking)
-            if not tracking or tracking in {'合计','总计','汇总'}: continue
+            if tracking in {'合计','总计','汇总'} or (not tracking and not retain_unidentified): continue
             amount = number(row.get('total_cost'))
             if amount is None: raise InputError('运费金额缺失或无效：'+value['name'])
             day=str(row.get('ship_date') or '')
@@ -210,7 +210,7 @@ def parse_sources(root, shadow_root, model, inputs, progress=lambda *_: None):
             charges.append({'charge_id':charge_id,'tracking_no':tracking,'raw_tracking_no':raw_tracking,
                 'amount':text_amount(amount),'scan_time':when,'scan_time_raw':raw_time,'file_sha':value['sha'],'file':value['name'],
                 'settlement_object':str(row.get('material_name') or '').strip(),
-                'sheet':sheet,'row_no':row_no,'source_issue':'','carrier':''})
+                'sheet':sheet,'row_no':row_no,'source_issue':'' if tracking else 'identity_missing','carrier':''})
     # Cross-file overlap is not silently deduped or counted twice as confirmed.
     flag_charge_overlaps(charges)
     if not charges:

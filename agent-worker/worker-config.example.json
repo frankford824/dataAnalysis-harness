@@ -1,0 +1,21 @@
+{
+  "worker_id": "example-ledger-worker",
+  "control_plane_url": "http://127.0.0.1:8000",
+  "state_dir": "/srv/example/ledger-worker/state",
+  "service_token_file": "/etc/example/ledger-worker/service-token",
+  "inherit_ledger_gateway": true,
+  "models": [],
+  "poll_seconds": 5,
+  "upstream": {
+    "order_base_url": "http://127.0.0.1:8001",
+    "cost_base_url": "https://cost-api.example.invalid",
+    "order_token_file": "/etc/example/ledger-worker/order-token",
+    "cost_token_file": "/etc/example/ledger-worker/cost-token",
+    "member_requests_enabled": false,
+    "timeout_seconds": 15,
+    "max_gaps": 200,
+    "max_requests": 80,
+    "max_response_bytes": 5242880
+  },
+  "tools": {}
+}

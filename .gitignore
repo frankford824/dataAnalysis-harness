@@ -2,6 +2,8 @@
 .env.*.local
 !.env.example
 node_modules/
+.vite/
+/RELEASE-ACCEPTANCE.json
 dist/
 target/
 .venv/

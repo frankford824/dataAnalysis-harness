@@ -35,6 +35,7 @@ from .engine.rules import norm_expr
 from .engine.types import ANCHOR_FILE, ANCHOR_ROW, ANCHOR_SHA, ANCHOR_SHEET, FileRef, Recognition
 from .model.schema import ColumnBinding, Model, Store, Template
 from .order_alignment import ORDER_FIELDS, ITEM_FIELDS, read_groups
+from .order_origin import original_parent
 
 SCHEMA_VERSION = "ledger-feed.v1"
 _initialization_lock = threading.Lock()
@@ -895,20 +896,28 @@ class OrderFeed:
         from .order_flags import collect as collect_order_flags
         fallback_flags, _ = collect_order_flags(ingestion, store)
         goods_metric = next((m.for_platform(store.platform) for m in ingestion.model.metrics if m.id == 'goods_cost'), None) if ingestion.model else None
+        self._historical_cost_facts=[]
         frames = self._frames(store, json.loads(state["manifest_json"]),
                               {child: next(iter(parents)) if len(parents) == 1 else None for child, parents in exported.items()},
                               fallback_flags,
                               any(p.id == store.platform and p.cost_pricing == "historical" for p in ingestion.model.platforms) if ingestion.model else False,
                               any(p.id == store.platform and p.cost_pricing in {"required", "historical"} for p in ingestion.model.platforms) if ingestion.model else False,
                               getattr(goods_metric, 'brushing_scope', 'platform_order'))
+        ingestion.historical_cost_evidence=getattr(self,'_historical_cost_facts',[])
         evidence = getattr(self, '_brushing_evidence', pl.DataFrame())
         if not evidence.is_empty():
             prior = getattr(ingestion, 'brushing_evidence', pl.DataFrame())
             ingestion.brushing_evidence = pl.concat([prior, evidence], how='diagonal_relaxed')
         after = self.state()
+        # Judge this immutable input against the head captured in the same
+        # transaction, not a moving global head observed after building frames.
+        # Later store events keep their own durable recompute obligation.
+        # Health is part of the same captured input. Live source errors are
+        # checked separately at financial close, not backdated into this run.
         ingestion.source_sync_pending = (
-            int(getattr(self, "_captured_seq", state.get("consumed_seq") or 0)) < int(after.get("source_latest_seq") or 0)
-            or bool(after.get("last_error"))
+            int(self._captured_seq) < int(self._captured_source_latest_seq)
+            or self._captured_snapshot_id != after["snapshot_id"]
+            or bool(self._captured_last_error)
         )
         if not frames:
             raise OrderFeedError(f"订单台没有 {store.name} 的已确认店铺映射")
@@ -1190,12 +1199,16 @@ class OrderFeed:
         self._brushing_evidence = pl.DataFrame()
         with self._connect() as conn:
             conn.execute("BEGIN")
-            captured = conn.execute("SELECT snapshot_id,consumed_seq FROM feed_state WHERE id=1").fetchone()
+            captured = conn.execute(
+                "SELECT snapshot_id,consumed_seq,source_latest_seq,last_error FROM feed_state WHERE id=1"
+            ).fetchone()
             if captured["snapshot_id"] != manifest["snapshot_id"]:
                 raise OrderFeedError("订单快照刚发生切换，本次计算等待重试")
             fingerprint = f"order-feed:{captured['snapshot_id']}:{captured['consumed_seq']}"
             self._captured_snapshot_id = captured['snapshot_id']
             self._captured_seq = int(captured["consumed_seq"])
+            self._captured_source_latest_seq = int(captured["source_latest_seq"])
+            self._captured_last_error = captured['last_error']
             order_store_ids = [
                 str(r[0]) for r in conn.execute(
                     "select order_store_id from feed_store where ledger_store_id=? and mapping_status='confirmed'",
@@ -1246,6 +1259,8 @@ class OrderFeed:
                     relation_records.append(record)
         if relation_records:
             relations = self._append_records(relations, relation_records).unique(maintain_order=True)
+        from .historical_cost_facts import overlay as historical_facts_overlay
+        costs,self._historical_cost_facts=historical_facts_overlay(self.workspace_root,store,orders,items,costs,relations)
         after = pl.scan_parquet(path("after_sales.parquet")).filter(
             pl.col("order_store_id").cast(pl.Utf8).is_in(order_store_ids)
         ).collect()
@@ -1269,7 +1284,7 @@ class OrderFeed:
 
         reship_origins = self._reshipment_origins(after, items, exported_orders)
         order_frame = self._order_frame(orders, items, after, relations, store, fingerprint, reship_origins, exported_orders)
-        cost_frame = self._cost_frame(orders, items, costs, relations, store, fingerprint, reship_origins, require_history, require_pricing)
+        cost_frame = self._cost_frame(orders, items, costs, relations, store, fingerprint, reship_origins, require_history, require_pricing, exported_orders)
         after_frame = self._after_frame(after, after_items, items, store, fingerprint)
         cost_item = self._item("order_cost", "order_console_cost_v1", "订单台日期时点成本", cost_frame,
                                self._cost_template(), fingerprint)
@@ -1501,14 +1516,18 @@ class OrderFeed:
             items=items.join(controls.select('order_id','__payment_valid'),on='order_id',how='left',maintain_order='left').with_columns(
                 pl.when(pl.col('__payment_valid')).then(pl.col('paid_amount')).otherwise(None).alias('paid_amount')).drop('__payment_valid')
         parent=pl.col('online_order_no_order').fill_null(pl.col('online_order_no')).cast(pl.Utf8)
-        if store.platform=='taobao' and exported_orders:
-            certified={str(k):str(v) for k,v in exported_orders.items() if v}
-            child=pl.col('outer_sku').fill_null(pl.col('sub_order_id')).cast(pl.Utf8)
-            known=child.replace_strict(certified,default=None,return_dtype=pl.Utf8)
-            aliases=parent.str.replace_all('[，;；]',',').str.split(',').list.eval(pl.element().str.strip_chars().str.split(':').list.last())
-            # Merged ERP orders carry several platform master IDs. Resolve an
-            # item only through its unique, certified platform child identity.
-            parent=pl.when(known.is_not_null() & (parent.is_null() | (parent=='') | aliases.list.contains(known).fill_null(False))).then(known).otherwise(parent)
+        origin_day=pl.lit(None,dtype=pl.Date)
+        origin_supplied=pl.lit(False)
+        if store.platform in {'taobao','douyin'}:
+            shop_name=('order_store_id_order' if 'order_store_id' in items.columns and 'order_store_id' in orders.columns else 'order_store_id')
+            shop=(pl.col(shop_name) if 'order_store_id' in items.columns or 'order_store_id' in orders.columns else pl.lit(None,dtype=pl.String))
+            parent,bound=original_parent(pl.col('online_order_no'),parent,shop,
+                pl.col('outer_sku').fill_null(pl.col('sub_order_id')),exported_orders,
+                item_shop=pl.col('order_store_id') if 'order_store_id' in items.columns and 'order_store_id' in orders.columns else None)
+            if 'original_order_date' in items.columns:
+                raw_day=pl.col('original_order_date').cast(pl.String).str.slice(0,10)
+                origin_supplied=bound & raw_day.is_not_null() & (raw_day!='')
+                origin_day=pl.when(bound).then(raw_day.str.strptime(pl.Date,'%Y-%m-%d',strict=False)).otherwise(None)
         frame = items.join(orders, on="order_id", how="inner", suffix="_order").join(
             refund, on="order_id", how="left",
         ).select(
@@ -1526,6 +1545,8 @@ class OrderFeed:
             (pl.col('order_remark_order' if 'order_remark' in items.columns else 'order_remark').cast(pl.Utf8)
              if 'order_remark' in orders.columns else pl.lit(None, dtype=pl.Utf8)).alias('order_remark'),
             pl.col('order_id').cast(pl.Utf8).alias('internal_order_id'),
+            origin_day.alias('__original_day'),
+            origin_supplied.alias('__original_day_supplied'),
             pl.when(is_reship)
             .then(pl.lit("补发订单")).otherwise(pl.lit("销售订单")).alias("order_type"),
             self._dt("order_time").alias("order_time"),
@@ -1546,6 +1567,9 @@ class OrderFeed:
             pl.when(pl.col('order_remark').drop_nulls().n_unique() == 1)
               .then(pl.col('order_remark').drop_nulls().first()).otherwise(None).alias('order_remark'),
             pl.col('internal_order_id').drop_nulls().first(),
+            pl.when(pl.col('__original_day').is_not_null().all() & (pl.col('__original_day').n_unique()==1))
+              .then(pl.col('__original_day').first()).otherwise(None).alias('__original_day'),
+            pl.col('__original_day_supplied').any(),
             # Do not turn a grouped/merged item into apparently unique freight
             # evidence. Only a single raw replacement item can certify this path.
             pl.when((pl.len()==1) & (pl.col('order_type')=='补发订单').all())
@@ -1569,6 +1593,16 @@ class OrderFeed:
                 pl.when(pl.col("order_time").dt.date() == original_day)
                 .then(pl.col("order_time")).otherwise(None).alias("order_time"),
             )
+        elif store.platform in {'taobao','douyin'}:
+            # The source's separately derived original day belongs to this
+            # exact member; a later merge/exchange header must not replace it.
+            frame=frame.with_columns(
+                pl.when(pl.col('__original_day_supplied')).then(pl.col('__original_day').cast(pl.Datetime))
+                  .otherwise(pl.col('order_date')).alias('order_date'),
+                pl.when(pl.col('__original_day_supplied')).then(
+                    pl.when(pl.col('order_time').dt.date()==pl.col('__original_day')).then(pl.col('order_time')).otherwise(None))
+                  .otherwise(pl.col('order_time')).alias('order_time'))
+        frame=frame.drop('__original_day','__original_day_supplied')
         # 和千牛人工表同一套：子订单净实付 / 主订单合计。不写这一列的话，
         # 和带「收入分配率」的千牛明细拼成脊柱后列在、值空，分摊按 0，
         # 对账挂得上、销售收入却是 0.00。
@@ -1591,10 +1625,10 @@ class OrderFeed:
         self, orders: pl.DataFrame, items: pl.DataFrame, costs: pl.DataFrame,
         relations: pl.DataFrame,
         store: Store, fingerprint: str, reship_origins: dict[str, str] | None = None, require_history: bool = False,
-        require_pricing: bool = False,
+        require_pricing: bool = False, exported_orders: dict[str,str | None] | None = None,
     ) -> pl.DataFrame:
         review_pricing = require_history or require_pricing
-        from .engine.cost_policy import is_freight_surcharge
+        from .engine.cost_policy import is_policy_zero_sku
         # Deleted/replaced lines are traceability only on every platform,
         # including platforms that accept provided rather than historical costs.
         keys = ["order_id", "sub_order_id"]
@@ -1611,7 +1645,7 @@ class OrderFeed:
             missing = items.with_columns(pl.col(*keys).cast(pl.Utf8)).join(
                 costs.select(pl.col(*keys).cast(pl.Utf8)).unique(), on=keys, how="anti")
             if "is_virtual" in missing.columns:
-                missing = missing.filter(~pl.col("is_virtual").cast(pl.Boolean, strict=False).fill_null(False) | is_freight_surcharge(missing,'sku_id'))
+                missing = missing.filter(~pl.col("is_virtual").cast(pl.Boolean, strict=False).fill_null(False) | is_policy_zero_sku(missing,'sku_id'))
             if not missing.is_empty():
                 pending = missing.select(pl.col("order_id", "sub_order_id", "sku_id", "quantity")).with_columns(
                     pl.lit(None, dtype=pl.Float64).alias("unit_cost"),
@@ -1622,7 +1656,7 @@ class OrderFeed:
                 )
                 costs = pl.concat([costs, pending], how="diagonal_relaxed")
         else:
-            missing=items.filter(is_freight_surcharge(items,'sku_id')).with_columns(pl.col('order_id','sub_order_id').cast(pl.Utf8)).join(
+            missing=items.filter(is_policy_zero_sku(items,'sku_id')).with_columns(pl.col('order_id','sub_order_id').cast(pl.Utf8)).join(
                 costs.select(pl.col('order_id','sub_order_id').cast(pl.Utf8)).unique(),on=['order_id','sub_order_id'],how='anti')
             if not missing.is_empty():
                 pending=missing.select('order_id','sub_order_id','sku_id','quantity').with_columns(
@@ -1631,7 +1665,7 @@ class OrderFeed:
                 costs=pl.concat([costs.with_columns(pl.col('order_id','sub_order_id').cast(pl.Utf8)),pending],how='diagonal_relaxed')
         certified = costs if review_pricing else costs.filter(
             ((pl.col("cost_status") == "priced") & pl.col("cost_source").is_in(CAPTURED_COST_SOURCES))
-            | is_freight_surcharge(costs,'sku_id'))
+            | is_policy_zero_sku(costs,'sku_id'))
         # ERP 把「没价」写成 0，移动平均被退货打穿会出负数；两者都不是成交成本。
         # 订单台 2026-09-03 起已把 ≤0 改判缺价，这里再守一道：关账月冻结的旧行、
         # 以及任何后续回归都不能把负成本算进利润。明确的赠品 0 价保留。
@@ -1642,6 +1676,8 @@ class OrderFeed:
             pl.col('quantity').alias('__current_item_quantity'),
             (pl.col('original_order_date').cast(pl.String) if 'original_order_date' in items.columns
              else pl.lit(None, dtype=pl.String)).alias('__upstream_original_day'),
+            (pl.col('cost_company_id').cast(pl.String) if 'cost_company_id' in items.columns
+             else pl.lit(None,dtype=pl.String)).alias('__upstream_cost_company'),
             (pl.col('unit_price') if 'unit_price' in items.columns else pl.lit(None)).alias('__current_sale_price'),
             (pl.col("order_flag").cast(pl.Utf8) if "order_flag" in items.columns else pl.lit(None, dtype=pl.Utf8).alias("order_flag")),
             (pl.col('__flag_from_upload').fill_null(False) if '__flag_from_upload' in items.columns
@@ -1679,10 +1715,10 @@ class OrderFeed:
         if review_pricing:
             certified=certified.with_columns(suspect.alias('__source_pricing_suspect'))
         else:
-            certified = certified.filter(~suspect | is_freight_surcharge(certified,'sku_id'))
+            certified = certified.filter(~suspect | is_policy_zero_sku(certified,'sku_id'))
         from .engine.cost_policy import is_brushing
         brushing = is_brushing(certified)
-        unpriced = ((unit <= 0) | unit.is_null()) & ~((unit == 0) & (pl.col("is_gift") | brushing)) & ~is_freight_surcharge(certified,'sku_id')
+        unpriced = ((unit <= 0) | unit.is_null()) & ~((unit == 0) & (pl.col("is_gift") | brushing)) & ~is_policy_zero_sku(certified,'sku_id')
         self._unpriced_cost_rows = int(certified.select(unpriced.sum()).item() or 0)
         if not review_pricing:
             certified = certified.filter(~unpriced)
@@ -1709,7 +1745,16 @@ class OrderFeed:
             _amount(orders, ["order_id"], "paid_amount").rename({"paid_amount": "order_paid"}), on="order_id", how="left",
         )
         price = pl.max_horizontal(pl.col("line_amount").fill_null(0.0), pl.col("order_paid").fill_null(0.0))
-        implausible = ~is_freight_surcharge(certified,'sku_id') & (
+        from .reship_sale_control import original_sale_controls
+        candidates=certified.filter((total>IMPLAUSIBLE_COST_FLOOR) & (price>0) & (total>IMPLAUSIBLE_COST_TO_PRICE*price))
+        controls=original_sale_controls(candidates,orders,items,relations)
+        certified=certified.join(controls,on=['order_id','sub_order_id'],how='left',maintain_order='left')
+        # Free replacements commonly carry a token collection amount. Compare
+        # their magnitude with the uniquely linked original sale only after
+        # proving current quantity/SKU and matching original purchased quantity.
+        # This reference never becomes income, a unit cost, or an allocation.
+        price=pl.max_horizontal(price,pl.col('__original_sale_control').fill_null(0.0))
+        implausible = ~is_policy_zero_sku(certified,'sku_id') & (
             (total > IMPLAUSIBLE_COST_FLOOR)
             & (price > 0)
             & (total > IMPLAUSIBLE_COST_TO_PRICE * price)
@@ -1728,14 +1773,21 @@ class OrderFeed:
             if not relations.is_empty() and {"relation_type", "target_order_id"} <= set(relations.columns)
             else []
         )
+        line_parent=pl.col('online_order_no')
+        if store.platform in {'taobao','douyin'}:
+            line_parent,_=original_parent(pl.col('item_order_no'),line_parent,
+                pl.coalesce('__parent_store_id','__item_store_id'),
+                pl.col('outer_sku').fill_null(pl.col('sub_order_id')),exported_orders,item_shop=pl.col('__item_store_id'))
         frame = certified.join(
             orders.select("order_id", "online_order_no", "order_time", "order_status_raw", "tracking_no",
+                          (pl.col('order_store_id').cast(pl.String) if 'order_store_id' in orders.columns else pl.lit(None,dtype=pl.String)).alias('__parent_store_id'),
                           (pl.col("order_remark").cast(pl.Utf8) if "order_remark" in orders.columns else pl.lit(None, dtype=pl.Utf8)).alias('__header_order_remark'),
                           pl.col("ship_time") if "ship_time" in orders.columns else pl.lit(None).alias("ship_time"),
                           pl.col("link_order_id") if "link_order_id" in orders.columns else pl.lit(None).alias("link_order_id")),
             on="order_id", how="left",
         ).join(
             items.select("order_id", "sub_order_id", "outer_sku", "tracking_no", "online_order_no",
+                         (pl.col('order_store_id').cast(pl.String) if 'order_store_id' in items.columns else pl.lit(None,dtype=pl.String)).alias('__item_store_id'),
                          pl.col("item_status_raw").cast(pl.Utf8) if "item_status_raw" in items.columns
                          else pl.lit(None, dtype=pl.Utf8).alias("item_status_raw")).rename(
                 {"tracking_no": "item_tracking_no", "online_order_no": "item_order_no"}),
@@ -1744,18 +1796,21 @@ class OrderFeed:
             pl.col("sub_order_id").cast(pl.Utf8).alias("internal_sub_order_id"),
             pl.col("order_id").cast(pl.Utf8).alias("internal_order_id"),
             (self._pdd_original(pl.col("outer_sku"), pl.col("item_order_no"), pl.col("online_order_no"))
-             if store.platform == "pdd" else pl.col("online_order_no")).cast(pl.Utf8).alias("order_id"),
+             if store.platform == "pdd" else line_parent).cast(pl.Utf8).alias("order_id"),
             (self._pdd_original(pl.col("outer_sku"), pl.col("item_order_no"), pl.col("online_order_no"))
-             if store.platform == "pdd" else pl.col("online_order_no")).cast(pl.Utf8).alias("original_order_id"),
+             if store.platform == "pdd" else line_parent).cast(pl.Utf8).alias("original_order_id"),
             pl.when(pl.col("outer_sku").cast(pl.Utf8).str.strip_chars().fill_null("") != "")
             .then(pl.col("outer_sku")).otherwise(pl.col("sub_order_id")).cast(pl.Utf8).alias("sub_order_id"),
             pl.col("sku_id").cast(pl.Utf8).alias("sku"),
+            pl.col('__upstream_cost_company').alias('cost_company_id'),
             pl.col("order_remark"),
+            pl.col('__original_sale_control_id'),
             pl.col("link_order_id").cast(pl.Utf8).alias("parent_internal_order_id"),
             pl.col("ship_time").cast(pl.Utf8),
             pl.col("quantity").cast(pl.Float64, strict=False),
             pl.col("unit_cost").cast(pl.Float64, strict=False),
             pl.col("cost_amount").cast(pl.Float64, strict=False).alias("total_cost"),
+            *([pl.col('__ledger_history_fact_period')] if '__ledger_history_fact_period' in certified.columns else []),
             pl.col("item_tracking_no").fill_null(pl.col("tracking_no")).cast(pl.Utf8).alias("tracking_no"),
             pl.when(pl.col("item_status_raw").is_in(["Cancelled", "已取消", "取消"]))
             .then(pl.col("item_status_raw")).otherwise(pl.col("order_status_raw")).cast(pl.Utf8).alias("order_state"),
@@ -1791,11 +1846,14 @@ class OrderFeed:
                 ])).otherwise(pl.lit(None, dtype=pl.Utf8)).alias("source_note"),
             ).drop("__reship_original")
         note=pl.col('source_note') if 'source_note' in frame.columns else pl.lit(None,dtype=pl.Utf8)
+        note=pl.when(pl.col('__original_sale_control_id').is_not_null()).then(pl.concat_str([
+            note,pl.concat_str([pl.lit('补发数量量级按原销售单 '),pl.col('__original_sale_control_id'),
+                pl.lit(' 的金额核对；补发收款不作为商品成本依据')])],separator='；',ignore_nulls=True)).otherwise(note)
         note = pl.concat_str([note, pl.col('__member_brushing_note')], separator='；', ignore_nulls=True)
         frame=frame.with_columns(pl.when(pl.col('__flag_from_upload')).then(pl.concat_str([
             note,pl.lit('订单台旗帜缺失；依据同店原始聚水潭表内部订单 '),pl.col('internal_order_id'),pl.lit(' 的一致旗帜补全')
         ],ignore_nulls=True)).otherwise(note).alias('source_note'))
-        return self._anchors(frame, fingerprint, "订单台日期时点成本")
+        return self._anchors(frame.drop('__original_sale_control_id'), fingerprint, "订单台日期时点成本")
 
     def _after_frame(
         self, after: pl.DataFrame, items: pl.DataFrame, order_items: pl.DataFrame,
@@ -1834,7 +1892,8 @@ class OrderFeed:
             id=template_id, source=source, name=template_id, match_columns=(roles[0][0],),
             bindings=tuple(ColumnBinding(role=role, columns=(role,), kind=kind) for role, kind in roles),
             time_slots={
-                slot: role for slot, role in (("order_date", "order_time"), ("pay_date", "pay_time"))
+                slot: slot if any(candidate == slot for candidate, _ in roles) else role
+                for slot, role in (("order_date", "order_time"), ("pay_date", "pay_time"))
                 if any(candidate == role for candidate, _ in roles)
             },
         )
@@ -1849,7 +1908,7 @@ class OrderFeed:
             ("order_state", "text"), ("order_type", "text"),
             ("order_flag", "text"), ("order_remark", "text"), ("internal_order_id", "text"),
             ("freight_attribution_evidence", "text"),
-            ("order_time", "time"), ("pay_time", "time"),
+            ("order_date", "time"), ("order_time", "time"), ("pay_time", "time"),
             ("store_name", "text"),
         ])
 

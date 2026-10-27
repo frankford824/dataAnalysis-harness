@@ -58,9 +58,15 @@ def test_bulk_validation_is_atomic_and_closed_period_remains_frozen(tmp_path):
     assert bad.status_code == 400
     assert not registry.active("s1")[1]
     old = {"can_close": True, "findings": [], "missing_sources": [],
+           "statement":[{"id":"n_receipt","name":"销售收入","value":246.8,"available":True}],
            "commission": {"total": 12.34, "base_total": 246.8, "people": [{"person": "旧人员", "amount": 12.34}]}}
     run_id = ws.record("s1", "2026-06", old, [], evidence_ready=True)
-    ws.close_period("s1", "2026-06", by="tester", note="原月结")
+    from ledger.model.schema import Overhead
+    base=_model()
+    close_model=base.model_copy(update={'statement':tuple(
+        node.model_copy(update={'headline':'revenue'}) if node.id=='n_receipt' else node for node in base.statement),
+        'overheads':(Overhead(period='2026-06',amount=0,name='夹具已确认零兼职'),)})
+    ws.close_period("s1", "2026-06", by="tester", note="原月结",model=close_model)
     frozen = ws.state("s1", "2026-06")
     assert frozen.run_id == run_id
     res = c.post("/api/commission-v2/schemes", json={"store_id": "s1", "product_id": "123456789001", "body": body,

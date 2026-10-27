@@ -1,0 +1,321 @@
+{
+  "schema": 2,
+  "kind": "redacted_local_corpus_adjudication_snapshot",
+  "snapshot": {
+    "report_created_at_utc": "2026-10-27T09:36:35.674230+00:00",
+    "run_timestamps": [
+      "2026-10-27T02:15:59.714885-07:00",
+      "2026-10-27T02:23:37.223276-07:00",
+      "2026-10-27T02:28:12.267375-07:00"
+    ],
+    "phase": "local_legacy_corpus_diagnostics_before_readonly_production_acquisition",
+    "production_accessed_in_this_snapshot": false,
+    "scope_note": "This flag describes only this earlier local snapshot, not the entire task; a later readonly production acquisition is separate."
+  },
+  "formal_release_ready": false,
+  "baseline_modified": false,
+  "expected_values_modified": false,
+  "full_private_report": {
+    "path": "/home/wsfwk/.ledger-readonly-20261027/legacy-diagnostics/snapshot-20261027-093635/full-report.json",
+    "sha256": "0f7d7bee417e441cb320d05d24c43c6a38c2c1f0bc48959c7d36c2a7de9288d4"
+  },
+  "initial": {
+    "passed": 2,
+    "failed": 12,
+    "test_count": 14,
+    "tests": [
+      {
+        "case_ref": "842d5677a9bdc87570a9d7d7",
+        "status": "failed",
+        "reason_codes": [
+          "unclassified_local_diagnostic"
+        ],
+        "failure_message_sha256": "48a673621bc43ad3024d898455f4c69368e3b789040f2b14157db099585b3eb5"
+      },
+      {
+        "case_ref": "9a3e3f619ff9b05e5a085527",
+        "status": "failed",
+        "reason_codes": [
+          "unclassified_local_diagnostic"
+        ],
+        "failure_message_sha256": "3a9a66753bf74b2adf39ebc6d01c2fc9bed895808dac14ff84f18be39c88296a"
+      },
+      {
+        "case_ref": "1c3fa7a30d9a781f43cc3352",
+        "status": "failed",
+        "reason_codes": [
+          "unclassified_local_diagnostic"
+        ],
+        "failure_message_sha256": "21366d96ab94bcf860c59f1d221e9bef7b647a7d73f37a48c20094e6d8ab119a"
+      },
+      {
+        "case_ref": "ead6414bad108835e510fa06",
+        "status": "passed",
+        "reason_codes": [
+          "unclassified_local_diagnostic"
+        ],
+        "failure_message_sha256": null
+      },
+      {
+        "case_ref": "1f76bd3d559ab04dd560e142",
+        "status": "failed",
+        "reason_codes": [
+          "shared_attribution_unresolved",
+          "amount_expectation_difference"
+        ],
+        "failure_message_sha256": "d5a34b3bd4ae3790c158c8a94ea422e2664b37d200761bc6d47b7abcb41efc43"
+      },
+      {
+        "case_ref": "b185318bbf6b49636cd28667",
+        "status": "failed",
+        "reason_codes": [
+          "shared_attribution_unresolved",
+          "amount_expectation_difference"
+        ],
+        "failure_message_sha256": "34100e7168388a4d898bf3be420cc213d8115e57c67fd822dd3662febe5e60dc"
+      },
+      {
+        "case_ref": "80c6f4c3fd403308de1b11ae",
+        "status": "failed",
+        "reason_codes": [
+          "shared_attribution_unresolved",
+          "amount_expectation_difference"
+        ],
+        "failure_message_sha256": "5b2e6428d1e90a2cd7712f7b976d07f598fc9d9f390eae2507de6a2f6a5dcc81"
+      },
+      {
+        "case_ref": "a42456dd08ef533cbebb8610",
+        "status": "failed",
+        "reason_codes": [
+          "unclassified_local_diagnostic"
+        ],
+        "failure_message_sha256": "1fdc67ab12aba01dac592fe42d3a3e7a40ed6ea9a29a58296d6759ff614ed17f"
+      },
+      {
+        "case_ref": "2d4568e22620c2ef01809f27",
+        "status": "failed",
+        "reason_codes": [
+          "unclassified_local_diagnostic"
+        ],
+        "failure_message_sha256": "e474829ac7ffc0956873df96477d541f6cf64e686f54cf819f60f90e30f9cc13"
+      },
+      {
+        "case_ref": "d8acf2791ff4edd1ca210861",
+        "status": "failed",
+        "reason_codes": [
+          "order_spine_material_gap",
+          "amount_expectation_difference"
+        ],
+        "failure_message_sha256": "7dd6ab5ce8e9e2db4cb17e47576827ff2c854135f205cbaca442a57cb0ac20ab"
+      },
+      {
+        "case_ref": "4ff9cded1069748e03c920a8",
+        "status": "failed",
+        "reason_codes": [
+          "order_spine_material_gap"
+        ],
+        "failure_message_sha256": "b0403ff939fab3e9b59c5832dac38d864a14371d88e5439b1638feae732d7408"
+      },
+      {
+        "case_ref": "b151ef396511ca4088703df1",
+        "status": "passed",
+        "reason_codes": [
+          "order_spine_material_gap"
+        ],
+        "failure_message_sha256": null
+      },
+      {
+        "case_ref": "b0fcbe8da3058ee748a4244b",
+        "status": "failed",
+        "reason_codes": [
+          "order_spine_material_gap"
+        ],
+        "failure_message_sha256": "612be33e20b8011c4ecab245291e0c704e8e2ca6127c47a935dd8e986f45bc8d"
+      },
+      {
+        "case_ref": "62facd240e59d57f518b729c",
+        "status": "failed",
+        "reason_codes": [
+          "amount_expectation_difference",
+          "legacy_baseline_or_snapshot_difference"
+        ],
+        "failure_message_sha256": "10f84b7465a4b2e3c6a402d0228324f626847b60c0bae95c88e93daaf75fb430"
+      }
+    ]
+  },
+  "alias_binding_recheck": {
+    "passed": 0,
+    "failed": 2,
+    "test_count": 2,
+    "tests": [
+      {
+        "case_ref": "1c3fa7a30d9a781f43cc3352",
+        "status": "failed",
+        "reason_codes": [
+          "unclassified_local_diagnostic"
+        ],
+        "failure_message_sha256": "21366d96ab94bcf860c59f1d221e9bef7b647a7d73f37a48c20094e6d8ab119a"
+      },
+      {
+        "case_ref": "842d5677a9bdc87570a9d7d7",
+        "status": "failed",
+        "reason_codes": [
+          "unclassified_local_diagnostic"
+        ],
+        "failure_message_sha256": "48a673621bc43ad3024d898455f4c69368e3b789040f2b14157db099585b3eb5"
+      }
+    ]
+  },
+  "active_store_scope_check": {
+    "passed": 1,
+    "failed": 0,
+    "test_count": 1,
+    "tests": [
+      {
+        "case_ref": "702df7719debe337f125ba06",
+        "status": "passed",
+        "reason_codes": [
+          "legacy_baseline_or_snapshot_difference"
+        ],
+        "failure_message_sha256": null
+      }
+    ]
+  },
+  "materials": [
+    {
+      "material_ref": "d25c513c37ac907105e5370c",
+      "sha256": "a75d1e0e9b2050f14be88fca9d526aa805c4853760340727df92819dfc4c1fb4",
+      "rows": 21988,
+      "period_counts": {
+        "order_date": [
+          {
+            "order_date": "2026-05",
+            "count": 21988
+          }
+        ]
+      },
+      "historical_evidence_column_count": 3
+    },
+    {
+      "material_ref": "7d55981707a3bf96eca0e470",
+      "sha256": "374fbf55bf830268a3197bb5c42d95ece2f43c6a38b9206c349797a36622ade2",
+      "rows": 70957,
+      "period_counts": {
+        "order_date": [
+          {
+            "order_date": "2026-05",
+            "count": 42232
+          },
+          {
+            "order_date": "2026-06",
+            "count": 28725
+          }
+        ]
+      },
+      "historical_evidence_column_count": 3
+    },
+    {
+      "material_ref": "7b8c6b00a4020cd8b6f2e0e5",
+      "sha256": "24b6adca5fde327d4a941dc40eb1129dd3961cc139ab4f4b9e618025ed62961a",
+      "rows": 3085,
+      "period_counts": {
+        "order_date": [
+          {
+            "order_date": "2026-05",
+            "count": 3085
+          }
+        ]
+      },
+      "historical_evidence_column_count": 3
+    },
+    {
+      "material_ref": "14e09caa436feb54b0c8ae1a",
+      "sha256": "6ef78d0fc7df6a700932f3e66fb7d57d6d2d7212044f0fc7a1f6a41bca1bfd60",
+      "rows": 10370,
+      "period_counts": {
+        "order_date": [
+          {
+            "order_date": "2026-05",
+            "count": 6170
+          },
+          {
+            "order_date": "2026-06",
+            "count": 4200
+          }
+        ]
+      },
+      "historical_evidence_column_count": 3
+    },
+    {
+      "material_ref": "b40c9ff1a24e34d33ed231a7",
+      "sha256": "9e4488107c77ee1a3debabd1aa128e4d8dfa5647c78b7eb206d6ced879e9df7c",
+      "rows": 254,
+      "period_counts": {
+        "order_date": [
+          {
+            "order_date": "2026-05",
+            "count": 254
+          }
+        ]
+      },
+      "historical_evidence_column_count": 3
+    },
+    {
+      "material_ref": "8a08bc9647d455eed8715650",
+      "sha256": "48dd6e8e867741173e9452c78b2bfe22b779eb1a91a2a99529dd8cc983899b2d",
+      "rows": 1379,
+      "period_counts": {
+        "order_date": [
+          {
+            "order_date": "2026-05",
+            "count": 373
+          },
+          {
+            "order_date": "2026-06",
+            "count": 1006
+          }
+        ]
+      },
+      "historical_evidence_column_count": 3
+    }
+  ],
+  "evidence_files": [
+    {
+      "evidence_ref": "0",
+      "kind": "xml",
+      "sha256": "b0758af94df21b6fccb40886a31fcfedeecca6c7efd7b8b22a83dcf857a29c3c",
+      "local_private_copy": "/home/wsfwk/.ledger-readonly-20261027/legacy-diagnostics/snapshot-20261027-093635/run-evidence-0.xml"
+    },
+    {
+      "evidence_ref": "1",
+      "kind": "log",
+      "sha256": "e01c7e13c804112e9adf71ef0c1d48cfecd7b8b8ace287a819ba31d064d0dd77",
+      "local_private_copy": "/home/wsfwk/.ledger-readonly-20261027/legacy-diagnostics/snapshot-20261027-093635/run-evidence-1.log"
+    },
+    {
+      "evidence_ref": "2",
+      "kind": "xml",
+      "sha256": "07435b4e900d934240b9b538cae9c3ea20c946d1256bf22d2d905dd5397ffca4",
+      "local_private_copy": "/home/wsfwk/.ledger-readonly-20261027/legacy-diagnostics/snapshot-20261027-093635/run-evidence-2.xml"
+    },
+    {
+      "evidence_ref": "3",
+      "kind": "log",
+      "sha256": "e7200078e1f9c771cf07706ac60ac1cd6f9bb352378a6b374d926a8edaf403e0",
+      "local_private_copy": "/home/wsfwk/.ledger-readonly-20261027/legacy-diagnostics/snapshot-20261027-093635/run-evidence-3.log"
+    },
+    {
+      "evidence_ref": "4",
+      "kind": "json",
+      "sha256": "86a136d90282a55fdac8071f5bebaddecf91479167ad6759cf14d890a6534c46",
+      "local_private_copy": "/home/wsfwk/.ledger-readonly-20261027/legacy-diagnostics/snapshot-20261027-093635/run-evidence-4.json"
+    },
+    {
+      "evidence_ref": "5",
+      "kind": "xml",
+      "sha256": "caeb026ac32a45b9569eeb0a99f536c4d1635818c5c092651586e8b6bcfc8e66",
+      "local_private_copy": "/home/wsfwk/.ledger-readonly-20261027/legacy-diagnostics/snapshot-20261027-093635/run-evidence-5.xml"
+    }
+  ],
+  "privacy_policy": "No original failure text, business names, order identifiers, money or source filenames are committed."
+}

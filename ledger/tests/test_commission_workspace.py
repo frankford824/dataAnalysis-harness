@@ -135,6 +135,19 @@ def test_report_pages_keep_whole_scope_total_and_export(view,key,tmp_path):
 def test_detail_drawer_stays_on_the_parent_calculation_after_new_run(tmp_path):
     ws,registry,people,client=fixture(tmp_path)
     closed=record(ws,people,'s1','2026-06',[12.34])
+    # This drawer test closes a single explicitly declared operating store;
+    # provide known income and an explicit zero labor total for the real gate.
+    import json
+    from test_commission import _model
+    from ledger.model.schema import Store,Overhead
+    from ledger.automation_checker import bind_model
+    close_model=_model(stores=(Store(id='s1',name='店铺1',platform='taobao'),))
+    close_model=close_model.model_copy(update={'statement':tuple(n.model_copy(update={'headline':'revenue'}) if n.id=='n_receipt' else n for n in close_model.statement),
+        'overheads':(Overhead(period='2026-06',amount=0),)})
+    bind_model(ws,close_model)
+    body=json.loads(ws.latest_run('s1','2026-06')['result'])
+    body['statement']=[{'id':'n_receipt','value':100,'available':True}]
+    with ws.conn:ws.conn.execute('UPDATE run SET result=? WHERE id=?',(json.dumps(body),closed))
     ws.close_period('s1','2026-06',by='test',note='原结账')
     record(ws,people,'s1','2026-06',[999])
     opened=record(ws,people,'s2','2026-06',[7.89])

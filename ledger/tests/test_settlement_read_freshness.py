@@ -72,7 +72,10 @@ def test_navigation_and_detail_etags_follow_metadata_only_rename(client):
 def test_closed_background_run_does_not_invalidate_visible_report(tmp_path,monkeypatch):
     from ledger import commission_reports
     ws,reg,people,client=fixture(tmp_path)
-    record(ws,people,'s1','2026-06',[10])
+    record(ws,people,'s1','2026-06',[10],revenue=100)
+    from finance_fixture import monthly_model
+    from ledger.automation_checker import bind_model
+    bind_model(ws,monthly_model(_model(),'s1','2026-06',0))
     ws.close_period('s1','2026-06',by='test',note='test')
     selection={'start':'2026-06','end':'2026-06'}
     before=client.post('/api/commission-v2/reports/query',json=selection).json()

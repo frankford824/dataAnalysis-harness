@@ -9,14 +9,19 @@ from ledger.allocation_correction import preview,publish
 from ledger.commission_registry import Registry
 from ledger.workspace import Workspace,WorkspaceError
 from ledger.storage_integrity import seal
+from ledger.model.schema import Overhead
 from test_manual_cost import model
 from test_commission_profit import _persist
+from automation_fixtures import capture_synthetic_summary_fixture
+from ledger.automation_checker import bind_model
 
 
 def case(tmp_path):
     m=model();ws=Workspace(tmp_path);reg=Registry(tmp_path)
     a=reg.person_save({'name':'甲'},'test','test')['id'];b=reg.person_save({'name':'乙'},'test','test')['id']
-    sid='taobao_mt9scjag';period='2026-06'
+    sid=m.stores[0].id;period='2026-06'
+    m=m.model_copy(update={'stores':(m.store(sid),),'commission':(),
+        'overheads':(Overhead(period=period,amount=0,name='夹具已确认零兼职'),)})
     data={'spine_row':[0,1],'order_id':['master']*2,'sub_order_id':['child1','child2'],
         'product_id':['p1','p2'],'product_name':['商品','赠品'],'person_id':[a,b],'person':['甲','乙'],
         'status':['distribute']*2,'share':[.05,.05],'total_rate':[.05,.05],
@@ -33,14 +38,17 @@ def case(tmp_path):
         'products':[]}
     cid=_persist(reg,a,rows=data,run_id=1,store_id=sid,period=period);summary['calculation_id']=cid
     raw={'store_id':sid,'period':period,'can_close':True,'findings':[],'missing_sources':[],
-         'commission':summary,'statement':[{'id':'net_profit','name':'利润','value':70.,'available':True}]}
+         'commission':summary,'statement':[{'id':'n_receipt','name':'销售收入','value':100.,'available':True},
+             {'id':'net_profit','name':'利润','value':70.,'available':True}]}
     run=ws.record(sid,period,raw,[]);assert run==1
     facts.write_parquet(ws.facts_path(run));seal(ws.facts_path(run))
+    bind_model(ws,m)
+    capture_synthetic_summary_fixture(ws,m,run)
     manual=deepcopy(raw);manual['manual_payout']={'source_run_id':run}
     manual['commission'].update(total=3.33,manual_amounts_after_labor=True,manual_confirmed=True)
     manual['commission']['people'][0]['amount']=1.11;manual['commission']['people'][1]['amount']=2.22
     ws.close_period(sid,period,note='人工确认实发',expected_run_id=run,manual_result=manual,
-                    manual_decision={'source_run_id':run,'payouts':[]},labor_cut='0.00')
+                    manual_decision={'source_run_id':run,'payouts':[]},labor_cut='0.00',model=m)
     with reg.connect() as conn:sha=conn.execute('SELECT sha FROM calculation WHERE id=?',(cid,)).fetchone()[0]
     return m,ws,reg,sid,raw,facts,details,original,current,sha
 

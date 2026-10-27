@@ -156,6 +156,9 @@ CREATE TABLE IF NOT EXISTS job (
 );
 CREATE INDEX IF NOT EXISTS job_kind_at ON job(kind,at DESC);
 CREATE INDEX IF NOT EXISTS job_status_at ON job(status,at);
+CREATE TABLE IF NOT EXISTS automation_dispatch (
+ store_id TEXT NOT NULL,fingerprint TEXT NOT NULL,at TEXT NOT NULL,
+ PRIMARY KEY(store_id,fingerprint));
 CREATE TABLE IF NOT EXISTS policy_version (
  id INTEGER PRIMARY KEY AUTOINCREMENT, store_id TEXT NOT NULL DEFAULT '',
  effective_from TEXT NOT NULL, recorded_at TEXT NOT NULL, actor TEXT NOT NULL,
@@ -447,7 +450,11 @@ class Registry:
                     for column, definition in [("next_attempt", "INTEGER NOT NULL DEFAULT 0"), ("error", "TEXT NOT NULL DEFAULT ''"),
                                                ("source_seq", "INTEGER NOT NULL DEFAULT 0"), ("source_fingerprint", "TEXT NOT NULL DEFAULT ''"),
                                                ("files_revision", "INTEGER NOT NULL DEFAULT 0"),
-                                               ("files_applied_revision", "INTEGER NOT NULL DEFAULT 0")]:
+                                               ("files_applied_revision", "INTEGER NOT NULL DEFAULT 0"),
+                                               ("lease_owner", "TEXT NOT NULL DEFAULT ''"),
+                                               ("lease_token", "INTEGER NOT NULL DEFAULT 0"),
+                                               ("lease_until", "INTEGER NOT NULL DEFAULT 0"),
+                                               ("attempt_count", "INTEGER NOT NULL DEFAULT 0")]:
                         if column not in fields:
                             conn.execute(f"ALTER TABLE pending ADD COLUMN {column} {definition}")
                     _migrate_store_member(conn)
@@ -459,7 +466,8 @@ class Registry:
         # Streaming HTTP iterators resume sequentially on different worker threads.
         # Only those private read connections opt out of thread affinity.
         conn = sqlite3.connect(self.path, timeout=30, check_same_thread=thread_affine)
-        conn.row_factory = sqlite3.Row
+        from .snapshot_store import install_reader
+        install_reader(conn)
         conn.execute("PRAGMA foreign_keys=ON")
         conn.execute("PRAGMA cache_size=-16384")
         conn.execute("PRAGMA mmap_size=268435456")
@@ -482,7 +490,8 @@ class Registry:
 
     @contextmanager
     def transaction(self):
-        with self.connect() as conn:
+        from .finance_guard import authority
+        with authority(self.root.parent),self.connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
             yield conn
 
@@ -1202,6 +1211,18 @@ class Registry:
         if not re.fullmatch(r"nas:[0-9a-f]{64}", fingerprint):
             raise RegistryError("原文件来源版本格式不正确")
         self._enqueue_changed_inputs(stores, fingerprint)
+
+    def enqueue_automation(self, stores: set[str], fingerprint: str) -> None:
+        """Idempotent delivery into pending, never a second accounting queue."""
+        if not re.fullmatch(r'automation:[0-9a-f]{64}',fingerprint):
+            raise RegistryError('自动任务来源版本格式不正确')
+        with self.transaction() as conn:
+            revision=conn.execute('SELECT revision FROM meta WHERE id=1').fetchone()[0]
+            for sid in sorted(stores):
+                added=conn.execute('INSERT OR IGNORE INTO automation_dispatch VALUES(?,?,?)',(sid,fingerprint,now()))
+                if not added.rowcount:continue
+                conn.execute('INSERT INTO pending(store_id,revision,source_fingerprint,files_revision,next_attempt) VALUES(?,?,?,1,?) ON CONFLICT(store_id) DO UPDATE SET revision=max(revision,excluded.revision),source_fingerprint=excluded.source_fingerprint,files_revision=files_revision+1,error=\'\'',
+                    (sid,revision,fingerprint,int(time.time())))
 
     def enqueue_cost_lines(self, store_id: str, period: str, revision: int) -> None:
         """Cost decisions reuse the durable input queue, not a new worker."""

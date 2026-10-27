@@ -4,13 +4,21 @@ import os
 
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import PlainTextResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
-from . import freight_review, freight_trial, store_classification
+from . import freight_review, freight_trial, freight_experiments, store_classification
 
 
 class ShipmentRequest(BaseModel):
     period: str
+
+
+class ExperimentRequest(BaseModel):
+    model_config = {'extra':'forbid'}
+    period: str
+    allow_zero_equal: bool = True
+    replay_of: str = Field(default='',max_length=32)
+    evidence_parent_id: str = Field(default='',max_length=32)
 
 
 def install(app, workspace, model, display_names):
@@ -46,6 +54,43 @@ def install(app, workspace, model, display_names):
     def guarded(operation):
         try:return operation()
         except freight_trial.InputError as exc:raise HTTPException(400,str(exc)) from exc
+
+    def experiments():return freight_experiments.manager(workspace().root)
+
+    @router.post('/experiments',status_code=202)
+    def experiment_start(body: ExperimentRequest):
+        return guarded(lambda:experiments().start(body.period,model(),
+            os.environ.get('LEDGER_ORDER_FEED_ROOT',r'D:\order\exchange\ledger-feed'),display_names(),
+            allow_zero_equal=body.allow_zero_equal,replay_of=body.replay_of,
+            evidence_parent_id=body.evidence_parent_id))
+
+    @router.get('/experiments/{experiment_id}')
+    def experiment_result(experiment_id: str,offset: int=0,limit: int=50,
+                          store_id: str='',only_category: str='',changed_only: bool=False):
+        return guarded(lambda:freight_experiments.query(experiments(),experiment_id,
+            offset=offset,limit=limit,store_id=store_id,only_category=only_category,changed_only=changed_only))
+
+    @router.get('/experiments/{experiment_id}/diff.csv')
+    def experiment_export(experiment_id: str,scope_fingerprint: str='',
+                          store_id: str='',only_category: str='',changed_only: bool=False):
+        content=guarded(lambda:freight_experiments.export(experiments(),experiment_id,
+            scope_fingerprint=scope_fingerprint,store_id=store_id,only_category=only_category,changed_only=changed_only))
+        return PlainTextResponse(content,media_type='text/csv; charset=utf-8',headers={
+            'Content-Disposition':"attachment; filename*=UTF-8''"+quote('运费同输入实验逐笔差异.csv'),
+            'Cache-Control':'private,no-cache'})
+
+    @router.get('/experiments/{experiment_id}/groups')
+    def experiment_groups(experiment_id:str,offset:int=0,limit:int=50,store_id:str='',only_category:str=''):
+        return guarded(lambda:freight_experiments.group_query(experiments(),experiment_id,
+            offset=offset,limit=limit,store_id=store_id,only_category=only_category))
+
+    @router.get('/experiments/{experiment_id}/group-diff.csv')
+    def experiment_group_export(experiment_id:str,scope_fingerprint:str='',store_id:str='',only_category:str=''):
+        content=guarded(lambda:freight_experiments.group_export(experiments(),experiment_id,
+            scope_fingerprint=scope_fingerprint,store_id=store_id,only_category=only_category))
+        return PlainTextResponse(content,media_type='text/csv; charset=utf-8',headers={
+            'Content-Disposition':"attachment; filename*=UTF-8''"+quote('运费同源组件差异.csv'),
+            'Cache-Control':'private,no-cache'})
 
     @router.get('/store-classification')
     def classification_catalog():

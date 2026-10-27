@@ -1,4 +1,7 @@
+import json
 from types import SimpleNamespace
+
+import pytest
 
 from ledger.commission_manager import Manager
 from ledger.commission_registry import Registry
@@ -22,6 +25,98 @@ def test_new_source_while_calculating_remains_in_durable_queue(tmp_path, monkeyp
         pending = conn.execute("SELECT * FROM pending WHERE store_id='s1'").fetchone()
         assert pending["source_seq"] == 20
     assert registry.revision() == 0
+
+
+def test_new_automation_attempt_during_calculation_is_not_marked_completed(tmp_path,monkeypatch):
+    from ledger import automation_actions as actions
+    monkeypatch.setenv('LEDGER_ORDER_FEED_ENABLED','0')
+    ws=Workspace(tmp_path);model=_model();registry=Registry(tmp_path)
+    human={'id':'finance','kind':'human','authenticated':True}
+    actions.advance(ws,model,'2026-07','initial',human)
+    injected=False
+    def compute(*args,**kwargs):
+        nonlocal injected
+        if not injected:
+            injected=True
+            actions.advance(ws,model,'2026-07','newer-during-calculation',human)
+        # Deliberate Manager protocol stub: this test proves generation/attempt
+        # acknowledgement only, and does not claim any financial readiness.
+        return SimpleNamespace(failure=None,periods=[{'run_id':99}])
+    monkeypatch.setattr('ledger.commission_manager.service.recompute',compute)
+    manager=Manager(lambda:ws,lambda:model);manager.once()
+    assert ws.conn.execute("SELECT count(*) FROM automation_attempt WHERE state='queued'").fetchone()[0]==2
+    assert not ws.conn.execute("SELECT 1 FROM automation_attempt WHERE state='completed'").fetchone()
+    with registry.transaction() as conn:conn.execute('UPDATE pending SET next_attempt=0')
+    manager.once()
+    assert ws.conn.execute("SELECT count(*) FROM automation_attempt WHERE state='completed'").fetchone()[0]==2
+
+
+@pytest.mark.parametrize("updated_store", ["s1", "s2"], ids=["same-store", "other-store"])
+def test_completed_input_retires_only_its_own_captured_work(tmp_path, monkeypatch, updated_store):
+    from ledger.engine.runtime import Ingestion
+    from ledger.order_feed import OrderFeed
+    from test_order_feed import FakeClient, _fixture
+
+    monkeypatch.setenv("LEDGER_ORDER_FEED_ENABLED", "1")
+    ws = Workspace(tmp_path / "workspace")
+    registry = Registry(ws.root)
+    root = tmp_path / "feed"
+    feed = OrderFeed(ws.root, client=FakeClient(_fixture(root)), feed_root=root)
+    feed.sync()
+    with feed._connect() as conn:
+        conn.execute("UPDATE feed_store SET ledger_store_id='s1' WHERE order_store_id='10'")
+    registry.enqueue_source({"s1"}, "order-feed:s1:11")
+    frames = feed._frames
+
+    def read_frames(*args, **kwargs):
+        result = frames(*args, **kwargs)
+        with feed._connect() as conn:
+            conn.execute("UPDATE feed_state SET consumed_seq=12,source_latest_seq=12 WHERE id=1")
+            conn.execute(
+                "INSERT INTO feed_entity(entity_type,entity_id,seq,revision,operation,order_store_id) "
+                "VALUES('order','new-order',12,12,'upsert',?)",
+                ("10" if updated_store == "s1" else "20",),
+            )
+        registry.enqueue_source({updated_store}, "order-feed:s1:12")
+        return result
+
+    monkeypatch.setattr(feed, "_frames", read_frames)
+
+    def compute(_ws, _model, store, **kwargs):
+        ingestion = Ingestion(model=None)
+        feed.append_to(ingestion, store)
+        return SimpleNamespace(failure=None, periods=[{
+            "run_id": 99, "source_sync_pending": ingestion.source_sync_pending,
+        }])
+
+    monkeypatch.setattr("ledger.commission_manager.service.recompute", compute)
+    Manager(lambda: ws, _model).once()
+    with registry.connect() as conn:
+        pending = [dict(row) for row in conn.execute("SELECT * FROM pending")]
+        job = json.loads(conn.execute("SELECT result FROM job").fetchone()[0])
+    assert not job["provisional"]
+    assert [(row["store_id"], row["source_seq"]) for row in pending] == [(updated_store, 12)]
+
+
+@pytest.mark.parametrize("open_pending", [False, True], ids=["open-complete", "open-syncing"])
+def test_frozen_sync_flags_do_not_keep_current_work_pending(tmp_path, monkeypatch, open_pending):
+    monkeypatch.setenv("LEDGER_ORDER_FEED_ENABLED", "0")
+    ws = Workspace(tmp_path)
+    registry = Registry(tmp_path)
+    registry.enqueue_source({"s1"}, "order-feed:snapshot:10")
+    periods = [
+        {"period": "2026-07", "state": "closed", "source_sync_pending": True},
+        {"period": "2026-08", "state": "open", "source_sync_pending": open_pending},
+    ]
+    monkeypatch.setattr("ledger.commission_manager.service.recompute",
+                        lambda *a, **k: SimpleNamespace(failure=None, periods=periods))
+    Manager(lambda: ws, _model).once()
+    with registry.connect() as conn:
+        pending = conn.execute("SELECT 1 FROM pending WHERE store_id='s1'").fetchone()
+        job = json.loads(conn.execute("SELECT result FROM job").fetchone()[0])
+    assert bool(pending) is open_pending
+    assert job["provisional"] is open_pending
+    assert periods[0]["source_sync_pending"] is True
 
 
 def test_repeated_source_updates_preserve_waiting_time_and_worker_lease(tmp_path, monkeypatch):

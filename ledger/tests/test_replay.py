@@ -127,7 +127,7 @@ class TestTheGateActuallyCatchesThings:
     def test_ignores_sub_penny_noise(self) -> None:
         """浮点尾数不算变化，否则门槛天天误报，然后就没人看它了。"""
         assert not self._pair(
-            {"v": 100.0}, {"v": 100.0 + TOLERANCE / 2}
+            {"value": 100.0}, {"value": 100.0 + TOLERANCE / 2}
         )
 
     def test_catches_can_close_flipping(self) -> None:

@@ -167,6 +167,12 @@ def certified(model, result: dict, source_run_id: int, confirmed: dict,
         commission["notes"].append(
             f"提交金额等于扣兼职前试算，已按兼职分摊 {money_float(labor_cut):,.2f} 元折算")
     decided["commission"] = commission
+    # Certification replaces the cost blockers it actually resolves. Do not
+    # inherit the raw trial's false readiness after all those checks pass;
+    # unrelated hard findings and missing sources still keep it false.
+    decided['can_close']=bool(trial['profit'] is not None
+        and not decided.get('missing_sources') and not decided.get('source_sync_pending')
+        and not any(f.get('blocking') and not f.get('passed') for f in decided.get('findings',[])))
     decision = {"source_run_id": source_run_id, "observed": trial["observed"],
                 "confirmed": trial["confirmed"], "payouts": [
                     {"person_id": pid, "amount": money_float(amount)}

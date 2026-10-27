@@ -83,7 +83,8 @@ def test_bad_embedded_component_row_is_isolated_without_guessing_cost(tmp_path):
     costs=pl.DataFrame({
         'internal_order_id':['I','GOOD'],'internal_sub_order_id':['L','G'],
         'pricing_suspect':[False,False],'failure_reason':[None,None],
-        'cost_source':['register','register'],'cost_status':['priced','priced'],
+        # Isolate component validity from the independent history-source gate.
+        'cost_source':['history','history'],'cost_status':['priced','priced'],
         'cost_as_of':['2026-06-01','2026-06-01'],'unit_cost':[1.0,2.0],
         'quantity':[1.0,1.0],
         'pricing_evidence':[json.dumps({'order_date':'2026-06-01'})]*2,

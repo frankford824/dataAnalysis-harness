@@ -61,7 +61,10 @@ def context(ws,store_id,period,run_id,model,offset=0,limit=20):
     for d in payload.get('deduplication',[]):
         if d.get('status')=='conflict':
             for g in d.get('groups',[]):groups[g['group_id']]=g
-    frame=pl.read_parquet(path,columns=['file_sha','sheet','row_no','linked'])
+    try:
+        frame=pl.read_parquet(path,columns=['file_sha','sheet','row_no','linked'])
+    except (pl.exceptions.PolarsError,OSError) as exc:
+        raise WorkspaceError('流水证据的必要字段或留档内容不可读，请按当前服务重新核算') from exc
     anchors={anchor(r) for r in frame.unique().to_dicts()}
     linked={anchor(r) for g in groups.values() for r in g['members']
             if any(s.get('linked') for s in r.get('scopes',[]))}
@@ -122,8 +125,7 @@ def confirm(ws,model,store_id,period,run_id,group_id,chosen,reason,acknowledged,
             reason=reason.strip(),actor=actor,at=datetime.now(timezone.utc).isoformat(),evidence=found)
         # Strict transactional audit; unlike best-effort config logging, failure
         # aborts this decision and does not claim it was saved.
-        with ws.conn:
-            ws.conn.execute('BEGIN IMMEDIATE')
+        with ws.transaction():
             fresh=ws.latest_run(store_id,period)
             if not fresh or fresh['id']!=run_id or not active_shas(ws,store_id).issubset(set(json.loads(fresh['shas']))):
                 raise WorkspaceError('提交时原始资料或计算已更新，请刷新核对')
@@ -135,8 +137,7 @@ def confirm(ws,model,store_id,period,run_id,group_id,chosen,reason,acknowledged,
 def revoke(ws,store_id,period,run_id,group_id,reason,actor):
     from .service import _store_lock
     if len(reason.strip())<8 or not actor.strip():raise WorkspaceError('撤销需填写核对人及至少8字原因')
-    with _store_lock(store_id),guard(ws.root,store_id,period),ws.conn:
-        ws.conn.execute('BEGIN IMMEDIATE')
+    with _store_lock(store_id),guard(ws.root,store_id,period),ws.transaction():
         state=ws.state(store_id,period);latest=ws.latest_run(store_id,period)
         if state and state.state=='closed':raise WorkspaceError('已结账账期不允许直接撤销核对')
         if not latest or latest['id']!=run_id:raise WorkspaceError('计算已更新，请刷新')
@@ -196,7 +197,8 @@ def apply_to_facts(facts,decisions):
         group=json.loads(proof);decision=decisions.get(group['group_id'])
         if not decision:continue
         chosen[proof]=decision['chosen']
-        notes[proof]=f"流水关联已人工核对：{decision['reason']}；核对人 {decision['actor']}；时间 {decision['at']}；原始候选记录均保留审计"
+        mode='确定性规则核对' if str(decision.get('actor','')).startswith('service:deterministic') else '人工核对'
+        notes[proof]=f"流水关联已{mode}：{decision['reason']}；核对人 {decision['actor']}；时间 {decision['at']}；原始候选记录均保留审计"
     if not chosen:return facts
     selected=pl.col('statement_evidence').replace_strict(chosen,default=None,return_dtype=pl.String)
     key=pl.concat_str(pl.col('file_sha'),pl.lit(':'),pl.col('sheet').fill_null(''),pl.lit(':'),pl.col('row_no').cast(pl.String))

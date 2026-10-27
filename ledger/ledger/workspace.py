@@ -34,6 +34,7 @@ import shutil
 import sqlite3
 import threading
 import uuid
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
@@ -250,6 +251,9 @@ create trigger if not exists bump_cost_line_insert after insert on cost_line_log
 end;
 """
 
+from .snapshot_store import SCHEMA as SNAPSHOT_SCHEMA
+_SCHEMA += SNAPSHOT_SCHEMA
+
 #: 后加的列。老工作区打开时补上，不用导数据。
 _COLUMNS = {
     "run_report_slice": {"overview_json": "text"},
@@ -351,6 +355,8 @@ class Workspace:
             _migrate(conn)
             from .workspace_read_version import install as install_read_versions
             install_read_versions(conn)
+            from .automation_store import install as install_automation
+            install_automation(conn)
             conn.commit()
         finally:
             conn.close()
@@ -373,7 +379,8 @@ class Workspace:
         conn = getattr(self._local, "conn", None)
         if conn is None:
             conn = sqlite3.connect(self.root / "workspace.db", check_same_thread=False)
-            conn.row_factory = sqlite3.Row
+            from .snapshot_store import install_reader
+            install_reader(conn)
             # WAL在Workspace启动时只设置一次。连接这里只保留等待策略。
             # 写与写还是要排队。默认排不到就立刻抛
             # "database is locked"：两个人同时交表，后一个直接失败，而他交的表
@@ -393,6 +400,24 @@ class Workspace:
         if conn is not None:
             conn.close()
             self._local.conn = None
+
+    @contextmanager
+    def transaction(self):
+        """Nest financial actions without committing the caller's journal."""
+        conn=self.conn
+        nested=conn.in_transaction
+        name='automation_'+uuid.uuid4().hex
+        conn.execute('SAVEPOINT '+name if nested else 'BEGIN IMMEDIATE')
+        try:
+            yield conn
+            if nested:conn.execute('RELEASE SAVEPOINT '+name)
+            else:conn.commit()
+        except BaseException:
+            if nested:
+                conn.execute('ROLLBACK TO SAVEPOINT '+name)
+                conn.execute('RELEASE SAVEPOINT '+name)
+            else:conn.rollback()
+            raise
 
     # ------------------------------------------------------------------ #
     # 留档
@@ -657,6 +682,7 @@ class Workspace:
         old=json.loads(row['result'])
         return (row['id'],old) if comparable(old)==comparable(result) else None
 
+    @financial_decision
     def record(
         self,
         store_id: str,
@@ -674,6 +700,8 @@ class Workspace:
                 "select state from period where store_id=? and period=?", (store_id, period)
             ).fetchone()
             payload = json.dumps(result, ensure_ascii=False)
+            from .snapshot_store import store
+            stored_payload=store(conn,payload,self.root)
             cur = conn.execute(
                 "insert into run "
                 "(store_id, period, at, can_close, evidence_ready, engine, "
@@ -683,7 +711,7 @@ class Workspace:
                     store_id, period, _now(), int(bool(result.get("can_close"))),
                     int(evidence_ready), engine_version(),
                     model_revision or None, input_fingerprint or None,
-                    json.dumps(sorted(shas)), payload,
+                    json.dumps(sorted(shas)), stored_payload,
                 ),
             )
             run_id = int(cur.lastrowid or 0)
@@ -717,11 +745,12 @@ class Workspace:
                         "message": message,
                     })
             payload = json.dumps(result, ensure_ascii=False)
+            from .snapshot_store import store
             conn.execute(
                 "update run set evidence_ready=?, evidence_error=?, can_close=?, result=? where id=?",
                 (
                     int(ready), error[:1000], int(bool(result.get("can_close"))),
-                    payload, run_id,
+                    store(conn,payload,self.root), run_id,
                 ),
             )
             commission_slice.save(conn, run_id, result, kind='run', payload_text=payload)
@@ -735,7 +764,8 @@ class Workspace:
         """
         d = self.root / "runs"
         d.mkdir(parents=True, exist_ok=True)
-        return d / f"{run_id}.parquet"
+        from .run_artifacts import path
+        return path(self.root,run_id)
 
     def pricing_gaps_path(self, run_id: int) -> Path:
         return self.facts_path(run_id).with_suffix(".pricing.parquet")
@@ -776,10 +806,10 @@ class Workspace:
         rows = self.conn.execute(
             "select p.period, p.state, p.changed_at, p.by, p.note, "
             "r.id as shown_id, r.at as shown_at, "
-            "json_extract(s.overview_json,'$.can_close') as can_close, "
-            "json_extract(s.overview_json,'$.cost_review.requires_human') as cost_human, "
+            "json_extract(snapshot_json(s.overview_json),'$.can_close') as can_close, "
+            "json_extract(snapshot_json(s.overview_json),'$.cost_review.requires_human') as cost_human, "
             "case when p.state=? and exists (select 1 from version nv "
-            "where nv.store_id in (p.store_id, ?) and nv.id>p.at_version) then 1 else 0 end as stale "
+            "where nv.store_id in (p.store_id, ?) and nv.id>max(p.at_version,coalesce((select json_extract(av.manifest_json,'$.version') from automation_run_validation av where av.run_id=p.run_id order by av.rowid desc limit 1),0))) then 1 else 0 end as stale "
             "from period p left join run r on r.id = case "
             "when p.state=? and p.run_id is not null then p.run_id else "
             "(select lr.id from run lr where lr.store_id=p.store_id and lr.period=p.period "
@@ -800,7 +830,7 @@ class Workspace:
     def previous_gap_basis(self, store_id: str, period: str) -> dict[str, Any] | None:
         """缺口比对只需要上一期报表行，不要整份核算。"""
         row = self.conn.execute(
-            "select json_extract(coalesce(mf.result_json,r.result),'$.statement') as statement "
+            "select json_extract(snapshot_json(coalesce(mf.result_json,r.result)),'$.statement') as statement "
             "from period p left join run r on r.id = case "
             "when p.state=? and p.run_id is not null then p.run_id else "
             "(select lr.id from run lr where lr.store_id=p.store_id and lr.period=p.period "
@@ -826,7 +856,7 @@ class Workspace:
             "r.id as shown_id, coalesce(mf.result_json,r.result) as shown_result, r.at as shown_at, "
             "r.engine as shown_engine, "
             "case when p.state=? and exists (select 1 from version nv "
-            "where nv.store_id in (p.store_id, ?) and nv.id>p.at_version) then 1 else 0 end as stale "
+            "where nv.store_id in (p.store_id, ?) and nv.id>max(p.at_version,coalesce((select json_extract(av.manifest_json,'$.version') from automation_run_validation av where av.run_id=p.run_id order by av.rowid desc limit 1),0))) then 1 else 0 end as stale "
             "from run r left join period p on p.store_id=r.store_id and p.period=r.period "
             "left join run_labor rl on rl.run_id=p.run_id "
             "left join manual_finance mf on mf.run_id=r.id "
@@ -873,7 +903,7 @@ class Workspace:
             "r.id as shown_id, coalesce(mf.result_json,r.result) as shown_result, r.at as shown_at, "
             "r.engine as shown_engine, "
             "case when p.state=? and exists (select 1 from version nv "
-            "where nv.store_id in (p.store_id, ?) and nv.id>p.at_version) then 1 else 0 end as stale "
+            "where nv.store_id in (p.store_id, ?) and nv.id>max(p.at_version,coalesce((select json_extract(av.manifest_json,'$.version') from automation_run_validation av where av.run_id=p.run_id order by av.rowid desc limit 1),0))) then 1 else 0 end as stale "
             "from period p left join run r on r.id = case "
             "when p.state=? and p.run_id is not null then p.run_id else "
             "(select lr.id from run lr where lr.store_id=p.store_id and lr.period=p.period "
@@ -930,9 +960,11 @@ class Workspace:
         labor_cut: str | None = None,
         manual_result: dict[str, Any] | None = None,
         manual_decision: dict[str, Any] | None = None,
+        model=None,
     ) -> PeriodState:
         """结账；允许人工确认无法追溯的业务事项，但不允许绕过证据留档。"""
         from .pricing_status import read_feed
+        from .automation_checker import assert_close
         run = self.latest_run(store_id, period)
         if run is None:
             raise WorkspaceError(f"{period} 还没算过账，不能结")
@@ -941,15 +973,18 @@ class Workspace:
         if not run["evidence_ready"]:
             why = run["evidence_error"] or "事实证据尚未完成留档"
             raise WorkspaceError(f"{period} 结不了账：{why}")
+        existing_state=self.conn.execute('SELECT state FROM period WHERE store_id=? AND period=?',(store_id,period)).fetchone()
+        if existing_state and existing_state['state']==CLOSED:
+            raise WorkspaceError(f'{period} 已结账；请先反结账再修改')
         result = json.loads(run["result"])
         if any(f.get('id') in {'promotion_integrity','promotion_scope_evidence'} and not f.get('passed') for f in result.get('findings',[])):
             raise WorkspaceError('推广原始证据范围有冲突或月份不明，不能人工忽略；请先核对原表并重算')
         if any(d.get("status") == "conflict" for d in result.get("deduplication", [])):
             raise WorkspaceError("原对账单流水存在冲突或精度丢失，不能人工忽略；请更正原始账单后重算")
         if manual_result is None and self.coverage_gaps_path(run["id"]).exists():
-            from .cost_lines import current
-            if current(self, run["id"], store_id, period)["reviewed_count"]:
-                raise WorkspaceError("本期有人工补录成本，请先预览并人工确认结账金额")
+            from .cost_lines import current,posted_current
+            if current(self, run["id"], store_id, period)["reviewed_count"] and not posted_current(self,run['id'],store_id,period):
+                raise WorkspaceError("本期补录成本尚未全部进入当前核算，请等待自动重算后确认月结")
         if manual_result is not None:
             if expected_run_id is None or not note.strip() or manual_decision is None:
                 raise WorkspaceError("人工确认成本需要当前运行号、金额和原因")
@@ -1004,9 +1039,31 @@ class Workspace:
                 labor_cut = str(amount.quantize(Decimal("0.01")))
             except (InvalidOperation, ValueError) as exc:
                 raise WorkspaceError("兼职分摊金额无效，不能冻结结账") from exc
-        with self.conn as conn:
-            if not conn.in_transaction:
-                conn.execute('BEGIN IMMEDIATE')
+        close_check = assert_close(
+            self, store_id, period, model=model, expected_run_id=expected_run_id,
+            ignored_blockers=ignored_blockers, manual_result=manual_result)
+        with self.transaction() as conn:
+            # Final validation belongs inside the writer transaction. Financial
+            # publication uses the same store-period guard as this method.
+            final_check = assert_close(
+                self, store_id, period, model=model, expected_run_id=run['id'],
+                ignored_blockers=ignored_blockers, manual_result=manual_result)
+            if final_check['input_sha'] != close_check['input_sha']:
+                raise WorkspaceError('预览后输入已变化，本次未结账，请重新核对')
+            company = final_check['overhead']
+            if company:
+                from .automation_store import encoded as automation_json
+                frozen = conn.execute('SELECT input_sha FROM automation_overhead_close WHERE period=? AND input_sha=?', (period,company['input_sha'])).fetchone()
+                if not frozen:
+                    conn.execute('INSERT INTO automation_overhead_close VALUES(?,?,?,?,?,?,?)',
+                        (period,company['input_sha'],company['total'],automation_json(company['basis']),
+                         automation_json(company['shares']),by,_now()))
+                expected_labor = company['shares'].get(store_id)
+                if expected_labor is None:
+                    raise WorkspaceError('本店不在本月已确认营业范围，不能结账')
+                if labor_cut is not None and Decimal(str(labor_cut)) != Decimal(expected_labor):
+                    raise WorkspaceError('兼职分摊金额与公司冻结依据不一致')
+                labor_cut = expected_labor
             if manual_result is not None:
                 entered = conn.execute(
                     'SELECT coalesce(max(id),0) FROM cost_line_log WHERE store_id=? AND period=?',
@@ -1070,6 +1127,7 @@ class Workspace:
         assert state is not None
         return state
 
+    @financial_decision
     def close_historical_period(
         self,
         store_id: str,
@@ -1107,7 +1165,12 @@ class Workspace:
             assert state is not None
             return state
         audit_note = f"{note.strip()}；依据：{reference.strip()}"
-        with self.conn as conn:
+        from .automation_checker import assert_legacy_close
+        checked=assert_legacy_close(self,store_id,period,cutoff)
+        with self.transaction() as conn:
+            final=assert_legacy_close(self,store_id,period,cutoff)
+            if final['input_sha']!=checked['input_sha']:
+                raise WorkspaceError('历史归档预览后依据已变化')
             version = conn.execute(
                 "select coalesce(max(id), 0) as v from version where store_id in (?,?)",
                 (store_id, SHARED_STORE_ID),
@@ -1123,6 +1186,7 @@ class Workspace:
         assert state is not None
         return state
 
+    @financial_decision
     def enrich_historical_snapshot(
         self,
         store_id: str,
@@ -1168,6 +1232,7 @@ class Workspace:
 
             if numbers(before) != numbers(result):
                 raise WorkspaceError(f"{store_id} {period} 补证会改变损益表金额，已拒绝")
+            from .snapshot_store import store
             cursor = conn.execute(
                 "insert into run "
                 "(store_id,period,at,can_close,evidence_ready,evidence_error,engine,"
@@ -1175,7 +1240,7 @@ class Workspace:
                 (
                     store_id, period, _now(), int(bool(result.get("can_close"))), 1, "",
                     engine_version(), model_revision or None, input_fingerprint or None,
-                    row["shas"], json.dumps(result, ensure_ascii=False),
+                    row["shas"], store(conn,json.dumps(result,ensure_ascii=False),self.root),
                 ),
             )
             run_id = int(cursor.lastrowid or 0)

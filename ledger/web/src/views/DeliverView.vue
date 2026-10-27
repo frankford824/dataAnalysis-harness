@@ -184,6 +184,13 @@ async function loadPeriodSnap(storeId, period) {
   if (!storeId || !period) { periodLoading.value=false;return }
   periodLoading.value = true
   try {
+    const detail = await app.loadStoreDetail(storeId)
+    if (request !== periodRequest) return
+    // A missing delivery is an ordinary workbench state. The backend has not
+    // published a financial snapshot yet; do not request one and turn it into
+    // an HTTP error on the material-entry page.
+    const saved = detail?.periods?.find(item => item.period === period)
+    if (!saved?.run_id) return
     const data = await api.period(storeId, period)
     if (request === periodRequest) periodSnap.value = data
   } catch (error) {

@@ -5,6 +5,9 @@
  * 唯一有用的信息扔了。
  */
 
+import {notifyAuthentication} from './telemetry.js'
+export {startTelemetry as startClientTelemetry,recordTelemetry} from './telemetry.js'
+
 async function call(path, init) {
   let res
   try {
@@ -23,6 +26,7 @@ async function call(path, init) {
   }
   if (!res.ok) {
     const detail=typeof body?.detail==='string'?body.detail:null
+    notifyAuthentication(res.status,detail)
     throw new Error(detail || (res.status>=500?'服务暂时未能完成请求，请稍后重试':res.status===404?'没有找到对应数据，请刷新后重试':res.status===422?'请检查填写内容':`请求失败（${res.status}）`))
   }
   return body
@@ -38,6 +42,21 @@ function query(params) {
 }
 
 export const api = {
+  operatorStatus: () => call('/api/commission-v2/status'),
+  operatorLogin: (name,password) => call('/api/commission-v2/session',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({name,password})}),
+  operatorLogout: () => call('/api/commission-v2/session',{method:'DELETE'}),
+  operationsReport: (params, options={}) => call(`/api/operations/month${query(params)}`,options),
+  operationsEvidence: (params, options={}) => call(`/api/operations/evidence${query(params)}`,options),
+  operationsExport: params => `/api/operations/export.csv${query(params)}`,
+  automationRuleContracts: () => call('/api/automation/rule-contracts'),
+  automationMonth: (period, options={}) => call(`/api/automation/months/${encodeURIComponent(period)}`,options),
+  automationAdvance: (period, body) => call(`/api/automation/months/${encodeURIComponent(period)}/advance`,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(body)}),
+  automationDecision: id => call(`/api/automation/decisions/${encodeURIComponent(id)}`),
+  automationDecisionRevoke: (id,body) => call(`/api/automation/decisions/${encodeURIComponent(id)}/revoke`,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(body)}),
+  automationDecisionPreview: body => call('/api/automation/decisions/preview',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(body)}),
+  automationDecisionApply: body => call('/api/automation/decisions/apply',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(body)}),
+  automationClosePreview: body => call('/api/automation/close-batches/preview',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(body)}),
+  automationCloseConfirm: body => call('/api/automation/close-batches/confirm',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(body)}),
   freightShipmentLatest: (period, options={}) => call(`/api/freight-review/shipments${query({period})}`, options),
   freightShipmentStart: period => call('/api/freight-review/shipments', {method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({period})}),
   freightShipmentResult: (id,params,options={}) => call(`/api/freight-review/shipments/${id}${query(params)}`,options),

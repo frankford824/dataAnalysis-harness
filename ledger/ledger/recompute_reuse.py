@@ -80,6 +80,11 @@ def load(ws, store, signature, registry):
             return None
         if any(not verified(path) for path in paths):
             return None
+        period_proof=ws.conn.execute('SELECT manifest_json FROM automation_run_proof WHERE run_id=?',(run_id,)).fetchone()
+        if period_proof:
+            from .automation_period_proof import valid_artifact
+            if any(not valid_artifact(ws,item) for item in json.loads(period_proof['manifest_json']).get('artifacts',[])):
+                return None
         payload = json.loads(row["result"])
         calculation = (payload.get("commission") or {}).get("calculation_id")
         if calculation:
@@ -122,7 +127,7 @@ def remember(ws, store, signature, registry, periods):
         if original.get('order_issue_counts') and not main.with_suffix('.order-issues.parquet').is_file():
             return
         paths = tuple(path for path in [main, *[main.with_suffix(suffix) for suffix in
-                      (".pricing.parquet", ".coverage.parquet", ".allocation.parquet", ".order-issues.parquet")]] if path.is_file())
+                      (".pricing.parquet", ".pricing-raw.parquet", ".coverage.parquet", ".allocation.parquet", ".operations.parquet", ".order-issues.parquet")]] if path.is_file())
         runs.append((period, run_id, _run_signature(row), paths))
     with _lock:
         _entries[_key(ws, store)] = (signature, runs)
