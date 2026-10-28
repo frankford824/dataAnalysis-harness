@@ -145,8 +145,20 @@ def test_service_persists_supplement_in_same_statement_and_drill(tmp_path,monkey
     m=original.model;store=m.store('s');ws=Workspace(tmp_path)
     ws.keep('orders.csv',BytesIO(b'original input'),'s')
     monkeypatch.setenv('LEDGER_ORDER_FEED_ENABLED','0')
-    monkeypatch.setattr(service,'ingest',lambda *a,**kw:original.ingestion)
-    monkeypatch.setattr(service,'run',lambda *a,**kw:deepcopy(original))
+    ingestions=[]
+    def fresh_ingest(*args,**kwargs):
+        # Production ingest creates a new Ingestion for every recompute. The
+        # service may attach live Workspace-bound guards to that attempt only.
+        ingestion=deepcopy(original.ingestion)
+        ingestions.append(ingestion)
+        return ingestion
+    def fresh_run(ingestion,*args,**kwargs):
+        assert ingestion.frozen_refund_context.ws is ws
+        result=deepcopy(original)
+        result.ingestion=ingestion
+        return result
+    monkeypatch.setattr(service,'ingest',fresh_ingest)
+    monkeypatch.setattr(service,'run',fresh_run)
     first=service.recompute(ws,m,store)
     assert not first.failure
     rid=ws.state('s','2026-07').run_id
@@ -164,3 +176,5 @@ def test_service_persists_supplement_in_same_statement_and_drill(tmp_path,monkey
     assert len(supplement)==1 and supplement[0]['file_sha'] is None
     third=service.recompute(ws,m,store)
     assert not third.failure and ws.state('s','2026-07').run_id==state.run_id
+    assert len(ingestions)==3 and len({id(ing) for ing in ingestions})==3
+    assert getattr(original.ingestion,'frozen_refund_context',None) is None

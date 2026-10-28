@@ -473,3 +473,64 @@ def test_index_preserves_duplicate_anchor_missing_identity_and_last_item_rules(t
         assert separate.current_identity({'file_sha':'a'*64,'template_id':'other-bank','sheet':'Sheet1','row_no':3},both)=={'namespace':'other-refunds','leg':'event','event_id':'unique','component':'C'}
         assert len(separate.current_indexes)==2
     finally:ws.close()
+
+
+
+def test_actual_return_derivation_preserves_frozen_refund_context(tmp_path,monkeypatch):
+    from test_after_sales_cost import AFTER_HEADER
+    c=_case(tmp_path,monkeypatch,payout=True)
+    try:
+        def payout_rows():
+            with c.registry.connect() as db:return [tuple(r) for r in db.execute('SELECT * FROM payout_confirmation ORDER BY id')]
+        confirmed=payout_rows();assert confirmed
+        c.publish('2026-09-01','e')
+        full=load_model(MODELS/'cn-ecommerce')
+        after_templates=tuple(t for t in full.templates if t.source=='after_sales')
+        model=c.model.model_copy(update={
+            'stores':tuple(s.model_copy(update={'cost_return_posting':'transaction'}) for s in c.model.stores),
+            'sources':(*c.model.sources,full.source('cost_return')),
+            'templates':(*c.model.templates,*after_templates),
+            'metrics':(*c.model.metrics,full.metric('goods_return_cost')),
+            'statement':tuple(n.model_copy(update={'formula':n.formula.model_copy(update={
+                'of':('gross_profit','trade_refund','goods_return_cost')})}) if n.id=='net_profit' else n for n in c.model.statement)})
+        original_store=model.store('s1')
+        after=write_xlsx(tmp_path/'declared-actual-return.xlsx',[
+            AFTER_HEADER+['实退数量','进仓时间'],
+            ['declared-actual-return','9000',original_store.name,'3319999999999999999',
+             '已确认','退款成功','卖家已收到退货','SKU9000','3319999999999999000',1,1,'2026-09-09']])
+        c.ws.keep(after.name,after,'s1')
+        checker.bind_model(c.ws,model)
+        actual_run=service.run;observed=[]
+        def guarded_run(ingestion,*args,**kwargs):
+            context=ingestion.frozen_refund_context
+            result=actual_run(ingestion,*args,**kwargs)
+            observed.append((ingestion,result))
+            # A real actual-receipt row triggers dataclasses.replace. The
+            # same read-only Workspace-bound coordinator must survive it.
+            assert result.ingestion is not ingestion
+            assert result.ingestion.frozen_refund_context is context
+            return result
+        monkeypatch.setattr(service,'run',guarded_run)
+        result=service.recompute(c.ws,model,original_store,publication_scope=c.scope)
+        assert not result.failure,result.failure
+        assert observed
+        rows=pl.read_parquet(c.ws.facts_path(c.ws.state('s1','2026-09').run_id))
+        refund=_refunds(rows)
+        assert refund.height==1 and refund['amount'][0]==-20
+        assert not refund['counted'][0] and refund['contribution'][0]==0
+        assert json.loads(refund['statement_evidence'][0])['frozen_refund']['owner']['period']=='2026-07'
+        returns=rows.filter(pl.col('metric_id')=='goods_return_cost')
+        assert returns.height==1 and returns['counted'][0]
+        # Original captured unit price 2 * actual received quantity 1; the
+        # receipt is September, while the old frozen refund remains July.
+        assert returns['amount'][0]==2 and returns['contribution'][0]==2
+        assert returns['period'][0]=='2026-09'
+        assert 'declared-actual-return' in returns['source_note'][0]
+        preview=actions.close_preview(c.ws,model,request_id='return-and-refund-9-preview',period='2026-09',store_ids=['s1'],actor=c.actor)
+        assert preview['eligible'] and not preview['blocked']
+        actions.close_confirm(c.ws,model,request_id='return-and-refund-9-confirm',proposal_id=preview['proposal_id'],
+            proposal_sha=preview['proposal_sha'],input_sha=preview['input_sha'],actor=c.actor)
+        assert c.ws.state('s1','2026-09').closed
+        _frozen_unchanged(c)
+        assert payout_rows()==confirmed
+    finally:c.ws.close()

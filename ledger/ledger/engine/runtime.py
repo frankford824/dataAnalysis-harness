@@ -102,6 +102,10 @@ class Ingestion:
     deduplication: list[dict] = field(default_factory=list)
     statement_decisions: dict = field(default_factory=dict)
     brushing_evidence: pl.DataFrame = field(default_factory=pl.DataFrame)
+    # Attempt-local read-only coordinator. Explicitly retain its live reference
+    # when deriving additional items with dataclasses.replace; never serialize
+    # or deep-copy its Workspace/thread-local resources as financial payload.
+    frozen_refund_context: object | None = field(default=None, repr=False, compare=False)
 
     @property
     def known(self) -> list[Ingested]:
