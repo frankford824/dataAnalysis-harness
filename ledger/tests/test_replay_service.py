@@ -37,6 +37,101 @@ def seed():
         'policies':[{'body':{'base_node':'net_profit','wages':'skip_preview'},'effective_from':'2026-06-01'}]}
 
 
+def configuration_snapshot(tmp_path):
+    """Synthetic source rows exercise the real current-configuration adapter."""
+    fixed=seed();versions=[];schemes=[]
+    for index,row in enumerate(fixed['schemes']):
+        sid='scheme-'+str(index);active=sid+'-active';draft=sid+'-draft'
+        body={**row['body'],'store_id':row['store_id'],'product_id':row['product_id']}
+        versions.extend([
+            {'id':active,'scheme_id':sid,'revision':1,'recorded_at':'2026-06-01T00:00:00+08:00',
+             'body':json.dumps(body)},
+            {'id':draft,'scheme_id':sid,'revision':2,'recorded_at':'2026-07-01T00:00:00+08:00',
+             'body':json.dumps({**body,'segments':[{'valid_from':'2026-06-01','mode':'hold','total_rate':'0','allocations':[]}]})}])
+        schemes.append({'id':sid,'store_id':row['store_id'],'product_id':row['product_id'],
+            'revision':2,'active_version':active,'draft_version':draft})
+    people=[{**person,'parent_id':'team'} for person in fixed['people']]+[{'id':'team','name':'合成组织','parent_id':''}]
+    body={'schema':1,'kind':'readonly_registry_configuration_snapshot','read_only_sqlite':True,
+        'transaction':'BEGIN read snapshot','stores':['s1','s2'],'meta':[{'id':1,'revision':7}],
+        'meta_after':[{'id':1,'revision':7}],'captured_at':'2026-08-02T00:00:00+08:00','people':people,
+        'members':[{**row,'id':'member-'+str(index),'leader_id':'team','valid_from':'2026-06-01',
+                    'valid_to':'2026-08-01'} for index,row in enumerate(fixed['members'])],
+        'org_stores':[{'person_id':'team','store_id':sid} for sid in ('s1','s2')],
+        'schemes':schemes,'scheme_versions':versions,
+        'policies':[{**row,'store_id':'','id':index+1,'recorded_at':'2026-06-01T00:00:00+08:00'}
+                    for index,row in enumerate(fixed['policies'])]}
+    path=tmp_path/'source-configuration.json';path.write_text(json.dumps(body),encoding='utf-8')
+    return path,body
+
+
+def configuration_reference(path):
+    return {'path':str(path),'sha256':hashlib.sha256(path.read_bytes()).hexdigest()}
+
+
+def test_source_seed_actual_session_preserves_active_body_parent_order_and_cutoff(bundle,tmp_path):
+    path,_missing=bundle;source,body=configuration_snapshot(tmp_path)
+    fixed=replay_service.registry_seed_from_snapshot(configuration_reference(source))
+    assert fixed['people'][0]['id']=='team'  # Source children precede the parent.
+    assert all(row['body']['segments'][0]['mode']=='distribute' for row in fixed['schemes'])
+    assert all(row['active_version'].endswith('-active') for row in fixed['source_snapshot']['active_versions'])
+    assert fixed['source_snapshot']['historical_truth_established'] is False
+    assert fixed['source_snapshot']['new_month_authorized'] is False
+    with replay_service.Session(path,fixed) as session:
+        assert {row['parent_id'] for row in session.registry.people() if row['id'] in {'p1','p2'}}=={'team'}
+        assert len(session.registry.org_stores('team'))==2
+        assert session.registry.store_members_at('s1','2026-07-31T23:59:59')
+        assert not session.registry.store_members_at('s1','2026-08-01T00:00:00')
+        session.recompute('s1');session.recompute('s2')
+        result=session.check(all_expected())  # Existing financial expectations stay unchanged.
+        assert result['status']=='passed',result['differences']
+
+
+@pytest.mark.parametrize('fault',['unknown_parent','cycle','self_parent'])
+def test_actual_session_rejects_invalid_people_before_partial_import(bundle,fault):
+    path,_missing=bundle;fixed=seed()
+    if fault=='unknown_parent':fixed['people'][0]['parent_id']='absent'
+    elif fault=='self_parent':fixed['people'][0]['parent_id']='p1'
+    else:
+        fixed['people'][0]['parent_id']='p2';fixed['people'][1]['parent_id']='p1'
+    session=replay_service.Session(path,fixed)
+    with pytest.raises(replay_service.ReplayError,match='未知上级|循环'):
+        with session:pytest.fail('invalid hierarchy reached an active Session')
+    assert not session.root.exists()
+
+
+def test_source_active_version_change_requires_new_snapshot_identity(bundle,tmp_path):
+    source,body=configuration_snapshot(tmp_path);reference=configuration_reference(source)
+    before=replay_service.registry_seed_from_snapshot(reference)
+    body['schemes'][0]['active_version']=body['schemes'][0]['draft_version']
+    source.write_text(json.dumps(body),encoding='utf-8')
+    with pytest.raises(replay_service.ReplayError,match='SHA已变化'):
+        replay_service.registry_seed_from_snapshot(reference)
+    after=replay_service.registry_seed_from_snapshot(configuration_reference(source))
+    assert after['source_snapshot']['seed_fingerprint']!=before['source_snapshot']['seed_fingerprint']
+    assert after['schemes'][0]['body']['segments'][0]['mode']=='hold'
+    altered=json.loads(json.dumps(before));altered['members'][0]['valid_to']=''
+    with pytest.raises(replay_service.ReplayError,match='种子身份已变化'):
+        with replay_service.Session(bundle[0],altered):pytest.fail('modified source-bound seed was accepted')
+
+
+@pytest.mark.parametrize('fault',['missing_active','wrong_scheme','body_identity','recorded_after_capture','invalid_segment_dates','invalid_member_dates'])
+def test_source_seed_rejects_invalid_active_version_body_and_dates(tmp_path,fault):
+    source,body=configuration_snapshot(tmp_path)
+    version=body['scheme_versions'][0]
+    if fault=='missing_active':body['schemes'][0]['active_version']='missing'
+    elif fault=='wrong_scheme':version['scheme_id']='wrong'
+    elif fault=='recorded_after_capture':version['recorded_at']='2026-09-01'
+    elif fault=='invalid_member_dates':body['members'][0]['valid_to']='2026-05-31'
+    else:
+        value=json.loads(version['body'])
+        if fault=='body_identity':value['store_id']='wrong'
+        else:value['segments'][0]['valid_to']='2026-05-31'
+        version['body']=json.dumps(value)
+    source.write_text(json.dumps(body),encoding='utf-8')
+    with pytest.raises(replay_service.ReplayError,match='版本|有效期'):
+        replay_service.registry_seed_from_snapshot(configuration_reference(source))
+
+
 @pytest.fixture
 def bundle(tmp_path):
     full = load_model(MODELS/'cn-ecommerce')

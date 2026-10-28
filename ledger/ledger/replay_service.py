@@ -29,6 +29,142 @@ class ReplayError(RuntimeError):
     pass
 
 
+def _ordered_people(people):
+    """Validate the whole hierarchy before creating any temporary person."""
+    if not isinstance(people,list) or any(not isinstance(person,dict) for person in people):
+        raise ReplayError('固定人员输入必须是完整列表')
+    ids=[person.get('id') for person in people]
+    if any(not isinstance(pid,str) or not pid.strip() or pid!=pid.strip() for pid in ids) or len(set(ids))!=len(ids):
+        raise ReplayError('固定人员身份缺失或重复')
+    known=set(ids)
+    if any(str(person.get('parent_id') or '').strip() not in known|{''} for person in people):
+        raise ReplayError('固定人员包含未知上级')
+    ordered=[];pending=list(people);created=set()
+    while pending:
+        ready=[person for person in pending if str(person.get('parent_id') or '').strip() in created|{''}]
+        if not ready:raise ReplayError('固定人员上级关系存在循环')
+        ordered.extend(ready);created.update(person['id'] for person in ready)
+        pending=[person for person in pending if person['id'] not in created]
+    return ordered
+
+
+def _seed_fingerprint(seed):
+    return hashlib.sha256(json.dumps(seed,ensure_ascii=False,sort_keys=True,
+        separators=(',',':'),allow_nan=False).encode()).hexdigest()
+
+
+def registry_seed_from_snapshot(reference, *, store_ids=None):
+    """Adapt hash-bound current configuration facts, never historical approval.
+
+    Source bytes stay in the parent evidence store. The isolated oracle child
+    receives the fixed seed and its provenance, not access to that parent path.
+    """
+    from .commission_registry import local_time,validate_timeline,RegistryError
+    if (not isinstance(reference,dict) or set(reference)!={'path','sha256'}
+            or not isinstance(reference['path'],str) or not Path(reference['path']).is_absolute()
+            or not re.fullmatch('[0-9a-f]{64}',str(reference['sha256']))):
+        raise ReplayError('配置快照必须绑定绝对路径和SHA')
+    path=Path(reference['path'])
+    if path.is_symlink() or not path.is_file() or path.stat().st_size>256*1024*1024:
+        raise ReplayError('配置快照必须是有界固定原文件')
+    raw=path.read_bytes()
+    if hashlib.sha256(raw).hexdigest()!=reference['sha256']:raise ReplayError('配置快照SHA已变化')
+    snapshot=json.loads(raw)
+    _finite(snapshot)
+    if (snapshot.get('schema')!=1 or snapshot.get('kind')!='readonly_registry_configuration_snapshot'
+            or snapshot.get('read_only_sqlite') is not True or snapshot.get('transaction')!='BEGIN read snapshot'
+            or not snapshot.get('meta') or snapshot['meta']!=snapshot.get('meta_after')):
+        raise ReplayError('配置快照缺少一致的只读事务身份')
+    for table in ('people','members','org_stores','schemes','scheme_versions','policies'):
+        if not isinstance(snapshot.get(table),list) or any(not isinstance(row,dict) for row in snapshot[table]):
+            raise ReplayError('配置快照缺少完整配置表')
+    captured=local_time(snapshot['captured_at'])
+    captured_stores=snapshot.get('stores')
+    if (not isinstance(captured_stores,list) or not captured_stores
+            or any(not isinstance(sid,str) or not sid for sid in captured_stores)
+            or len(set(captured_stores))!=len(captured_stores)):
+        raise ReplayError('配置快照店铺范围无效')
+    selected=sorted(captured_stores if store_ids is None else store_ids)
+    if not selected or len(set(selected))!=len(selected) or set(selected)-set(captured_stores):
+        raise ReplayError('配置种子不能超出或静默清空采集店铺范围')
+    people=_ordered_people(snapshot['people']);person_ids={person['id'] for person in people}
+    versions={row['id']:row for row in snapshot['scheme_versions']}
+    if len(versions)!=len(snapshot['scheme_versions']):raise ReplayError('配置方案版本身份重复')
+    seed={'people':people,'members':[],'schemes':[],'policies':[],'org_stores':[]}
+    version_refs=[];seen=set()
+    try:
+        for scheme in snapshot['schemes']:
+            if scheme['store_id'] not in captured_stores:raise ReplayError('配置方案超出原采集店铺范围')
+            if scheme['store_id'] not in selected:continue
+            key=(scheme['store_id'],scheme['product_id'])
+            if key in seen:raise ReplayError('配置方案店铺商品身份重复')
+            seen.add(key)
+            if not scheme.get('active_version'):continue
+            version=versions.get(scheme['active_version'])
+            if (not version or version.get('scheme_id')!=scheme['id']
+                    or type(version.get('revision')) is not int or version['revision']<1
+                    or type(scheme.get('revision')) is not int or version['revision']>scheme['revision']
+                    or local_time(version['recorded_at'])>captured):
+                raise ReplayError('配置active版本身份或记录日期无效')
+            body=json.loads(version['body']) if isinstance(version['body'],str) else version['body']
+            if (not isinstance(body,dict) or body.get('store_id',scheme['store_id'])!=scheme['store_id']
+                    or body.get('product_id',scheme['product_id'])!=scheme['product_id']):
+                raise ReplayError('配置active版本body身份不一致')
+            _finite(body);validate_timeline(body,person_ids)
+            seed['schemes'].append({'store_id':scheme['store_id'],'product_id':scheme['product_id'],'body':body})
+            version_refs.append({'scheme_id':scheme['id'],'active_version':version['id'],
+                'source_revision':version['revision'],'recorded_at':version['recorded_at'],
+                'body_sha256':_seed_fingerprint(body)})
+        intervals={}
+        for row in snapshot['members']:
+            if row['store_id'] not in captured_stores:raise ReplayError('配置成员超出原采集店铺范围')
+            if row['store_id'] not in selected:continue
+            if row['person_id'] not in person_ids or row.get('leader_id','') not in person_ids|{''}:
+                raise ReplayError('配置成员引用未知人员')
+            start=local_time(row['valid_from']);end=local_time(row.get('valid_to',''),optional=True)
+            if end and end<=start:raise ReplayError('配置成员有效期无效')
+            intervals.setdefault((row['store_id'],row['person_id']),[]).append((start,end))
+            seed['members'].append(dict(row))
+        for rows in intervals.values():
+            rows.sort()
+            if any(not a[1] or a[1]>b[0] for a,b in zip(rows,rows[1:])):
+                raise ReplayError('配置成员有效期重叠')
+        seed['members'].sort(key=lambda row:(row['store_id'],row['person_id'],local_time(row['valid_from'])))
+        for row in snapshot['org_stores']:
+            if row['person_id'] not in person_ids:raise ReplayError('配置组织归属引用未知人员')
+            if row['store_id'] in selected:seed['org_stores'].append(dict(row))
+        for row in snapshot['policies']:
+            if row['store_id'] and row['store_id'] not in selected:continue
+            effective=local_time(row['effective_from'])
+            if effective[8:]!='01T00:00:00' or local_time(row['recorded_at'])>captured:
+                raise ReplayError('配置政策版本日期无效')
+            body=json.loads(row['body']) if isinstance(row['body'],str) else row['body']
+            if not isinstance(body,dict):raise ReplayError('配置政策body无效')
+            _finite(body)
+            seed['policies'].append({'body':body,'effective_from':row['effective_from'],'store_id':row['store_id']})
+    except (RegistryError,KeyError,TypeError,ValueError) as error:
+        if isinstance(error,ReplayError):raise
+        raise ReplayError('配置版本body或有效期验证失败') from error
+    source={'kind':'current_configuration_facts_not_historical_truth_or_authorization',
+        'reference':dict(reference),'captured_at':snapshot['captured_at'],'meta':snapshot['meta'],
+        'captured_store_ids':captured_stores,'selected_store_ids':selected,'active_versions':version_refs,
+        'historical_truth_established':False,'new_month_authorized':False}
+    seed['source_snapshot']=source
+    source['seed_fingerprint']=_seed_fingerprint(seed)
+    return seed
+
+
+def _validate_seed_source(seed):
+    if 'source_snapshot' not in seed:return
+    source=seed['source_snapshot']
+    if (not isinstance(source,dict) or not re.fullmatch('[0-9a-f]{64}',str(source.get('seed_fingerprint','')))
+            or source.get('historical_truth_established') is not False or source.get('new_month_authorized') is not False):
+        raise ReplayError('固定配置种子缺少来源身份')
+    expected=source['seed_fingerprint']
+    payload={**seed,'source_snapshot':{key:value for key,value in source.items() if key!='seed_fingerprint'}}
+    if _seed_fingerprint(payload)!=expected:raise ReplayError('固定配置来源种子身份已变化')
+
+
 def _blocked(*_args, **_kwargs):
     raise ReplayError('服务整链回放禁止网络；必须提供固定来源')
 
@@ -191,11 +327,18 @@ class Session:
         return self.stack.__exit__(*args)
 
     def _seed(self):
-        for person in self.registry_seed['people']:
+        _validate_seed_source(self.registry_seed)
+        people=_ordered_people(self.registry_seed['people'])
+        for person in people:
             self.registry.person_save(person,'replay:seed','固定人员输入')
+        assignments={}
+        for row in self.registry_seed.get('org_stores',[]):
+            assignments.setdefault(row['person_id'],[]).append(row['store_id'])
+        for person_id,store_ids in assignments.items():
+            self.registry.save_org_stores(person_id,store_ids,'replay:seed','固定组织归属')
         for row in self.registry_seed['members']:
             self.registry.save_store_member(row['store_id'],row['person_id'],row['duty'],row.get('leader_id',''),
-                'replay:seed','固定店铺身份',valid_from=row.get('valid_from','1970-01-01'))
+                'replay:seed','固定店铺身份',valid_from=row.get('valid_from','1970-01-01'),valid_to=row.get('valid_to',''))
         for row in self.registry_seed['schemes']:
             self.registry.save_scheme(row['store_id'],row['product_id'],row['body'],
                 'replay:seed','固定版本关系',publish=True)

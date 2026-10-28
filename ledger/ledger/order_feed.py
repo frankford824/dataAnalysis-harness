@@ -21,7 +21,7 @@ import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterator
 
@@ -138,6 +138,62 @@ class OrderFeedError(RuntimeError):
 
 class OrderFeedNotFound(OrderFeedError):
     """A pointer names an entity that is no longer present in current state."""
+
+
+def producer_cost_scope(manifest: dict[str, Any]) -> tuple[date, date | None] | None:
+    """Read producer-declared query coverage, never observed row extrema.
+
+    All three exports must use the same header-date predicate. The declaration
+    travels with the immutable snapshot and names the producer implementation;
+    it is not a consumer inference from the first/last returned order.
+    """
+    scope = manifest.get("producer_query_scope")
+    if scope is None:
+        return None
+    try:
+        if not isinstance(scope, dict) or (
+            scope["schema_version"] != "producer_query_scope.v1"
+            or scope["snapshot_id"] != manifest["snapshot_id"]
+        ):
+            raise ValueError("query predicate contract")
+        digest = scope["producer_sha256"]
+        if not isinstance(digest, str) or len(digest) != 64 or any(c not in "0123456789abcdef" for c in digest):
+            raise ValueError("producer identity")
+        predicates = []
+        for name in ("orders.parquet", "order_items.parquet", "order_costs.parquet"):
+            declaration = scope["objects"][name]
+            if not isinstance(declaration, dict) or (
+                declaration["basis"] != "header.order_date"
+                or declaration["complete"] is not True
+                or declaration["sha256"] != manifest["objects"][name]["sha256"]
+            ):
+                raise ValueError("object query predicate contract")
+            predicates.append((declaration["from_inclusive"], declaration["to_exclusive"]))
+        if not all(predicate == predicates[0] for predicate in predicates):
+            raise ValueError("inconsistent cost query coverage")
+        start, stop = predicates[0]
+        if not isinstance(start, str) or len(start) != 10:
+            raise ValueError("lower boundary")
+        lower = date.fromisoformat(start)
+        if lower.isoformat() != start:
+            raise ValueError("lower boundary")
+        upper = None
+        if stop is not None:
+            if not isinstance(stop, str) or len(stop) != 10:
+                raise ValueError("upper boundary")
+            upper = date.fromisoformat(stop)
+            if upper.isoformat() != stop or lower >= upper:
+                raise ValueError("upper boundary")
+        return lower, upper
+    except (KeyError, TypeError, ValueError) as exc:
+        raise OrderFeedError("source_scope_unverified: 订单台查询范围声明无效") from exc
+
+
+def _query_scope_fingerprint(manifest: dict[str, Any]) -> str:
+    if producer_cost_scope(manifest) is None:
+        return ""
+    raw = json.dumps(manifest["producer_query_scope"], sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    return ":query-scope:" + hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
 def _now() -> str:
@@ -584,6 +640,7 @@ class OrderFeed:
         through = manifest.get("through_seq")
         if not isinstance(through, int) or through < 0:
             raise OrderFeedError("快照缺少原子 through_seq")
+        producer_cost_scope(manifest)
         required = {
             "stores.parquet", "orders.parquet", "order_items.parquet", "after_sales.parquet",
             "after_sale_items.parquet", "order_costs.parquet", "order_relations.parquet",
@@ -796,7 +853,9 @@ class OrderFeed:
     def fingerprint(self) -> str:
         state = self.state()
         from .order_components import fingerprint
-        return f"order-feed:{state.get('snapshot_id','')}:{int(state.get('consumed_seq') or 0)}" + fingerprint(self.workspace_root)
+        manifest = json.loads(state.get("manifest_json") or "{}")
+        return (f"order-feed:{state.get('snapshot_id','')}:{int(state.get('consumed_seq') or 0)}"
+                + _query_scope_fingerprint(manifest) + fingerprint(self.workspace_root))
 
     @staticmethod
     def _jd_export_cost_for_absent_orders(
@@ -867,13 +926,75 @@ class OrderFeed:
             ))
         return output
 
+    def _costs_outside_source_scope(
+        self, ingestion: Ingestion, store: Store, manifest: dict[str, Any],
+    ) -> list[Ingested]:
+        """Preserve source bytes outside coverage, without reviving replaced facts.
+
+        A captured entity (including deleted/split/merged parents and unpriced
+        members) owns its decision regardless of date. Outside that ownership,
+        only an explicit producer query boundary can prove an uploaded row lies
+        outside the feed. The normal engine still applies all price/lifecycle
+        rules to retained rows; this method does not certify their amounts.
+        """
+        scope = producer_cost_scope(manifest)
+        ownership = getattr(self, "_captured_cost_ownership", {})
+        output: list[Ingested] = []
+        for item in ingestion.frames_of("order_cost"):
+            if item.template is not None and item.template.id.startswith("order_console_"):
+                continue
+            frame = item.frame
+            if frame is None or frame.is_empty():
+                continue
+            if "store_name" in frame.columns:
+                frame = frame.filter(pl.col("store_name").is_in([store.name, *store.aliases]))
+            if frame.is_empty():
+                continue
+            captured = pl.lit(False)
+            platform_captured = pl.lit(False)
+            known_internal = pl.lit(False)
+            for column in ("internal_order_id", "internal_sub_order_id"):
+                if column in frame.columns:
+                    known_internal = known_internal | (norm_expr(pl.col(column).cast(pl.Utf8)).fill_null("") != "")
+            for column, owned in ownership.items():
+                if column in frame.columns and owned:
+                    matches = norm_expr(pl.col(column).cast(pl.Utf8)).is_in(sorted(owned)).fill_null(False)
+                    if column in ("internal_order_id", "internal_sub_order_id"):
+                        captured = captured | matches
+                    else:
+                        platform_captured = platform_captured | matches
+            # Original sales and later reships can share platform order/member
+            # numbers while naming different physical ERP orders. An external
+            # number alone cannot supersede an independently identified entity.
+            captured = captured | (platform_captured & ~known_internal)
+            frame = frame.filter(~captured)
+            if frame.is_empty():
+                continue
+            if scope is None:
+                raise OrderFeedError("source_scope_unverified: 未声明查询范围，不能替换未捕获的原始成本行")
+            if item.template is None or item.template.id != "jushuitan_cost_v1" or "order_time" not in frame.columns:
+                raise OrderFeedError("source_scope_unverified: 原始成本缺少可核对的订单日期合同")
+            lower, upper = scope
+            dates = pl.col("order_time").cast(pl.Utf8).str.slice(0, 10).str.to_date("%Y-%m-%d", strict=False)
+            frame = frame.with_columns(dates.alias("__source_query_day"))
+            if frame["__source_query_day"].null_count():
+                raise OrderFeedError("source_scope_unverified: 原始成本订单日期缺失或无效")
+            outside = pl.col("__source_query_day") < lower
+            if upper is not None:
+                outside = outside | (pl.col("__source_query_day") >= upper)
+            frame = frame.filter(outside).drop("__source_query_day")
+            if not frame.is_empty():
+                output.append(replace(item, frame=frame, rows=frame.height,
+                    notes=[*item.notes, f"{frame.height:,} 行原始成本在订单台声明查询范围以外，且未被当前实体或删除事件覆盖；保留原件与原行依据，金额仍按有效政策核验"]))
+        return output
+
     def append_to(self, ingestion: Ingestion, store: Store) -> None:
         """Overlay live facts while preserving human-certified platform identities.
 
         Existing order exports keep their platform product/sub-order identifiers: those are
         what settlement and promotion files link to.  Order Console enriches their mutable
-        status fields and contributes orders absent from the export.  Cost is replaced
-        outright because the feed is the more current operational fact.  After-sales from
+        status fields and contributes orders absent from the export. Cost replacement
+        is limited to captured entities and explicitly declared query coverage. After-sales from
         the feed are added next to the uploaded 聚水潭售后单 rather than replacing it: the
         cost rule is per-product and the feed names at most one product per after-sale.
         """
@@ -896,13 +1017,27 @@ class OrderFeed:
         from .order_flags import collect as collect_order_flags
         fallback_flags, _ = collect_order_flags(ingestion, store)
         goods_metric = next((m.for_platform(store.platform) for m in ingestion.model.metrics if m.id == 'goods_cost'), None) if ingestion.model else None
+        uploaded_cost_ids: dict[str, set[str]] = {"order": set(), "member": set()}
+        for item in ingestion.frames_of("order_cost"):
+            if item.template is None or item.template.id != "jushuitan_cost_v1" or item.frame is None:
+                continue
+            original = item.frame
+            # Only row-level shop evidence authorizes intersecting a tombstone
+            # whose producer omitted its shop. Never broadcast an unscoped ID.
+            if "store_name" not in original.columns:
+                continue
+            original = original.filter(pl.col("store_name").is_in([store.name, *store.aliases]))
+            for column, key in (("internal_order_id", "order"), ("internal_sub_order_id", "member")):
+                if column in original.columns:
+                    uploaded_cost_ids[key].update(filter(None, (normalize_key(v) for v in original[column])))
         self._historical_cost_facts=[]
-        frames = self._frames(store, json.loads(state["manifest_json"]),
+        manifest = json.loads(state["manifest_json"])
+        frames = self._frames(store, manifest,
                               {child: next(iter(parents)) if len(parents) == 1 else None for child, parents in exported.items()},
                               fallback_flags,
                               any(p.id == store.platform and p.cost_pricing == "historical" for p in ingestion.model.platforms) if ingestion.model else False,
                               any(p.id == store.platform and p.cost_pricing in {"required", "historical"} for p in ingestion.model.platforms) if ingestion.model else False,
-                              getattr(goods_metric, 'brushing_scope', 'platform_order'))
+                              getattr(goods_metric, 'brushing_scope', 'platform_order'), uploaded_cost_ids)
         ingestion.historical_cost_evidence=getattr(self,'_historical_cost_facts',[])
         evidence = getattr(self, '_brushing_evidence', pl.DataFrame())
         if not evidence.is_empty():
@@ -921,14 +1056,12 @@ class OrderFeed:
         )
         if not frames:
             raise OrderFeedError(f"订单台没有 {store.name} 的已确认店铺映射")
+        retained_source_cost = self._costs_outside_source_scope(ingestion, store, manifest)
         from .order_date_context import publish as publish_order_dates
         publish_order_dates(ingestion, store, self.workspace_root)
         feed_order = next(item for item in frames if item.recognition.source_id == "order_detail")
         feed_after = next(item for item in frames if item.recognition.source_id == "after_sales")
         feed_cost = next(item for item in frames if item.recognition.source_id == "order_cost")
-        jd_source_cost = self._jd_export_cost_for_absent_orders(
-            ingestion, store, feed_order.frame, feed_cost.frame,
-        ) if feed_order.frame is not None and feed_cost.frame is not None else []
         from .order_flags import apply as apply_order_flags
         apply_order_flags(ingestion, store, feed_cost, feed_order)
         # 订单台售后和上传的聚水潭售后单并用，不替换。订单台一张售后只挂一个商品，
@@ -989,7 +1122,7 @@ class OrderFeed:
             if item.recognition.source_id not in replaced
         ]
         ingestion.items.extend(frames)
-        ingestion.items.extend(jd_source_cost)
+        ingestion.items.extend(retained_source_cost)
         for item in ingestion.known:
             assert item.frame is not None
             item.frame = item.frame.with_columns(pl.lit(True).alias("__live_period_scope__"))
@@ -1195,7 +1328,8 @@ class OrderFeed:
 
     def _frames(self, store: Store, manifest: dict[str, Any], exported_orders: dict[str, str | None] | None = None,
                 fallback_flags: dict[str, str] | None = None, require_history: bool = False,
-                require_pricing: bool = False, brushing_scope: str = 'platform_order') -> list[Ingested]:
+                require_pricing: bool = False, brushing_scope: str = 'platform_order',
+                uploaded_cost_ids: dict[str, set[str]] | None = None) -> list[Ingested]:
         self._brushing_evidence = pl.DataFrame()
         with self._connect() as conn:
             conn.execute("BEGIN")
@@ -1204,7 +1338,8 @@ class OrderFeed:
             ).fetchone()
             if captured["snapshot_id"] != manifest["snapshot_id"]:
                 raise OrderFeedError("订单快照刚发生切换，本次计算等待重试")
-            fingerprint = f"order-feed:{captured['snapshot_id']}:{captured['consumed_seq']}"
+            fingerprint = (f"order-feed:{captured['snapshot_id']}:{captured['consumed_seq']}"
+                           + _query_scope_fingerprint(manifest))
             self._captured_snapshot_id = captured['snapshot_id']
             self._captured_seq = int(captured["consumed_seq"])
             self._captured_source_latest_seq = int(captured["source_latest_seq"])
@@ -1220,6 +1355,22 @@ class OrderFeed:
                 "'order_relation','after_sale','after_sale_item') and order_store_id in (%s)"
                 % ",".join("?" for _ in order_store_ids), order_store_ids,
             )] if order_store_ids else []
+            # A producer tombstone may omit shop metadata. Intersect only exact
+            # original ERP IDs proved by this shop's uploaded source rows, in
+            # this same read transaction and entity namespace. Small chunks
+            # keep the query below SQLite's parameter limit on large exports.
+            if order_store_ids and uploaded_cost_ids:
+                for key, types in (("order", ("order",)), ("member", ("order_item", "order_cost"))):
+                    ids = sorted(uploaded_cost_ids.get(key, set()))
+                    for offset in range(0, len(ids), 800):
+                        chunk = ids[offset:offset + 800]
+                        deltas.extend(dict(r) for r in conn.execute(
+                            "SELECT * FROM feed_entity WHERE operation='delete' "
+                            "AND (order_store_id IS NULL OR order_store_id='') "
+                            "AND entity_type IN (%s) AND entity_id IN (%s)"
+                            % (",".join("?" for _ in types), ",".join("?" for _ in chunk)),
+                            [*types, *chunk],
+                        ))
         if not order_store_ids:
             return []
         objects = manifest["objects"]
@@ -1259,6 +1410,47 @@ class OrderFeed:
                     relation_records.append(record)
         if relation_records:
             relations = self._append_records(relations, relation_records).unique(maintain_order=True)
+        # Ownership precedes price/lifecycle filtering: a missing current price,
+        # deleted member, or superseded parent must never revive an uploaded one.
+        ownership: dict[str, set[str]] = {
+            name: set() for name in ("internal_order_id", "internal_sub_order_id",
+                                     "order_id", "original_order_id", "sub_order_id")
+        }
+        def own(frame: pl.DataFrame, source: str, target: str, *, parents: bool = False) -> None:
+            if source not in frame.columns:
+                return
+            for value in frame[source].drop_nulls().cast(pl.Utf8).unique():
+                values = str(value).replace("，", ",").replace("；", ",").replace(";", ",").split(",") if parents else [value]
+                for raw in values:
+                    normalized = normalize_key(raw)
+                    if normalized:
+                        ownership[target].add(normalized)
+                        if parents and ":" in normalized:
+                            prefix, suffix = normalized.split(":", 1)
+                            if prefix in order_store_ids and suffix:
+                                ownership[target].add(suffix)
+        own(orders, "order_id", "internal_order_id")
+        for table in (items, costs):
+            own(table, "sub_order_id", "internal_sub_order_id")
+        for table in (orders, items):
+            own(table, "online_order_no", "order_id", parents=True)
+            own(table, "online_order_no", "original_order_id", parents=True)
+        own(items, "outer_sku", "sub_order_id")
+        replacements = (relations.filter(pl.col("relation_type").is_in(["split", "merge"]))
+                        if "relation_type" in relations.columns else relations.head(0))
+        for column in ("source_order_id", "target_order_id"):
+            own(replacements, column, "internal_order_id")
+        for delta in deltas:
+            if delta["entity_type"] not in {"order", "order_item", "order_cost"}:
+                continue
+            target = {"order": "internal_order_id", "order_item": "internal_sub_order_id",
+                      "order_cost": "internal_sub_order_id"}.get(delta["entity_type"])
+            if target and (value := normalize_key(delta.get("entity_id"))):
+                declared = normalize_key(delta.get("order_id" if delta["entity_type"] == "order" else "sub_order_id"))
+                if declared and declared != value:
+                    raise OrderFeedError("source_scope_unverified: 增量实体标识与其删除或替代正文冲突")
+                ownership[target].add(value)
+        self._captured_cost_ownership = ownership
         from .historical_cost_facts import overlay as historical_facts_overlay
         costs,self._historical_cost_facts=historical_facts_overlay(self.workspace_root,store,orders,items,costs,relations)
         after = pl.scan_parquet(path("after_sales.parquet")).filter(
