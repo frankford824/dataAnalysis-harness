@@ -107,9 +107,10 @@ class TestTheFiveItemsAreSplitApart:
 class TestQianchuanTopUpIsNotAdSpend:
     """货款直投千川是充值，不是消耗。"""
 
-    def test_it_is_parked_like_wanxiangtai(self, model):
+    @pytest.mark.parametrize('scene', ['货款直投千川', '充值千川账户'])
+    def test_it_is_parked_like_wanxiangtai(self, model, scene):
         entry = next(e for e in model.dictionary
-                     if e.platform == "douyin" and e.raw == "货款直投千川")
+                     if e.platform == "douyin" and e.raw == scene)
         assert entry.major == "ad_topup"
         assert entry.naturally_unlinked, "没有订单号是它的常态，不该报成「要查归属」"
 
@@ -117,18 +118,34 @@ class TestQianchuanTopUpIsNotAdSpend:
         """没有任何指标消费 ad_topup——那是它不进利润的唯一防线。"""
         assert "ad_topup" not in {m.major for m in model.metrics if m.major}
 
-    def test_it_shows_up_under_its_own_name(self, tmp_path, model):
+    @pytest.mark.parametrize('scene', ['货款直投千川', '充值千川账户'])
+    def test_it_shows_up_under_its_own_name(self, tmp_path, model, scene):
         """不进利润，但要以自己的名字摆出来。
 
         两千多块钱无声消失和摆一行「货款直投千川 -2,640.09」是两件事。
         """
         out, _ = _classified(tmp_path, [
             DY_SETTLE,
-            _dy_row("货款直投千川", "-1.89", direction="出账"),
+            _dy_row(scene, "-1.89", direction="出账"),
         ], model)
         from ledger.engine.classify import COL_MINOR
 
-        assert out.get_column(COL_MINOR).to_list() == ["货款直投千川"]
+        assert out.get_column(COL_MINOR).to_list() == [scene]
+
+    @pytest.mark.parametrize('scene', ['充值千川账户服务费', '千川广告实际消耗', '充值其他账户'])
+    def test_alias_is_not_a_broad_recharge_or_ad_spend_exclusion(self, tmp_path, model, scene):
+        out, _ = _classified(tmp_path, [DY_SETTLE, _dy_row(scene, '-1.25')], model)
+        assert out.get_column(COL_MAJOR).to_list() != ['ad_topup']
+
+    def test_alias_preserves_signed_cash_and_separate_original_scene(self, tmp_path, model):
+        from ledger.engine.classify import COL_MINOR
+        out, _ = _classified(tmp_path, [DY_SETTLE,
+            _dy_row('充值千川账户', '-1.25', direction='出账'),
+            _dy_row('货款直投千川', '-2.50', direction='出账')], model)
+        assert out.get_column(COL_MAJOR).to_list() == ['ad_topup', 'ad_topup']
+        assert out.get_column(COL_MINOR).to_list() == ['充值千川账户', '货款直投千川']
+        assert out.get_column('income').to_list() == [-1.25, -2.50]
+        assert not any(metric.major == 'ad_topup' for metric in model.metrics)
 
 
 class TestSettlementHeaderVariants:
