@@ -331,6 +331,15 @@ def overlay(root,store,orders,items,costs,relations=None):
         conn.row_factory=sqlite3.Row
         if not conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='automation_decision'").fetchone():return costs,[]
         facts=active(conn,store.id)
+        # Natural expiry and kill switches stop adoption, not existing cost
+        # evidence. Explicit grant withdrawal invalidates open owned inputs;
+        # historical frozen origins remain read-only return/cost evidence.
+        withdrawn_grants={row['id'] for row in conn.execute("""SELECT d.id FROM automation_decision d
+            JOIN automation_authorization a ON a.request_id=d.request_id
+            JOIN automation_decision r ON r.ref_id=json_extract(a.scope_json,'$.approved_rule_grant') AND r.action='revoke'
+            WHERE d.store_id=? AND d.kind=? AND d.action='apply'""",(store.id,RULE))}
+        closed_periods={row[0] for row in conn.execute("SELECT period FROM period WHERE store_id=? AND state='closed'",(store.id,))}
+        facts=[fact for fact in facts if fact['decision_id'] not in withdrawn_grants or fact['period'] in closed_periods]
         manual=[dict(r) for r in conn.execute('SELECT * FROM cost_line_log WHERE store_id=? ORDER BY id',(store.id,))]
         effective_manual=manual_authority(conn,root,store.id,{f['period'] for f in facts},manual) if manual and facts else set()
     if not facts:return costs,[]

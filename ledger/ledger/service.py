@@ -338,6 +338,7 @@ def recompute(
 ) -> Recomputed:
     """同店串行、全局最多两个重算，避免目录竞态和内存失控。"""
     from .version import assert_code_integrity,CodeIntegrityError,CODE_MAINTENANCE
+    from .frozen_refund_guard import HistoryChanged
     def maintenance():
         return Recomputed(store_id=store.id,failure={'store':store.name,'kind':'maintenance',
             'code':'code_source_drift','why':CODE_MAINTENANCE})
@@ -384,6 +385,8 @@ def recompute(
                 assert_code_integrity()
                 result=_recompute_locked(ws, model, store, report=tracked, note=note, publication_scope=scope)
                 assert_code_integrity()
+            except HistoryChanged as exc:
+                return Recomputed(store_id=store.id,failure={'kind':'waiting_sources','code':'frozen_refund_history_changed','why':str(exc)})
             except CodeIntegrityError:
                 return maintenance()
             except publication.PublicationScopeError as exc:
@@ -456,12 +459,15 @@ def _recompute_locked(
         except order_feed.OrderFeedError as exc:
             out.failure = {"store": store.name, "why": f"订单台证据未就绪：{exc}"}
             return out
+    from .frozen_refund_guard import Context as FrozenRefundContext
+    ing.frozen_refund_context=FrozenRefundContext(ws,model,store)
     from .statement_review import apply as apply_statement_reviews
     apply_statement_reviews(ing,ws,store.id)
     out.unknown_tables = unknown_tables(ing, store)
     registry = Registry(ws.root) if (ws.root / "commission" / "registry.db").exists() else None
     reuse_signature = recompute_reuse.fingerprint(ws, model, store, ing, registry, publication_scope=scope)
     cached = recompute_reuse.load(ws, store, reuse_signature, registry, publication_scope=scope)
+    if cached:ing.frozen_refund_context.validate()
     if cached is not None:
         report(f"核算输入未变化 · {where}")
         out.periods = cached
@@ -631,9 +637,11 @@ def _recompute_locked(
                 from .finance_guard import guard as publication_guard
                 with publication_guard(ws.root,store.id,sl.period):
                     scope.require(store.id,sl.period,workspace_root=ws.root)
+                    ing.frozen_refund_context.validate()
                     capture_shared_fees(ws,reused['id'],model=model,payload=json.loads(reused['result']))
             else:
                 capture_shared_fees(ws,reused['id'],model=model,payload=json.loads(reused['result']))
+            ing.frozen_refund_context.validate()
             state=ws.state(store.id,sl.period)
             shown=state.result if state and state.result else json.loads(reused['result'])
             out.periods.append({**shown,'run_id':reused['id'],'state':state.state if state else 'open',
@@ -675,6 +683,7 @@ def _recompute_locked(
                 with financial_reuse(ws.root,store.id,sl.period):
                     assert_code_integrity()
                     if scope is not None:scope.require(store.id,sl.period,workspace_root=ws.root)
+                    ing.frozen_refund_context.validate()
                     if period_proof:automation_period_proof.save(ws,previous_id,period_proof)
                     from .automation_shared_fee import capture as capture_shared_fees
                     capture_shared_fees(ws,previous_id,model=model,payload=previous_payload)
@@ -687,6 +696,7 @@ def _recompute_locked(
         with financial_publish(ws.root,store.id,sl.period):
             assert_code_integrity()
             if scope is not None:scope.require(store.id,sl.period,workspace_root=ws.root)
+            ing.frozen_refund_context.validate()
             run_id = ws.record(
                 store.id, sl.period, payload, shas, evidence_ready=False,
                 model_revision=model_revision, input_fingerprint=fingerprint,

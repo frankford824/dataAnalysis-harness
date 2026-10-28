@@ -235,6 +235,49 @@ def company_basis(ws,model,period):
             'basis':basis,'shares':shares,'missing_store_ids':missing,'input_sha':signature,'issues':problems,'finance_decision':finance_decision}
 
 
+
+def source_fact_dependencies_current(ws,store_id,recorded):
+    """Check the exact used IDs before filtering can hide a revoked fact."""
+    from datetime import datetime
+    from .historical_cost_facts import RULE as v2_rule,RULE_SHA as v2_sha
+    from .automation_source_cost_v3 import RULE as v3_rule,RULE_SHA as v3_sha
+    rules={v2_rule:v2_sha,v3_rule:v3_sha}
+    for source in (recorded or {}).get('approved_cost_sources',[]):
+        if not source.get('source_fact'):continue
+        row=ws.conn.execute("""SELECT d.*,a.identity_kind,a.action AS authority_action,
+            a.input_sha AS authority_input,a.proposal_sha AS authority_proposal,a.scope_json
+            FROM automation_decision d LEFT JOIN automation_authorization a ON a.request_id=d.request_id
+            WHERE d.id=?""",(source.get('decision_id'),)).fetchone()
+        if (not row or row['store_id']!=store_id or row['action']!='apply' or row['kind'] not in rules
+            or row['identity_kind']!='delegated_service' or row['authority_action']!=row['kind']
+            or row['authority_input']!=row['input_sha'] or row['authority_proposal']!=row['proposal_sha']):return False
+        if ws.conn.execute("SELECT 1 FROM automation_decision WHERE action='revoke' AND ref_id=?",(row['id'],)).fetchone():return False
+        try:
+            value=json.loads(row['values_json']);authority=json.loads(row['scope_json'])
+            facts=value.get('facts') if row['kind']==v2_rule else value.get('fact')
+            if value.get('rule_sha')!=rules[row['kind']] or journal.digest(facts)!=row['proposal_sha']:return False
+            if row['kind']==v2_rule:
+                if not isinstance(facts,list) or not any(f.get('coverage_key')==source.get('coverage_key') and f.get('quote_sha')==source.get('quote_sha') for f in facts):return False
+            elif (not isinstance(facts,dict) or facts.get('store_id')!=store_id
+                or (facts.get('target') or {}).get('coverage_key')!=source.get('coverage_key')):return False
+            grant=ws.conn.execute("""SELECT d.*,a.identity_kind,a.action AS authority_action FROM automation_decision d
+                LEFT JOIN automation_authorization a ON a.request_id=d.request_id WHERE d.id=?""",(authority.get('approved_rule_grant'),)).fetchone()
+            if (not grant or grant['kind']!='rule_grant' or grant['action']!='apply' or grant['store_id']!=store_id
+                or grant['identity_kind']!='human' or grant['authority_action']!='decision.apply'):return False
+            values=json.loads(grant['values_json']);adopted=datetime.fromisoformat(row['at'])
+            if (values.get('enabled') is not True or values.get('rule_id')!=row['kind'] or values.get('rule_sha')!=rules[row['kind']]
+                or not datetime.fromisoformat(values['valid_from'])<=adopted<datetime.fromisoformat(values['valid_until'])
+                or not values.get('period_from',grant['period'])<=row['period']<=values.get('period_until',grant['period'])):return False
+            # Frozen borrowed inputs retain the already verified historical
+            # authority contract. No open owned basis survives withdrawal.
+            frozen_origin=bool(source.get('frozen_origin_run_id'))
+            if source.get('origin_period') and source.get('origin_period')!=recorded.get('period'):
+                origin=ws.state(store_id,source['origin_period'])
+                frozen_origin=frozen_origin or bool(origin and origin.closed)
+            if not frozen_origin and ws.conn.execute("SELECT 1 FROM automation_decision WHERE action='revoke' AND ref_id=?",(grant['id'],)).fetchone():return False
+        except (ValueError,TypeError,KeyError,AttributeError):return False
+    return True
+
 def check(ws,store_id,period,*,model=None,expected_run_id=None,ignored_blockers=(),
           manual_result=None,check_company=True,check_pending=True,company_context=None,verify_artifacts=False):
     model=resolve_model(ws,model)
@@ -258,6 +301,8 @@ def check(ws,store_id,period,*,model=None,expected_run_id=None,ignored_blockers=
         if 'calculation_inputs' in payload and not proof:
             problems.append(issue('input_capture_unverified','本次结果缺少完整输入与账期血缘凭据，请先按当前服务重算'))
         if recorded:
+            if not bool(state and state.closed) and not source_fact_dependencies_current(ws,store_id,recorded):
+                problems.append(issue('source_fact_input_unverified','本期曾采用的成本来源事实或其授权已撤回或不可验证，系统须重新核算后再月结'))
             if recorded.get('source_code_sha') and recorded['source_code_sha']!=code_state.get('source_code_sha'):
                 problems.append(issue('unverified_code_change','适用核算源码已更新，请等待当前批准代码自动重算复核'))
             elif 'calculation_inputs' in payload and not recorded.get('source_code_sha'):
@@ -346,7 +391,20 @@ def check(ws,store_id,period,*,model=None,expected_run_id=None,ignored_blockers=
     from .automation_source_cost_v3 import fingerprint as physical_facts_fingerprint
     scope['physical_source_facts_sha']=physical_facts_fingerprint(ws,store_id,period)
     from .source_dates import fingerprint as date_facts_fingerprint
-    scope['original_date_facts_sha']=date_facts_fingerprint(ws,store_id,period)
+    date_dependencies=recorded.get('original_date_dependencies') if recorded else None
+    current_date_sha=date_facts_fingerprint(ws,store_id,period,date_dependencies)
+    scope['original_date_facts_sha']=current_date_sha
+    if (recorded and not bool(state and state.closed)
+        and ('original_date_facts_sha' in recorded or (date_dependencies or {}).get('potential_parent_ids'))
+        and recorded.get('original_date_facts_sha')!=current_date_sha):
+        problems.append(issue('original_date_input_unverified',
+            '原订单日期依据已有变化，系统须按本期已封存依赖重新核算或验证等价后再月结'))
+    if row is not None and model is not None and not (state and state.closed):
+        from .frozen_refund_guard import validate_run as validate_frozen_refunds
+        refund_state=validate_frozen_refunds(ws,model,model.store(store_id),period,row['id'])
+        scope['frozen_refund_binding_sha']=refund_state['sha']
+        if refund_state['recompute_required']:
+            problems.append(issue('frozen_refund_recheck_required','已结退款归属依据已变化或未完整核实，请等待当前结果重新核算，不能确认旧金额'))
     scope['company_finance_sha']=journal.digest(company.get('finance_decision')) if company else None
     scope['shared_fee_source_sha']=shared_fee['input_sha']
     return {'allowed':not problems,'input_sha':journal.digest(scope),'scope':scope,'run_id':scope['run_id'],

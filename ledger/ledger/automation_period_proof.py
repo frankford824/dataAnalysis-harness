@@ -161,11 +161,14 @@ def prepare(ws,model,store,ingestion,sl,payload,allocation,source_context=None):
     evidence_sha=journal.digest(evidence)
     result_sha=journal.digest(_logical(payload))
     dep=journal.digest({'engine':code,'source_code_sha':source_code,'model':model_part,'result_sha':result_sha,'evidence_sha':evidence_sha})
+    from .frozen_refund_guard import protected_artifacts,event_index
+    frozen_refund_artifacts=protected_artifacts(sl.facts)
     manifest={**(source_context or source_manifest(ws,store.id)),'engine':code,'source_code_sha':source_code,'model_sha':journal.digest(model.model_dump(mode='json')),
         'source_refs':sorted({r.ref.sha256 for r in ingestion.items}),
         'period':sl.period,'store_id':store.id,'evidence_sha':evidence_sha,
         'effective_model_sha':journal.digest(model_part),'template_ids':sorted(used_templates),'subjects':sorted(subjects),
-        'approved_cost_sources':cost_sources,
+        'approved_cost_sources':cost_sources,'frozen_refund_artifacts':frozen_refund_artifacts,
+        'frozen_refund_event_index':event_index(ingestion,sl.facts,store.id,sl.period),
         'verified_original_date_sources':date_sources,
         'original_date_dependencies':date_dependencies,'original_date_facts_sha':date_source_sha,
         'collectable_scope':collectable_scope(getattr(sl,'pricing_gaps',None),getattr(sl,'coverage_gap_rows',None),getattr(sl,'order_issue_rows',None),payload),
@@ -233,6 +236,11 @@ def save(ws,run_id,proof):
                 ws.mark_evidence(run_id,ready=False,error='已采用历史成本的原始凭据缺失或哈希不一致')
                 return
             artifacts.append(artifact)
+    for artifact in proof['manifest'].get('frozen_refund_artifacts',[]):
+        if not valid_artifact(ws,artifact):
+            ws.mark_evidence(run_id,ready=False,error='已结退款归属档案失效，当前结果保持待核')
+            return
+        artifacts.append(artifact)
     from .finance_guard import guard
     from .version import assert_code_integrity
     with guard(ws.root,proof['manifest']['store_id'],proof['manifest']['period']),ws.transaction() as conn:

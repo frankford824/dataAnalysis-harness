@@ -44,6 +44,8 @@ def fingerprint(ws, model, store, ingestion, registry, *, publication_scope=None
                                   state, ingestion.source_sync_pending, ingestion.validation_errors,
                                   ingestion.deduplication,
                                   publication_scope.identity if publication_scope is not None else None], ensure_ascii=False, sort_keys=True).encode())
+    context=getattr(ingestion,'frozen_refund_context',None)
+    if context is not None:h.update(context.identity.encode())
     for item in ingestion.items:
         # All post-feed enrichment is included, not just the raw file hash or
         # amounts. Thus flags, identities, dates, quantities and price evidence

@@ -187,7 +187,7 @@ def month(ws,model,period):
             problems=[]
         elif checked['allowed']:
             status,stage,message='needs_decision','ready_for_close','核算与复核已完成，请确认本月结账'
-        elif any(p['code'] in {'cost_decision_required','commission_incomplete'} for p in problems):
+        elif any(p['code'] in {'cost_decision_required','commission_incomplete','frozen_refund_finance_conflict'} for p in problems):
             status,stage,message='needs_decision','business_decision','请确认确实需要业务决定的事项'
             cost_work=(any(p['code']=='cost_decision_required' for p in problems)
                 or bool(json.loads(checker.current_run(ws,store.id,period)['result']).get('pricing_pending_count',0) if checked['run_id'] else False))
@@ -210,7 +210,7 @@ def month(ws,model,period):
             codes={p['code'] for p in problems}
             if codes and codes<={'company_revenue_unknown','overhead_basis_empty','overhead_total_unknown'}:
                 stage,message='waiting_company','本店核算已完成，等待公司其他营业店资料与公摊依据完整'
-            elif codes and codes<={'recompute_pending','unverified_input_change','input_capture_unverified','manual_input_unverified','unverified_code_change'}:
+            elif codes and codes<={'recompute_pending','unverified_input_change','input_capture_unverified','manual_input_unverified','unverified_code_change','original_date_input_unverified','source_fact_input_unverified'}:
                 stage,message='calculating','新资料已进入现有核算队列，完成后自动更新'
         waiting=None
         if waiting_items and status!='completed' and not checked['allowed']:
@@ -225,6 +225,9 @@ def month(ws,model,period):
         if not waiting and status!='completed' and 'recompute_pending' in codes and local_recompute:
             status='processing'
             stage,message='calculating','资料已收到，正在现有核算队列中复核'
+        if status!='completed' and codes&{'original_date_input_unverified','source_fact_input_unverified'}:
+            status,stage,message='processing','calculating','来源依据已更新或撤回，系统正在复核本店账期，无需重新录入金额'
+            waiting=None
         finance_codes={'overhead_frozen_input_changed','overhead_legacy_frozen_basis','overhead_frozen_basis_unverified'}
         local_work=codes-finance_codes-{'company_revenue_unknown','overhead_basis_empty','overhead_total_unknown'}
         local_income_missing=store.id in company.get('missing_store_ids',[])
@@ -545,7 +548,8 @@ def _decision_revoke(ws,model,decision_id,*,request_id,reason,input_sha,actor):
         affects_cost=row['kind'] in {'cost_line',history_rule}
         affects_statement=row['kind']==statement_rule
         from .automation_source_cost_v3 import RULE as physical_source_rule
-        affects_source_facts=row['kind'] in {source_facts_rule,physical_source_rule}
+        source_rule_grant=(row['kind']=='rule_grant' and json.loads(row['values_json']).get('rule_id') in {source_facts_rule,physical_source_rule})
+        affects_source_facts=row['kind'] in {source_facts_rule,physical_source_rule} or source_rule_grant
         if affects_cost:
             value=json.loads(row['values_json'])
             if row['kind']==history_rule:value={**value,'coverage_key':value['coverage']['coverage_key'],'_line_log_id':value['line_log_id']}

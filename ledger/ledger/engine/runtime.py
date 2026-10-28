@@ -880,6 +880,9 @@ def run(ingestion: Ingestion, platform: str = "*") -> RunResult:
     facts=bind_scopes(facts,metrics)
     facts=apply_to_facts(facts,ingestion.statement_decisions)
 
+    frozen_context=getattr(ingestion,'frozen_refund_context',None)
+    if frozen_context is not None:facts=frozen_context.annotate(ingestion,facts,metrics)
+
     # 投影到脊柱。源事实是证据链（一行一条源记录，带文件行号），脊柱事实是口径
     # （一行一条订单记录，含分摊）。损益表从脊柱事实出数，否则主订单级的钱会被
     # 每个子订单各算一遍。
@@ -897,6 +900,9 @@ def run(ingestion: Ingestion, platform: str = "*") -> RunResult:
             facts=facts.with_columns(pl.when(unknown).then(message).otherwise(pl.col('source_note')).alias('source_note'))
             eval_errors.setdefault('promotion',[]).extend(facts.filter(unknown)['source_note'].unique().sort().to_list())
     projectable = facts.filter((pl.col("store") != "(未知店铺)") & ~_statement_pending(facts) & ~_promotion_pending(facts))
+    from ..frozen_refund_guard import STATUS as FROZEN_REFUND_STATUS
+    if FROZEN_REFUND_STATUS in projectable.columns:
+        projectable=projectable.filter(~pl.col(FROZEN_REFUND_STATUS).is_in(['excluded','pending']).fill_null(False))
     for metric in metrics:
         if not (metric.link and metric.link.to) or metric.posting_basis in {"transaction", "order_number"}:
             proj = project_transactions(projectable, metric, spine)
@@ -913,6 +919,8 @@ def run(ingestion: Ingestion, platform: str = "*") -> RunResult:
         pl.concat(spine_parts, how="diagonal_relaxed") if spine_parts else _empty_spine_facts()
     )
     facts = _mark_counted(facts, spine_facts, metrics)
+    from ..frozen_refund_guard import clear_contribution
+    facts = clear_contribution(facts)
     facts = _promotion_booking_evidence(facts)
     from .promotion_allocation import annotate as annotate_promotion_allocation
     facts = annotate_promotion_allocation(facts, projections)
@@ -935,6 +943,8 @@ def run(ingestion: Ingestion, platform: str = "*") -> RunResult:
     # when another month has valid projections.
     slice_keys.update(_slice_keys(facts.filter(_statement_pending(facts))))
     slice_keys.update(_slice_keys(result.pricing_gaps))
+    if FROZEN_REFUND_STATUS in facts.columns:
+        slice_keys.update(_slice_keys(facts.filter(pl.col(FROZEN_REFUND_STATUS).is_in(['excluded','pending']))))
     for store, period in sorted(slice_keys):
         result.slices[(store, period)] = _build_slice(
             model, ingestion, facts, spine_facts, spine.frame, store, period,
@@ -1500,6 +1510,8 @@ def _build_slice(
             unavailable.add("goods_cost")
         if not own_gaps.is_empty():
             unavailable.update(own_gaps["metric_id"].unique().to_list())
+    from ..frozen_refund_guard import blocked_metrics as frozen_pending_metrics
+    unavailable.update(frozen_pending_metrics(scoped))
     # 没有合格订单时，零投影就是未入账，不能退回源金额把已拦下的补发成本算回来。
     # 期间级指标也已生成显式投影，因此所有损益只使用实际入账事实。
     totals = calc.totals_by_metric(scoped_spine, only_linked=False)
@@ -1666,6 +1678,8 @@ def _build_slice(
     )
     from ..cost_completeness import apply as apply_cost_completeness
     apply_cost_completeness(sliced,model,platform)
+    from ..frozen_refund_guard import finish_slice
+    finish_slice(sliced,model)
     return sliced
 
 

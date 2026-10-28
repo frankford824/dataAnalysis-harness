@@ -28,7 +28,7 @@ REJECTION_OBSERVATION_FIELDS = {'run_present','state','outcome','source_state',
 REJECTION_CATEGORIES = {'incomplete_data','safety_boundary','scope_coverage'}
 NON_BUSINESS_REASONS = {'code_source_drift','unverified_code_change',
     'unverified_model_change','unverified_input_change','input_capture_unverified',
-    'manual_input_unverified','evidence_archive','stale_run','publication_scope_unverified'}
+    'manual_input_unverified','original_date_input_unverified','source_fact_input_unverified','evidence_archive','stale_run','publication_scope_unverified'}
 NON_BUSINESS_FAILURES = {'maintenance','code_source_drift','publication_scope_unverified',
     'publication_scope_changed','storage','storage_failure','internal_error'}
 SOURCE_FAILURE_KINDS = {'source_unavailable','source_missing','missing_sources',
