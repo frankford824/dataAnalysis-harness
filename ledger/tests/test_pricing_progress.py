@@ -246,7 +246,7 @@ def test_provisional_calculation_stays_queued_until_full_result(tmp_path, monkey
     monkeypatch.setenv('LEDGER_ORDER_FEED_ENABLED', '0')
     ws = Workspace(tmp_path); reg = Registry(tmp_path)
     reg.enqueue_source({'s1'}, 'order-feed:snapshot:10')
-    result = SimpleNamespace(failure=None, periods=[{'source_sync_pending': True}])
+    result = SimpleNamespace(failure=None, periods=[{'store_id':'s1','period':'2026-06','source_sync_pending': True}])
     monkeypatch.setattr('ledger.commission_manager.service.recompute', lambda *a, **k: result)
     Manager(lambda: ws, _model).once()
     with reg.transaction() as conn:

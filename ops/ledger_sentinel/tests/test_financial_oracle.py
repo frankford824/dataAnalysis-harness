@@ -18,20 +18,21 @@ _spec=importlib.util.spec_from_file_location('ledger_oracle_fixture_conftest',RO
 _fixture_conftest=importlib.util.module_from_spec(_spec);_spec.loader.exec_module(_fixture_conftest)
 try:
     sys.modules['conftest']=_fixture_conftest
-    from test_replay_service import bundle as service_bundle, seed, all_expected
+    from test_replay_service import bundle as service_bundle, complete_bundle as service_complete_bundle, seed, all_expected, complete_expected
 finally:
     if _prior_conftest is None:sys.modules.pop('conftest',None)
     else:sys.modules['conftest']=_prior_conftest
 
 
 @pytest.fixture
-def oracle_case(tmp_path):
-    bundle,missing=service_bundle.__wrapped__(tmp_path)
+def oracle_case(tmp_path,request):
+    incomplete=getattr(request,'param',{}).get('incomplete',False)
+    bundle,missing=(service_bundle if incomplete else service_complete_bundle).__wrapped__(tmp_path)
     path=tmp_path/'approved-case.json'
     case={'schema_version':1,'kind':'service_fixture','case_id':'external-session',
         'approval_reference':'synthetic engineering fixture only','bundle':str(bundle),
-        'registry':seed(),'steps':[{'operation':'recompute','store_id':sid} for sid in ('s1','s2')],
-        'expected':all_expected()}
+        'registry':seed(),'steps':[*[{'operation':'recompute','store_id':sid} for sid in ('s1','s2')],{'operation':'drain_pending'}],
+        'expected':all_expected() if incomplete else complete_expected()}
     path.write_text(json.dumps(case))
     manifest=tmp_path/'approved-manifest.json'
     body={'schema_version':1,'kind':'service_fixture','approval_reference':case['approval_reference'],
@@ -120,7 +121,8 @@ def prepare_closed_case(oracle_case):
         {'operation':'close_approved','store_id':'s1','period':'2026-06',
          'approval_reference':case['approval_reference'],'reason':'explicit synthetic close fixture'},
         {'operation':'recompute','store_id':'s1'}]
-    case['expected']=all_expected(**{key:expected_scope(160,8,cost=2,can_close=True) for key in missing})
+    case['expected']=(all_expected(**{key:expected_scope(160,8,cost=2,can_close=True) for key in missing})
+        if missing else complete_expected())
     case['expected']['scopes']['s1/2026-06'].update(state='closed',can_close=False,confirmed_total=8.0,confirmed_people={'p1':8.0})
     rewrite_case(manifest,path,case)
     return manifest
@@ -201,10 +203,70 @@ def test_missing_original_costs_are_verified_pending_without_zero_profit(oracle_
     expected=case['expected']['scopes']['s1/2026-06']
     expected['statement']['gross_profit']={'value':None,'available':False}
     expected['statement']['net_profit']={'value':None,'available':False}
-    # The declared partial preview uses known income 20*10 and no recognized
-    # cost, at the fixed 5% scheme. It is explicitly incomplete, never payable.
-    expected.update(commission_total=10.0,commission_people={'p1':{'base':200.0,'amount':10.0}},commission_complete=False)
+    # Preserve the existing incomplete reference trial: known income 20*10
+    # less no recognized cost, at the fixed 5% scheme, gives trial 10. This is
+    # not a final profit or payable commission: both profit nodes are unknown,
+    # completion/close stay false, and there is no confirmed payout.
+    expected.update(commission_total=10.0,commission_people={'p1':{'base':200.0,'amount':10.0}},
+                    commission_complete=False,can_close=False)
     rewrite_case(manifest,path,case)
     report=make_oracle(manifest).verify(candidate_root=ROOT,candidate_code_sha='3'*40,output=tmp_path/'authority')
     assert report['status']=='passed',report.get('reason_code')
     assert report['financial_approval_granted'] is False
+
+
+@pytest.mark.parametrize('oracle_case',[{'incomplete':True}],indirect=True)
+def test_incomplete_original_source_remains_unknown_at_independent_oracle(oracle_case,tmp_path):
+    manifest,_path,_case,_missing=oracle_case
+    report=make_oracle(manifest).verify(candidate_root=ROOT,candidate_code_sha='6'*40,output=tmp_path/'authority')
+    assert report['status']=='blocked' and report['reason_code']=='financial_expected_difference'
+    assert report['child_exit_code']==0 and report['candidate_execution_isolated']
+    snapshot=json.loads((tmp_path/'authority/child-artifacts/0/2/snapshot.json').read_text())
+    for scope in snapshot['scopes'].values():
+        assert scope['statement']['n_receipt']=={'value':200.0,'available':True}
+        assert scope['statement']['net_profit']=={'value':None,'available':False}
+        assert scope['commission_complete'] is False and scope['can_close'] is False
+    assert not (tmp_path/'authority/acceptance-receipt.json').exists()
+
+
+@pytest.mark.parametrize('oracle_case',[{'incomplete':True}],indirect=True)
+def test_actual_approved_missing_price_supplements_still_close_and_freeze(oracle_case,tmp_path):
+    manifest=prepare_closed_case(oracle_case)
+    report=make_oracle(manifest).verify(candidate_root=ROOT,candidate_code_sha='7'*40,output=tmp_path/'authority')
+    assert report['status']=='passed',report.get('reason_code')
+    assert report['cases'][0]['frozen_count']==1
+
+
+def test_projected_pure_ledger_needs_no_sdk_and_receives_scopes_without_expected_values(oracle_case,tmp_path):
+    manifest,_path,_case,_missing=oracle_case
+    candidate=tmp_path/'candidate';shutil.copytree(ROOT/'ledger/ledger',candidate/'ledger/ledger',ignore=shutil.ignore_patterns('__pycache__'))
+    target=candidate/'ledger/ledger/__init__.py'
+    probe=("from pathlib import Path\nimport json\n"
+        +"assert not Path('/candidate/agent-worker').exists()\n"
+        +"_request=json.loads(Path('/request.json').read_text())\n"
+        +"assert all(set(case)=={'kind','registry','steps','publication_scopes'} for case in _request['cases'])\n"
+        +"assert all(case['publication_scopes']==['s1/2026-06','s1/2026-07','s2/2026-06','s2/2026-07'] for case in _request['cases'])\n"
+        +"from . import source_recovery\n")
+    target.write_text(probe+target.read_text())
+    report=make_oracle(manifest).verify(candidate_root=candidate,candidate_code_sha='8'*40,output=tmp_path/'authority')
+    assert report['status']=='passed',report.get('reason_code')
+
+
+def test_child_failure_retains_actual_private_stderr(oracle_case,tmp_path):
+    manifest,_path,_case,_missing=oracle_case
+    candidate=tmp_path/'candidate';shutil.copytree(ROOT/'ledger/ledger',candidate/'ledger/ledger',ignore=shutil.ignore_patterns('__pycache__'))
+    (candidate/'ledger/ledger/__init__.py').write_text("raise RuntimeError('declared synthetic child traceback')\n")
+    report=make_oracle(manifest).verify(candidate_root=candidate,candidate_code_sha='9'*40,output=tmp_path/'authority')
+    assert report['status']=='blocked' and report['reason_code']=='financial_transport_incomplete'
+    log=tmp_path/'authority'/report['child_log_path']
+    assert 'declared synthetic child traceback' in log.read_text()
+    assert file_sha(log)==report['child_log_sha256']
+
+
+def test_unimplemented_manual_transport_step_is_explicitly_blocked_before_child(oracle_case,tmp_path):
+    manifest,path,case,_missing=oracle_case
+    case['steps'].append({'operation':'restore_approved_manual_finance','store_id':'s1','period':'2026-06'})
+    rewrite_case(manifest,path,case)
+    report=make_oracle(manifest).verify(candidate_root=ROOT,candidate_code_sha='0'*40,output=tmp_path/'authority')
+    assert report['status']=='blocked' and report['reason_code']=='service_operation_unsupported'
+    assert report['candidate_execution_isolated'] is False

@@ -7,7 +7,9 @@ import pytest
 
 from ledger import cost_lines, cost_line_posting, frozen_costs, manual_cost, service
 from ledger.engine import calculate
-from ledger.engine.runtime import _empty_spine_facts
+from ledger.engine.runtime import Slice, _empty_spine_facts
+from ledger.engine.audit import AuditResult
+from ledger.engine.types import ClassifyReport, Completeness
 from ledger.workspace import Workspace
 from test_cost_lines import model, payload, archive
 
@@ -20,10 +22,25 @@ def setup(tmp_path, amount='12.50'):
     saved = cost_lines.save(ws, store.id, raw['period'], rid, coverage_key='S2',
         context_sha=gaps['context_sha'][0], amount=amount, reason='原单核对')
     inputs = deepcopy(raw['calculation_inputs']); inputs['unavailable_metrics'] = []
-    sl = SimpleNamespace(coverage_gap_rows=gaps, cost_line_posting={},
-        calculation_inputs=inputs, nodes=calculate.evaluate_statement(m,inputs['metric_totals'],set(),set()),
-        facts=pl.DataFrame({'metric_id':['goods_cost'],'source_id':['order_cost'],
-                           'amount':[-600.0],'contribution':[-600.0],'counted':[True]}))
+    # Declared synthetic source basis for this posting contract, not a full
+    # financial golden. Use a real Slice so audit and amount completeness run
+    # through their production interface without defaulting missing audit data.
+    basis = {key: None for key in calculate._empty_facts().columns}
+    basis.update(metric_id='goods_cost', source_id='order_cost',
+        template_id='synthetic_known_cost_basis', store=store.name, period='2026-06',
+        grain='order', link_key='KNOWN_BASE', linked=True,
+        amount=-600.0, contribution=-600.0, counted=True,
+        count_without_order=False, classify_via='declared_synthetic_fixture',
+        file_name='synthetic-known-source', file_sha='a'*64, sheet='fixture', row_no=1)
+    schema = {**calculate._empty_facts().schema, 'counted': pl.Boolean,
+              'contribution': pl.Float64}
+    facts = pl.DataFrame([basis], schema=schema, strict=False)
+    sl = Slice(store=store.name, period='2026-06', coverage_gap_rows=gaps,
+        calculation_inputs=inputs,
+        nodes=calculate.evaluate_statement(m, inputs['metric_totals'], set(), set()),
+        facts=facts, audit=AuditResult(), link_reports={},
+        classify_report=ClassifyReport(),
+        completeness=Completeness(arrived=['order_cost']))
     # Another month's row must not shift this month's global spine identity.
     spine = pl.DataFrame({'store':[store.name]*2, 'period':['2026-05','2026-06'],
         'order_id':['O1','O2'],'sub_order_id':['S1','S2'],'product_id':['P1','P2'],

@@ -354,6 +354,19 @@ def test_new_raw_metadata_changes_lineage_but_not_proved_financial_members(sourc
     assert any(r['source']=='fixed_jst_source_receipt' and r['sha256']==fresh['receipt_sha256'] for r in fresh['source_refs'])
 
 
+def gate_first_writer(ws,monkeypatch):
+    """Force both optimistic reads to finish even when no sync is needed."""
+    from contextlib import contextmanager
+    import threading
+    barrier=threading.Barrier(2);local=threading.local();original=ws.transaction
+    @contextmanager
+    def synchronized():
+        if not getattr(local,'passed',False):
+            local.passed=True;barrier.wait(timeout=15)
+        with original() as conn:yield conn
+    monkeypatch.setattr(ws,'transaction',synchronized)
+
+
 @pytest.mark.parametrize('physical',[False,True])
 def test_concurrent_same_close_request_rechecks_under_writer_and_creates_one_generation(source_case,monkeypatch,physical):
     from concurrent.futures import ThreadPoolExecutor
@@ -365,10 +378,13 @@ def test_concurrent_same_close_request_rechecks_under_writer_and_creates_one_gen
         fact={'decision_id':'synthetic-source-fact','store_id':'s1','period':c.period,'source_binding':value['source_binding']}
         monkeypatch.setattr('ledger.automation_source_cost_v3.used',lambda *args:[fact])
     else:monkeypatch.setattr('ledger.automation_source_cost_v3.used',lambda *args:[])
-    barrier=threading.Barrier(2);original=actions.sync_month
-    def synchronized(*args,**kwargs):
-        result=original(*args,**kwargs);barrier.wait(timeout=15);return result
-    monkeypatch.setattr(actions,'sync_month',synchronized)
+    if physical:
+        barrier=threading.Barrier(2);original=actions.sync_month
+        def synchronized(*args,**kwargs):
+            result=original(*args,**kwargs);barrier.wait(timeout=15);return result
+        monkeypatch.setattr(actions,'sync_month',synchronized)
+    else:
+        gate_first_writer(c.ws,monkeypatch)
     kwargs={'period':c.period,'store_ids':['s1'],'request_id':'concurrent-same-source-preview',
         'actor':{'id':'finance-synthetic','kind':'human','authenticated':True}}
     with ThreadPoolExecutor(max_workers=2) as pool:
@@ -388,10 +404,7 @@ def test_concurrent_same_request_with_different_identity_is_conflict_not_integri
     import threading
     from ledger import automation_actions as actions
     c=source_case;monkeypatch.setattr('ledger.automation_source_cost_v3.used',lambda *args:[])
-    barrier=threading.Barrier(2);original=actions.sync_month
-    def synchronized(*args,**kwargs):
-        result=original(*args,**kwargs);barrier.wait(timeout=15);return result
-    monkeypatch.setattr(actions,'sync_month',synchronized)
+    gate_first_writer(c.ws,monkeypatch)
     first={'period':c.period,'store_ids':['s1'],'request_id':'concurrent-different-source-preview',
         'actor':{'id':'finance-synthetic','kind':'human','authenticated':True}}
     second=deepcopy(first)

@@ -809,7 +809,7 @@ def ensure_close_refresh(ws,model,*,period,store_ids,request_id,actor):
         if record['signature']!=signature:raise Conflict('月结取证请求的店铺、事实或确认身份已变化，请重新预览')
         return _close_refresh_status(ws,model,record)
     # Establish current case identities without inventing an approval.
-    sync_month(ws,model,period)
+    if facts:sync_month(ws,model,period)
     tasks=[]
     with ws.transaction() as conn:
         # Another request can cross the optimistic read while sync_month is
@@ -846,7 +846,7 @@ def ensure_close_refresh(ws,model,*,period,store_ids,request_id,actor):
                 'actor':actor['id'],'tasks':tasks}
         # Even an empty source set is sealed: adding a fact later must not
         # silently change the meaning of an already used human request ID.
-        lineage=tasks[0]['case_id'] if tasks else journal.digest([selected[0],period])[:32]
+        lineage=tasks[0]['case_id'] if tasks else '__company__'
         conn.execute('INSERT INTO automation_attempt VALUES(?,?,?,?,?,?,?)',
             (key,lineage,key,signature,'source_close_refresh',journal.encoded(record),journal.now()))
     return _close_refresh_status(ws,model,record)

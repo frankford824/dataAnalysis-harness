@@ -58,6 +58,27 @@ class ReplayActionRejection(ReplayError):
         super().__init__('离线业务入口拒绝：'+operation+'：'+','.join(self.reason_codes))
 
 
+
+def _snapshot_amount(value):
+    """JSON number DTO, preserving decimal text instead of rounding cents.
+
+    Financial arithmetic stays Decimal. JSON round-tripping uses the same
+    decimal-through-text convention as the ledger, so a micro amount cannot
+    silently become zero or a wide fractional amount lose precision.
+    """
+    if value is None:return None
+    if isinstance(value,bool):raise ReplayError('金额传输不接受布尔值')
+    try:
+        amount=Decimal(str(value))
+        if not amount.is_finite():raise ValueError()
+        number=float(amount)
+        if not math.isfinite(number):raise ValueError()
+    except (ValueError,TypeError,ArithmeticError,OverflowError):
+        raise ReplayError('金额传输必须是有限JSON数值') from None
+    if Decimal(str(number))!=amount:
+        raise ReplayError('JSON金额传输会损失精度，不能补零或截断')
+    return number
+
 def _partial_differences(expected, actual, path=''):
     """Compare only explicitly evidenced fields; an absent field is not None.
 
@@ -794,9 +815,9 @@ class Session:
             observations[key]={'run_present':bool(run_id),'state':state.state if state else None,
                 'outcome':outcome,'source_state':source_state,'checker_allowed':bool(checked['allowed']),
                 'reason_codes':sorted({p['code'] for p in checked['issues']}),'failure':failure,
-                'company':{'total':Decimal(str(company['total'])) if company.get('total') is not None else None,
-                    'basis_total':Decimal(str(company['basis_total'])) if income_complete and company.get('basis_total') is not None else None,
-                    'known_income_subtotal':Decimal(str(company['basis_total'])) if company.get('basis_total') is not None else None,
+                'company':{'total':_snapshot_amount(company.get('total')),
+                    'basis_total':_snapshot_amount(company.get('basis_total')) if income_complete else None,
+                    'known_income_subtotal':_snapshot_amount(company.get('basis_total')),
                     'income_complete':income_complete,'missing_store_ids':missing}}
             if not run_id:continue
             if not verified(self.ws.facts_path(state.run_id)):

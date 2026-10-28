@@ -1,8 +1,8 @@
 """Host-owned service oracle; candidate outputs never sign their own acceptance.
 
 Only code, frozen input bundles, approved seed/steps and an empty output volume
-enter the child namespace. Expected scopes, the manifest and release authority
-remain in the parent. A financial proof is distinct from the eight release gates.
+enter the child namespace. Expected financial values, the manifest and release authority
+remain in the parent. Only approved scope keys cross the execution boundary. A financial proof is distinct from the eight release gates.
 """
 from contextlib import closing
 from decimal import Decimal
@@ -30,6 +30,7 @@ CHECKER = ROOT/'tools/verify-ledger-service-cases.py'
 SCOPE_FIELDS = {'state','statement','commission_total','commission_people','confirmed_total',
     'confirmed_people','cost_line_total','allocation_pending_count','commission_complete','can_close','source_sync_pending'}
 IMMUTABLE_TABLES = ('run_labor','automation_overhead_close','payout_confirmation','settlement')
+SERVICE_OPERATIONS=frozenset({'recompute','supplement','confirm','replace_scheme','drain_pending','close_approved'})
 SHA = re.compile('[0-9a-f]{64}')
 
 
@@ -239,6 +240,7 @@ class FinancialOracle:
             elif body.get('workspace_decisions'):raise OracleBlocked('workspace_approval_case_missing')
             if not isinstance(case.get('steps'),list) or not case['steps']:raise OracleBlocked('service_steps_missing')
             for step in case['steps']:
+                if not isinstance(step,dict) or step.get('operation') not in SERVICE_OPERATIONS:raise OracleBlocked('service_operation_unsupported')
                 if step.get('operation')=='close_approved' and step.get('approval_reference')!=case['approval_reference']:raise OracleBlocked('close_approval_mismatch')
             inventory.append({'case_sha':file_sha(path),'bundle':str(bundle.resolve()),'inventory':_inventory(bundle),'decision_sha':file_sha(decision_path) if decision_path else None})
             output.append({'case':case,'bundle':bundle.resolve(),'fingerprint':fingerprint,'decisions':decision_path})
@@ -301,6 +303,9 @@ class FinancialOracle:
                 child=temp/'child';child.mkdir();request=[];mounts=[]
                 for index,row in enumerate(cases):
                     case=row['case'];public={k:case[k] for k in ('kind','registry','steps')}
+                    # Scope names are execution authority metadata, never the
+                    # expected monetary results or the parent's manifest.
+                    public['publication_scopes']=sorted(case['expected']['scopes'])
                     if row['decisions']:
                         public['workspace_decisions']={**case['workspace_decisions'],'path':'/decisions/'+str(index)+'.json'}
                         mounts+=['--ro-bind',str(row['decisions']),'/decisions/'+str(index)+'.json']
@@ -327,6 +332,9 @@ class FinancialOracle:
                     finally:
                         if process.poll() is None:os.killpg(process.pid,signal.SIGKILL);process.wait()
                 report.update(candidate_execution_isolated=True,child_exit_code=exit_code,child_log_sha256=file_sha(temp/'private.log'),source_code_manifest=code_manifest,source_code_sha=digest(code_manifest))
+                shutil.copyfile(temp/'private.log',output/'child.private.log')
+                (output/'child.private.log').chmod(0o600)
+                report['child_log_path']='child.private.log'
                 # Persist raw artifacts privately for an independent inspection.
                 _bounded_child_tree(child)
                 shutil.copytree(child,output/'child-artifacts')
@@ -335,6 +343,7 @@ class FinancialOracle:
                     previous_frozen={};previous_immutable={};last=None
                     for step_index,_step in enumerate(row['case']['steps']):
                         observed=inspect_checkpoint(child/str(index)/str(step_index),source_code_sha=digest(code_manifest))
+                        if set(observed['scopes'])-set(row['case']['expected']['scopes']):raise OracleBlocked('financial_scope_outside_approved')
                         if any(observed['frozen'].get(k)!=v for k,v in previous_frozen.items()) or any(observed['immutable'].get(k)!=v for k,v in previous_immutable.items()):raise OracleBlocked('frozen_financial_layer_changed')
                         previous_frozen.update(observed['frozen']);previous_immutable.update(observed['immutable']);last=observed
                     if last['input_bundle_fingerprint']!=row['fingerprint'] or _different(row['case']['expected']['scopes'],last['scopes']):raise OracleBlocked('financial_expected_difference')

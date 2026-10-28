@@ -11,7 +11,7 @@ from ledger import freight_experiments_inputs as frozen
 from ledger import replay_service
 from ledger.freight_trial_inputs import digest
 from ledger.model.schema import Model, Platform, Store
-from test_replay_service import all_expected, bundle, seed
+from test_replay_service import all_expected, bundle, seed, complete_bundle, complete_expected
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -307,13 +307,14 @@ def test_reports_cannot_overwrite_approved_inputs_or_candidate_model(declared_ma
     assert before == (gate._sha(case_path), gate._sha(manifest_path), gate._sha(directory / 'model.json'))
 
 
-def test_positive_actual_service_fixture_executes_but_never_qualifies_as_real_history(bundle, tmp_path):
-    """Real files/feed/registry/recompute; hand-authored fixture expected is unchanged."""
-    directory, _missing = bundle
+def test_positive_actual_service_fixture_executes_but_never_qualifies_as_real_history(complete_bundle, tmp_path):
+    """Separate complete inputs: 20*10 income - 20*2 cost = 160; 5% = 8."""
+    directory, _missing = complete_bundle
     case = {'schema_version': 1, 'case_id': 'service-fixture-two-months', 'kind': 'service_fixture',
         'bundle': str(directory), 'registry': seed(), 'steps': [
-            {'operation': 'recompute', 'store_id': 's1'}, {'operation': 'recompute', 'store_id': 's2'}],
-        'expected': all_expected()}
+            {'operation': 'recompute', 'store_id': 's1'}, {'operation': 'recompute', 'store_id': 's2'},
+            {'operation': 'drain_pending'}],
+        'expected': complete_expected()}
     result = replay_service.execute(case)
     assert result['status'] == 'passed', result.get('differences')
     assert len(result['checked_scopes']) == 4
@@ -335,6 +336,29 @@ def test_positive_actual_service_fixture_executes_but_never_qualifies_as_real_hi
     assert '禁止冒充真实历史' in attempt['cases'][0]['issues'][0]['message']
     assert attempt['cases'][0]['bundle_fingerprint'] == fingerprint
 
+
+
+def test_original_95_percent_fixture_remains_pending_and_cannot_be_positive_history(bundle):
+    """Twenty source targets with one missing price do not prove final profit."""
+    directory, missing = bundle
+    assert len(missing)==4  # One unresolved target in each of two stores/two months.
+    case={'schema_version':1,'case_id':'source-incomplete-service-fixture','kind':'service_fixture',
+        'bundle':str(directory),'registry':seed(),'steps':[
+            {'operation':'recompute','store_id':'s1'},{'operation':'recompute','store_id':'s2'},
+            {'operation':'drain_pending'}],
+        # This deliberately counterfactual old positive claim must be rejected;
+        # no actual output is recorded as a new expected value or golden.
+        'expected':all_expected()}
+    result=replay_service.execute(case)
+    assert result['status']=='failed' and result['differences']
+    for scope in result['actual']['scopes'].values():
+        assert scope['statement']['n_receipt']=={'value':200.0,'available':True}
+        for metric in ('gross_profit','net_profit'):
+            assert scope['statement'][metric]=={'value':None,'available':False}
+        assert scope['commission_complete'] is False and scope['can_close'] is False
+    for observation in result['actual']['observations'].values():
+        assert observation['outcome']=='pending' and not observation['checker_allowed']
+        assert 'required_cost_unresolved' in observation['reason_codes']
 
 def approved_scope_material(materials,*,attach_case=True):
     directory,case_path,manifest_path,_model=materials

@@ -50,3 +50,8 @@ root AgentScope运维Toolkit应**仅注册** `repair.model_tools(repair_id)` 返
 `artifacts()`输出impact.json、proposal.patch、pr-body.md和建议的`codex/ops-repair-...`分支。若配置绝对gh路径，会生成draft PR的固定`gh pr create --draft --body-file ...`参数；不会联网建PR、push或merge。远端身份尚未确定时保留本地可审查产物。CLI为 `python -m ops.ledger_sentinel.repair --repo ... --home ... --config ... prepare|check|freeze|accept|artifacts`。
 
 当前测试在临时Git仓库验证工作树/WIP保留、脱敏、路径保护、无隔离时blocked、断网命令与真实门禁收据适配。已在本机实际bwrap断网沙箱执行合成缺陷闭环：既有测试先失败、修改旧测试被拒、仅修源码后通过、冻结后模型不能再读写，并用沙箱外纯函数AST oracle独立检查4个合成输入；没有独立financial oracle继续阻断。另用固定受信源码执行真实case预检，缺批准材料继续阻断，此预检不执行候选代码。入口为 `python -m ops.ledger_sentinel.repair_drill --output /new/private/drill --repo /trusted/repo --runtime /trusted/ledger/.venv --model-root /trusted/model --corpus-root /trusted/corpus --target-period YYYY-MM`。该演练不代表LLM评测、财务真实验收或生产周期；SDK独立ops标定由agent-worker的评测工具负责，不能复用业务证书。实际可信corpus修复及远端PR尚未完成，红灯继续阻断发布。
+
+
+独立财务 oracle 的执行边界只传已批准的 `publication_scopes` 店月键、业务源输入及操作步骤，不传 parent 的 expected 金额、批准 manifest 或发布 authority。child 的 Session 必须带明确 scope，不能默认全月份；每个检查点不得出现批准范围以外的店月。所有 `automation_run_proof.manifest.artifacts` 原件及来源证据按安全相对路径和 SHA 导出，parent 再独立核对，不能把缺原件从断言中删掉。实际 child stderr 保存在 authority 私有 `child.private.log`，不只留下不可诊断的 hash。
+
+当前 oracle 运输协议只支持 `recompute`、`supplement`、`confirm`、`replace_scheme`、`drain_pending`、`close_approved` 六类步骤；新 `restore_approved_manual_finance` 尚不在该受测 allowlist，manifest 若需要它将明确 blocked，不能宣称 M5 已覆盖全部真实验收流程。业务回放支持不等于隔离运输已支持，后续需按真实 case 单独升级与复验。合成 complete 输入与缺价 pending 输入均保留独立测试，任何合成通过都不生成生产发布收据。Ops executable 协议改变后旧 Ops 100 次 profile 立即过期，需冻结新字节后重新运行真实配置合成评估；业务/source SDK 执行文件不因此重写。

@@ -313,7 +313,7 @@ def check(ws,store_id,period,*,model=None,expected_run_id=None,ignored_blockers=
     from .feed_freshness import evaluate as evaluate_feed
     feed=evaluate_feed(ws,store_id,period,recorded)
     if feed['blocked']:
-        problems.append(issue('source_sync_pending','本次捕获的来源前缀或本店后续变更尚未完成复核，不能确认月结'))
+        problems.append(issue('source_sync_pending','本次捕获的来源同步前缀或本店后续变更尚未完成复核，不能确认月结'))
     work=pending(ws,store_id) if check_pending else None
     if work:problems.append(issue('recompute_pending',work.get('error') or '本店新资料尚在自动核算，完成后再确认'))
     company=(company_context if company_context is not None else company_basis(ws,model,period)) if check_company else None
