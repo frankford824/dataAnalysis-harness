@@ -52,7 +52,15 @@ def feed_state(ws):
     except sqlite3.Error:return {'last_error':'来源状态暂不可读'}
 
 
-def feed_scope(ws):
+def feed_scope(ws,store_id=None,period=None,recorded=None):
+    if store_id is not None and period is not None:
+        if recorded is None:
+            run=current_run(ws,store_id,period)
+            proof=ws.conn.execute('SELECT manifest_json FROM automation_run_validation WHERE run_id=? ORDER BY rowid DESC LIMIT 1',(run['id'],)).fetchone() if run else None
+            if proof is None and run:proof=ws.conn.execute('SELECT manifest_json FROM automation_run_proof WHERE run_id=?',(run['id'],)).fetchone()
+            recorded=json.loads(proof['manifest_json']) if proof else None
+        from .feed_freshness import evaluate
+        return evaluate(ws,store_id,period,recorded)['identity']
     value=feed_state(ws)
     return {k:value.get(k) for k in ('snapshot_id','consumed_seq','source_latest_seq','last_error')} if value else None
 
@@ -63,6 +71,28 @@ def current_run(ws,store_id,period):
         LEFT JOIN run_report_slice s ON s.run_id=r.id AND s.payload_kind='run'
         WHERE r.store_id=? AND r.period=? ORDER BY r.id DESC LIMIT 1''',(store_id,period)).fetchone()
     return dict(row) if row else None
+
+
+def pending_input_identity(ws,store_id,period,*,recorded=None,current=None):
+    """Fence the receive/enqueue gap until this slice is revalidated.
+
+    Unrelated changes disappear from this identity once a trusted equivalence
+    validation records the new source epoch; no unverified input is accepted
+    merely because the last financial result has not changed yet.
+    """
+    if recorded is None:
+        run=current_run(ws,store_id,period)
+        proof=ws.conn.execute('SELECT manifest_json FROM automation_run_validation WHERE run_id=? ORDER BY rowid DESC LIMIT 1',(run['id'],)).fetchone() if run else None
+        if proof is None and run:proof=ws.conn.execute('SELECT manifest_json FROM automation_run_proof WHERE run_id=?',(run['id'],)).fetchone()
+        recorded=json.loads(proof['manifest_json']) if proof else None
+    if not recorded:return None
+    from .automation_period_proof import source_manifest
+    current=current if current is not None else source_manifest(ws,store_id)
+    revision=current['manual_versions'].get(period,0)
+    if (journal.digest(current['slots'])==journal.digest(recorded.get('slots',[]))
+        and current['version']==recorded.get('version') and revision==recorded.get('manual_revision',0)):
+        return None
+    return journal.digest({'slots':current['slots'],'version':current['version'],'manual_revision':revision})
 
 
 def period_header(ws,store_id,period,latest_id=None):
@@ -149,7 +179,7 @@ def company_basis(ws,model,period):
     problems=[]
     if not scope:problems.append(issue('company_scope_empty','本月没有已确认的营业店铺'))
     if missing:problems.append(issue('company_revenue_unknown','公司本月仍有营业店铺收入未确定'))
-    if total is None:problems.append(issue('overhead_total_unknown','请确认本月兼职费用总额，零元也须明确登记',False))
+    if total is None:problems.append(issue('overhead_total_unknown','本月兼职核定依据尚未收到，资料到达并核定后继续公摊和月结',False))
     if total is not None and total>0 and denominator<=0:problems.append(issue('overhead_basis_empty','全公司没有正收入，无法确定兼职费用分摊'))
     shares={}
     if not problems:
@@ -216,6 +246,7 @@ def check(ws,store_id,period,*,model=None,expected_run_id=None,ignored_blockers=
     except CodeIntegrityError as exc:
         code_state=exc.integrity
         problems.append(issue('code_source_drift',CODE_MAINTENANCE))
+    recorded=None
     payload=manual_result or (json.loads(row['result']) if row else {})
     if row is None:problems.append(issue('no_result','尚未取得本店本月完整资料，系统将继续取证核算'))
     else:
@@ -279,9 +310,10 @@ def check(ws,store_id,period,*,model=None,expected_run_id=None,ignored_blockers=
     shared_fee=shared_fee_check(ws,store_id,period,row['id'] if row else None,model=model,
         closed=bool(state and state.closed),payload=payload)
     problems.extend(shared_fee['issues'])
-    feed=feed_state(ws)
-    if feed and (not feed.get('snapshot_id') or feed.get('last_error') or feed.get('consumed_seq',0)<feed.get('source_latest_seq',0)):
-        problems.append(issue('source_sync_pending','当前来源仍有积压或错误，不能确认月结'))
+    from .feed_freshness import evaluate as evaluate_feed
+    feed=evaluate_feed(ws,store_id,period,recorded)
+    if feed['blocked']:
+        problems.append(issue('source_sync_pending','本次捕获的来源前缀或本店后续变更尚未完成复核，不能确认月结'))
     work=pending(ws,store_id) if check_pending else None
     if work:problems.append(issue('recompute_pending',work.get('error') or '本店新资料尚在自动核算，完成后再确认'))
     company=(company_context if company_context is not None else company_basis(ws,model,period)) if check_company else None
@@ -292,11 +324,29 @@ def check(ws,store_id,period,*,model=None,expected_run_id=None,ignored_blockers=
         'payload_sha':journal.digest(payload),'engine':row['engine'] if row else None,
         'model_revision':row['model_revision'] if row else None,
         'cost_line_revision':ws.conn.execute('SELECT coalesce(max(id),0) FROM cost_line_log WHERE store_id=? AND period=?',(store_id,period)).fetchone()[0],
-        'period_state':state.state if state else 'open','feed':feed_scope(ws),
+        'period_state':state.state if state else 'open','feed':feed['identity'],
+        'unverified_source_sha':pending_input_identity(ws,store_id,period,recorded=recorded),
         'pending':{k:work.get(k) for k in ('revision','source_seq','source_fingerprint','files_revision','files_applied_revision')} if work else None,
         'company_sha':company['input_sha'] if company else None,'code_integrity':code_state}
+    from .automation_source_cost_v3 import used as physical_facts,verify_for_close as verify_physical_facts,_adoption_authority
+    from .automation_cost_actions import Pending as SourceFactPending
+    physical=physical_facts(ws,store_id,period)
+    for fact in physical:
+        try:_adoption_authority(ws,fact)
+        except (SourceFactPending,ValueError,KeyError):
+            problems.append(issue('physical_source_authority_changed','已采用的物理来源规则已撤销或授权依据失效，请等待重新核验'))
+    if verify_artifacts and physical and verify_physical_facts(ws,model,store_id,period):
+        problems.append(issue('physical_source_fact_pending','实际发货成员或原始报价证据已变化，请等待独立复核'))
+    if verify_artifacts and physical:
+        from .automation_source_cost_v3 import quote_close_reasons
+        if quote_close_reasons(ws,store_id,period):
+            problems.append(issue('physical_quote_refresh_required','原日历史价尚未完成本次上游刷新，请等待自动复核后再确认月结'))
     from .historical_cost_facts import fingerprint as history_facts_fingerprint
     scope['historical_source_facts_sha']=history_facts_fingerprint(ws,store_id,period)
+    from .automation_source_cost_v3 import fingerprint as physical_facts_fingerprint
+    scope['physical_source_facts_sha']=physical_facts_fingerprint(ws,store_id,period)
+    from .source_dates import fingerprint as date_facts_fingerprint
+    scope['original_date_facts_sha']=date_facts_fingerprint(ws,store_id,period)
     scope['company_finance_sha']=journal.digest(company.get('finance_decision')) if company else None
     scope['shared_fee_source_sha']=shared_fee['input_sha']
     return {'allowed':not problems,'input_sha':journal.digest(scope),'scope':scope,'run_id':scope['run_id'],

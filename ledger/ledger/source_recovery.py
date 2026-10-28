@@ -9,6 +9,8 @@ import os
 from pathlib import Path
 import re
 import time
+from types import SimpleNamespace
+from copy import copy
 
 import polars as pl
 
@@ -18,9 +20,26 @@ from .storage_integrity import digest as file_sha
 
 CAPABILITY = 'jst_source_recovery.v1'
 MAX_KEYS = 2000
+RETRY_DELAYS=(60,300,900,3600)
+RETRY_DAILY_LIMIT=16
+RETRY_HEARTBEAT_LIMIT=1
+RETRY_REASONS={'source_transport_unavailable','source_http_unavailable','source_rate_limited',
+    'source_runtime_unavailable','source_node_runtime_unavailable','source_jst_module_unavailable'}
 PARSER_SHA = '0c636672b044492c249572b7f3940eaa4cdf9c3f0d05b8761ac7ddd3929477b8'
 _SHA = re.compile(r'^[0-9a-f]{64}$')
 _ID = re.compile(r'^[1-9][0-9]{0,23}$')
+
+
+def capture_originals(ingestion):
+    """Read-only parsed evidence before financial feed replacement.
+
+    No item is reinserted into ingestion.items. A cheap Polars clone isolates
+    later header/flag transformations while preserving only locator access.
+    """
+    ingestion.source_recovery_originals=tuple(SimpleNamespace(ref=copy(item.ref),
+        template=item.template,frame=item.frame.clone(),derivative=getattr(item,'derivative',None)) for item in ingestion.known
+        if item.template is not None and item.frame is not None)
+    return len(ingestion.source_recovery_originals)
 
 
 class SourcePending(ValueError):
@@ -113,10 +132,10 @@ def anchor_index(ingestion, store, period, pricing, coverage, facts=None):
         return {'schema': CAPABILITY, 'status': 'indexed', 'orders': {},'date_demands':date_demands}
     if not hasattr(ingestion,'model') or not hasattr(ingestion,'known'):
         return {'schema': CAPABILITY, 'status': 'pending', 'reason': 'parsed_original_index_unavailable', 'orders': {}}
-    native_sources = {s.id for s in ingestion.model.sources if s.is_spine and s.platform in ('*', store.platform)}
+    native_sources = {s.id for s in ingestion.model.sources if s.is_spine and s.platform in ('*', 'any', store.platform)}
     cost_sources = {m.source for m in ingestion.model.metrics if m.id == 'goods_cost'}
     result = {key: {'native': [], 'cost': [], 'internal_order_ids': []} for key in wanted}
-    for item in ingestion.known:
+    for item in getattr(ingestion,'source_recovery_originals',ingestion.known):
         template, frame = item.template, item.frame
         if template is None or frame is None or template.source not in native_sources | cost_sources:
             continue
@@ -292,14 +311,35 @@ def submit(ws, model, body, *, order_client=None):
     payload = {'kind': CAPABILITY, 'source_context_sha': source_context, 'plan': plan,
                'plan_sha256': journal.digest(plan) if plan else None, 'reason': reason,
                'financial_applied': False}
+    # Rebinding never blesses an old financial proposal. The new current CAS
+    # above still applies; only immutable source bytes may be reused after an
+    # independent backend proof against the exact same sealed target.
+    if plan:
+        cached={}
+        for row in ws.conn.execute("SELECT * FROM automation_attempt WHERE case_id=? AND state='source_raw_ready'",(case['id'],)):
+            previous=_json(row['result_json']);old_plan=previous.get('plan') or {}
+            if previous.get('kind')!=CAPABILITY or source_semantic(old_plan)!=source_semantic(plan):continue
+            try:
+                binding=_source_binding(row,previous);verified=_verified_binding(ws,binding)
+            except (SourcePending,ValueError,OSError,KeyError,TypeError):continue
+            # Distinct captures with different normalized facts cannot be
+            # resolved by first/last capture or timestamps.
+            identity=journal.digest(proof_semantic(verified['source_proof']))
+            cached.setdefault(identity,[]).append(binding)
+        if len(cached)==1:
+            payload['source_binding']=min(next(iter(cached.values())),key=journal.encoded)
+            payload['cache_revalidated']=True
+            state='source_raw_ready'
     with ws.transaction() as conn:
         _current(ws, model, body['case_id'], body['run_id'], body['input_sha'])
         if context_sha(ws, model, case['store_id'], case['period'], case['input_sha']) != source_context:
             raise Conflict('取证来源上下文已变化')
         if plan and any(plan[k]!=v for k,v in publication_observation(ws,model,case['store_id'],case['period']).items()):
             raise Conflict('自动发布范围在取证计划封存前已变化')
-        conn.execute('INSERT OR IGNORE INTO automation_attempt VALUES(?,?,?,?,?,?,?)',
-                     (task_id, case['id'], task_id, case['input_sha'], state, journal.encoded(payload), journal.now()))
+        created=conn.execute('INSERT OR IGNORE INTO automation_attempt VALUES(?,?,?,?,?,?,?)',
+                     (task_id, case['id'], task_id, case['input_sha'], state, journal.encoded(payload), journal.now())).rowcount
+        if created and plan:_activate_generation(conn,case,task_id,plan)
+
     return status(ws, task_id)
 
 
@@ -346,6 +386,7 @@ def status(ws, task_id):
         return None
     return {'task_id': row['id'], 'state': row['state'], 'reason': payload.get('reason'),
             'plan_sha256': payload.get('plan_sha256'), 'proof_sha256': payload.get('proof_sha256'),
+            'retry':payload.get('automatic_retry'),
             'financial_applied': False, 'business_complete': False}
 
 
@@ -360,26 +401,132 @@ def ready(ws,case_id,input_sha):
     return next((dict(r) for r in rows if _json(r['result_json']).get('kind')==CAPABILITY),None)
 
 
-def configuration_changed(ws, worker_id, configuration_sha):
-    """Retry an actual tool failure once per new, server observed host epoch."""
+def _retry_snapshot(payload):
+    return {k:payload.get(k) for k in ('reason','source_attempt_id','proof_sha256','receipt_sha256',
+        'worker_configuration_sha','automatic_retry')}
+
+
+def _retry_current(ws,model,row,payload,stamp):
+    if model is None:raise SourcePending('source_retry_model_unavailable')
+    plan=payload['plan'];case=_current(ws,model,row['case_id'],plan['run_id'],row['input_sha'])
+    if plan.get('execution_scope')!=execution_scope(case['store_id'],case['period']):
+        raise SourcePending('source_execution_scope_changed')
+    if any(plan.get(k)!=v for k,v in publication_observation(ws,model,case['store_id'],case['period']).items()):
+        raise SourcePending('publication_scope_context_changed')
+    from .automation_handoff import context_sha
+    if payload.get('source_context_sha')!=context_sha(ws,model,case['store_id'],case['period'],case['input_sha']):
+        raise SourcePending('source_retry_target_context_changed')
+    head=generation_head(ws,case['id'],plan['platform_order_id'])
+    if head and head['active_task_id']!=row['id']:raise SourcePending('source_capture_generation_superseded')
+    if case.get('lease_owner') and case.get('lease_until',0)>stamp:
+        raise SourcePending('source_retry_case_busy')
+    return case
+
+
+def _queue_retry(ws,row,payload,case,*,reason,stamp,configuration_sha=None):
+    previous=_retry_snapshot(payload)
+    payload.setdefault('prior_source_receipts',[]).append(previous)
+    if configuration_sha is not None:
+        payload['worker_configuration_sha']=configuration_sha
+        retry={'scheduled_count':0,'state':'scheduled','next_attempt_at':None,
+               'reason':'worker_configuration_changed','policy_epoch':configuration_sha}
+    else:
+        retry={**payload['automatic_retry'],'scheduled_count':payload['automatic_retry']['scheduled_count']+1,
+               'state':'scheduled','next_attempt_at':None,'reason':reason}
+    retry.update(maximum_automatic_retries=len(RETRY_DELAYS),daily_limit=RETRY_DAILY_LIMIT)
+    payload.update(reason=None,automatic_retry=retry)
+    ws.conn.execute('UPDATE automation_attempt SET state=?,result_json=? WHERE id=?',
+        ('source_queued',journal.encoded(payload),row['id']))
+    # The old source lease cannot complete this new execution. No monetary
+    # context/CAS is made current by changing this technical queue state.
+    ws.conn.execute("UPDATE automation_case SET status='processing',stage='gathering',lease_owner='',lease_until=0,lease_token=lease_token+1,worker_attempt_id='' WHERE id=? AND input_sha=?",
+        (case['id'],case['input_sha']))
+    value={'source_task_id':row['id'],'previous':previous,'worker_id':payload['captured_worker_id'],
+        'day':int(stamp)//86400,'scheduled_at':int(stamp),'reason':reason,
+        'configuration_sha':configuration_sha,'retry_number':retry['scheduled_count']}
+    ws.conn.execute('INSERT INTO automation_attempt VALUES(?,?,?,?,?,?,?)',
+        (journal.ident(),row['case_id'],row['id'],row['input_sha'],
+         'source_configuration_recovery' if configuration_sha is not None else 'source_retry_scheduled',
+         journal.encoded(value),journal.now()))
+
+
+def configuration_changed(ws, worker_id, configuration_sha,*,model=None,stamp=None):
+    """Genuine local session/config epochs wake once, independently of time."""
+    stamp=int(time.time() if stamp is None else stamp)
     rows=ws.conn.execute("SELECT * FROM automation_attempt WHERE state='source_pending'").fetchall()
     for row in rows:
         payload=_json(row['result_json'])
         if (payload.get('kind')!=CAPABILITY or not payload.get('plan')
             or payload.get('captured_worker_id')!=worker_id
-            or payload.get('worker_configuration_sha') in (None,'',configuration_sha)):
+            or payload.get('worker_configuration_sha') in (None,'',configuration_sha)):continue
+        try:case=_retry_current(ws,model,row,payload,stamp)
+        except (Conflict,SourcePending,ValueError,KeyError):continue
+        _queue_retry(ws,row,payload,case,reason='worker_configuration_changed',stamp=stamp,configuration_sha=configuration_sha)
+
+
+def retry_due(ws,model,worker_id,stamp):
+    """At most one bounded technical retry per authenticated heartbeat."""
+    stamp=int(stamp);scheduled=0;day=stamp//86400
+    daily=ws.conn.execute("SELECT count(*) FROM automation_attempt WHERE state='source_retry_scheduled' AND json_extract(result_json,'$.worker_id')=? AND json_extract(result_json,'$.day')=?",(worker_id,day)).fetchone()[0]
+    rows=ws.conn.execute("SELECT * FROM automation_attempt WHERE state='source_pending' ORDER BY json_extract(result_json,'$.automatic_retry.next_attempt_at'),rowid").fetchall()
+    for row in rows:
+        if scheduled>=RETRY_HEARTBEAT_LIMIT:break
+        payload=_json(row['result_json']);retry=payload.get('automatic_retry') or {}
+        if (payload.get('kind')!=CAPABILITY or payload.get('captured_worker_id')!=worker_id
+            or not retry.get('eligible') or retry.get('state') not in {'waiting','daily_limit'}
+            or retry.get('next_attempt_at') is None or int(retry['next_attempt_at'])>stamp):continue
+        try:case=_retry_current(ws,model,row,payload,stamp)
+        except (Conflict,SourcePending,ValueError,KeyError) as error:
+            if getattr(error,'reason',None)=='source_retry_case_busy':continue
+            retry.update(state='held_current_context',next_attempt_at=None,
+                         hold_reason=getattr(error,'reason',None) or 'source_retry_current_input_changed')
+            payload['automatic_retry']=retry
+            ws.conn.execute('UPDATE automation_attempt SET result_json=? WHERE id=?',(journal.encoded(payload),row['id']))
             continue
-        case=ws.conn.execute('SELECT input_sha FROM automation_case WHERE id=?',(row['case_id'],)).fetchone()
-        if not case or case['input_sha']!=row['input_sha']:continue
-        previous={k:payload.get(k) for k in ('reason','source_attempt_id','proof_sha256','receipt_sha256','worker_configuration_sha')}
-        payload.setdefault('prior_source_receipts',[]).append(previous)
-        payload.update(reason=None,worker_configuration_sha=configuration_sha)
-        ws.conn.execute('UPDATE automation_attempt SET state=?,result_json=? WHERE id=?',
-                        ('source_queued',journal.encoded(payload),row['id']))
-        ws.conn.execute('INSERT INTO automation_attempt VALUES(?,?,?,?,?,?,?)',
-                        (journal.ident(),row['case_id'],row['id'],row['input_sha'],'source_configuration_recovery',
-                         journal.encoded({'source_task_id':row['id'],'previous':previous,
-                                          'configuration_sha':configuration_sha}),journal.now()))
+        if retry.get('scheduled_count',0)>=len(RETRY_DELAYS):
+            retry.update(state='exhausted',next_attempt_at=None);payload['automatic_retry']=retry
+            ws.conn.execute('UPDATE automation_attempt SET result_json=? WHERE id=?',(journal.encoded(payload),row['id']))
+            continue
+        if daily>=RETRY_DAILY_LIMIT:
+            retry.update(state='daily_limit',next_attempt_at=(day+1)*86400,
+                         hold_reason='source_retry_daily_limit');payload['automatic_retry']=retry
+            ws.conn.execute('UPDATE automation_attempt SET result_json=? WHERE id=?',(journal.encoded(payload),row['id']))
+            continue
+        _queue_retry(ws,row,payload,case,reason=payload['reason'],stamp=stamp)
+        daily+=1;scheduled+=1
+    return scheduled
+
+
+def _record_retry_policy(payload,result,folder,stamp):
+    reason=result.get('reason');eligible=reason in RETRY_REASONS;failure_kind='transport' if eligible else 'semantic_or_manual'
+    receipt=_json((folder/'receipt.json').read_bytes());responses=receipt.get('responses') or []
+    if reason=='source_session_refresh_required':eligible=False;failure_kind='login_required'
+    if responses:
+        last=responses[-1];status=last.get('status');sha=last.get('sha256');raw=folder/(str(sha)+'.raw')
+        proved=bool(isinstance(sha,str) and _SHA.fullmatch(sha) and not raw.is_symlink()
+            and raw.is_file() and raw.stat().st_size<=16*1024*1024 and file_sha(raw)==sha)
+        if not proved:eligible=False;failure_kind='response_unverified'
+        else:
+            # The fixed reader's transport catch can collapse a login page or
+            # HTTP failure to source_transport_unavailable. Classify from its
+            # actual retained response, rather than retrying login forever.
+            head=raw.read_bytes()[:10000].decode('utf-8',errors='replace')
+            login=status in {401,403} or bool(re.search(r'loginReact|erp-login|无访问权限|未登录|请登录',head))
+            if login:eligible=False;failure_kind='login_required'
+            elif status!=200:
+                eligible=(reason in RETRY_REASONS|{'source_session_or_http_unavailable'}
+                    and status in {405,408,425,429,500,502,503,504})
+                failure_kind='transport' if eligible else 'http_manual_review'
+    previous=payload.get('automatic_retry') or {};count=int(previous.get('scheduled_count',0))
+    state='recovered' if result['state']=='source_raw_ready' else 'waiting' if eligible and count<len(RETRY_DELAYS) else 'exhausted' if eligible else 'not_retryable'
+    payload['automatic_retry']={**previous,'eligible':eligible,'state':state,'scheduled_count':count,
+        'maximum_automatic_retries':len(RETRY_DELAYS),'daily_limit':RETRY_DAILY_LIMIT,
+        'next_attempt_at':int(stamp)+RETRY_DELAYS[count] if state=='waiting' else None,
+        'last_reason':reason,'failure_kind':failure_kind,'last_finished_at':int(stamp)}
+
+
+def retry_queued(ws,case_id,input_sha):
+    return bool(ws.conn.execute("SELECT 1 FROM automation_attempt WHERE case_id=? AND input_sha=? AND state='source_queued' AND json_extract(result_json,'$.automatic_retry.state')='scheduled' LIMIT 1",(case_id,input_sha)).fetchone())
 
 
 def verify_receipt(ws, plan, task_id, job_id, expected_sha):
@@ -453,20 +600,79 @@ def verify_receipt(ws, plan, task_id, job_id, expected_sha):
     return result
 
 
-def verified_source(ws, model, request):
-    """Backend-only resolver for a subsequent trusted provider/source consumer.
 
-    It always reopens original bytes and reruns the independent normalizer.
-    Raw status/flags remain verbatim (including missing/unknown); callers still
-    owe their own rule grant, price interval, quantity policy, CAS and freeze
-    checks. No DTO silently turns an original Split into Sent or fills flags.
+def proof_semantic(value,field=''):
+    """Financial proof content, separately from immutable raw lineage.
+
+    Every raw blob remains SHA checked and retained. A capture's HTML nonce,
+    graph-blob SHA or reordered items pointer does not change a proved member.
+    Identity, exact units and all observed lifecycle/risk flags do.
     """
+    if isinstance(value,dict):
+        return {k:proof_semantic(v,k) for k,v in value.items()
+            if k not in {'graph_refs','source_raw','physical_raw','physical_item_pointer'}}
+    if isinstance(value,list):return sorted((proof_semantic(v,field) for v in value),key=journal.encoded)
+    if field in {'quantity','logical_quantity'} and isinstance(value,str):
+        from decimal import Decimal,DecimalException
+        try:
+            d=Decimal(value)
+            if d.is_finite():
+                sign,digits,exponent=d.as_tuple();digits=list(digits)
+                while len(digits)>1 and digits[-1]==0:digits.pop();exponent+=1
+                return ('-' if sign else '')+''.join(map(str,digits))+'e'+str(exponent)
+        except DecimalException:pass
+    return value
+
+def source_semantic(plan):
+    """Source identity excludes financial CAS and receipt delivery nonces."""
+    fields=('schema','store_id','platform','platform_order_id','source_order_id',
+            'purpose','shop_ids','store_names','original_day','native_anchors',
+            'cost_anchors','original_identifier_anchor','parser_sha256')
+    return journal.digest({key:plan.get(key) for key in fields})
+
+
+def _source_binding(task,payload):
+    return payload.get('source_binding') or {
+        'task_id':task['id'],'plan':payload['plan'],
+        'source_attempt_id':payload['source_attempt_id'],
+        'receipt_sha256':payload['receipt_sha256'],
+        'source_context_sha':payload['source_context_sha'],
+        'source_semantic_sha':source_semantic(payload['plan'])}
+
+
+def _verified_binding(ws,binding):
+    """A binding is a server journal reference, never worker-supplied truth."""
+    row=ws.conn.execute('SELECT * FROM automation_attempt WHERE id=?',(binding['task_id'],)).fetchone()
+    if not row or row['state']!='source_raw_ready':raise SourcePending('source_binding_not_ready')
+    payload=_json(row['result_json']);canonical=_source_binding(row,payload)
+    if canonical!=binding:raise SourcePending('source_binding_journal_changed')
+    plan=binding['plan']
+    if source_semantic(plan)!=binding['source_semantic_sha']:raise SourcePending('source_binding_semantic_changed')
+    result=verify_receipt(ws,plan,binding['task_id'],binding['source_attempt_id'],binding['receipt_sha256'])
+    if result['state']!='source_raw_ready':raise SourcePending('source_binding_raw_unavailable')
+    folder=ws.root/'source-recovery'/binding['task_id']/binding['source_attempt_id']
+    from .jst_source_members import parse_order
+    refs=[{'path':str(folder/(r['sha256']+'.raw')),'sha256':r['sha256'],
+           'source':'fixed_jst_source_reader'} for r in result['raw_refs']]
+    refs.append({'path':str(folder/'receipt.json'),'sha256':binding['receipt_sha256'],'source':'fixed_jst_source_receipt'})
+    receipt=_json((folder/'receipt.json').read_bytes());raw_orders={}
+    for ref in receipt['nodes']:
+        raw_orders[str(ref['order_id'])]=parse_order((folder/(ref['sha256']+'.raw')).read_bytes(),str(ref['order_id']))[0]
+    for ref in plan['native_anchors']+plan['cost_anchors']:
+        refs.append({'path':str(ws.path_of(ref['sha256'])),'sha256':ref['sha256'],'source':'sealed_original_workbook'})
+    return {'task_id':binding['task_id'],'plan':plan,'source_proof':result['source_proof'],
+        'source_attempt_id':binding['source_attempt_id'],'receipt_sha256':binding['receipt_sha256'],
+        'source_context_sha':binding['source_context_sha'],'source_binding':binding,
+        'raw_orders':raw_orders,'source_refs':refs,'financial_applied':False,'business_complete':False}
+
+
+def verified_source(ws, model, request):
+    """Current financial CAS first, then independently reopen server raw bytes."""
     case=_current(ws,model,request['case_id'],request['run_id'],request['input_sha'])
     from .automation_handoff import context_sha
     current_context=context_sha(ws,model,case['store_id'],case['period'],case['input_sha'])
     candidates=[]
-    for row in ws.conn.execute("SELECT * FROM automation_attempt WHERE case_id=? AND input_sha=? AND state='source_raw_ready'",
-                               (case['id'],case['input_sha'])):
+    for row in ws.conn.execute("SELECT * FROM automation_attempt WHERE case_id=? AND input_sha=? AND state='source_raw_ready'",(case['id'],case['input_sha'])):
         payload=_json(row['result_json']);plan=payload.get('plan') or {}
         if (payload.get('kind')==CAPABILITY and payload.get('source_context_sha')==current_context
             and plan.get('coverage_key')==request['coverage_key'] and plan.get('coverage_context_sha')==request['context_sha']):
@@ -475,21 +681,222 @@ def verified_source(ws, model, request):
     row,payload,plan=candidates[0]
     if any(plan.get(k)!=v for k,v in publication_observation(ws,model,case['store_id'],case['period']).items()):
         raise SourcePending('publication_scope_context_changed')
-    result=verify_receipt(ws,plan,row['id'],payload['source_attempt_id'],payload['receipt_sha256'])
-    folder=ws.root/'source-recovery'/row['id']/payload['source_attempt_id']
-    from .jst_source_members import parse_order
-    raw_orders={};refs=[]
-    for ref in result['raw_refs']:
-        path=folder/(ref['sha256']+'.raw')
-        refs.append({'path':str(path),'sha256':ref['sha256'],'source':'fixed_jst_source_reader'})
-    receipt=_json((folder/'receipt.json').read_bytes())
-    for ref in receipt['nodes']:
-        data,_=parse_order((folder/(ref['sha256']+'.raw')).read_bytes(),str(ref['order_id']))
-        raw_orders[str(ref['order_id'])]=data
-    for ref in plan['native_anchors']+plan['cost_anchors']:
-        refs.append({'path':str(ws.path_of(ref['sha256'])),'sha256':ref['sha256'],'source':'sealed_original_workbook'})
-    return {'task_id':row['id'],'plan':plan,'source_proof':result['source_proof'],
-            'raw_orders':raw_orders,'source_refs':refs,'financial_applied':False,'business_complete':False}
+    return _verified_binding(ws,_source_binding(row,payload))
+
+
+def verified_fact_source(ws,model,fact,*,allow_pending_refresh=False):
+    """An adopted fact survives its own run nonce, not real source changes.
+
+    Immutable raw/originals are reopened. Active source membership and current
+    store semantics are checked separately from the original financial CAS.
+    No old lease, proposal or write request becomes current through this API.
+    """
+    binding=fact.get('source_binding')
+    if not isinstance(binding,dict):raise SourcePending('adopted_source_binding_missing')
+    plan=binding['plan'];store=model.store(plan['store_id'])
+    if (store.platform!=plan['platform'] or [store.name,*store.aliases]!=plan['store_names']):
+        raise SourcePending('adopted_source_store_contract_changed')
+    current=publication_observation(ws,model,plan['store_id'],plan['period'])
+    if not current['publication_allowed'] or any(plan.get(k)!=v for k,v in current.items()):
+        raise SourcePending('publication_scope_context_changed')
+    slots=ws.conn.execute('SELECT name,sha FROM slot WHERE store_id IN (?,?) ORDER BY CASE WHEN store_id=? THEN 0 ELSE 1 END,name',(store.id,'__shared__',store.id))
+    selected={}
+    for slot in slots:selected.setdefault(slot['name'],slot['sha'])
+    active=set(selected.values())
+    if any(a['sha256'] not in active for a in plan['native_anchors']+plan['cost_anchors']):
+        raise SourcePending('adopted_source_original_membership_changed')
+    original=_verified_binding(ws,binding)
+    head=generation_head(ws,plan['case_id'],plan['platform_order_id'])
+    if head:
+        row=ws.conn.execute('SELECT * FROM automation_attempt WHERE id=?',(head['active_task_id'],)).fetchone()
+        if not row:raise SourcePending('source_capture_generation_not_ready')
+        payload=_json(row['result_json']);active_plan=payload.get('plan') or {}
+        if row['state']!='source_raw_ready':
+            # An in-flight authenticated refresh is not counter-evidence to
+            # the previously proved basis. Ordinary recompute may retain it
+            # as a stage result; every close verifier remains strict.
+            control=ws.conn.execute("SELECT result_json FROM automation_attempt WHERE id=? AND state='source_close_refresh'",(payload.get('close_refresh',''),)).fetchone()
+            controlled=bool(control and any(t['task_id']==row['id'] and t['generation']==head['generation']
+                for t in _json(control[0]).get('tasks',[])))
+            if (allow_pending_refresh and controlled and row['state'] in {'source_queued','source_pending'}
+                and source_semantic(active_plan)==binding['source_semantic_sha']):
+                return {**original,'basis_status':'previously_verified_awaiting_close_refresh',
+                    'close_eligible':False,'source_generation':head}
+            raise SourcePending('source_capture_generation_not_ready')
+        if source_semantic(active_plan)!=binding['source_semantic_sha']:
+            raise SourcePending('adopted_source_target_semantics_changed')
+        active=_verified_binding(ws,_source_binding(row,payload))
+        if journal.digest(proof_semantic(active['source_proof']))!=journal.digest(proof_semantic(original['source_proof'])):
+            raise SourcePending('adopted_source_physical_facts_changed')
+        active['source_generation']=head
+        return active
+    return original
+
+
+def _generation_id(case_id,platform_order_id):
+    return 'source-generation-'+journal.digest([case_id,str(platform_order_id)])[:40]
+
+
+def generation_head(ws,case_id,platform_order_id):
+    row=ws.conn.execute("SELECT result_json FROM automation_attempt WHERE id=? AND state='source_generation'",
+        (_generation_id(case_id,platform_order_id),)).fetchone()
+    return _json(row[0]) if row else None
+
+
+def _activate_generation(conn,case,task_id,plan):
+    """The trusted writer chooses a capture, never timestamp/order heuristics."""
+    key=_generation_id(case['id'],plan['platform_order_id'])
+    row=conn.execute('SELECT result_json FROM automation_attempt WHERE id=?',(key,)).fetchone()
+    before=_json(row[0]) if row else {}
+    head={'schema':'ledger_source_generation.v1','active_task_id':task_id,
+          'generation':int(before.get('generation',0))+1,'platform_order_id':plan['platform_order_id'],
+          'source_semantic_sha':source_semantic(plan)}
+    conn.execute('INSERT INTO automation_attempt VALUES(?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET input_sha=excluded.input_sha,result_json=excluded.result_json',
+        (key,case['id'],key,case['input_sha'],'source_generation',journal.encoded(head),journal.now()))
+    return head
+
+
+
+def _close_refresh_status(ws,model,record):
+    generations=[];pending=[]
+    for entry in record['tasks']:
+        row=ws.conn.execute('SELECT * FROM automation_attempt WHERE id=?',(entry['task_id'],)).fetchone()
+        head=generation_head(ws,entry['case_id'],entry['platform_order_id'])
+        if not head or head['active_task_id']!=entry['task_id'] or head['generation']!=entry['generation']:
+            raise Conflict('月结取证代际已被后续任务替代，请重新预览')
+        if not row or row['state']!='source_raw_ready':
+            detail=_json(row['result_json']) if row else {}
+            pending.append({'task_id':entry['task_id'],'state':row['state'] if row else 'missing',
+                'reason':detail.get('reason'),'retry':detail.get('automatic_retry')});continue
+        payload=_json(row['result_json']);binding=_source_binding(row,payload)
+        verified=_verified_binding(ws,binding)
+        if journal.digest(proof_semantic(verified['source_proof']))!=entry['expected_source_proof_sha']:
+            pending.append({'task_id':entry['task_id'],'state':'physical_source_changed'});continue
+        generations.append({'case_id':entry['case_id'],'platform_order_id':entry['platform_order_id'],
+            'generation':entry['generation'],'active_task_id':entry['task_id'],
+            'receipt_sha256':binding['receipt_sha256'],
+            'capture_observation':payload.get('capture_observation'),
+            'source_proof_sha':journal.digest(proof_semantic(verified['source_proof']))})
+    terminal=any(p['state'] not in ('source_queued','worker_running')
+        and (p.get('retry') or {}).get('state')!='waiting' for p in pending)
+    return {'refresh_id':record['refresh_id'],'required':bool(record['tasks']),
+        'status':'pending' if terminal else 'processing' if pending else 'verified',
+        'source_generations':generations,'generation_sha':journal.digest(generations) if not pending else None,
+        'pending':pending,'financial_applied':False}
+
+
+def ensure_close_refresh(ws,model,*,period,store_ids,request_id,actor):
+    """A human preview seals one bounded, persistent source-read generation.
+
+    Same request retries reuse its exact generation. No caller can name an old
+    source generation or supply financial facts. Only the fixed source reader
+    performs network requests; this path never waits in a model loop.
+    """
+    from .automation_actions import human,_request,sync_month
+    from .automation_source_cost_v3 import used
+    human(actor);_request(request_id);journal.period(period)
+    selected=sorted(set(store_ids));facts=[]
+    if not selected:raise Conflict('月结取证需要明确的店铺范围')
+    for sid in selected:
+        state=ws.state(sid,period)
+        if not state or not state.closed:facts.extend(used(ws,sid,period))
+    signature=journal.digest({'period':period,'store_ids':selected,'actor':actor['id'],
+        'facts':sorted((f['decision_id'],journal.digest(f)) for f in facts)})
+    key='source-close-refresh:'+request_id
+    old=ws.conn.execute("SELECT result_json FROM automation_attempt WHERE id=? AND state='source_close_refresh'",(key,)).fetchone()
+    if old:
+        record=_json(old[0])
+        if record['signature']!=signature:raise Conflict('月结取证请求的店铺、事实或确认身份已变化，请重新预览')
+        return _close_refresh_status(ws,model,record)
+    # Establish current case identities without inventing an approval.
+    sync_month(ws,model,period)
+    tasks=[]
+    with ws.transaction() as conn:
+        # Another request can cross the optimistic read while sync_month is
+        # establishing current cases. BEGIN IMMEDIATE serializes the writer;
+        # repeat the identity check inside it before creating tasks or heads.
+        raced=conn.execute("SELECT result_json FROM automation_attempt WHERE id=? AND state='source_close_refresh'",(key,)).fetchone()
+        if raced:
+            record=_json(raced[0])
+            if record['signature']!=signature:raise Conflict('月结取证请求的店铺、事实或确认身份已变化，请重新预览')
+            return _close_refresh_status(ws,model,record)
+        for fact in facts:
+            verified=verified_fact_source(ws,model,fact,allow_pending_refresh=True);original=verified['plan']
+            case=conn.execute('SELECT * FROM automation_case WHERE store_id=? AND period=?',(fact['store_id'],period)).fetchone()
+            if not case:raise Conflict('月结取证案件不存在')
+            case=dict(case);_current(ws,model,case['id'],case['run_id'],case['input_sha'])
+            tid='source-'+journal.digest([key,case['id'],original['platform_order_id'],signature])[:40]
+            if any(t['task_id']==tid for t in tasks):continue
+            plan={**original,'case_id':case['id'],'run_id':case['run_id'],'input_sha':case['input_sha'],
+                'demand_anchor':{'kind':'authenticated_close_preview_source_refresh',
+                    'request_id':request_id,'decision_id':fact['decision_id'],'fact_sha':journal.digest(fact)}}
+            from .automation_handoff import context_sha
+            context=context_sha(ws,model,case['store_id'],period,case['input_sha'])
+            payload={'kind':CAPABILITY,'source_context_sha':context,'plan':plan,
+                'plan_sha256':journal.digest(plan),'reason':None,'financial_applied':False,
+                'close_refresh':key,'cache_reuse_allowed':False}
+            conn.execute('INSERT INTO automation_attempt VALUES(?,?,?,?,?,?,?)',
+                (tid,case['id'],tid,case['input_sha'],'source_queued',journal.encoded(payload),journal.now()))
+            head=_activate_generation(conn,case,tid,plan)
+            tasks.append({'task_id':tid,'case_id':case['id'],'platform_order_id':plan['platform_order_id'],
+                'generation':head['generation'],'input_sha':case['input_sha'],
+                'expected_source_proof_sha':journal.digest(proof_semantic(verified['source_proof']))})
+            conn.execute("UPDATE automation_case SET status='processing',stage='gathering' WHERE id=?",(case['id'],))
+        record={'refresh_id':key,'signature':signature,'period':period,'store_ids':selected,
+                'actor':actor['id'],'tasks':tasks}
+        # Even an empty source set is sealed: adding a fact later must not
+        # silently change the meaning of an already used human request ID.
+        lineage=tasks[0]['case_id'] if tasks else journal.digest([selected[0],period])[:32]
+        conn.execute('INSERT INTO automation_attempt VALUES(?,?,?,?,?,?,?)',
+            (key,lineage,key,signature,'source_close_refresh',journal.encoded(record),journal.now()))
+    return _close_refresh_status(ws,model,record)
+
+
+def verify_close_refresh(ws,model,*,refresh_id,generation_sha):
+    row=ws.conn.execute("SELECT result_json FROM automation_attempt WHERE id=? AND state='source_close_refresh'",(refresh_id,)).fetchone()
+    if not row:raise Conflict('月结取证收据不存在')
+    value=_close_refresh_status(ws,model,_json(row[0]))
+    if value['status']!='verified' or value['generation_sha']!=generation_sha:
+        raise Conflict('月结来源仍在刷新或已经变化，不能确认旧预览')
+    return value
+
+
+def close_refresh_pending(ws,case_id,input_sha):
+    row=ws.conn.execute("SELECT 1 FROM automation_attempt WHERE case_id=? AND input_sha=? AND state='source_queued' AND json_extract(result_json,'$.close_refresh') IS NOT NULL LIMIT 1",(case_id,input_sha)).fetchone()
+    return bool(row)
+
+
+
+def _equivalent_close_capture(ws,model,case,task_id,payload,result):
+    """Only a server-sealed used-fact refresh can avoid a finance dispatch."""
+    control_id=payload.get('close_refresh')
+    control=ws.conn.execute("SELECT result_json FROM automation_attempt WHERE id=? AND state='source_close_refresh'",(control_id,)).fetchone() if control_id else None
+    if not control or result['source_proof'].get('status')!='proved':return False
+    record=_json(control[0]);head=generation_head(ws,case['id'],payload['plan']['platform_order_id'])
+    if not head or head['active_task_id']!=task_id:return False
+    entries=[e for e in record.get('tasks',[]) if e['task_id']==task_id and e['case_id']==case['id'] and e['generation']==head['generation']]
+    if len(entries)!=1 or entries[0]['expected_source_proof_sha']!=journal.digest(proof_semantic(result['source_proof'])):return False
+    from .automation_source_cost_v3 import used
+    anchor=payload['plan'].get('demand_anchor') or {}
+    return any(f['decision_id']==anchor.get('decision_id') and journal.digest(f)==anchor.get('fact_sha')
+               for f in used(ws,case['store_id'],case['period']))
+
+
+def _capture_observation(ws,case,task_id,job_id,payload,result,receipt_sha,proof_path,proof_sha,equivalent):
+    folder=proof_path.parent
+    refs=[{'path':str(folder/(r['sha256']+'.raw')),'sha256':r['sha256'],'role':'source_raw'} for r in result['raw_refs']]
+    refs.extend({'path':str(ws.path_of(a['sha256'])),'sha256':a['sha256'],'role':'original_workbook'}
+        for a in payload['plan']['native_anchors']+payload['plan']['cost_anchors'])
+    refs.extend([{'path':str(folder/'receipt.json'),'sha256':receipt_sha,'role':'source_receipt'},
+                 {'path':str(proof_path),'sha256':proof_sha,'role':'independent_source_proof'}])
+    value={'schema':'ledger_source_capture_observation.v1','store_id':case['store_id'],'period':case['period'],
+        'task_id':task_id,'source_attempt_id':job_id,'source_refs':refs,
+        'source_proof_semantic_sha':journal.digest(proof_semantic(result['source_proof'])),
+        'equivalent_used_fact_refresh':equivalent,'financial_applied':False}
+    key='source-observation:'+journal.digest([task_id,job_id,receipt_sha]);oid=journal.digest(key)[:32]
+    ws.conn.execute('INSERT OR IGNORE INTO automation_attempt VALUES(?,?,?,?,?,?,?)',
+        (oid,case['id'],key,case['input_sha'],'source_capture_observation',journal.encoded(value),journal.now()))
+    return {'observation_id':oid,'source_refs':refs,'equivalent_used_fact_refresh':equivalent}
 
 
 def install_routes(router, workspace, model, service, owned, service_auth, prior, clock):
@@ -543,6 +950,8 @@ def install_routes(router, workspace, model, service, owned, service_auth, prior
                 or task['input_sha'] != case['input_sha'] or task['state'] != 'source_queued'):
             raise HTTPException(409, '取证任务与当前租约不一致')
         payload = json.loads(task['result_json'])
+        head=generation_head(ws,case['id'],payload['plan']['platform_order_id'])
+        if head and head['active_task_id']!=task_id:raise HTTPException(409,'上游取证代际已被替代')
         return {'task_id': task_id, 'plan': payload['plan'], 'plan_sha256': payload['plan_sha256']}
 
     @router.post('/api/automation/source-recovery/requests/{task_id}/finish')
@@ -565,7 +974,9 @@ def install_routes(router, workspace, model, service, owned, service_auth, prior
             if not task or metadata.get('source_task_id') != task_id or task['case_id'] != case['id'] or task['input_sha'] != case['input_sha']:
                 raise HTTPException(409, '取证任务已过期')
             payload = json.loads(task['result_json'])
-            _current(ws, model(), case['id'], case['run_id'], case['input_sha'])
+            head=generation_head(ws,case['id'],payload['plan']['platform_order_id'])
+            if head and head['active_task_id']!=task_id:raise HTTPException(409,'上游取证代际已被替代')
+            translate(lambda:_current(ws, model(), case['id'], case['run_id'], case['input_sha']))
             if any(payload['plan'].get(k)!=v for k,v in publication_observation(ws,model(),case['store_id'],case['period']).items()):
                 raise HTTPException(409,'自动发布范围在取证期间已变化')
             result = translate(lambda: verify_receipt(ws, payload['plan'], task_id, body.job_id, body.receipt_sha256))
@@ -577,18 +988,35 @@ def install_routes(router, workspace, model, service, owned, service_auth, prior
                            receipt_sha256=body.receipt_sha256,captured_worker_id=identity['id'],
                            worker_configuration_sha=metadata.get('worker_configuration_sha'))
             payload['original_date_input']=dates
+            equivalent_close=_equivalent_close_capture(ws,model(),case,task_id,payload,result)
+            payload['capture_observation']=_capture_observation(ws,case,task_id,body.job_id,payload,result,body.receipt_sha256,proof_path,proof_sha,equivalent_close)
+            _record_retry_policy(payload,result,proof_path.parent,int(clock()))
+            if (result['state']=='source_raw_ready' and dates.get('status')!='source_input_queued'
+                and not equivalent_close
+                and publication_observation(ws,model(),case['store_id'],case['period'])['publication_allowed']):
+                dispatch_key='source-raw-dispatch:'+journal.digest([task_id,body.receipt_sha256])
+                if not conn.execute('SELECT 1 FROM automation_attempt WHERE request_id=?',(dispatch_key,)).fetchone():
+                    conn.execute('INSERT INTO automation_attempt VALUES(?,?,?,?,?,?,?)',
+                        (journal.ident(),case['id'],dispatch_key,case['input_sha'],'dispatch_pending',
+                         journal.encoded({'store_id':case['store_id'],'target_period':case['period'],
+                             'fingerprint':'automation:'+journal.digest(dispatch_key),
+                             'publication_scope_identity':payload['plan']['publication_scope_identity'],
+                             'purpose':'independently_verify_source_cost_without_model'}),journal.now()))
             stage='gathering'
+            # Publish this technical outcome inside the same transaction
+            # before registering a wait. A just-failed retry is no longer a
+            # queued attempt whose old handoff should be suppressed.
+            conn.execute('UPDATE automation_attempt SET state=?,result_json=? WHERE id=?',
+                         (result['state'], journal.encoded(payload), task_id))
             if result['state']=='source_pending':
                 from .automation_handoff import record
                 receipt_path=ws.root/'source-recovery'/task_id/body.job_id/'receipt.json'
-                login=result['reason'] in {'source_session_or_http_unavailable','source_session_refresh_required'}
+                login=payload['automatic_retry'].get('failure_kind')=='login_required'
                 record(ws,model(),case,body.job_id,identity['id'],[{
                     'tool_id':'collect_case_evidence','source_kind':'order',
                     'reason_code':'login_required' if login else 'source_unavailable',
                     'artifact_refs':[{'path':str(receipt_path),'sha256':body.receipt_sha256}]}])
                 stage='waiting_maintenance'
-            conn.execute('UPDATE automation_attempt SET state=?,result_json=? WHERE id=?',
-                         (result['state'], journal.encoded(payload), task_id))
             conn.execute('UPDATE automation_attempt SET state=?,result_json=? WHERE id=?',
                          (result['state'], journal.encoded({**metadata, 'source_receipt_sha256': body.receipt_sha256,
                                                          'proof_sha256': proof_sha}), body.job_id))

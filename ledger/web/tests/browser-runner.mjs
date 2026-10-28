@@ -9,6 +9,7 @@ import {fileURLToPath} from 'node:url'
 import {chromium} from 'playwright'
 import {createHash} from 'node:crypto'
 import {costCompletenessScenario} from './cost-completeness-scenario.mjs'
+import {closeRefreshScenario} from './close-refresh-scenario.mjs'
 
 const web=fileURLToPath(new URL('..',import.meta.url)),repo=path.resolve(web,'../..')
 const temporary=await mkdtemp(path.join(tmpdir(),'ledger-browser-'))
@@ -72,7 +73,9 @@ try{
     const page=await newPage({viewport:{width:1440,height:1000}}),errors=[]
     page.on('pageerror',error=>errors.push(error.message));page.on('console',event=>{if(event.type()==='error')errors.push(event.text())})
     await page.goto(`${base}/tests/${item.name}${item.query}`)
-    if(item.name==='cost-completeness.html'){
+    if(item.name==='close-refresh.html'){
+      await markPass(page,await closeRefreshScenario(page,artifacts))
+    }else if(item.name==='cost-completeness.html'){
       const result=await costCompletenessScenario(page,artifacts)
       await markPass(page,result)
     }else if(item.name==='store-refresh.html'){
@@ -149,10 +152,21 @@ try{
   const before=await (await page.request.get(origin+'/api/operations/month?period=2030-01')).json()
   assert.equal(before.summary.net_income,'320.00');assert.equal(before.summary.labor_cost,null)
   await page.getByRole('tab',{name:/需你决定/}).click()
-  await page.getByRole('button',{name:'查看并决定',exact:true}).first().click()
-  await page.getByRole('textbox',{name:'兼职费用总额'}).fill('10.00')
-  await page.getByRole('textbox',{name:'决定依据'}).fill('浏览器本地合成语料：本月兼职总额已核实')
-  await page.getByRole('button',{name:'预览影响',exact:true}).click()
+  const companyWait=page.locator('[data-waiting-scope="company"]')
+  await companyWait.getByRole('heading',{name:'本月兼职核定资料',exact:true}).waitFor()
+  assert.match(await companyWait.innerText(),/公司资料 1 项 · 影响 2 家店/)
+  assert.match(await companyWait.innerText(),/开始等待：未留档/)
+  assert.equal(await page.getByRole('button',{name:'查看并决定',exact:true}).count(),0,
+    'Missing payroll is one source wait, not an invented approval candidate')
+  const candidate=await page.request.post(origin+'/api/automation/decisions/preview',{data:{
+    request_id:'browser-human-candidate',period:'2030-01',store_id:'',kind:'overhead_total',
+    values:{amount:'10.00'},reason:'浏览器本地合成核定资料：财务已核实本期总额'}})
+  assert.equal(candidate.status(),200,await candidate.text())
+  await page.getByRole('button',{name:'刷新',exact:true}).click()
+  await page.getByRole('button',{name:'查看并决定',exact:true}).click()
+  await page.getByText('本月兼职总额确认 10.00 元，系统按本月公司收入分摊后继续核算。',{exact:true}).waitFor()
+  assert.equal(await page.getByRole('textbox',{name:'兼职费用总额'}).count(),0,
+    'An authenticated current candidate is reviewed without re-entering its amount')
   await page.getByRole('button',{name:'确认本次决定',exact:true}).click()
   await page.getByRole('tab',{name:'经营分析',exact:true}).click()
   await page.waitForFunction(()=>document.querySelector('.month-kpis')?.textContent.includes('182.00'))
@@ -170,7 +184,7 @@ try{
   await page.getByRole('button',{name:'经营测试店甲',exact:true}).click();await page.getByRole('button',{name:'经营测试宝贝',exact:true}).click()
   await page.getByRole('button',{name:'s1-child',exact:true}).click();await page.getByText('经营测试原表.csv',{exact:true}).first().waitFor()
   assert.match(await page.locator('body').innerText(),/原始流水/)
-  await pollJson(page.request,origin+'/api/automation/telemetry/summary?period=2030-01',result=>!!(result.events?.some(row=>row.kind==='manual_confirm')&&result.events?.some(row=>row.kind==='manual_amount_edit')))
+  await pollJson(page.request,origin+'/api/automation/telemetry/summary?period=2030-01',result=>!!result.events?.some(row=>row.kind==='manual_confirm'))
   await page.screenshot({path:path.join(artifacts,'operations-evidence.png'),fullPage:true})
   await page.keyboard.press('Escape')
   await page.locator('.n-drawer').waitFor({state:'hidden'})
@@ -196,7 +210,10 @@ try{
   await closePage.getByRole('tab',{name:/需你决定/}).click()
   await closePage.getByRole('button',{name:'授权固定规则',exact:true}).click()
   const contracts=await (await closePage.request.get(origin+'/api/automation/rule-contracts')).json()
-  assert.ok(contracts.rules[0].contract_sha)
+  const grantRule=contracts.rules.find(rule=>rule.id==='statement_unique_candidate.v1')
+  assert.ok(grantRule?.contract_sha)
+  await closePage.getByLabel('固定业务规则',{exact:true}).click()
+  await closePage.locator('.n-base-select-option').filter({hasText:grantRule.label}).click()
   await closePage.getByText('持续生效（指定起止月）',{exact:true}).click()
   assert.ok(await closePage.getByLabel('持续生效（指定起止月）',{exact:true}).isChecked())
   await closePage.getByLabel('业务开始月',{exact:true}).fill('2026-06')
@@ -209,14 +226,14 @@ try{
   const junePolicies=(await (await closePage.request.get(origin+'/api/automation/months/2026-06')).json()).policies
   const julyPolicies=(await (await closePage.request.get(origin+'/api/automation/months/2026-07')).json()).policies
   const grant=julyPolicies.find(policy=>policy.kind==='rule_grant'&&policy.values.period_from==='2026-06'&&policy.values.period_until==='2026-07')
-  assert.ok(grant);assert.equal(grant.status,'active');assert.equal(grant.values.rule_sha,contracts.rules[0].contract_sha)
+  assert.ok(grant);assert.equal(grant.status,'active');assert.equal(grant.values.rule_sha,grantRule.contract_sha)
   assert.ok(junePolicies.some(policy=>policy.decision_id===grant.decision_id),'One human approval must cover both explicit business months')
   await closePage.getByText('业务月份：2026-06 至 2026-07',{exact:false}).waitFor()
   await closePage.screenshot({path:path.join(artifacts,'cross-month-rule-grant.png'),fullPage:true})
   console.log('PASS cross-month live HTTP: metadata-fixed rule + explicit finite range + human preview/apply -> same approved decision serves both June and July')
   for(const month of ['2026-06','2026-07']){
     const authority=await (await closePage.request.get(origin+`/api/_browser/rule-authority?period=${month}&store_id=${grant.store_id}&grant_id=${grant.decision_id}`)).json()
-    assert.equal(authority.approved,true,'The real rule executor approval gate must recognize the human grant')
+    assert.equal(authority.approved,true,'The real rule executor approval gate must recognize the human grant: '+JSON.stringify(authority))
   }
   await closePage.locator(`[data-policy-id="${grant.decision_id}"]`).getByRole('button',{name:'预览撤销',exact:true}).click()
   await closePage.getByRole('textbox',{name:'撤销依据',exact:true}).fill('合成原件授权撤销：停止继续凭本次规则授权自动处理，保留原始记录')
@@ -326,7 +343,7 @@ try{
   await precisionPage.screenshot({path:path.join(artifacts,'waiting-source-and-maintenance.png'),fullPage:true})
   precisionPage.on('request',request=>{if(request.method()==='POST'&&request.url().includes('/api/')&&!request.url().endsWith('/api/automation/telemetry'))entryWrites.push(request.url())})
   const deliveredTelemetry=precisionPage.waitForRequest(request=>request.method()==='POST'&&request.url().endsWith('/api/automation/telemetry')&&request.postDataJSON().events?.some(event=>event.action==='waiting_deliver_open'))
-  await waitPanel.getByRole('button',{name:'去资料入口',exact:true}).click()
+  await waitPanel.locator('[data-waiting-scope="store"][data-waiting-kind="source"]').getByRole('button',{name:'去资料入口',exact:true}).click()
   await precisionPage.getByRole('heading',{name:'数据与店铺',exact:true}).waitFor()
   await precisionPage.waitForFunction(()=>location.hash.includes('/deliver'))
   assert.equal(await precisionPage.getByRole('tab',{name:'待办事项',exact:true}).getAttribute('aria-selected'),'true')

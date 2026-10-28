@@ -31,6 +31,10 @@ def revisions(ws, registry):
 
 
 def fingerprint(ws, model, store, ingestion, registry, *, publication_scope=None):
+    # Adopted physical sources must reopen immutable raw dependencies on each
+    # compute; a warm process cache must not bypass that validation.
+    from .automation_source_cost_v3 import active as physical_facts
+    if physical_facts(ws.conn,store.id):return None
     version = engine_version()
     if not version or version == "unknown" or "dirty" in version:
         return None

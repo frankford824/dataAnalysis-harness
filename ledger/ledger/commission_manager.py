@@ -25,6 +25,7 @@ class Manager:
         self.last_error = ""
         self.last_error_store = None
         self._yield_fee = False
+        self._yield_quote = False
         self.lease_owner = 'commission-manager:' + uuid.uuid4().hex
         self.current_lease = None
         self._publication_scope = publication_scope
@@ -102,6 +103,15 @@ class Manager:
     def _once_scoped(self,ws,scope):
         self.current_pending = None
         self.current_file_revision = 0
+        # A finite upstream quote refresh is a technical read task, not a
+        # reason to parse/recompute the entire financial store repeatedly.
+        skip_quote=self._yield_quote
+        self._yield_quote=False
+        if not skip_quote:
+            from .automation_source_cost_v3 import process_one_quote_refresh
+            if process_one_quote_refresh(ws,self.model(),scope):
+                self._yield_quote=True
+                return
         registry = Registry(ws.root)
         from .automation_actions import deliver
         deliver(ws)
@@ -201,7 +211,12 @@ class Manager:
             renewal=threading.Thread(target=renew,name='commission-lease',daemon=True)
             renewal.start()
             try:
-                result = service.recompute(ws, self.model(), self.model().store(store_id), note=note)
+                from contextlib import nullcontext
+                from .feed_freshness import hold_task
+                boundary=(hold_task(ws.root,store_id,state[2],int(pending['source_seq']) or int(state[1]))
+                          if order_feed.enabled() else nullcontext())
+                with boundary:
+                    result = service.recompute(ws, self.model(), self.model().store(store_id), note=note)
                 for period_result in result.periods:
                     period=period_result.get('period')
                     if not period or not scope.allows(store_id,period) or period_result.get('store_id',store_id)!=store_id:

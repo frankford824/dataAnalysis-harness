@@ -1001,11 +1001,8 @@ class Workspace:
             for index, f in enumerate(result.get("findings", []))
             if f.get("blocking") and not f.get("passed")
         }
-        feed = read_feed(self.root)
-        feed_blocked = bool(feed and (
-            not feed["snapshot_id"] or feed["last_error"]
-            or feed["consumed_seq"] < feed["source_latest_seq"]
-        ))
+        from .feed_freshness import current as current_feed_freshness
+        feed_blocked = current_feed_freshness(self,store_id,period)['blocked']
         if feed_blocked:
             active.setdefault("source_sync_pending", {
                 "id": "source_sync_pending", "name": "订单数据仍在同步",

@@ -1050,7 +1050,7 @@ class OrderFeed:
         # Health is part of the same captured input. Live source errors are
         # checked separately at financial close, not backdated into this run.
         ingestion.source_sync_pending = (
-            int(self._captured_seq) < int(self._captured_source_latest_seq)
+            int(self._captured_seq) < int(self._captured_boundary['required_through_seq'])
             or self._captured_snapshot_id != after["snapshot_id"]
             or bool(self._captured_last_error)
         )
@@ -1350,6 +1350,11 @@ class OrderFeed:
                     (store.id,),
                 )
             ]
+            from .feed_freshness import task_boundary
+            try:
+                self._captured_boundary=task_boundary(self.workspace_root,store.id,self._captured_snapshot_id,
+                    self._captured_seq,self._captured_source_latest_seq,order_store_ids)
+            except ValueError as exc:raise OrderFeedError(str(exc)) from exc
             deltas = [dict(r) for r in conn.execute(
                 "select * from feed_entity where entity_type in ('order','order_item','order_cost',"
                 "'order_relation','after_sale','after_sale_item') and order_store_id in (%s)"

@@ -3,11 +3,13 @@ def contracts():
     from .automation_deterministic import RULE as statement,RULE_SHA as statement_sha,RULE_CONTRACT as statement_contract
     from .automation_cost_actions import RULE as cost,RULE_SHA as cost_sha,RULE_CONTRACT as cost_contract
     from .historical_cost_facts import RULE as facts,RULE_SHA as facts_sha,RULE_CONTRACT as facts_contract
-    return {statement:(statement_sha,statement_contract),cost:(cost_sha,cost_contract),facts:(facts_sha,facts_contract)}
+    from .automation_source_cost_v3 import RULE as physical,RULE_SHA as physical_sha,RULE_CONTRACT as physical_contract
+    return {physical:(physical_sha,physical_contract),statement:(statement_sha,statement_contract),cost:(cost_sha,cost_contract),facts:(facts_sha,facts_contract)}
 
 
 def metadata():
     copy={
+        'jst_physical_source_cost_facts.v3':('凭实际发货成员补齐来源成本事实','独立核对原件、实际物理成员、单位守恒与原日历史价，只补缺失组件，保留既有成本与人工决定；由同一核算引擎执行费用及退货政策，不自动月结。'),
         'statement_unique_candidate.v1':('核对唯一订单候选的重复流水',
             '同一原始流水组仅有一个候选能由原订单互证时，系统自动核对并重算，保留原金额、日期与科目。'),
         'history_cost_single_component.v1':('凭原始历史价补齐单组件成本',

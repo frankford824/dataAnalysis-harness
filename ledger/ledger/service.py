@@ -439,6 +439,8 @@ def _recompute_locked(
         cache_root=ws.root / "cache" / "parse",
         default_store=store.name,
     )
+    from .source_recovery import capture_originals
+    capture_originals(ing)
     from .source_dates import attach_saved as attach_saved_source_dates
     attach_saved_source_dates(ws,model,store,ing,scope)
     if order_feed.enabled():
@@ -450,6 +452,7 @@ def _recompute_locked(
                 'snapshot_id':getattr(captured_feed,'_captured_snapshot_id',''),
                 'consumed_seq':getattr(captured_feed,'_captured_seq',0),
                 'source_latest_seq':getattr(captured_feed,'_captured_source_latest_seq',0)}
+            captured_source['feed_boundary']=getattr(captured_feed,'_captured_boundary',None)
         except order_feed.OrderFeedError as exc:
             out.failure = {"store": store.name, "why": f"订单台证据未就绪：{exc}"}
             return out
@@ -468,6 +471,8 @@ def _recompute_locked(
     report(f"归类核算 · {where}")
     try:
         result = run(ing, store.platform)
+        from .automation_source_cost_v3 import consume as consume_physical_cost_facts
+        result = consume_physical_cost_facts(ws,model,store,ing,result,scope)
         from .cost_line_posting import apply as apply_cost_lines
         apply_cost_lines(ws, result, store)
     except Exception as exc:  # noqa: BLE001 — 交表接口不能 500，原因写进回执

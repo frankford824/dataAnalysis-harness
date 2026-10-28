@@ -347,6 +347,63 @@ def load_workspace_decisions(reference, *, fixture=False):
     return body,sha
 
 
+
+def load_manual_finance_decision(reference,store_id,period,*,fixture=False):
+    """Read documentary human inputs, never run.result/observed as an oracle."""
+    fields={'path','sha256','source_run_id','decision_sha256','original_result_sha256','decision_at'}
+    if (not isinstance(reference,dict) or set(reference)!=fields
+        or not isinstance(reference['path'],str) or not Path(reference['path']).is_absolute()
+        or type(reference['source_run_id']) is not int or reference['source_run_id']<=0
+        or any(not re.fullmatch('[0-9a-f]{64}',str(reference[k])) for k in ('sha256','decision_sha256','original_result_sha256'))
+        or not isinstance(reference['decision_at'],str) or not reference['decision_at']):
+        raise ReplayError('整期人工决定必须绑定原始捕获、精确decision SHA、历史run及结果身份')
+    path=Path(reference['path'])
+    if path.is_symlink() or not path.is_file() or path.stat().st_size>32*1024*1024:
+        raise ReplayError('整期人工决定来源不是有界的固定文件')
+    raw=path.read_bytes()
+    if hashlib.sha256(raw).hexdigest()!=reference['sha256']:raise ReplayError('整期人工决定原始捕获SHA已变化')
+    def unique(pairs):
+        out={}
+        for key,value in pairs:
+            if key in out:raise ReplayError('整期人工决定JSON包含重复键')
+            out[key]=value
+        return out
+    def read(value):
+        return json.loads(value,parse_float=Decimal,object_pairs_hook=unique,
+            parse_constant=lambda _:(_ for _ in ()).throw(ReplayError('整期人工决定包含非有限数值')))
+    body=read(raw)
+    expected_method='declared_synthetic_manual_decisions' if fixture else 'sqlite_mode_ro_query_only_transaction'
+    if (not isinstance(body,dict) or body.get('method')!=expected_method
+        or body.get('no_engine_result_amounts_read') is not True or not isinstance(body.get('rows'),list)
+        or any(not isinstance(r,dict) for r in body['rows'])):
+        raise ReplayError('缺少原始人工决定捕获；合成夹具不能冒充历史凭据')
+    rows=[r for r in body['rows'] if r.get('store_id')==store_id and r.get('period')==period
+          and type(r.get('run_id')) is int and r.get('run_id')==reference['source_run_id']]
+    if len(rows)!=1:raise ReplayError('整期人工决定必须绑定唯一历史店月和运行号')
+    row=rows[0];encoded=row.get('decision_json')
+    if (not isinstance(encoded,str) or hashlib.sha256(encoded.encode('utf-8')).hexdigest()!=reference['decision_sha256']
+        or row.get('original_sha')!=reference['original_result_sha256'] or row.get('at')!=reference['decision_at']):
+        raise ReplayError('历史人工决定正文、时间或原结果身份与指定材料不符')
+    decision=read(encoded)
+    required={'source_run_id','confirmed','payouts','no_payout','reason'}
+    if (not isinstance(decision,dict) or not required<=set(decision)
+        or decision['source_run_id']!=reference['source_run_id']
+        or not isinstance(decision['confirmed'],dict) or set(decision['confirmed'])!={'goods','dropship','reshipment'}
+        or not isinstance(decision['payouts'],list) or type(decision['no_payout']) is not bool
+        or not isinstance(decision['reason'],str) or not decision['reason'].strip()):
+        raise ReplayError('原材料不是完整整期成本确认；仅确认提成不能用来恢复成本')
+    from .manual_cost import _cents
+    for value in decision['confirmed'].values():_cents(value)
+    if 'base_costs' in decision:
+        if not isinstance(decision['base_costs'],dict) or set(decision['base_costs'])!={'goods','dropship','reshipment'}:
+            raise ReplayError('历史成本基数必须明确三个科目')
+        for value in decision['base_costs'].values():_cents(value)
+    return decision,{'path':str(path),'capture_sha256':reference['sha256'],
+        'decision_sha256':reference['decision_sha256'],'historical_source_run_id':reference['source_run_id'],
+        'historical_result_sha256':reference['original_result_sha256'],'decision_at':reference['decision_at'],
+        'historical_authenticated_actor_proved':False,'production_authority':False,
+        'documentary_history_only':not fixture}
+
 def _offline_actor(ws,registry):
     root=Path(ws.root).resolve();temporary=Path(tempfile.gettempdir()).resolve()
     if (root.parent!=temporary or not root.name.startswith(('ledger-service-replay-','ledger-service-scope-'))
@@ -395,6 +452,7 @@ class Session:
         self.trace = []
         self.workspace_decisions = None
         self._workspace_reference = None
+        self._manual_finance_references = []
         self.publication_scopes = publication_scopes
         self.publication_scope = None
 
@@ -559,6 +617,79 @@ class Session:
             'approval_reference':approval_reference,'input_sha':preview['input_sha'],'reason':reason})
         return result
 
+    def restore_approved_manual_finance(self,store_id,period,*,reference,approval_reference,fixture=False):
+        """Replay a whole-period approval through real preview AND close.
+
+        The production API has no pre-close manual-total confirmation writer.
+        This step therefore closes only this disposable replay, through the
+        existing Checker. It never inserts manual_finance or splits totals.
+        """
+        from . import api,automation_checker as checker,cost_lines,manual_cost,labor_api,write_auth
+        from .finance_guard import guard
+        from .workspace import WorkspaceError
+        from fastapi import HTTPException
+        if not isinstance(approval_reference,str) or not approval_reference.strip():
+            raise ReplayError('历史人工整期确认重演缺少本次回放批准依据')
+        if (not fixture and (not isinstance(reference,dict)
+            or not Path(reference.get('path','')).resolve().is_relative_to(self.bundle))):
+            raise ReplayError('真实整期决定材料必须纳入新封存bundle，报告不得覆盖外置原件')
+        actor=_offline_actor(self.ws,self.registry)
+        decision,document=load_manual_finance_decision(reference,store_id,period,fixture=fixture)
+        _,fingerprint=frozen.verify(self.bundle)
+        if fingerprint!=self.fingerprint:raise ReplayError('人工确认前冻结输入身份已变化')
+        if self.publication_scope is None or not self.publication_scope.allows(store_id,period):
+            raise ReplayError('人工整期确认不在显式隔离回放店月范围')
+        with guard(self.root,store_id,period),self.ws.transaction():
+            run=self.ws.latest_run(store_id,period)
+            if not run:raise ReplayActionRejection('restore_approved_manual_finance',store_id,period,['no_result'])
+            before=checker.check(self.ws,store_id,period,model=self.model,verify_artifacts=True)
+            lines=api._line_snapshot(self.ws,run['id'],store_id,period,cost_lines.revision(self.ws,store_id,period))
+            if lines['reviewed_count']:
+                if not isinstance(decision.get('base_costs'),dict):
+                    raise ReplayError('已有逐笔补录时缺少原批准base_costs，不能推测或重复叠加')
+                costs=decision['base_costs'];line_mode='original_base_plus_replayed_lines'
+            else:
+                costs=decision['confirmed'];line_mode='documented_whole_period_total_no_line_import'
+            action=api.PeriodAction(run_id=run['id'],line_revision=lines['line_revision'],
+                costs=costs,payouts=decision['payouts'],no_payout=decision['no_payout'],note=decision['reason'])
+            token=write_auth._identity.set(actor)
+            try:
+                with patch.object(api,'workspace',lambda:self.ws),patch.object(api,'_model',lambda:self.model),                     patch.object(api,'DEFAULT_MODEL',self.root/'isolated-model-lock'):
+                    trial=api.manual_cost_preview(store_id,period,action)
+                    if any(manual_cost._cents(trial['confirmed'][k])!=manual_cost._cents(decision['confirmed'][k]) for k in manual_cost.COST_KEYS):
+                        raise ReplayError('当前逐笔补录与历史整期批准总额不一致，不能重复计入或改写批准金额')
+                    current=checker.check(self.ws,store_id,period,model=self.model,verify_artifacts=True)
+                    if current['input_sha']!=before['input_sha'] or current['run_id']!=run['id']:
+                        raise ReplayError('人工预览后当前run或金融输入CAS已变化')
+                    # The current API can correct a trial-like payout for labor.
+                    # Recheck BEFORE its writer; documentary approved payouts
+                    # cannot silently become new amounts in a replay.
+                    labor=labor_api.share_at_close(self.ws,self.model,period,store_id)
+                    _,certified=manual_cost.certified(self.model,json.loads(run['result']),run['id'],
+                        api._costs_with_lines(action.costs,lines),action.payouts,action.no_payout,action.note,labor_cut=labor)
+                    expected={str(v['person_id']):manual_cost._cents(v['amount']) for v in decision['payouts']}
+                    actual={str(v['person_id']):manual_cost._cents(v['amount']) for v in certified['payouts']}
+                    if actual!=expected:raise ReplayError('当前公摊校正会改变原人工批准提成，不能静默重写历史决定')
+                    current=checker.check(self.ws,store_id,period,model=self.model,verify_artifacts=True)
+                    if current['input_sha']!=before['input_sha'] or current['run_id']!=run['id']:
+                        raise ReplayError('人工预览后当前run或金融输入CAS已变化')
+                    load_manual_finance_decision(reference,store_id,period,fixture=fixture)
+                    result=api.close_period(store_id,period,action)
+            except HTTPException as exc:
+                raise ReplayError('真实人工预览或月结入口拒绝：'+str(exc.status_code)+'：'+str(exc.detail)) from exc
+            except WorkspaceError as exc:
+                raise ReplayError('真实人工预览或月结入口拒绝：'+str(exc)) from exc
+            finally:write_auth._identity.reset(token)
+            state=self.ws.state(store_id,period)
+            if not state or not state.closed or result.get('run_id')!=run['id']:
+                raise ReplayError('真实月结未完成，不能把人工预览当作整期确认成功')
+        self._manual_finance_references.append((dict(reference),store_id,period,fixture))
+        self.trace.append({'operation':'manual_finance.restore_and_close','store_id':store_id,'period':period,
+            'run_id':run['id'],'input_sha':before['input_sha'],'bundle_fingerprint':self.fingerprint,
+            'approval_reference':approval_reference,'document':document,'line_mode':line_mode,
+            'historical_authenticated_actor_proved':False,'production_authority':False})
+        return result
+
     def replace_scheme(self,store_id,product_id,body,reason):
         with self.registry.connect() as db:
             row = db.execute('SELECT revision FROM scheme WHERE store_id=? AND product_id=?',(store_id,product_id)).fetchone()
@@ -633,6 +764,8 @@ class Session:
         if self._workspace_reference:
             reference,fixture=self._workspace_reference
             load_workspace_decisions(reference,fixture=fixture)
+        for reference,sid,period,fixture in self._manual_finance_references:
+            load_manual_finance_decision(reference,sid,period,fixture=fixture)
         scopes = {}; proofs = {}; observations={}
         states={state.store_id+'/'+state.period:state for state in self.ws.overview()}
         declared=self._declared_scope_keys()
@@ -805,7 +938,7 @@ def execute(case):
         for step in case.get('steps',[]):
             arguments = {k:v for k,v in step.items() if k!='operation'}
             operation = step.get('operation')
-            if operation not in {'recompute','supplement','confirm','replace_scheme','drain_pending','close_approved','expect_failure'}:
+            if operation not in {'recompute','supplement','confirm','replace_scheme','drain_pending','close_approved','restore_approved_manual_finance','expect_failure'}:
                 raise ReplayError('不支持的离线回放步骤：'+str(operation))
             if operation=='expect_failure' and case['kind'] not in {'service_rejection_fixture','source_rejection'}:
                 raise ReplayError('只有显式负向案例可以声明expected failure')
@@ -818,6 +951,15 @@ def execute(case):
             if operation=='close_approved' and (not case.get('approval_reference')
                 or arguments.get('approval_reference')!=case['approval_reference']):
                 raise ReplayError('月结步骤的批准引用必须与批准案例完全一致')
+            if operation=='restore_approved_manual_finance':
+                if case['kind'] not in {'service_fixture','historical_golden'} or 'fixture' in arguments:
+                    raise ReplayError('整期人工确认只用于明确正向回放，不允许拒绝轨道或伪造夹具身份')
+                if not case.get('approval_reference') or arguments.get('approval_reference')!=case['approval_reference']:
+                    raise ReplayError('整期人工确认的回放批准必须与案例完全一致')
+                reference=arguments.get('reference')
+                if case['kind']=='historical_golden' and (case.get('source_evidence') or {}).get('manual_finance_decisions_sha256')!=(reference or {}).get('sha256'):
+                    raise ReplayError('历史整期人工决定缺少source_evidence捕获SHA绑定')
+                arguments={**arguments,'fixture':case['kind']=='service_fixture'}
             getattr(session,operation)(**arguments)
         report = (session.check_rejection(case['expected']) if case['kind'] in {'service_rejection_fixture','source_rejection'}
                   else session.check(case['expected']))

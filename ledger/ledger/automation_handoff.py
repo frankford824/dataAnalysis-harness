@@ -89,6 +89,21 @@ def context_sha(ws,model,store_id,period,input_sha,*,source_kind='',reason_code=
         and captured.get('version',0)>=source_version and captured.get('manual_revision',0)==line_revision)
     source_inputs=({'kind':'verified_period'} if verified_period and source_kind not in {'system','statement','freight'}
         else {'kind':'unverified_source','slots':slots,'line_revision':line_revision,'source_version':source_version})
+    # A sealed demand's original anchors remain the same when an unrelated
+    # company document is added. Replacing/removing a demanded active original
+    # still falls back to the conservative whole-source epoch.
+    index=manifest.get('source_recovery_index') or {}
+    anchors=set()
+    for demand in index.get('orders',{}).values():
+        for role in ('native','cost'):
+            anchors.update(a['sha256'] for a in demand.get(role,[]) if a.get('sha256'))
+    anchors.update(d['anchor']['sha256'] for d in index.get('date_demands',{}).values() if d.get('anchor',{}).get('sha256'))
+    current_anchors=sorted(row for row in slots if row[2] in anchors)
+    recorded_anchors=sorted(tuple(row) for row in captured.get('slots',[]) if row[2] in anchors)
+    if (anchors and {row[2] for row in current_anchors}==anchors and current_anchors==recorded_anchors
+        and captured.get('manual_revision',0)==line_revision):
+        source_inputs={'schema':'ledger_source_demand_context.v1','kind':'sealed_active_originals',
+                       'anchors':current_anchors,'line_revision':line_revision}
     feed=feed_scope(ws)
     # Financial input_sha still fences every submission. Queue delivery/ack is
     # not new source evidence, so it must not wake an unchanged missing-file
@@ -154,6 +169,8 @@ def _view(row,model):
 
 def active(ws,model,store_id,period,input_sha):
     from .automation_checker import current_run
+    from .source_recovery import retry_queued
+    if retry_queued(ws,journal.digest([store_id,period])[:32],input_sha):return []
     case_id=journal.digest([store_id,period])[:32]
     rows=ws.conn.execute('SELECT * FROM automation_source_handoff WHERE case_id=? ORDER BY since,id',(case_id,)).fetchall()
     if not rows:return []

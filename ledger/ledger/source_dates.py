@@ -9,12 +9,106 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 import csv,hashlib,io,json,re
 from pathlib import Path
+import polars as pl
 
 from . import automation_store as journal
 from .jst_source_members import Node,parse_order,MemberPending
 
 VERSION='verified_refund_order_dates.v1'
 HEADERS=('退款原订单号','原订单下单时间','核对店铺名称','核对聚水潭订单号')
+
+
+def potential_parents(ingestion,model,store,period,facts=None):
+    """Current source-period identifiers, including unposted/excluded rows.
+
+    Original sale month is deliberately not a filter: a September transaction
+    may need a July original date. Missing occurrence dates remain possible
+    dependencies rather than being guessed into or out of a month.
+    """
+    from .engine.link import normalize_key
+    keys=set()
+    if facts is not None:
+        for column in ('order_id','link_key'):
+            if column in facts.columns:
+                keys.update(normalize_key(v) for v in facts[column].drop_nulls().to_list())
+    source_items=getattr(ingestion,'source_recovery_originals',getattr(ingestion,'known',()))
+    metrics=[m for raw in model.metrics if raw.id in ('trade_refund','trade_refund_douyin')
+             and (m:=raw.for_platform(store.platform)) is not None and m.link]
+    for metric in metrics:
+        for item in source_items:
+            if item.template is None or item.template.source!=metric.source:continue
+            frame=item.frame;key=metric.link.key
+            if frame is None or key not in frame.columns:continue
+            if 'store_name' in frame.columns:
+                frame=frame.filter(pl.col('store_name').is_null()|pl.col('store_name').is_in(['',store.id,store.name,*store.aliases]))
+            slot=str(metric.orderless_time_basis or metric.time_basis)
+            if slot not in frame.columns:slot=item.template.time_slots.get(slot,slot)
+            if slot in frame.columns:
+                month=pl.col(slot).cast(pl.String).str.slice(0,7)
+                valid=month.str.contains(r'^\d{4}-(0[1-9]|1[0-2])$',literal=False).fill_null(False)
+                frame=frame.filter((month==period)|~valid)
+            elif '__hint_period__' in frame.columns:
+                frame=frame.filter(pl.col('__hint_period__').is_null()|(pl.col('__hint_period__')==period))
+            keys.update(normalize_key(v) for v in frame[key].drop_nulls().to_list())
+    return {'schema':VERSION,'store_id':store.id,'period':period,
+            'potential_parent_ids':sorted(k for k in keys if k)}
+
+
+
+def _selected_date_rows(ws,store_id):
+    """Explicit trusted heads version dates; legacy equal facts stay readable."""
+    rows=ws.conn.execute("SELECT a.id,a.result_json,c.store_id AS origin_store FROM automation_attempt a LEFT JOIN automation_case c ON c.id=a.case_id WHERE a.state='date_source_fact'").fetchall()
+    heads={}
+    for row in ws.conn.execute("SELECT result_json FROM automation_attempt WHERE state='date_source_head'"):
+        value=json.loads(row[0])
+        if value.get('schema')==VERSION and value.get('store_id')==store_id:
+            heads[str(value['platform_order_id'])]=value
+    selected=[];found=set()
+    for row in rows:
+        try:value=json.loads(row['result_json'])
+        except (ValueError,TypeError):
+            if row['origin_store']==store_id:selected.append(row)
+            continue
+        if value.get('store_id')!=store_id:continue
+        pid=str(value.get('platform_order_id') or '');head=heads.get(pid)
+        if head:
+            if head['fact_id']!=row['id']:continue
+            if head['fact_sha']!=journal.digest(value):raise MemberPending('date_source_head_fact_changed')
+            found.add(pid)
+        selected.append(row)
+    if set(heads)-found:raise MemberPending('date_source_head_fact_missing')
+    return selected
+
+def fingerprint(ws,store_id,period,dependencies=None):
+    """Semantic facts intersected with this run's potential input identities."""
+    if dependencies is None:
+        row=ws.latest_run(store_id,period)
+        proof=ws.conn.execute('SELECT manifest_json FROM automation_run_proof WHERE run_id=?',(row['id'],)).fetchone() if row else None
+        validation=ws.conn.execute('SELECT manifest_json FROM automation_run_validation WHERE run_id=? ORDER BY rowid DESC LIMIT 1',(row['id'],)).fetchone() if row else None
+        manifest=json.loads((validation or proof)[0]) if validation or proof else {}
+        dependencies=manifest.get('original_date_dependencies')
+        if dependencies is None:
+            # A previous source-index release can still supply its explicitly
+            # sealed demanded identities; never manufacture new raw anchors.
+            index=manifest.get('source_recovery_index',{})
+            ids=set(index.get('orders',{}))|{d['platform_order_id'] for d in index.get('date_demands',{}).values()}
+            dependencies={'potential_parent_ids':sorted(ids)}
+    relevant=set(map(str,dependencies.get('potential_parent_ids',[])));values={};invalid=[]
+    rows=_selected_date_rows(ws,store_id)
+    for row in rows:
+        try:value=json.loads(row['result_json'])
+        except (ValueError,TypeError):
+            if row['origin_store']==store_id:invalid.append(row['id'])
+            continue
+        if value.get('schema')!=VERSION or value.get('store_id')!=store_id:continue
+        pid=str(value.get('platform_order_id') or '')
+        if pid not in relevant:continue
+        day=value.get('original_day')
+        if not isinstance(day,str) or not re.fullmatch(r'\d{4}-\d{2}-\d{2}',day):
+            invalid.append(row['id']);continue
+        values.setdefault(pid,set()).add(day)
+    return journal.digest({'schema':VERSION,'store_id':store_id,'period':period,
+        'date_facts':[(pid,sorted(days)) for pid,days in sorted(values.items())],'unverified_rows':sorted(invalid)})
 
 
 def _parent(value,shop):
@@ -180,21 +274,42 @@ def publish_from_task(ws,model,case,plan,task_id,job_id,receipt_sha256,actor):
            'shop_ids':plan['shop_ids'],
            'source_order_ids':proof['source_order_ids'],'proof':proof,'source_refs':source_refs,
            'source_task_id':task_id,'source_attempt_id':job_id,'publication_scope_identity':dict(scope.identity)}
-    key='date-source:'+journal.digest(value)
     with guard(ws.root,case['store_id'],case['period']),ws.transaction() as conn:
         scope.require(case['store_id'],case['period'],workspace_root=ws.root)
         _current(ws,model,case['id'],case['run_id'],case['input_sha'])
-        existing=conn.execute('SELECT 1 FROM automation_attempt WHERE request_id=?',(key,)).fetchone()
+        current=[]
+        for row in _selected_date_rows(ws,case['store_id']):
+            saved=json.loads(row['result_json'])
+            if saved.get('platform_order_id')==proof['platform_order_id']:current.append((row['id'],saved))
+        if current and {saved['original_day'] for _,saved in current}=={proof['original_day']}:
+            # New raw bytes are a technical observation of the same date,
+            # not another financial input or a reason to rerun the month.
+            observed={**value,'source_refs':[*source_refs,
+                {'path':str(path),'sha256':receipt_sha256,'role':'source_receipt'}],
+                'canonical_fact_ids':sorted(i for i,_ in current),'financial_applied':False}
+            key='date-source-observation:'+journal.digest(observed);oid=journal.digest(key)[:32]
+            conn.execute('INSERT OR IGNORE INTO automation_attempt VALUES(?,?,?,?,?,?,?)',
+                (oid,case['id'],key,case['input_sha'],'date_source_observation',journal.encoded(observed),journal.now()))
+            return {'status':'source_input_reused','source_fact_ids':sorted(i for i,_ in current),
+                'original_day':proof['original_day'],'observation_id':oid,'source_refs':observed['source_refs'],
+                'recompute_required':False,'financial_applied':False,'business_complete':False}
+        value['supersedes_fact_ids']=sorted(i for i,_ in current)
+        key='date-source:'+journal.digest(value)
+        existing=conn.execute("SELECT id FROM automation_attempt WHERE request_id=? AND state='date_source_fact'",(key,)).fetchone()
+        fact_id=existing[0] if existing else journal.ident()
         if not existing:
             conn.execute('INSERT INTO automation_attempt VALUES(?,?,?,?,?,?,?)',
-                (journal.ident(),case['id'],key,case['input_sha'],'date_source_fact',journal.encoded(value),journal.now()))
-            # Existing deterministic Manager consumes this durable handoff.
-            # Its independent PublicationScope fences every published month.
+                (fact_id,case['id'],key,case['input_sha'],'date_source_fact',journal.encoded(value),journal.now()))
+            head_id='date-source-head:'+journal.digest([case['store_id'],proof['platform_order_id']])
+            head={'schema':VERSION,'store_id':case['store_id'],'platform_order_id':proof['platform_order_id'],
+                  'fact_id':fact_id,'fact_sha':journal.digest(value),'source_task_id':task_id}
+            conn.execute('INSERT INTO automation_attempt VALUES(?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET input_sha=excluded.input_sha,result_json=excluded.result_json,at=excluded.at',
+                (head_id,case['id'],head_id,case['input_sha'],'date_source_head',journal.encoded(head),journal.now()))
             conn.execute('INSERT INTO automation_attempt VALUES(?,?,?,?,?,?,?)',
                 (journal.ident(),case['id'],key,case['input_sha'],'dispatch_pending',
                  journal.encoded({'store_id':case['store_id'],'fingerprint':'automation:'+journal.digest([key,case['input_sha']]),
                                   'publication_scope_identity':dict(scope.identity),'target_period':case['period']}),journal.now()))
-        return {'status':'source_input_queued','source_fact_key':key,'original_day':proof['original_day'],
+        return {'status':'source_input_queued','source_fact_key':key,'source_fact_id':fact_id,'original_day':proof['original_day'],
                 'recompute_required':True,'financial_applied':False,'business_complete':False}
 
 
@@ -210,7 +325,7 @@ def attach_saved(ws,model,store,ingestion,publication_scope):
     if not ws.conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='automation_attempt'").fetchone():
         return {'attached':0}
     facts=[]
-    for row in ws.conn.execute("SELECT result_json FROM automation_attempt WHERE state='date_source_fact' ORDER BY rowid"):
+    for row in _selected_date_rows(ws,store.id):
         value=json.loads(row['result_json'])
         if value.get('schema')!=VERSION or value.get('store_id')!=store.id:continue
         # Source date/current case month never truncates source evidence.

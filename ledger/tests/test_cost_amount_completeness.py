@@ -125,3 +125,16 @@ def test_income_based_person_amount_can_be_known_while_required_cost_still_block
         assert all(p['amount_complete'] is True for p in body['commission']['people'])
         assert next(n for n in body['statement'] if n['id']=='net_profit')['value'] is None
         assert not automation_checker.check(session.ws,'s1','2026-06',model=session.model)['allowed']
+
+
+def test_explicit_reviewed_zero_cost_is_known_zero_not_an_unknown_default(bundle):
+    path,missing=bundle
+    with fixture_session(path,seed()) as session:
+        session.recompute('s1');session.recompute('s2');session.drain_pending()
+        session.supplement('s1','2026-06',amount='0.00',reason='Explicit synthetic original evidence approves no charge',order_id=missing['s1/2026-06'])
+        session.drain_pending()
+        state=session.ws.state('s1','2026-06');body=state.result
+        assert body['cost_line_posting']['count']==1 and body['cost_line_posting']['total']==0
+        assert body['cost_review']['amount_complete']['goods'] is True
+        assert next(n for n in body['statement'] if n['id']=='net_profit')['value']==162
+        assert automation_checker.check(session.ws,'s1','2026-06',model=session.model)['allowed']

@@ -99,6 +99,16 @@ def _cost_sources(ws,store_id,period,payload,ingestion=None,sl=None):
                'sha':ref['sha256'],'sealed':False} for ref in fact['source_refs']]
         values.append({'decision_id':fact['decision_id'],'source_fact':True,'coverage_key':fact['coverage_key'],
             'quote_sha':fact['quote_sha'],'origin_period':fact['period'],'dependent_period':period,'artifacts':refs})
+    for fact in getattr(ingestion,'physical_cost_evidence',[]) if ingestion is not None else []:
+        if fact['store_id']!=store_id or (fact['period']!=period and period not in fact.get('dependent_periods',[])):continue
+        refs=[{'path':Path(ref['path']).resolve().relative_to(ws.root.resolve()).as_posix(),
+               'sha':ref['sha256'],'sealed':False} for ref in fact['source_refs']]
+        values.append({'decision_id':fact['decision_id'],'source_fact':True,'rule_id':fact['rule_id'],
+            'coverage_key':fact['target']['coverage_key'],'quote_shas':[q['quote_sha'] for q in fact['quotes']],
+            'source_refresh_binding':fact.get('source_refresh_binding'),'source_inputs':fact.get('source_inputs',[]),
+            'frozen_origin_run_id':fact.get('frozen_origin_run_id'),'frozen_origin_proof_sha':fact.get('frozen_origin_proof_sha'),
+            'close_quote_keys':fact.get('close_quote_keys'),
+            'origin_period':fact['period'],'dependent_period':period,'artifacts':refs})
     return values
 
 
@@ -140,6 +150,10 @@ def prepare(ws,model,store,ingestion,sl,payload,allocation,source_context=None):
             date_sources.append({'platform_order_id':fact['platform_order_id'],'original_day':fact['original_day'],
                                  'source_task_id':fact['source_task_id'],'artifacts':artifacts})
     evidence['verified_original_date_sources']=date_sources
+    from .source_dates import potential_parents,fingerprint as date_fingerprint
+    date_dependencies=potential_parents(ingestion,model,store,sl.period,getattr(sl,'facts',None))
+    date_source_sha=date_fingerprint(ws,store.id,sl.period,date_dependencies)
+    evidence['original_date_facts_sha']=date_source_sha
     code=engine_version()
     from .version import assert_code_integrity
     code_state=assert_code_integrity()
@@ -153,6 +167,7 @@ def prepare(ws,model,store,ingestion,sl,payload,allocation,source_context=None):
         'effective_model_sha':journal.digest(model_part),'template_ids':sorted(used_templates),'subjects':sorted(subjects),
         'approved_cost_sources':cost_sources,
         'verified_original_date_sources':date_sources,
+        'original_date_dependencies':date_dependencies,'original_date_facts_sha':date_source_sha,
         'collectable_scope':collectable_scope(getattr(sl,'pricing_gaps',None),getattr(sl,'coverage_gap_rows',None),getattr(sl,'order_issue_rows',None),payload),
         'registry_revision':(payload.get('commission') or {}).get('registry_revision'),
         'manual_revision':source_context.get('manual_versions',{}).get(sl.period,0) if source_context is not None else
@@ -160,6 +175,14 @@ def prepare(ws,model,store,ingestion,sl,payload,allocation,source_context=None):
     from .source_recovery import anchor_index
     manifest['source_recovery_index']=anchor_index(ingestion,store,sl.period,
         getattr(sl,'pricing_gaps',None),getattr(sl,'coverage_gap_rows',None),getattr(sl,'facts',None))
+    sparse=manifest['source_recovery_index'];original_shas=set()
+    for item in sparse.get('orders',{}).values():
+        for kind in ('native','cost'):
+            original_shas.update(a['sha256'] for a in item.get(kind,[]))
+    original_shas.update(d['anchor']['sha256'] for d in sparse.get('date_demands',{}).values())
+    manifest['source_refs']=sorted(set(manifest['source_refs'])|original_shas)
+    manifest['source_recovery_original_artifacts']=[{'path':ws.path_of(sha).relative_to(ws.root).as_posix(),
+        'sha':sha,'sealed':False,'role':'parsed_original_evidence_not_price_fallback'} for sha in sorted(original_shas)]
     return {'dependency_sha':dep,'result_sha':result_sha,'evidence_sha':evidence_sha,'manifest':manifest}
 
 
@@ -199,6 +222,11 @@ def save(ws,run_id,proof):
             if not verified(path):return
             artifacts.append({'path':path.relative_to(ws.root).as_posix(),'sha':file_digest(path)})
     manifest={**proof['manifest'],'artifacts':artifacts}
+    for artifact in proof['manifest'].get('source_recovery_original_artifacts',[]):
+        if not valid_artifact(ws,artifact):
+            ws.mark_evidence(run_id,ready=False,error='原始取证文件缺失或哈希不一致，未将旧成本价格重新计入')
+            return
+        artifacts.append(artifact)
     for source in [*proof['manifest'].get('approved_cost_sources',[]),*proof['manifest'].get('verified_original_date_sources',[])]:
         for artifact in source['artifacts']:
             if not valid_artifact(ws,artifact):

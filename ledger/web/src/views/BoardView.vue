@@ -26,6 +26,7 @@ const monthAdvanceBlocked=computed(()=>onlyCompanyHistoryRemains(workflow.value)
 const businessDecisionGroups=computed(()=>(workflow.value?.decision_groups||[]).filter(group=>group.kind!=='company_finance'))
 const waitingGroups=computed(()=>workflow.value?.waiting_groups||[])
 const waitingCount=computed(()=>workflow.value?.counts?.waiting??0)
+const companyWaiting=computed(()=>workflow.value?.company_waiting||null)
 const status=computed(()=>workflowError.value?'状态暂未更新':workflowLabels[workflow.value?.status]||'正在读取状态')
 const rows=computed(()=>sortedOperations(report.value?.rows||[],sortKey.value,sortDirection.value))
 const core=new Set(['net_income','goods_cost','gross_profit','promotion_cost','platform_cost','freight_cost','aftersales_cost','labor_cost','profit_after_labor'])
@@ -38,7 +39,8 @@ const currentRule=computed(()=>(ruleContracts.value?.rules||[]).find(rule=>rule.
 const storeOptions=computed(()=>(workflow.value?.stores||[]).map(row=>({label:row.store,value:row.store_id})))
 const revocation=ref(null),revocationReason=ref(''),revocationSnapshot=ref(null),revocationError=ref('')
 const actionId=clientRequestId
-let timer,reportSerial=0
+const closeRefresh=ref(null),closeRequest=ref(null)
+let timer,closeRefreshTimer,reportSerial=0
 async function loadReport(quiet=false){
   if(!period.value)return
   const serial=++reportSerial
@@ -58,9 +60,10 @@ onMounted(async()=>{
   await app.loadNavigation().catch(()=>{});await Promise.all([reload(),loadRules()])
   timer=setInterval(()=>{if(!document.hidden&&!busy.value&&!modal.value&&!revocation.value){loadWorkflow();if(workflow.value?.status==='processing')loadReport(true)}},15000)
 })
-onUnmounted(()=>{clearInterval(timer);request.cancel();workflowRequest.cancel()})
+onUnmounted(()=>{clearInterval(timer);clearTimeout(closeRefreshTimer);request.cancel();workflowRequest.cancel()})
+watch(modal,value=>{if(!value)clearTimeout(closeRefreshTimer)})
 watch(params,()=>loadReport(),{deep:true})
-watch(period,()=>{workflow.value=null;report.value=null;modal.value=false;revocation.value=null;scope.value={};trail.value=[];page.value=1;loadWorkflow()})
+watch(period,()=>{clearTimeout(closeRefreshTimer);closeRefresh.value=null;closeRequest.value=null;workflow.value=null;report.value=null;modal.value=false;revocation.value=null;scope.value={};trail.value=[];page.value=1;loadWorkflow()})
 watch([level,managed,scope,()=>app.storeId,()=>app.platform,sortKey,sortDirection,compare],()=>{page.value=1},{deep:true})
 watch(()=>app.uiRefresh,reload)
 function changeLevel(value){level.value=value;scope.value={};trail.value=[]}
@@ -98,10 +101,11 @@ function noteCompanyEvidence(){recordTelemetry({kind:'operation_complete',action
 function openDecision(group){
   if(group.kind==='company_finance')return
   if(group.kind==='close'){previewClose();return}
+  clearTimeout(closeRefreshTimer);closeRefresh.value=null
   if(!['store_scope','overhead_total','rule_grant'].includes(group.kind)){periodDetail(group.store_ids?.[0]);return}
   scopeMode.value='month';businessFrom.value=period.value;businessUntil.value=shiftedMonth(period.value);selectedRule.value=ruleContracts.value?.rules?.[0]?.id||''
   const now=new Date(),end=new Date(now);end.setFullYear(end.getFullYear()+1);executionFrom.value=localDateTime(now);executionUntil.value=localDateTime(end)
-  decision.value=group;decisionAmount.value=workflow.value?.overhead?.total??'';decisionReason.value='';selectedStore.value=group.store_ids?.[0]||storeOptions.value[0]?.value||'';included.value=true;preview.value=null;modalError.value='';modal.value=true
+  decision.value=group;decisionAmount.value=group.values?.amount??workflow.value?.overhead?.total??'';decisionReason.value='';selectedStore.value=group.store_ids?.[0]||storeOptions.value[0]?.value||'';included.value=true;preview.value=group.kind==='overhead_total'&&group.proposal_id&&group.proposal_sha&&group.input_sha?{proposal_id:group.proposal_id,proposal_sha:group.proposal_sha,input_sha:group.input_sha}:null;modalError.value='';modal.value=true
 }
 async function previewDecision(){
   if(busy.value)return
@@ -113,10 +117,31 @@ async function previewDecision(){
   }
   catch(reason){modalError.value=reason.message}finally{busy.value=false}
 }
-async function previewClose(){
+function restartClose(){
+  const stores=closeRequest.value?.period===period.value?closeRequest.value.store_ids:workflow.value?.close?.eligible_store_ids||[]
+  closeRequest.value={request_id:actionId(),period:period.value,store_ids:stores}
+  closeRefresh.value=null;previewClose(true)
+}
+async function previewClose(retry=false){
   if(busy.value)return
+  clearTimeout(closeRefreshTimer)
+  const resumable=closeRefresh.value?.status==='processing'&&closeRequest.value?.period===period.value
+  if((!retry&&!resumable)||closeRequest.value?.period!==period.value){
+    closeRefresh.value=null
+    closeRequest.value={request_id:actionId(),period:period.value,store_ids:workflow.value?.close?.eligible_store_ids||[]}
+  }
+  const batch=closeRequest.value
+  if(!batch.store_ids.length){message.warning('当前没有可进入本批预览的店铺');return}
   decision.value=null;preview.value=null;modalError.value='';modal.value=true;busy.value=true
-  try{preview.value=await api.automationClosePreview({request_id:actionId(),period:period.value,store_ids:workflow.value?.close?.eligible_store_ids||[]})}
+  try{
+    const result=await api.automationClosePreview(batch)
+    if(batch!==closeRequest.value||batch.period!==period.value)return
+    if(!result.proposal_id&&['processing','pending'].includes(result.status)){
+      closeRefresh.value=result
+      await loadWorkflow()
+      if(result.status==='processing'&&modal.value)closeRefreshTimer=setTimeout(()=>previewClose(true),10000)
+    }else{closeRefresh.value=null;preview.value=result}
+  }
   catch(reason){modalError.value=reason.message}finally{busy.value=false}
 }
 async function applyPreview(){
@@ -170,8 +195,8 @@ const metricChange=(key,item)=>comparisonCopy(item,(report.value?.metrics||[]).f
   <p v-if="monthAdvanceBlocked" class="small muted month-alert" aria-label="本月处理入口说明">重算不能解除历史冻结差异，请公司财务核对已保存依据。</p>
   <n-alert v-if="error||workflowError" type="warning" class="month-alert">{{error||workflowError}}<n-button text @click="reload">重试</n-button></n-alert>
   <section class="month-progress" :class="workflowError?'unavailable':workflow?.status" aria-label="本月工作状态">
-    <div><strong>{{status}}</strong><p>{{workflowError?'未取得最新处理状态，以下保留上次保存的结果。':waitingCount?`有 ${waitingCount} 个店月仍在等待资料或维护跟进，点击“其中等待”查看缺项与跟进角色。`:workflow?.status==='processing'?'系统正在收集、核算或复核，无需逐店重算。':workflow?.status==='completed'?'本月工作已完成，可以查看结果和依据。':workflow?.status==='needs_decision'?'以下事项需要决定，确认后系统继续推进。':'尚未取得后台工作状态，当前金额保留供查看。'}}</p></div>
-    <div v-if="workflow" class="month-counts"><span>完成 <b>{{workflow.counts?.completed??0}}</b></span><span>处理中 <b>{{workflow.counts?.processing??0}}</b></span><button v-if="waitingCount" title="等待事项仍未完成" @click="openWaitingSummary">其中等待 <b>{{waitingCount}}</b></button><button @click="tab='decisions'">需决定 <b>{{workflow.counts?.needs_decision??0}}</b></button></div>
+    <div><strong>{{status}}</strong><p>{{workflowError?'未取得最新处理状态，以下保留上次保存的结果。':waitingCount?`有 ${waitingCount} 个店月仍在等待资料或维护跟进，点击“其中等待”查看缺项与跟进角色。`:companyWaiting?'等待财务上传本月兼职核定资料；其他取证与核算继续处理。':workflow?.status==='processing'?'系统正在收集、核算或复核，无需逐店重算。':workflow?.status==='completed'?'本月工作已完成，可以查看结果和依据。':workflow?.status==='needs_decision'?'以下事项需要决定，确认后系统继续推进。':'尚未取得后台工作状态，当前金额保留供查看。'}}</p></div>
+    <div v-if="workflow" class="month-counts"><span>完成 <b>{{workflow.counts?.completed??0}}</b></span><span>处理中 <b>{{workflow.counts?.processing??0}}</b></span><button v-if="waitingGroups.length" title="查看等待资料与维护事项" @click="openWaitingSummary">其中等待 <b>{{waitingCount||waitingGroups.length}}</b></button><button @click="tab='decisions'">需决定 <b>{{workflow.counts?.needs_decision??0}}</b></button></div>
   </section>
   <div class="month-kpis" v-if="report">
     <div class="kpi"><span class="label">销售收入（到账）</span><b class="value">{{money(report.summary.net_income)}}</b><span class="foot">已扣销售退款</span></div>
@@ -201,14 +226,14 @@ const metricChange=(key,item)=>comparisonCopy(item,(report.value?.metrics||[]).f
       <details v-if="report" class="operations-details"><summary>口径、来源与核算版本</summary><p>本页经营口径 {{report.version}}。提成使用已经保存的结果；组织分组按当前组织版本展示。兼职按未扣退款、含托管的已认领做货收入分配。</p><p v-if="report.labor_unallocated&&Number(report.labor_unallocated)!==0">还有兼职费用 {{money(report.labor_unallocated)}} 元未分配到个人，店铺费用仍保留。</p><ul><li v-for="issue in report.issues" :key="issue">{{issue}}</li></ul><p class="fingerprint">输入 {{report.input_sha}}<br/>范围 {{report.scope_sha}}</p><ul><li v-for="run in report.run_refs" :key="run.store_id">{{run.store_id}} · 核算 {{run.run_id??'未生成'}} · {{run.at||'时间未留档'}} <span v-if="run.stale">· 有新增资料</span></li></ul></details>
     </n-tab-pane>
     <n-tab-pane name="decisions" :tab="`需你决定（${workflow?.decision_groups?.length??0}）${waitingCount?` · 等待 ${waitingCount}`:''}`">
-      <div v-if="waitingGroups.length" class="decision-list" aria-label="等待资料与维护摘要"><h3>等待资料或维护跟进</h3><article v-for="group in waitingGroups" :key="group.id" :data-waiting-kind="group.kind"><div><h3>{{group.missing_material}}</h3><p>{{group.summary}}</p><p>跟进角色：{{group.role_label||'角色未配置'}}<span v-if="group.assignee_status==='role_unconfigured'&&group.role_label">（角色未配置）</span> · 开始等待：{{stamp(group.since)||'未留档'}}</p><p>影响店铺：{{waitingStoreNames(group)}} · {{group.count}} 个店月</p><p>{{group.delivery_hint}}</p></div><n-button v-if="group.kind==='source'" @click="openWaitingDelivery(group)">去资料入口</n-button><span v-else-if="group.kind==='maintenance'">已交维护</span></article></div>
+      <div v-if="waitingGroups.length" class="decision-list" aria-label="等待资料与维护摘要"><h3>等待资料或维护跟进</h3><article v-for="group in waitingGroups" :key="group.id" :data-waiting-kind="group.kind" :data-waiting-scope="group.scope||'store'"><div><h3>{{group.missing_material||group.evidence_label}}</h3><p>{{group.summary}}</p><p>跟进角色：{{group.role_label||'角色未配置'}}<span v-if="group.assignee_status==='role_unconfigured'&&group.role_label">（角色未配置）</span> · 开始等待：{{stamp(group.since)||'未留档'}}</p><p v-if="group.scope==='company'">公司资料 {{group.count}} 项 · 影响 {{group.store_ids?.length||0}} 家店</p><p>影响店铺：{{waitingStoreNames(group)}}<template v-if="group.scope!=='company'"> · {{group.count}} 个店月</template></p><p>{{group.delivery_hint||(group.scope==='company'?'请上传本期已有核定资料，无需逐店重录；核定前不冻结公摊或结账。':'')}}</p></div><n-button v-if="group.kind==='source'" @click="openWaitingDelivery(group)">去资料入口</n-button><span v-else-if="group.kind==='maintenance'">已交维护</span></article></div>
       <CompanyFinanceCard v-if="companyFinance" :group="companyFinance" :stores="workflow?.stores||[]" @open="noteCompanyEvidence"/>
       <div class="decision-list"><article v-for="(group,index) in businessDecisionGroups" :key="`${group.kind}:${index}`"><div><h3>{{group.title}}</h3><p>{{group.count}} 项 · {{group.store_ids?.length||0}} 家店</p></div><n-button @click="openDecision(group)">{{group.kind==='close'?'预览月结':['store_scope','overhead_total'].includes(group.kind)?'查看并决定':'查看需要的依据'}}</n-button></article></div>
       <n-empty v-if="workflow&&!workflow.decision_groups?.length&&!waitingGroups.length" :description="workflow.status==='processing'?'系统处理中，暂时没有需要你的决定':'暂无待决定事项'"/>
       <div class="decision-list"><article><div><h3>固定规则自动处理授权</h3><p>选择一店一规则及适用月份，一次确认后按有效范围执行。</p><p v-if="ruleContracts&&!ruleContracts.enabled">自动处理开关未启用，授权会保存，启用后才执行。</p></div><n-button :disabled="!ruleOptions.length" @click="openDecision({kind:'rule_grant',title:'授权固定规则自动处理'})">授权固定规则</n-button></article></div>
       <n-alert v-if="ruleError" type="warning" :bordered="false">{{ruleError}}<n-button text @click="loadRules">重试读取规则</n-button></n-alert>
       <details v-if="workflow?.policies?.length" class="operations-details" open><summary>本月适用的范围与授权历史（{{workflow.policies.length}}）</summary><ul><li v-for="policy in workflow.policies" :key="policy.decision_id" :data-policy-id="policy.decision_id"><strong>{{policyLabel(policy)}}</strong> · {{storeOptions.find(item=>item.value===policy.store_id)?.label||policy.store_id}} · {{policyStatusLabels[policy.status]||'状态待读取'}}<br/>业务月份：{{policyRange(policy)}}<span v-if="policy.kind==='store_scope'"> · {{policy.values?.included?'纳入处理':'排除处理'}}</span><br v-if="policy.kind==='rule_grant'"/><span v-if="policy.kind==='rule_grant'">执行有效期：{{executionRange(policy)}}</span><p>{{policy.reason}}</p><n-button v-if="policy.can_revoke" text size="small" :disabled="busy" @click="openRevocation(policy)">预览撤销</n-button><span v-else-if="policy.revoke_blocker">{{policy.revoke_blocker}}</span></li></ul></details>
-      <div class="month-close"><div><strong>本月全公司结账</strong><p>{{workflow?.close?.eligible_store_ids?.length??0}} 家可进入预览，{{workflow?.close?.blocked_store_ids?.length??0}} 家保留待处理。</p></div><n-button type="primary" :disabled="!workflow?.close?.can_preview||busy" @click="previewClose">预览本月全公司结账</n-button></div>
+      <div class="month-close"><div><strong>本月全公司结账</strong><p>{{workflow?.close?.eligible_store_ids?.length??0}} 家可进入预览，{{workflow?.close?.blocked_store_ids?.length??0}} 家保留待处理。</p></div><n-button type="primary" :disabled="!workflow?.close?.can_preview||busy" @click="previewClose()">预览本月全公司结账</n-button></div>
       <details class="operations-details" v-if="workflow?.stores?.length"><summary>各店处理进度</summary><ul><li v-for="store in workflow.stores" :key="store.case_id||store.store_id"><button class="link" @click="periodDetail(store.store_id)">{{store.store}}</button> · {{workflowLabels[store.status]||store.status}} · {{store.message}} <n-button v-if="store.actions?.some(action=>action.kind==='store_scope')" text size="small" @click="openDecision({kind:'store_scope',title:'确认本月店铺范围',store_ids:[store.store_id]})">调整本月范围</n-button></li></ul></details>
     </n-tab-pane>
   </n-tabs></div></n-spin>
@@ -222,8 +247,9 @@ const metricChange=(key,item)=>comparisonCopy(item,(report.value?.metrics||[]).f
       <n-input v-if="decision.kind==='overhead_total'" v-model:value="decisionAmount" inputmode="decimal" placeholder="本月兼职费用总额" aria-label="兼职费用总额" :input-props="{'aria-label':'兼职费用总额','inputmode':'decimal'}"/>
       <n-input v-model:value="decisionReason" type="textarea" placeholder="填写此次决定的依据" aria-label="决定依据" :input-props="{'aria-label':'决定依据'}"/>
       <n-button type="primary" :disabled="!decisionReason.trim()||busy||decision.kind!=='overhead_total'&&!selectedStore" @click="previewDecision">预览影响</n-button></div></template>
+    <section v-if="closeRefresh&&!preview&&!decision" aria-label="结账前自动复核进度"><h3>{{closeRefresh.status==='processing'?'正在自动复核':'本批依据待核'}}</h3><p>{{closeRefresh.message}}</p><p>复核期间继续自动取证，本次尚未结账。保持本批范围继续检查，不需要重新录入已有金额。</p><p v-if="closeRefresh.source_quote_refresh?.total_quotes">原日报价 {{closeRefresh.source_quote_refresh.completed_quotes}} / {{closeRefresh.source_quote_refresh.total_quotes}}</p><n-button :disabled="busy" @click="previewClose(true)">继续检查本批</n-button><n-button v-if="closeRefresh.status==='pending'" :disabled="busy" @click="restartClose">重新检查已恢复的来源</n-button></section>
     <template v-if="preview"><p v-if="!decision">本次可确认 {{preview.eligible?.length??0}} 家；{{preview.blocked?.length??0}} 家继续保留，原已结账结果不变。</p><template v-else><p v-if="decision.kind==='overhead_total'">本月兼职总额确认 {{money(decisionAmount)}} 元，系统按本月公司收入分摊后继续核算。</p><template v-else><p>{{storeOptions.find(item=>item.value===selectedStore)?.label||selectedStore}} · 业务月份 {{previewRange}}</p><template v-if="decision.kind==='rule_grant'"><strong>{{currentRule?.label}}</strong><p>{{currentRule?.description}}</p><p>执行有效期：{{executionFrom.replace('T',' ')}} 至 {{executionUntil.replace('T',' ')}}（当前设备时区）</p><p v-if="!ruleContracts?.enabled" class="small muted">全局开关尚未启用；本次仅保存人工授权。</p></template><p v-else>将{{included?'纳入':'排除于'}}以上月份的处理范围。</p></template></template><ul v-if="preview.blocked?.length"><li v-for="(item,index) in preview.blocked" :key="index">{{typeof item==='string'?item:item.store||item.store_id}} {{item.message||item.reason||''}}</li></ul><p class="small muted">资料或结果变化时，本次预览将失效，需要重新预览。</p><n-button type="primary" :disabled="busy||(!decision&&!preview.eligible?.length)" @click="applyPreview">{{decision?'确认本次决定':'确认本次结账'}}</n-button></template>
-    <n-alert v-if="modalError" type="error" style="margin-top:12px">{{modalError}}</n-alert>
+    <n-alert v-if="modalError" type="error" style="margin-top:12px">{{modalError}}<n-button v-if="!decision&&closeRequest" text :disabled="busy" @click="previewClose(true)">重试本批预览</n-button><n-button v-if="!decision&&closeRequest" text :disabled="busy" @click="restartClose">按当前依据重新预览</n-button></n-alert>
   </n-spin></n-modal>
   <n-modal :show="!!revocation" @update:show="value=>{if(!value&&!busy)revocation=null}" preset="card" title="撤销范围或规则授权" style="max-width:640px;width:calc(100vw - 32px)"><n-spin :show="busy"><template v-if="revocation"><strong>{{policyLabel(revocation)}}</strong><p>{{storeOptions.find(item=>item.value===revocation.store_id)?.label||revocation.store_id}} · 业务月份 {{policyRange(revocation)}}</p><p v-if="revocation.kind==='rule_grant'">撤回此规则后续自动执行的权限。已完成处理和冻结金额继续保留，后台将再次核对当前依据。</p><p v-else>撤销本次营业范围或兼职总额决定后，后台重新判断未结月份。生效范围已有冻结账时不可撤销，请另设未来范围。</p><n-input v-model:value="revocationReason" type="textarea" :disabled="!!revocationSnapshot" placeholder="填写撤销依据" :input-props="{'aria-label':'撤销依据'}"/><n-button v-if="!revocationSnapshot" type="primary" :disabled="busy||!revocationReason.trim()" @click="previewRevocation" style="margin-top:16px">预览此次撤销</n-button><template v-else><p>已读取当前决定。确认撤销上述范围，理由：{{revocationReason}}</p><n-button type="primary" :disabled="busy" @click="confirmRevocation">确认此次撤销</n-button></template><n-alert v-if="revocationError" type="error" style="margin-top:12px">{{revocationError}}</n-alert></template></n-spin></n-modal>
   <n-drawer v-model:show="evidenceOpen" :width="920" style="max-width:100vw"><n-drawer-content title="订单核算与原始依据" closable><n-spin :show="evidenceBusy"><n-alert v-if="evidenceError" type="error">{{evidenceError}}</n-alert><template v-if="evidence"><p>核算 {{evidence.run_id}} · 来源事实 {{evidence.total}} 行</p><p v-if="!evidence.evidence_complete" class="small muted">本次旧核算的完整分摊证据未留档，以下仅展示已保存来源。</p><div class="scroll"><table><thead><tr><th>来源</th><th>工作表/行</th><th>科目</th><th class="right">入账贡献</th><th>说明</th></tr></thead><tbody><tr v-for="(row,index) in evidence.items" :key="index"><td>{{row.file_name}}</td><td>{{row.sheet}} / {{row.row_no}}</td><td>{{row.metric_id}}</td><td class="right num">{{money(row.contribution)}}</td><td>{{row.source_note}}</td></tr></tbody></table></div><p class="fingerprint">{{evidence.input_sha}}</p></template></n-spin></n-drawer-content></n-drawer>

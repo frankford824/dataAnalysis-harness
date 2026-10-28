@@ -67,6 +67,10 @@ def main():
             shutil.copytree(session.root,target)
             next_model=session.model
         next_ws=Workspace(target);next_registry=Registry(target)
+        # The copied temporary workspace has a new root and needs its own
+        # explicit fixture-only automatic enrollment; source scope cannot migrate.
+        from conftest import fixture_publication_scope
+        fixture_publication_scope(next_ws,next_model,['2026-06','2026-07'])
         next_registry.operator_add('browser','fixture-password-2030',admin=True)
         for sid in ('s1','s2'):
             result=check(next_ws,sid,'2026-07',model=next_model)

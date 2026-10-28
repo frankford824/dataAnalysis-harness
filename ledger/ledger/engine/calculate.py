@@ -268,6 +268,11 @@ def evaluate_metric(
     else:
         store = pl.coalesce(store, pl.lit(store_hint or None, dtype=pl.Utf8))
 
+    if '__ledger_link_owner__' in frame.columns:
+        # Native/cost adapters supply an independently resolved canonical
+        # owner, including an explicit unknown. File fallback and a repeated
+        # global order number must not turn unknown back into a known store.
+        store=pl.col('__ledger_link_owner__').cast(pl.String)
     grain = metric.link.grain if metric.link else "period"
     source_note = pl.col("source_note").cast(pl.Utf8) if "source_note" in frame.columns else pl.lit(None, dtype=pl.Utf8)
     if shared_table:

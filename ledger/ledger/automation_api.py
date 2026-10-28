@@ -108,6 +108,12 @@ def install(app,workspace,model,actor=None,model_root=None):
         identity=actor(request) if actor else None
         return call(lambda:apply(workspace(),model(),body.model_dump(),identity))
 
+    @router.post('/service-physical-facts')
+    def physical_facts(body:ServiceAction,request:Request):
+        from .automation_source_cost_v3 import apply
+        identity=actor(request) if actor else None
+        return call(lambda:apply(workspace(),model(),body.model_dump(),identity))
+
     @router.post('/service-facts')
     def service_facts(body:SourceFacts,request:Request):
         from .historical_cost_facts import apply

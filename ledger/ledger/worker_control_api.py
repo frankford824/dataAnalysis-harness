@@ -131,7 +131,9 @@ def install(app,workspace,model,actor,*,lease_seconds=180,clock=time.time):
                 conn.execute("UPDATE automation_attempt SET state='interrupted' WHERE state='worker_running' AND id IN (SELECT worker_attempt_id FROM automation_case WHERE lease_owner=?)",(identity['id'],))
                 conn.execute("UPDATE automation_case SET lease_owner='',lease_until=0,lease_token=lease_token+1 WHERE lease_owner=?",(identity['id'],))
                 from .source_recovery import configuration_changed
-                configuration_changed(ws,identity['id'],body.configuration_sha)
+                configuration_changed(ws,identity['id'],body.configuration_sha,model=model(),stamp=int(clock()))
+            from .source_recovery import retry_due
+            retry_due(ws,model(),identity['id'],int(clock()))
             for lease in body.leases:
                 try:
                     case,_=owned(ws,lease.job_id,identity,lease.lease_token)

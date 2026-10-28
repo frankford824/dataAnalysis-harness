@@ -326,6 +326,9 @@ def apply(ws,model,request,actor,*,order_client=None,history_client=None,native_
 
 
 def run_available(ws,model,period,store_id,*,worker='native:commission-manager'):
+    from .automation_source_cost_v3 import run_available as physical_sources
+    physical=physical_sources(ws,model,period,store_id,worker=worker)
+    if physical:return physical
     if not enabled():return []
     from .historical_cost_facts import run_available as source_facts,granted as source_facts_granted
     if source_facts_granted(ws,store_id,period):

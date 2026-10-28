@@ -606,13 +606,27 @@ def _dedupe_across_files(result: Ingestion, model: Model) -> None:
         # 后面按它求和就全成 0 了。类型本来就一致时不铸型，走的还是原来那条路。
         mixed = {k for k in keys if len({str(i.frame.schema[k]) for i in items}) > 1}
         shadow = [f"__dedupe_{k}__" for k in keys]
+        store_shadow=None;store_lookup={}
+        if source.id=='order_cost' and all('store_name' in item.frame.columns for item in items):
+            aliases={}
+            for store in model.stores:
+                for label in (store.id,store.name,*store.aliases):
+                    aliases.setdefault(str(label).strip(),set()).add(store.id)
+            store_lookup={label:'known:'+next(iter(ids)) for label,ids in aliases.items() if len(ids)==1}
+            store_shadow='__dedupe_ledger_store__'
+            shadow.append(store_shadow)
 
         seen: pl.DataFrame | None = None
         for item in items:
-            frame = item.frame.with_columns(
+            base=item.frame
+            if store_shadow:
+                raw=pl.col('store_name').cast(pl.String).str.strip_chars().fill_null('')
+                base=base.with_columns(raw.replace_strict(store_lookup,default=pl.concat_str(pl.lit('unresolved:'),raw),
+                    return_dtype=pl.String).alias(store_shadow))
+            frame = base.with_columns(
                 [
                     (pl.col(k).cast(pl.Utf8) if k in mixed else pl.col(k)).alias(alias)
-                    for k, alias in zip(keys, shadow, strict=True)
+                    for k, alias in zip(keys, shadow[:len(keys)], strict=True)
                 ]
             )
             before = frame.height
@@ -775,8 +789,35 @@ def run(ingestion: Ingestion, platform: str = "*") -> RunResult:
                 continue
             supplied = True
             frame = _exclude_linked(item.frame, metric, ingestion, notes, item.ref.label())
-            frame, report = link(frame, metric, spine, item.template, bridges)
-            _merge_link(link_reports, metric.id, report)
+            owner_scoped=(metric.source in {'order_cost','cost_return'} or model.source(metric.source).is_spine)
+            if owner_scoped and frame.height:
+                from .ownership import owner_context
+                ownership=owner_context(frame,item.ref,model,platform)
+                owner=ownership.expression(frame,names=True)
+                frame=frame.with_columns(owner.alias('__ledger_link_owner__'))
+                # Unknown ownership must stay unknown in the source fact too;
+                # an older file hint or ambiguous alias cannot later restore
+                # a known store through _own_store/project_by_key. Raw input
+                # rows and file anchors remain unchanged.
+                original_store=(pl.col('store_name') if 'store_name' in frame.columns else pl.lit(None,dtype=pl.String))
+                frame=frame.with_columns(pl.when(pl.col('__ledger_link_owner__').is_null()).then(pl.lit('(未知店铺)'))
+                    .otherwise(original_store).alias('store_name'))
+                linked=[]
+                for (name,),part in frame.partition_by('__ledger_link_owner__',as_dict=True).items():
+                    scoped=spine.frame.filter(pl.col(SPINE_STORE)==name) if name is not None else spine.frame.clear()
+                    part,report=link(part,metric,Spine(scoped),item.template,bridges)
+                    _merge_link(link_reports,metric.id,report);linked.append(part)
+                    if name is None:
+                        if model.source(metric.source).is_spine:
+                            eval_errors.setdefault(metric.source,[]).append('订单原表店铺归属缺失或不唯一，未按文件首个名称或同编号套用其他店')
+                        elif metric.link and metric.link.key in part.columns:
+                            known=spine.keys(target_role(metric.link.to))
+                            if any(normalize_key(key) in known for key in part[metric.link.key].drop_nulls().to_list()):
+                                eval_errors.setdefault(metric.source,[]).append('成本来源店铺归属缺失或不唯一，编号相同不能证明属于本店')
+                frame=pl.concat(linked,how='diagonal_relaxed')
+            else:
+                frame, report = link(frame, metric, spine, item.template, bridges)
+                _merge_link(link_reports, metric.id, report)
 
             # 未归类科目要带准确金额，那是用户判断该不该管的唯一依据。只取取值
             # 表达式的第一个角色是不够的：支付宝把一笔钱拆成收入、支出两栏，余利宝
@@ -859,7 +900,8 @@ def run(ingestion: Ingestion, platform: str = "*") -> RunResult:
     for metric in metrics:
         if not (metric.link and metric.link.to) or metric.posting_basis in {"transaction", "order_number"}:
             proj = project_transactions(projectable, metric, spine)
-        elif live_feed or (metric.link is not None and metric.link.grain == "product"):
+        elif (live_feed or metric.source in {"order_cost","cost_return"} or model.source(metric.source).is_spine
+              or (metric.link is not None and metric.link.grain == "product")):
             proj = _project_scoped_live(projectable, metric, spine)
         else:
             proj = project(projectable, metric, spine)
