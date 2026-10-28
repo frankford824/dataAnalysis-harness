@@ -97,7 +97,7 @@ def test_checker_hard_block_and_native_action_guard_cannot_be_waived(tmp_path,ap
 
 
 def test_approved_code_refresh_uses_existing_dedup_queue_once_for_open_results(tmp_path,approved):
-    from ledger.commission_manager import Manager
+    from conftest import scoped_manager as Manager
     from ledger.commission_registry import Registry
     ws=Workspace(tmp_path/'ws');model=_model();registry=Registry(ws.root)
     ws.record('s1','2030-06',{'can_close':False,'calculation_inputs':{'metric_totals':{}}},[])

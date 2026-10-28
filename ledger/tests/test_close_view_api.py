@@ -1,4 +1,5 @@
 """Final readiness is a fresh view dependency, never a financial recomputation."""
+from test_replay_service import fixture_session
 from copy import deepcopy
 from types import SimpleNamespace
 
@@ -19,7 +20,7 @@ HUMAN={'id':'readiness-fixture-human','kind':'human','authenticated':True}
 def ready_service(tmp_path,monkeypatch):
     source=tmp_path/'original-inputs';source.mkdir()
     path,missing=bundle.__wrapped__(source)
-    with Session(path,seed()) as session:
+    with fixture_session(path,seed()) as session:
         session.drain_pending()
         for scope,order in missing.items():
             sid,period=scope.split('/')

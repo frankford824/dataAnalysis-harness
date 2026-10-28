@@ -9,12 +9,12 @@ import logging
 import uuid
 from contextlib import closing
 
-from . import commission_catalog, commission_import, order_feed, service, fee_jobs
+from . import commission_catalog, commission_import, order_feed, service, fee_jobs, publication_scope
 from .commission_registry import Registry, json_text
 
 
 class Manager:
-    def __init__(self, workspace, model):
+    def __init__(self, workspace, model, *, publication_scope=None):
         self.workspace = workspace
         self.model = model
         self.stop_event = threading.Event()
@@ -27,9 +27,22 @@ class Manager:
         self._yield_fee = False
         self.lease_owner = 'commission-manager:' + uuid.uuid4().hex
         self.current_lease = None
+        self._publication_scope = publication_scope
+
+    def _scope(self, ws):
+        value = self._publication_scope
+        if callable(value):value = value(ws, self.model())
+        if value is None:value = publication_scope.load_automatic(ws.root, self.model())
+        if not isinstance(value, publication_scope.PublicationScope):
+            raise publication_scope.PublicationScopeError('automatic_publication_scope_object_invalid')
+        return value.verify(ws.root, self.model())
 
     def start(self):
         ws=self.workspace()
+        try:self._scope(ws)
+        except publication_scope.PublicationScopeError as exc:
+            self.last_error=str(exc)
+            return
         registry = Registry(ws.root)
         self._enqueue_code_refresh(ws,registry)
         fee_jobs.restart(registry)
@@ -45,17 +58,19 @@ class Manager:
         try:identity=assert_code_integrity()
         except CodeIntegrityError:return 0
         code=identity['source_code_sha']
-        rows=ws.conn.execute('''SELECT DISTINCT r.store_id FROM period p JOIN run r ON r.id=(
+        scope=self._scope(ws)
+        rows=ws.conn.execute('''SELECT DISTINCT r.store_id,r.period FROM period p JOIN run r ON r.id=(
             SELECT max(latest.id) FROM run latest WHERE latest.store_id=p.store_id AND latest.period=p.period)
             LEFT JOIN automation_run_proof proof ON proof.run_id=r.id
             LEFT JOIN run_report_slice projection ON projection.run_id=r.id AND projection.payload_kind='run'
             WHERE p.state='open' AND json_type(snapshot_json(coalesce(projection.overview_json,r.result)),'$.calculation_inputs') IS NOT NULL
             AND coalesce(json_extract(proof.manifest_json,'$.source_code_sha'),'')<>?''',(code,)).fetchall()
         known={store.id for store in self.model().stores}
-        for row in rows:
-            if row['store_id'] in known:
-                registry.enqueue_automation({row['store_id']},'automation:'+digest(['approved-code-refresh',code,row['store_id']]))
-        return sum(row['store_id'] in known for row in rows)
+        targets={row['store_id'] for row in rows if row['store_id'] in known and scope.allows(row['store_id'],row['period'])}
+        for sid in sorted(targets):
+            scope.verify(ws.root)
+            registry.enqueue_automation({sid},'automation:'+digest(['approved-code-refresh',code,sid,scope.identity]))
+        return len(targets)
 
     def stop(self):
         self.stop_event.set()
@@ -79,9 +94,14 @@ class Manager:
             self.current_lease=None
 
     def _once(self):
+        ws=self.workspace()
+        scope=self._scope(ws)
+        with publication_scope.bind(scope,ws.root):
+            return self._once_scoped(ws,scope)
+
+    def _once_scoped(self,ws,scope):
         self.current_pending = None
         self.current_file_revision = 0
-        ws = self.workspace()
         registry = Registry(ws.root)
         from .automation_actions import deliver
         deliver(ws)
@@ -123,10 +143,13 @@ class Manager:
                     conn.execute("UPDATE job SET status='failed',error=? WHERE id=?", (str(exc)[:2000], job["id"]))
             return
         claimed_at = int(time.time())
+        allowed_stores=sorted({sid for sid,_period in scope.scopes})
+        scope.verify(ws.root,self.model())
         with registry.transaction() as conn:
             pending = conn.execute("SELECT * FROM pending WHERE next_attempt<=? AND lease_until<=? "
-                                   "ORDER BY (next_attempt=0) DESC,(files_revision>files_applied_revision) DESC,next_attempt,revision,store_id LIMIT 1",
-                                   (claimed_at,claimed_at)).fetchone()
+                                   "AND store_id IN (%s) "
+                                   "ORDER BY (next_attempt=0) DESC,(files_revision>files_applied_revision) DESC,next_attempt,revision,store_id LIMIT 1" % ','.join('?' for _ in allowed_stores),
+                                   (claimed_at,claimed_at,*allowed_stores)).fetchone()
             if pending:
                 pending=dict(pending)
                 pending['lease_token']+=1
@@ -159,7 +182,9 @@ class Manager:
                         conn.execute("UPDATE pending SET next_attempt=?,error=? WHERE store_id=? AND revision=? AND source_seq=? AND source_fingerprint=? AND files_revision=?",
                                      (int(time.time())+300,error,store_id,revision,pending['source_seq'],pending['source_fingerprint'],pending['files_revision']))
                     return
-            ws.note_external_version(store_id, "__commission_rules__", f"commission:{revision}")
+            # Registry/period proofs already capture rule generations. A
+            # store-global version bump would mutate every old month's input.
+            scope.verify(ws.root)
             file_work = pending['files_revision'] > pending['files_applied_revision']
             note = ("原文件更新" if file_work else
                     "订单数据更新" if pending["source_seq"] else "提成设置更新")
@@ -177,6 +202,10 @@ class Manager:
             renewal.start()
             try:
                 result = service.recompute(ws, self.model(), self.model().store(store_id), note=note)
+                for period_result in result.periods:
+                    period=period_result.get('period')
+                    if not period or not scope.allows(store_id,period) or period_result.get('store_id',store_id)!=store_id:
+                        raise publication_scope.PublicationScopeError('automatic_recompute_result_scope_unverified')
                 from .automation_deterministic import run_available
                 automatic=[]
                 for period_result in result.periods:
@@ -199,6 +228,7 @@ class Manager:
             # current work. Only open periods can require another sync pass.
             provisional = any(p.get("state") != "closed" and p.get("source_sync_pending")
                               for p in result.periods)
+            scope.verify(ws.root)
             with registry.transaction() as conn:
                 lease=conn.execute('SELECT lease_owner,lease_token FROM pending WHERE store_id=?',(store_id,)).fetchone()
                 if not lease or lease['lease_owner']!=self.lease_owner or lease['lease_token']!=pending['lease_token']:
@@ -244,8 +274,19 @@ class Manager:
                     if not remains:
                         with ws.transaction() as conn:
                             from .automation_store import encoded,now
-                            conn.execute("UPDATE automation_attempt SET state='completed',result_json=? WHERE state='queued' AND json_extract(result_json,'$.store_id')=?",
-                                (encoded({'store_id':store_id,'run_ids':[p.get('run_id') for p in result.periods],'worker':self.lease_owner,'completed_at':now()}),store_id))
+                            completed_periods={p['period'] for p in result.periods}
+                            attempts=conn.execute("SELECT a.id,c.store_id,c.period FROM automation_attempt a LEFT JOIN automation_case c ON c.id=a.case_id "
+                                "WHERE a.state='queued' AND json_extract(a.result_json,'$.store_id')=?",(store_id,)).fetchall()
+                            for attempt in attempts:
+                                if attempt['store_id']!=store_id or attempt['period'] not in completed_periods:
+                                    publication_scope.hold(scope,ws.root,attempt['id'],'completion_scope_metadata_unverified',
+                                        store_id=attempt['store_id'],period=attempt['period'])
+                                    continue
+                                scope.require(store_id,attempt['period'],workspace_root=ws.root)
+                                conn.execute("UPDATE automation_attempt SET state='completed',result_json=? WHERE id=? AND state='queued'",
+                                    (encoded({'store_id':store_id,'period':attempt['period'],
+                                        'run_ids':[p.get('run_id') for p in result.periods if p['period']==attempt['period']],
+                                        'worker':self.lease_owner,'completed_at':now(),'publication_scope':scope.identity}),attempt['id']))
             # Exact actions publish their own durable handoff. Queue it only
             # after retiring the captured generation so an older run cannot ack
             # away the newly approved source decision.
@@ -256,8 +297,10 @@ class Manager:
             # A real delivery can fail to yield any slice (missing/unknown
             # originals). Existing store-month waits still need reconciliation.
             for row in ws.conn.execute('SELECT period FROM automation_case WHERE store_id=?',(store_id,)):
-                periods.setdefault(row['period'],{'period':row['period']})
+                if scope.allows(store_id,row['period']):periods.setdefault(row['period'],{'period':row['period']})
+            for period in scope.periods_for_store(store_id):periods.setdefault(period,{'period':period})
             for period,period_result in periods.items():
+                scope.require(store_id,period,workspace_root=ws.root)
                 sync_month(ws,self.model(),period,worker=self.lease_owner)
                 if period_result.get('state')!='closed':
                     cost_actions(ws,self.model(),period,store_id,worker=self.lease_owner)

@@ -148,6 +148,7 @@ class Slice:
     order_issue_rows: pl.DataFrame = field(default_factory=pl.DataFrame)
     cost_line_posting: dict = field(default_factory=dict)
     operations_evidence: pl.DataFrame = field(default_factory=pl.DataFrame)
+    cost_completeness: dict = field(default_factory=dict)
 
     @property
     def can_close(self) -> bool:
@@ -1605,7 +1606,7 @@ def _build_slice(
     if goods_metric is not None:
         from ..brushing_zero import annotate_pending
         coverage_rows = annotate_pending(coverage_rows, ingestion.brushing_evidence, store, goods_metric)
-    return Slice(
+    sliced = Slice(
         store=store, period=period, nodes=nodes, facts=attach(scoped, own),
         completeness=completeness, audit=result,
         link_reports=scoped_reports, classify_report=own,
@@ -1621,6 +1622,9 @@ def _build_slice(
             "inapplicable_metrics": sorted(inapplicable),
         },
     )
+    from ..cost_completeness import apply as apply_cost_completeness
+    apply_cost_completeness(sliced,model,platform)
+    return sliced
 
 
 def _pending_goods_keys(pricing_gaps: pl.DataFrame) -> dict[str, list[dict]]:

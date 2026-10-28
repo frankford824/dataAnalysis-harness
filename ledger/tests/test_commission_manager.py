@@ -3,7 +3,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from ledger.commission_manager import Manager
+from conftest import scoped_manager as Manager
 from ledger.commission_registry import Registry
 from ledger.workspace import Workspace
 from ledger.model.schema import Store
@@ -41,7 +41,7 @@ def test_new_automation_attempt_during_calculation_is_not_marked_completed(tmp_p
             actions.advance(ws,model,'2026-07','newer-during-calculation',human)
         # Deliberate Manager protocol stub: this test proves generation/attempt
         # acknowledgement only, and does not claim any financial readiness.
-        return SimpleNamespace(failure=None,periods=[{'run_id':99}])
+        return SimpleNamespace(failure=None,periods=[{'run_id':99,'period':'2026-07'}])
     monkeypatch.setattr('ledger.commission_manager.service.recompute',compute)
     manager=Manager(lambda:ws,lambda:model);manager.once()
     assert ws.conn.execute("SELECT count(*) FROM automation_attempt WHERE state='queued'").fetchone()[0]==2
@@ -86,7 +86,7 @@ def test_completed_input_retires_only_its_own_captured_work(tmp_path, monkeypatc
         ingestion = Ingestion(model=None)
         feed.append_to(ingestion, store)
         return SimpleNamespace(failure=None, periods=[{
-            "run_id": 99, "source_sync_pending": ingestion.source_sync_pending,
+            "run_id": 99, "period": "2026-06", "source_sync_pending": ingestion.source_sync_pending,
         }])
 
     monkeypatch.setattr("ledger.commission_manager.service.recompute", compute)
@@ -147,7 +147,7 @@ def test_new_file_work_precedes_older_continuous_erp_refresh(tmp_path, monkeypat
     calls=[]
     def compute(_ws,_model,store,**kwargs):
         calls.append(store.id)
-        return SimpleNamespace(failure=None,periods=[{'run_id':99}])
+        return SimpleNamespace(failure=None,periods=[{'run_id':99,'period':'2026-07'}])
     monkeypatch.setattr('ledger.commission_manager.service.recompute',compute)
     Manager(lambda:ws,lambda:model).once()
     assert calls==['s2']
@@ -164,7 +164,7 @@ def test_explicit_setting_changes_keep_their_immediate_priority(tmp_path, monkey
     calls=[]
     def compute(_ws,_model,store,**kwargs):
         calls.append(store.id)
-        return SimpleNamespace(failure=None,periods=[{'run_id':99}])
+        return SimpleNamespace(failure=None,periods=[{'run_id':99,'period':'2026-07'}])
     monkeypatch.setattr('ledger.commission_manager.service.recompute',compute)
     Manager(lambda:ws,lambda:model).once()
     assert calls==['s1']
@@ -182,7 +182,7 @@ def test_completed_file_generation_loses_priority_despite_new_erp_events(tmp_pat
     def compute(_ws,_model,store,**kwargs):
         calls.append(store.id)
         registry.enqueue_source({store.id},'order-feed:snapshot:20')
-        return SimpleNamespace(failure=None,periods=[{'run_id':99,'source_sync_pending':True}])
+        return SimpleNamespace(failure=None,periods=[{'run_id':99,'period':'2026-07','source_sync_pending':True}])
     monkeypatch.setattr('ledger.commission_manager.service.recompute',compute)
     manager=Manager(lambda:ws,lambda:model);manager.once();manager.once()
     assert calls==['s1','s2']
@@ -196,7 +196,7 @@ def test_file_received_during_calculation_keeps_new_generation_pending(tmp_path,
     registry.enqueue_files({'s1'},'nas:'+'a'*64)
     def compute(*args,**kwargs):
         registry.enqueue_files({'s1'},'nas:'+'b'*64)
-        return SimpleNamespace(failure=None,periods=[{'run_id':99}])
+        return SimpleNamespace(failure=None,periods=[{'run_id':99,'period':'2026-07'}])
     monkeypatch.setattr('ledger.commission_manager.service.recompute',compute)
     Manager(lambda:ws,_model).once()
     with registry.connect() as conn:
@@ -255,7 +255,7 @@ def test_new_events_keep_worker_lease_so_other_stores_are_not_starved(tmp_path, 
         calls.append(store.id)
         if store.id=='s1':
             registry.enqueue_source({'s1'},'order-feed:snapshot:20')
-            return SimpleNamespace(failure=None,periods=[{'source_sync_pending':True}])
+            return SimpleNamespace(failure=None,periods=[{'period':'2026-07','source_sync_pending':True}])
         return SimpleNamespace(failure=None,periods=[])
     monkeypatch.setattr('ledger.commission_manager.service.recompute',compute)
     manager=Manager(lambda:ws,lambda:model)

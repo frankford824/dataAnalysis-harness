@@ -4,7 +4,7 @@ import threading
 
 import pytest
 
-from ledger.commission_manager import Manager
+from conftest import scoped_manager as Manager
 from ledger.commission_registry import Registry
 from ledger.order_feed import Worker, SyncResult
 from ledger.pricing_status import status

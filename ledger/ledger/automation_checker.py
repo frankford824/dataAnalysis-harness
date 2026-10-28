@@ -254,6 +254,18 @@ def check(ws,store_id,period,*,model=None,expected_run_id=None,ignored_blockers=
                 problems.append(issue(code,str(finding.get('message') or finding.get('name') or '核算依据待核对'),hard))
         if payload.get('missing_sources'):problems.append(issue('missing_sources','还缺：'+'、'.join(map(str,payload['missing_sources']))))
         if payload.get('source_sync_pending'):problems.append(issue('source_sync_pending','本次输入捕获时来源尚未追平'))
+        cost_review=payload.get('cost_review') or {}
+        amount_complete=cost_review.get('amount_complete')
+        if amount_complete is not None:
+            if (not isinstance(amount_complete,dict) or set(amount_complete)!={'goods','dropship','reshipment'}
+                or any(type(value) is not bool for value in amount_complete.values())):
+                problems.append(issue('cost_amount_completeness_unverified','本次成本完整性凭据无效，请按当前输入重新核算'))
+            elif not all(amount_complete.values()):
+                problems.append(issue('required_cost_unresolved','仍有必需成本金额或有效价格未核齐；覆盖质量线不能把未知成本当零'))
+        elif (payload.get('pricing_pending_count') or (payload.get('cost_coverage') or {}).get('uncovered')):
+            # An old summary's 95%-passed flag is not amount authority. Rebuild
+            # its scoped economic evidence; never guess missing fields true.
+            problems.append(issue('cost_amount_completeness_unverified','旧结果仍有成本缺口，须重新验证金额完整性'))
         profit_id=next((n.id for n in model.statement if n.headline=='profit'),'net_profit') if model else 'net_profit'
         profit=next((n for n in payload.get('statement',[]) if n.get('id')==profit_id or n.get('name')=='利润'),None)
         if profit and (profit.get('value') is None or profit.get('available',True) is False):

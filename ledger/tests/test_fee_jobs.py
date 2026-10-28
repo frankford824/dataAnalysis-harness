@@ -174,7 +174,7 @@ def test_restart_keeps_finished_stores_and_resumes_interrupted_one(setup,monkeyp
 
 
 def test_fee_worker_yields_to_existing_source_queue(setup,monkeypatch):
-    from ledger.commission_manager import Manager
+    from conftest import scoped_manager as Manager
     ws,root,model=setup;job=submit(setup,'*');registry=Registry(ws.root)
     monkeypatch.setenv('LEDGER_ORDER_FEED_ENABLED','0')
     registry.enqueue_source({'pdd_huanglishi'},'order-feed:snapshot:10')

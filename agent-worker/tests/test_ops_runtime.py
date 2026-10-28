@@ -73,8 +73,11 @@ def test_calibration_flag_does_not_authorize_production_repair(tmp_path):
     assert result['state']=='waiting_configuration' and result['published'] is False
 
 
-def test_runtime_identity_is_separate_from_the_preserved_business_core():
-    assert runtime_identity()=='ba924cba755a7669494cf1708b7ae56171337ef6dd32c2ffc9157057a9fb4879'
+def test_client_lifecycle_change_does_not_relabel_the_prior_actual_qualification(tmp_path):
+    prior='ba924cba755a7669494cf1708b7ae56171337ef6dd32c2ffc9157057a9fb4879'
+    assert runtime_identity()!=prior
+    config=report_for(tmp_path,'http://unit.invalid/v1',runtime_sha=prior)
+    with pytest.raises(ValueError):validate_ops_model(config)
     assert len(ops_identity())==64 and ops_identity()!=runtime_identity()
 
 

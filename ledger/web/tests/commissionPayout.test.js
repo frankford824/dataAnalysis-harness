@@ -20,3 +20,18 @@ test('manual close falls back to the raw trial only when after-labor is missing'
   assert.equal(fallback.amount, '17.00')
   assert.equal(fallback.suggested, null)
 })
+
+test('partial trials remain reference values and never become confirmation defaults', () => {
+  const partial=suggestedManualPayout({amount:17,amount_after_labor:15},{complete:false})
+  assert.equal(partial.trial,17)
+  assert.equal(partial.suggested,15)
+  assert.equal(partial.amount,'')
+})
+
+test('unknown completion and invalid money cannot silently prefill a payout', () => {
+  assert.equal(suggestedManualPayout({amount:17},{complete:null}).amount,'')
+  assert.equal(suggestedManualPayout({amount:false}).amount,'')
+  assert.equal(suggestedManualPayout({amount:NaN}).amount,'')
+  assert.equal(suggestedManualPayout({amount:[]}).amount,'')
+  assert.equal(suggestedManualPayout({amount:' '}).amount,'')
+})

@@ -119,6 +119,12 @@ def test_payout_only_freezes_confirmed_amount_without_changing_profit_or_raw_run
                              amount_complete=False, unassigned_orders=2401,
                              unassigned_base=16087.19)
     raw['commission']['people'][0]['amount'] = -140.95
+    # This declared-summary unit fixture tests an assignment/payout gap, not
+    # missing economic costs. The separate real-service 20/19 case must reject
+    # payout-only confirmation while required cost remains unknown.
+    raw['cost_coverage']={'coverage':1.,'threshold':.95,'passed':True,
+                          'covered':10,'expected':10,'uncovered':0}
+    raw['calculation_inputs']['unavailable_metrics']=[]
     run = recorded(ws,m,raw)
     with pytest.raises(WorkspaceError, match='全部提成人员'):
         manual_cost.payout_only(raw, run, [{'person_id': 'other', 'amount': '17.00'}],
@@ -192,6 +198,12 @@ def test_http_payout_only_rejects_stale_run_and_does_not_change_store_profit(tmp
     raw['commission'].update(total=-140.95, base_total=13269.90,
                              amount_complete=False, unassigned_orders=2401)
     raw['commission']['people'][0]['amount'] = -140.95
+    # This declared-summary unit fixture tests an assignment/payout gap, not
+    # missing economic costs. The separate real-service 20/19 case must reject
+    # payout-only confirmation while required cost remains unknown.
+    raw['cost_coverage']={'coverage':1.,'threshold':.95,'passed':True,
+                          'covered':10,'expected':10,'uncovered':0}
+    raw['calculation_inputs']['unavailable_metrics']=[]
     run = recorded(ws,m,raw)
     monkeypatch.setattr(api, 'WORKSPACE_ROOT', tmp_path)
     monkeypatch.setattr(api, '_ws', ws)

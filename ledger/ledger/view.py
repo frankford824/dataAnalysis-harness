@@ -115,7 +115,9 @@ def slice_dict(sl: Slice, store: Store, model: Model) -> dict[str, Any]:
         "cost_coverage": sl.cost_coverage,
         "cost_line_posting": sl.cost_line_posting,
         "cost_review": {"observed": sl.cost_line_posting.get('observed') or observed({"calculation_inputs": sl.calculation_inputs}),
-                        "requires_human": not sl.cost_coverage.get("passed", False)},
+                        **(getattr(sl,'cost_completeness',{}) or {}),
+                        "requires_human": not all((getattr(sl,'cost_completeness',{}) or {}).get('amount_complete',{}).get(key,False)
+                                                  for key in ('goods','dropship','reshipment'))},
         "calculation_inputs": sl.calculation_inputs,
         "deduplication": sl.deduplication,
         "order_issue_counts": order_issue_counts(sl.order_issue_rows) if sl.order_issue_rows.height else {},

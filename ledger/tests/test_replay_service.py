@@ -24,6 +24,10 @@ from ledger.order_feed import OrderFeed
 from ledger.workspace import Workspace
 
 
+def fixture_session(path, fixed):
+    return replay_service.Session(path,fixed,publication_scopes=all_expected()['scopes'])
+
+
 def segment(person,start='2026-06-01',end=''):
     return {'valid_from':start,'valid_to':end,'mode':'distribute','total_rate':'.05',
         'allocations':[{'person_id':person,'rate':'.05','role':'运营','duty':'produce'}]}
@@ -68,21 +72,21 @@ def configuration_reference(path):
     return {'path':str(path),'sha256':hashlib.sha256(path.read_bytes()).hexdigest()}
 
 
-def test_source_seed_actual_session_preserves_active_body_parent_order_and_cutoff(bundle,tmp_path):
-    path,_missing=bundle;source,body=configuration_snapshot(tmp_path)
+def test_source_seed_actual_session_preserves_active_body_parent_order_and_cutoff(complete_bundle,tmp_path):
+    path,_missing=complete_bundle;source,body=configuration_snapshot(tmp_path)
     fixed=replay_service.registry_seed_from_snapshot(configuration_reference(source))
     assert fixed['people'][0]['id']=='team'  # Source children precede the parent.
     assert all(row['body']['segments'][0]['mode']=='distribute' for row in fixed['schemes'])
     assert all(row['active_version'].endswith('-active') for row in fixed['source_snapshot']['active_versions'])
     assert fixed['source_snapshot']['historical_truth_established'] is False
     assert fixed['source_snapshot']['new_month_authorized'] is False
-    with replay_service.Session(path,fixed) as session:
+    with fixture_session(path,fixed) as session:
         assert {row['parent_id'] for row in session.registry.people() if row['id'] in {'p1','p2'}}=={'team'}
         assert len(session.registry.org_stores('team'))==2
         assert session.registry.store_members_at('s1','2026-07-31T23:59:59')
         assert not session.registry.store_members_at('s1','2026-08-01T00:00:00')
-        session.recompute('s1');session.recompute('s2')
-        result=session.check(all_expected())  # Existing financial expectations stay unchanged.
+        session.recompute('s1');session.recompute('s2');session.drain_pending()
+        result=session.check(complete_expected())  # Independent complete source input has its own expected 160 / 8.
         assert result['status']=='passed',result['differences']
 
 
@@ -93,7 +97,7 @@ def test_actual_session_rejects_invalid_people_before_partial_import(bundle,faul
     elif fault=='self_parent':fixed['people'][0]['parent_id']='p1'
     else:
         fixed['people'][0]['parent_id']='p2';fixed['people'][1]['parent_id']='p1'
-    session=replay_service.Session(path,fixed)
+    session=fixture_session(path,fixed)
     with pytest.raises(replay_service.ReplayError,match='未知上级|循环'):
         with session:pytest.fail('invalid hierarchy reached an active Session')
     assert not session.root.exists()
@@ -111,7 +115,7 @@ def test_source_active_version_change_requires_new_snapshot_identity(bundle,tmp_
     assert after['schemes'][0]['body']['segments'][0]['mode']=='hold'
     altered=json.loads(json.dumps(before));altered['members'][0]['valid_to']=''
     with pytest.raises(replay_service.ReplayError,match='种子身份已变化'):
-        with replay_service.Session(bundle[0],altered):pytest.fail('modified source-bound seed was accepted')
+        with fixture_session(bundle[0],altered):pytest.fail('modified source-bound seed was accepted')
 
 
 @pytest.mark.parametrize('fault',['missing_active','wrong_scheme','body_identity','recorded_after_capture','invalid_segment_dates','invalid_member_dates'])
@@ -132,8 +136,7 @@ def test_source_seed_rejects_invalid_active_version_body_and_dates(tmp_path,faul
         replay_service.registry_seed_from_snapshot(configuration_reference(source))
 
 
-@pytest.fixture
-def bundle(tmp_path):
+def service_fixture_bundle(tmp_path, *, fully_priced=False):
     full = load_model(MODELS/'cn-ecommerce')
     goods = full.metric('goods_cost').for_platform('taobao').model_copy(update={'by_platform':()})
     template = Template(id='replay_orders',name='固定订单原表',source='order_detail',
@@ -178,11 +181,11 @@ def bundle(tmp_path):
                     'outer_sku':child,'product_name':'商品','quantity':'1','paid_amount':'10',
                     'line_amount':'10','refund_amount':'0','tracking_no':tracking,'is_gift':False,'is_suspect':False})
                 costs.append({'order_id':internal,'sub_order_id':item_id,'sku_id':'SKU'+internal,
-                    'quantity':'1','unit_cost':None if index==19 else '2','cost_amount':None if index==19 else '2',
-                    'cost_source':None if index==19 else 'history','cost_status':'missing_price' if index==19 else 'priced',
+                    'quantity':'1','unit_cost':None if index==19 and not fully_priced else '2','cost_amount':None if index==19 and not fully_priced else '2',
+                    'cost_source':None if index==19 and not fully_priced else 'history','cost_status':'missing_price' if index==19 and not fully_priced else 'priced',
                     'cost_as_of':day,'pricing_evidence':json.dumps({'order_date':day})})
                 raw[sid].append([main,child,product,10,datetime(2026,month,2,10),tracking])
-                if index==19:missing[sid+'/'+day[:7]]=main
+                if index==19 and not fully_priced:missing[sid+'/'+day[:7]]=main
     for filename,rows in [('orders.parquet',headers),('order_items.parquet',items),('order_costs.parquet',costs)]:
         manifest['objects'][filename]=_write(feed_root,filename,pl.from_dicts(rows,infer_schema_length=None))
     for filename in ('after_sales.parquet','after_sale_items.parquet'):
@@ -200,6 +203,22 @@ def bundle(tmp_path):
         {'version':'fixture','categories':[],'mapping':{},'erp_mapping':{}})
     ws.close()
     return tmp_path/'bundle',missing
+
+
+@pytest.fixture
+def bundle(tmp_path):
+    """Original 20 targets / 19 prices: a required economic-cost gap."""
+    return service_fixture_bundle(tmp_path)
+
+
+@pytest.fixture
+def complete_bundle(tmp_path):
+    """Separate sealed input: all 20 required prices exist, no supplements."""
+    return service_fixture_bundle(tmp_path,fully_priced=True)
+
+
+def complete_expected():
+    return all_expected(**{key:expected_scope(160,8,cost=0,can_close=True) for key in all_expected()['scopes']})
 
 
 def expected_scope(profit=162,total=8.1,person='p1',confirmed=None,cost=0,can_close=False):
@@ -220,11 +239,11 @@ def all_expected(**overrides):
         ('s1/2026-06','s1/2026-07','s2/2026-06','s2/2026-07')}}
 
 
-def test_real_service_files_feed_registry_and_unchanged_recompute_are_verified(bundle):
-    path,_missing=bundle
-    with replay_service.Session(path,seed()) as session:
-        session.recompute('s1');session.recompute('s2')
-        report=session.check(all_expected())
+def test_real_service_files_feed_registry_and_unchanged_recompute_are_verified(complete_bundle):
+    path,_missing=complete_bundle
+    with fixture_session(path,seed()) as session:
+        session.recompute('s1');session.recompute('s2');session.drain_pending()
+        report=session.check(complete_expected())
         assert report['status']=='passed',report['differences']
         before=session.snapshot()
         session.recompute('s1')
@@ -239,7 +258,7 @@ def test_real_service_files_feed_registry_and_unchanged_recompute_are_verified(b
 
 def test_cost_supplement_confirmation_and_person_relation_changes_do_not_change_other_scopes(bundle):
     path,missing=bundle
-    with replay_service.Session(path,seed()) as session:
+    with fixture_session(path,seed()) as session:
         session.recompute('s1');session.recompute('s2')
         before=session.snapshot()['scopes']
         session.supplement('s1','2026-06',amount='2.00',reason='原采购凭据确认商品成本',order_id=missing['s1/2026-06'])
@@ -258,21 +277,23 @@ def test_cost_supplement_confirmation_and_person_relation_changes_do_not_change_
         assert after['s1/2026-07']==before['s1/2026-07']
         assert after['s2/2026-06']==before['s2/2026-06'] and after['s2/2026-07']==before['s2/2026-07']
         session.confirm('s1','2026-06',[{'person_id':'p1','amount':'11.00'}],'独立核定服务夹具')
-        assert session.check(all_expected(**{'s1/2026-06':expected_scope(160,8,'p1',11,2)}))['status']=='passed'
+        assert not replay_service.differences(expected_scope(160,8,'p1',11,2),session.snapshot()['scopes']['s1/2026-06'])
+        assert session.snapshot()['scopes']['s1/2026-07']['statement']['net_profit']=={'value':None,'available':False}
         session.replace_scheme('s1','123456789001',{'segments':[
             segment('p2',end='2026-07-01'),segment('p1',start='2026-07-01')]},'仅六月换人')
         session.recompute('s1')
         session.recompute('s2')
-        assert session.check(all_expected(**{'s1/2026-06':expected_scope(160,8,'p2',None,2)}))['status']=='passed'
+        assert not replay_service.differences(expected_scope(160,8,'p2',None,2),session.snapshot()['scopes']['s1/2026-06'])
+        assert session.snapshot()['scopes']['s2/2026-06']['statement']['net_profit']=={'value':None,'available':False}
         with session.registry.connect() as db:
             assert db.execute('SELECT count(*) FROM payout_confirmation').fetchone()[0]==1
             saved=json.loads(db.execute('SELECT payouts_json FROM payout_confirmation').fetchone()[0])
             assert saved[0]['person_id']=='p1' and saved[0]['amount']==11
 
 
-def test_api_report_export_and_service_snapshot_share_real_runs(bundle):
-    path,_missing=bundle
-    with replay_service.Session(path,seed()) as session:
+def test_api_report_export_and_service_snapshot_share_real_runs(complete_bundle):
+    path,_missing=complete_bundle
+    with fixture_session(path,seed()) as session:
         session.recompute('s1');session.recompute('s2')
         session.confirm('s1','2026-06',[{'person_id':'p1','amount':'11.00'}],'已批准夹具金额')
         app=FastAPI();install(app,lambda:session.ws,lambda:session.model)
@@ -288,14 +309,14 @@ def test_api_report_export_and_service_snapshot_share_real_runs(bundle):
         assert '已核定实发' in export.text and '11' in export.text
 
 
-def test_missing_expected_scope_or_zero_instead_of_unknown_never_passes(bundle):
-    path,_missing=bundle
-    with replay_service.Session(path,seed()) as session:
+def test_missing_expected_scope_or_zero_instead_of_unknown_never_passes(complete_bundle):
+    path,_missing=complete_bundle
+    with fixture_session(path,seed()) as session:
         session.recompute('s1');session.recompute('s2')
-        missing=all_expected();del missing['scopes']['s2/2026-07']
+        missing=complete_expected();del missing['scopes']['s2/2026-07']
         report=session.check(missing)
         assert report['status']=='failed' and any('s2/2026-07' in d['path'] for d in report['differences'])
-        wrong=all_expected();wrong['scopes']['s1/2026-06']['confirmed_total']=0
+        wrong=complete_expected();wrong['scopes']['s1/2026-06']['confirmed_total']=0
         assert session.check(wrong)['status']=='failed'
         with pytest.raises(replay_service.ReplayError,match='禁止自动记录'):
             session.check({})
@@ -313,7 +334,7 @@ def test_real_corpus_missing_materials_and_nonfinite_expected_fail_closed(tmp_pa
 def test_fully_supplemented_service_fixture_is_eligible_for_actual_month_close(bundle):
     from ledger.automation_checker import check
     path,missing=bundle
-    with replay_service.Session(path,seed()) as session:
+    with fixture_session(path,seed()) as session:
         session.drain_pending()
         for scope,order in missing.items():
             sid,period=scope.split('/')
@@ -369,7 +390,7 @@ def test_final_snapshot_refuses_local_ready_when_another_operating_store_has_no_
     fixed=seed()
     fixed['members']=[r for r in fixed['members'] if r['store_id']=='s1']
     fixed['schemes']=[r for r in fixed['schemes'] if r['store_id']=='s1']
-    with replay_service.Session(path,fixed) as session:
+    with fixture_session(path,fixed) as session:
         complete_costs(session,missing,('s1',))
         assert session.ws.latest_run('s2','2026-06') is None
         snapshot=session.snapshot()
@@ -384,7 +405,7 @@ def test_final_snapshot_refuses_unknown_overhead_until_approved_nonzero_source_i
     path=changed_bundle(bundle,tmp_path/'no-overhead',lambda body:body.update(overheads=[]))
     _original,missing=bundle
     reference=workspace_source(tmp_path,overhead_decisions())
-    with replay_service.Session(path,seed()) as session:
+    with fixture_session(path,seed()) as session:
         complete_costs(session,missing)
         before=session.snapshot()
         assert all(v['engine_can_close'] for v in before['proofs'].values())
@@ -410,7 +431,7 @@ def test_approved_scope_uses_real_decision_rules_without_fake_revenue_or_zero_ov
     _old,missing=bundle
     reference=workspace_source(tmp_path,[{'period':'2026-06','store_id':'s3','kind':'store_scope',
         'values':{'included':False,'valid_from':'2026-06','valid_until':'2026-07'},'reason':'已批准两月未营业'},*overhead_decisions()])
-    with replay_service.Session(path,seed()) as session:
+    with fixture_session(path,seed()) as session:
         complete_costs(session,missing)
         before=session.snapshot()
         assert all(not row['can_close'] for row in before['scopes'].values())
@@ -472,7 +493,9 @@ def test_descriptor_cannot_close_without_case_approval_or_with_unfinished_condit
         'approval_reference':'unbound','reason':'不能以声明绕过审批'}],'expected':all_expected()}
     with pytest.raises(replay_service.ReplayError,match='批准引用'):replay_service.execute(case)
     case['approval_reference']='unbound'
-    with pytest.raises(replay_service.ReplayError,match='未通过原有Checker'):replay_service.execute(case)
+    with pytest.raises(replay_service.ReplayActionRejection) as rejected:replay_service.execute(case)
+    assert rejected.value.operation=='close_approved'
+    assert 'no_result' in rejected.value.reason_codes
 
 
 def test_descriptor_restores_bound_scope_and_nonzero_overhead_before_real_service_steps(bundle,tmp_path):

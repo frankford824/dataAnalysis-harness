@@ -292,6 +292,8 @@ class Recomputed:
     unknown_tables: list[dict[str, Any]] = field(default_factory=list)
     #: 一个账期都算不出来时的原因。正常情况是 None。
     failure: dict[str, Any] | None = None
+    publication_scope: dict[str, Any] | None = None
+    skipped_periods: list[str] = field(default_factory=list)
 
 
 def _commission(result: RunResult, model: Model, store: Store, period: str,
@@ -332,6 +334,7 @@ def recompute(
     store: Store,
     report: progress.Reporter = progress.SILENT,
     note: str = "",
+    publication_scope=None,
 ) -> Recomputed:
     """同店串行、全局最多两个重算，避免目录竞态和内存失控。"""
     from .version import assert_code_integrity,CodeIntegrityError,CODE_MAINTENANCE
@@ -340,6 +343,16 @@ def recompute(
             'code':'code_source_drift','why':CODE_MAINTENANCE})
     try:assert_code_integrity()
     except CodeIntegrityError:return maintenance()
+    from . import publication_scope as publication
+    try:
+        scope = publication.resolve(ws.root, model, publication_scope)
+        if scope is not None:
+            scope.verify(ws.root, model)
+            if not scope.periods_for_store(store.id):
+                raise publication.PublicationScopeError('automatic_publication_outside_approved_scope')
+    except publication.PublicationScopeError as exc:
+        return Recomputed(store_id=store.id, failure={'store':store.name,'kind':'maintenance',
+            'code':'publication_scope_unverified','why':str(exc)})
     lock = _store_lock(store.id)
     with _store_locks_guard:
         _recompute_waiters[store.id] = _recompute_waiters.get(store.id, 0) + 1
@@ -369,10 +382,13 @@ def recompute(
                 return report(phase, *args, **kwargs)
             try:
                 assert_code_integrity()
-                result=_recompute_locked(ws, model, store, report=tracked, note=note)
+                result=_recompute_locked(ws, model, store, report=tracked, note=note, publication_scope=scope)
                 assert_code_integrity()
             except CodeIntegrityError:
                 return maintenance()
+            except publication.PublicationScopeError as exc:
+                return Recomputed(store_id=store.id, failure={'store':store.name,'kind':'maintenance',
+                    'code':'publication_scope_unverified','why':str(exc)})
             _refresh_close_views(ws,model,result.periods)
             return result
         finally:
@@ -389,6 +405,7 @@ def _recompute_locked(
     store: Store,
     report: progress.Reporter = progress.SILENT,
     note: str = "",
+    publication_scope=None,
 ) -> Recomputed:
     """拿这家店当前生效的全部文件重算，把每个账期的结果存成快照。
 
@@ -396,6 +413,10 @@ def _recompute_locked(
     账已经报出去了，系统不能因为字典补了一条就把数字悄悄改掉。
     """
     out = Recomputed(store_id=store.id)
+    scope = publication_scope
+    if scope is not None:
+        scope.verify(ws.root, model)
+        out.publication_scope = scope.identity
     from .automation_checker import bind_model
     bind_model(ws,model)
     captured_source = automation_period_proof.source_manifest(ws,store.id)
@@ -418,6 +439,8 @@ def _recompute_locked(
         cache_root=ws.root / "cache" / "parse",
         default_store=store.name,
     )
+    from .source_dates import attach_saved as attach_saved_source_dates
+    attach_saved_source_dates(ws,model,store,ing,scope)
     if order_feed.enabled():
         try:
             report(f"关联订单与历史成本 · {where}")
@@ -434,8 +457,8 @@ def _recompute_locked(
     apply_statement_reviews(ing,ws,store.id)
     out.unknown_tables = unknown_tables(ing, store)
     registry = Registry(ws.root) if (ws.root / "commission" / "registry.db").exists() else None
-    reuse_signature = recompute_reuse.fingerprint(ws, model, store, ing, registry)
-    cached = recompute_reuse.load(ws, store, reuse_signature, registry)
+    reuse_signature = recompute_reuse.fingerprint(ws, model, store, ing, registry, publication_scope=scope)
+    cached = recompute_reuse.load(ws, store, reuse_signature, registry, publication_scope=scope)
     if cached is not None:
         report(f"核算输入未变化 · {where}")
         out.periods = cached
@@ -465,6 +488,31 @@ def _recompute_locked(
         }
         return out
 
+    if scope is not None:
+        # Calculate against the complete cross-month source. Restrict only the
+        # publication set, before every reuse/proof/catalog/artifact writer.
+        scope.verify(ws.root, model)
+        out.skipped_periods = sorted({sl.period for sl in own_slices.values()
+                                      if not scope.allows(store.id, sl.period)})
+        allowed = {}
+        for key, sl in own_slices.items():
+            if not scope.allows(store.id, sl.period):
+                continue
+            state = ws.state(store.id, sl.period)
+            if state and state.closed:
+                # The frozen result is read-only, including when fresh inputs
+                # would have produced a new historical trial run.
+                if state.result:
+                    out.periods.append({**state.result,'run_id':state.run_id,'state':state.state,'stale':state.stale})
+            else:
+                allowed[key] = sl
+        own_slices = allowed
+        if not own_slices:
+            if not out.periods:
+                out.failure = {'store':store.name,'kind':'waiting_sources',
+                    'code':'approved_period_no_result','why':'批准处理的账期还没算出结果，等待该账期资料；其他月份未发布'}
+            return out
+
     if shutil.disk_usage(ws.root).free < reserve + result.facts.estimated_size():
         out.failure = storage_failure
         return out
@@ -479,8 +527,15 @@ def _recompute_locked(
     fingerprint = input_digest.hexdigest()
     slices = sorted(own_slices.items(), key=lambda kv: (kv[0][1] or ""))
     if registry:
-        commission_catalog.observe(registry, store, result.spine)
+        observed_spine = result.spine
+        if scope is not None:
+            scope.verify(ws.root, model)
+            periods = sorted(sl.period for sl in own_slices.values())
+            observed_spine = observed_spine.filter(pl.col('period').is_in(periods)) if 'period' in observed_spine.columns else observed_spine.head(0)
+        commission_catalog.observe(registry, store, observed_spine)
     for i, ((_s, _p), sl) in enumerate(slices, 1):
+        if scope is not None:
+            scope.require(store.id, sl.period, workspace_root=ws.root)
         report(f"存账期 · {where}", i, len(slices))
         payload = slice_dict(sl, store, model)
         payload["source_sync_pending"] = ing.source_sync_pending
@@ -488,15 +543,17 @@ def _recompute_locked(
             not sl.cost_coverage.get("expected") and sl.pricing_gaps.is_empty()
         )
         partial_pricing = not sl.pricing_gaps.is_empty()
+        legacy_basis=model.commission_base_node(store.id)
+        legacy_basis_available=bool(legacy_basis and sl.nodes.get(legacy_basis.id) and sl.nodes[legacy_basis.id].available)
         allocation = (commission_engine.calculate(result, model, store.id, sl.period, registry,
                                                    allow_partial_pricing=partial_pricing)
                       if registry else None)
         payload["commission"] = (allocation[0] if allocation else
                                  commission_engine.pending_pricing(sl.pricing_gaps.height, sl.cost_coverage)
-                                 if not pricing_allowed else _commission(
+                                 if not pricing_allowed and not legacy_basis_available else _commission(
                                      result, model, store, sl.period,
                                      allow_partial_pricing=partial_pricing))
-        if not pricing_allowed and registry and not allocation:
+        if not pricing_allowed and registry and not allocation and not legacy_basis_available:
             c = payload["commission"]
             c["people"] = commission_engine.participation_only(result, model, store.id, sl.period, registry)
             c["participation_basis"] = "complete_link_output_per_assigned_person"
@@ -525,14 +582,12 @@ def _recompute_locked(
                 if pricing_allowed:
                     c["notes"].append(
                         f"商品成本覆盖率{sl.cost_coverage['coverage']:.1%}，已达到"
-                        f"{sl.cost_coverage['threshold']:.0%}结账门槛；未覆盖成本暂未计入。"
+                        f"{sl.cost_coverage['threshold']:.0%}质量参考；必需成本仍须全部核齐，未知部分不作为零成本确认。"
                     )
                 else:
-                    c["amount_complete"] = False
                     c["notes"].append(
                         f"商品成本覆盖率{sl.cost_coverage['coverage']:.1%}，未达到"
-                        f"{sl.cost_coverage['threshold']:.0%}自动放行参考；逐人提成已按现有资料试算，"
-                        "人工结账时可直接接受或修改。"
+                        f"{sl.cost_coverage['threshold']:.0%}质量参考；依赖未齐成本的提成仍为试算，不能直接视作已核定金额。"
                     )
             if ing.source_sync_pending:
                 c["amount_complete"] = False
@@ -548,6 +603,15 @@ def _recompute_locked(
                     c["amount_complete"] = False
                     c["notes"].append(f"提成基数与损益节点相差{delta:.2f}元，需核对后结算提成")
             allocation[2]["summary_json"] = json.dumps(c, ensure_ascii=False)
+        c=payload['commission']
+        basis_id=c.get('base_node') or (legacy_basis.id if legacy_basis else '')
+        basis=next((node for node in payload.get('statement',[]) if node['id']==basis_id),None)
+        basis_available=bool(basis and basis.get('available') is True and basis.get('value') is not None)
+        if basis_id and not basis_available:c['amount_complete']=False
+        for person in c.get('people',[]):
+            person['amount_complete']=bool(basis_available and c.get('amount_complete',c.get('configured',False))
+                                           and person.get('amount') is not None)
+        if allocation:allocation[2]['summary_json']=json.dumps(c,ensure_ascii=False)
         from .storage_integrity import verified, digest
         period_proof = automation_period_proof.prepare(
             ws,model,store,ing,sl,payload,allocation,captured_source)
@@ -558,7 +622,13 @@ def _recompute_locked(
         if reused:
             assert_code_integrity()
             from .automation_shared_fee import capture as capture_shared_fees
-            capture_shared_fees(ws,reused['id'],model=model,payload=json.loads(reused['result']))
+            if scope is not None:
+                from .finance_guard import guard as publication_guard
+                with publication_guard(ws.root,store.id,sl.period):
+                    scope.require(store.id,sl.period,workspace_root=ws.root)
+                    capture_shared_fees(ws,reused['id'],model=model,payload=json.loads(reused['result']))
+            else:
+                capture_shared_fees(ws,reused['id'],model=model,payload=json.loads(reused['result']))
             state=ws.state(store.id,sl.period)
             shown=state.result if state and state.result else json.loads(reused['result'])
             out.periods.append({**shown,'run_id':reused['id'],'state':state.state if state else 'open',
@@ -599,6 +669,7 @@ def _recompute_locked(
                 from .finance_guard import guard as financial_reuse
                 with financial_reuse(ws.root,store.id,sl.period):
                     assert_code_integrity()
+                    if scope is not None:scope.require(store.id,sl.period,workspace_root=ws.root)
                     if period_proof:automation_period_proof.save(ws,previous_id,period_proof)
                     from .automation_shared_fee import capture as capture_shared_fees
                     capture_shared_fees(ws,previous_id,model=model,payload=previous_payload)
@@ -610,6 +681,7 @@ def _recompute_locked(
         from .finance_guard import guard as financial_publish
         with financial_publish(ws.root,store.id,sl.period):
             assert_code_integrity()
+            if scope is not None:scope.require(store.id,sl.period,workspace_root=ws.root)
             run_id = ws.record(
                 store.id, sl.period, payload, shas, evidence_ready=False,
                 model_revision=model_revision, input_fingerprint=fingerprint,
@@ -633,7 +705,7 @@ def _recompute_locked(
             "state": state.state if state else "open",
             "stale": bool(state and state.stale),
         })
-    recompute_reuse.remember(ws, store, reuse_signature, registry, out.periods)
+    recompute_reuse.remember(ws, store, reuse_signature, registry, out.periods, publication_scope=scope)
     return out
 
 

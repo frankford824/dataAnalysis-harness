@@ -8,6 +8,7 @@ import path from 'node:path'
 import {fileURLToPath} from 'node:url'
 import {chromium} from 'playwright'
 import {createHash} from 'node:crypto'
+import {costCompletenessScenario} from './cost-completeness-scenario.mjs'
 
 const web=fileURLToPath(new URL('..',import.meta.url)),repo=path.resolve(web,'../..')
 const temporary=await mkdtemp(path.join(tmpdir(),'ledger-browser-'))
@@ -71,7 +72,10 @@ try{
     const page=await newPage({viewport:{width:1440,height:1000}}),errors=[]
     page.on('pageerror',error=>errors.push(error.message));page.on('console',event=>{if(event.type()==='error')errors.push(event.text())})
     await page.goto(`${base}/tests/${item.name}${item.query}`)
-    if(item.name==='store-refresh.html'){
+    if(item.name==='cost-completeness.html'){
+      const result=await costCompletenessScenario(page,artifacts)
+      await markPass(page,result)
+    }else if(item.name==='store-refresh.html'){
       await page.getByLabel('当前店名',{exact:true}).filter({hasText:'抖音浅花涧节日装饰'}).waitFor()
       await page.getByRole('button',{name:'模拟订单台更名',exact:true}).click();await page.getByRole('button',{name:'刷新店铺',exact:true}).click()
       await page.getByLabel('当前店名',{exact:true}).filter({hasText:'蔡果-抖店浅花涧'}).waitFor()

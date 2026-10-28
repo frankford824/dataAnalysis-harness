@@ -38,8 +38,17 @@ def record(ws,sid,value,**extra):
 def policy(ws,model,request,kind,values,store_id='s2',period=PERIOD):
     p=actions.decision_preview(ws,model,request_id=request+'-p',period=period,store_id=store_id,
         kind=kind,values=values,reason='核对已确认营业起止与规则范围',actor=HUMAN)
-    return actions.decision_apply(ws,model,request_id=request+'-a',proposal_id=p['proposal_id'],
+    result=actions.decision_apply(ws,model,request_id=request+'-a',proposal_id=p['proposal_id'],
         proposal_sha=p['proposal_sha'],input_sha=p['input_sha'],actor=HUMAN)
+    if kind=='rule_grant':
+        from conftest import fixture_publication_scope
+        start,end=values.get('period_from',period),values.get('period_until',period)
+        y,m=map(int,start.split('-'));stop_y,stop_m=map(int,end.split('-'))
+        periods=[]
+        while (y,m)<=(stop_y,stop_m):
+            periods.append(f'{y:04d}-{m:02d}');y,m=(y+1,1) if m==12 else (y,m+1)
+        fixture_publication_scope(ws,model,periods)
+    return result
 
 
 def test_scope_defaults_to_one_month_and_explicit_range_resolves_latest_then_revocation(sample):

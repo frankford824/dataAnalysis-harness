@@ -4,8 +4,10 @@ import { NDrawer, NDrawerContent, NInput, NButton, NDataTable, NPagination, NAle
 import { api } from '../api'
 import { useLatest } from './ui/useLatest'
 import { costCoverageView } from '../costCoverageView'
+import { sourceCostText } from '../costReviewInputs'
 
-const props = defineProps({ runId: { type: Number, required: true }, count: { type: Number, required: true }, coverageRows: {type:Number,default:0}, coverage: { type: Object, default: () => ({}) }, posting: {type:Object,default:()=>({})}, observed: {type:Object,default:()=>({})}, lineSummary: {type:Object,default:()=>({})}, manualDecision: {type:Object,default:null}, closed: Boolean, storeId: String, period: String })
+const props = defineProps({ runId: { type: Number, required: true }, count: { type: Number, required: true }, coverageRows: {type:Number,default:0}, coverage: { type: Object, default: () => ({}) }, posting: {type:Object,default:()=>({})}, observed: {type:Object,default:()=>({})}, review: {type:Object,default:null}, lineSummary: {type:Object,default:()=>({})}, manualDecision: {type:Object,default:null}, closed: Boolean, storeId: String, period: String })
+const costText = key => sourceCostText(props.review ?? {observed:props.observed},key)
 const overview = ref(false)
 const postedCount = computed(() => props.closed && props.manualDecision?.line_count != null
   ? props.manualDecision.line_count
@@ -183,7 +185,7 @@ const coverageColumns=[
       <p v-if="!summary.afterKnown" class="pricing-help">当前核算未提供可核对的补录覆盖笔数，暂不推算补录后覆盖率。</p>
       <div class="pricing-notice" :class="{passed:!summary.attention}">
     <div><strong>{{ manualDecision ? '本期成本已由人工确认' : summary.title }}</strong><p>{{ summary.description }}</p><p v-if="manualDecision">人工确认金额与原因已和结账记录一起保存，原始缺口仍保留供回查。</p><p v-else-if="summary.known && !closed">原始成本覆盖自动放行参考 {{ percentage(coverage.threshold) }}；{{ thresholdMet ? '原始覆盖率已达到参考值，但仍需核对其他结账条件。' : `原始覆盖还差 ${integer(needed)} 笔达到参考值。` }}</p>
-      <p v-if="observed && Object.hasOwn(observed,'goods') && !manualDecision" class="pricing-help">来源表成本：商品 {{ Number(observed.goods).toLocaleString('zh-CN',{minimumFractionDigits:2}) }} 元 · 代发 {{ Number(observed.dropship).toLocaleString('zh-CN',{minimumFractionDigits:2}) }} 元 · 补发 {{ Number(observed.reshipment).toLocaleString('zh-CN',{minimumFractionDigits:2}) }} 元<template v-if="lineSummary?.line_count"> · 已人工补录 {{ integer(lineSummary.line_count) }} 笔、{{ Number(lineSummary.line_total).toLocaleString('zh-CN',{minimumFractionDigits:2}) }} 元；本次看板已计入补录 {{ Number(lineSummary.posted_line_total || 0).toLocaleString('zh-CN',{minimumFractionDigits:2}) }} 元</template><template v-if="lineSummary?.line_posting_pending">；最新补录待自动核算，当前看板尚未更新。</template></p>
+      <p v-if="observed && Object.hasOwn(observed,'goods') && !manualDecision" class="pricing-help">来源已识别成本（不含补录）：商品 {{ costText('goods') }} · 代发 {{ costText('dropship') }} · 补发 {{ costText('reshipment') }}<template v-if="lineSummary?.line_count"> · 已人工补录 {{ integer(lineSummary.line_count) }} 笔、{{ Number(lineSummary.line_total).toLocaleString('zh-CN',{minimumFractionDigits:2}) }} 元；本次看板已计入补录 {{ Number(lineSummary.posted_line_total || 0).toLocaleString('zh-CN',{minimumFractionDigits:2}) }} 元</template><template v-if="lineSummary?.line_posting_pending">；最新补录待自动核算，当前看板尚未更新。</template></p>
       <p v-if="coverage.brushing_zero_covered" class="pricing-help">其中 {{ integer(coverage.brushing_zero_covered) }} 笔已按“蓝色旗帜＋by”刷单规则确认商品成本为 0，不需要补成本，也不在缺口清单中。</p>
       <p v-if="progress" aria-live="polite">{{ progress.message }}</p>
       <div v-if="['running','queued'].includes(progress?.state)" class="pricing-work-bar" role="progressbar" :aria-valuenow="progress.percent ?? 0" aria-valuemin="0" aria-valuemax="100" aria-label="本店后台核算进度"><span :style="{width:`${progress.percent ?? 0}%`}" /></div>

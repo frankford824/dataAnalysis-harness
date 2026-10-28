@@ -74,7 +74,7 @@ def test_verified_feed_history_day_does_not_need_duplicate_json_day(source,quote
         assert frame.select(known.alias('known'))['known'].item() is False
 
 
-def test_small_uncovered_cost_share_is_visible_without_blocking_profit_or_close():
+def test_small_uncovered_cost_share_remains_visible_but_cannot_supply_final_profit_or_close():
     full=load_model(MODELS/'cn-ecommerce')
     metric=full.metric('goods_cost').for_platform('taobao').model_copy(update={'by_platform':()})
     model=Model(id='coverage-test',name='coverage',platforms=(Platform(id='taobao',name='淘宝',cost_pricing='historical'),),
@@ -93,8 +93,9 @@ def test_small_uncovered_cost_share_is_visible_without_blocking_profit_or_close(
     sl=result.slices[('shop','2026-06')]
     assert sl.pricing_gaps.height==1
     assert sl.cost_coverage=={'coverage':.95,'threshold':.95,'passed':True,'covered':19,'expected':20,'uncovered':1}
-    assert sl.nodes['profit'].value==-95
-    assert sl.can_close
+    assert sl.facts.filter(pl.col('metric_id')=='goods_cost')['contribution'].sum()==-95
+    assert sl.nodes['profit'].value is None and not sl.nodes['profit'].available
+    assert not sl.can_close
     assert slice_dict(sl,model.store('s'),model)['cost_coverage']['passed'] is True
 
 

@@ -45,6 +45,7 @@ class Config:
     max_response_bytes: int = 5 * 1024 * 1024
     # Enqueue-only: the existing upstream worker owns ERP reads/outbox writes.
     member_requests_enabled: bool = False
+    source_recovery_enabled: bool = False
 
     def __post_init__(self):
         for value in (self.ledger_base_url, self.order_base_url, self.cost_base_url):
@@ -105,7 +106,7 @@ class Collector:
     ``cached_lookup`` is an optional trusted local read-only adapter returning an
     retained cache observation. It must not fetch or mutate when called.
     """
-    def __init__(self, config: Config, root: Path, *, client=None, order_client=None, cached_lookup=None):
+    def __init__(self, config: Config, root: Path, *, client=None, order_client=None, cached_lookup=None,capability_configuration=None):
         self.config = config
         self.root = Path(root).resolve()
         self.root.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -113,6 +114,7 @@ class Collector:
         self.client = client or httpx.Client(timeout=config.timeout_seconds, follow_redirects=False, trust_env=False)
         self._owns_client = client is None
         self.order_client, self.cached_lookup = order_client, cached_lookup
+        self.capability_configuration=capability_configuration
 
     def close(self):
         if self._owns_client:
@@ -128,7 +130,8 @@ class Collector:
 
     def configuration_sha(self):
         """Private configuration epoch; credential values never leave this hash."""
-        return _hash({'schema':'ledger-source-configuration.v1','configuration':asdict(self.config)})
+        return _hash({'schema':'ledger-source-configuration.v1','configuration':asdict(self.config),
+            'capability_configuration':self.capability_configuration() if callable(self.capability_configuration) else None})
 
     def _case_scope(self,case):
         fields=('id','store_id','period','input_sha','source_context_sha')
@@ -179,6 +182,8 @@ class Collector:
             return 'history_cost','original_evidence_missing'
         if reason in {'confirmed_order_store_mapping_missing','member_requests_disabled'}:
             return source,'source_unavailable'
+        if reason=='source_recovery_anchor_pending':return 'order','original_evidence_missing'
+        if reason=='source_recovery_tool_pending':return 'order','source_unavailable'
         if reason.endswith('_unavailable') or re.fullmatch(r'(?:order|cost|ledger)_http_[45][0-9]{2}',reason):
             return source,'technical_failure' if source=='system' else 'source_unavailable'
         if reason in {'collector_contract_or_local_error','local_evidence_integrity_failed','invalid_json_contract',
@@ -690,6 +695,48 @@ class Collector:
                              'operation_id': key, 'result': self._safe(result)})
         return {'status': 'pending', 'reason': 'upstream_request_queued', 'receipt': str(receipt), 'queue': result}
 
+    def _source_recovery(self,ctx,gap,*,request):
+        if not self.config.source_recovery_enabled:
+            return {'status':'pending','reason':'source_recovery_disabled','financial_applied':False}
+        source=gap.get('_coverage_row') or gap
+        if not source.get('coverage_key') or not source.get('context_sha'):
+            return {'status':'pending','reason':'source_recovery_anchor_pending','financial_applied':False}
+        body={'case_id':ctx['case']['id'],'run_id':int(ctx['run_id']),
+            'input_sha':ctx['case']['input_sha'],'coverage_key':source['coverage_key'],
+            'context_sha':source['context_sha']}
+        # Server derives every lookup identity/anchor from the sealed run. No
+        # model-supplied identity, path, URL, date, quantity or amount is sent.
+        if request:
+            value=self._request(ctx,'ledger','/api/automation/source-recovery/requests',body=body)
+            task_id=value.get('task_id')
+            if not isinstance(task_id,str) or not re.fullmatch(r'source-[0-9a-f]{40}',task_id):
+                raise Pending('source_recovery_receipt_unbound')
+            folder=self.root/'source-tasks';folder.mkdir(mode=0o700,exist_ok=True)
+            from .source_recovery import durable as source_write
+            source_write(folder/(_hash(body)+'.json'),{'body':body,'task_id':task_id})
+        else:
+            pointer=self.root/'source-tasks'/(_hash(body)+'.json')
+            if not pointer.is_file():return {'status':'pending','reason':'source_recovery_not_requested'}
+            stored=json.loads(pointer.read_text())
+            if stored.get('body')!=body:raise Pending('source_recovery_receipt_unbound')
+            task_id=stored['task_id']
+            value=self._request(ctx,'ledger','/api/automation/source-recovery/requests/'+task_id)
+        state=value.get('state')
+        source_reason=value.get('reason')
+        technical=source_reason in {'source_executor_not_qualified','source_node_runtime_unavailable',
+            'source_jst_module_unavailable','source_jst_module_identity_changed','source_session_or_http_unavailable',
+            'source_session_refresh_required','source_process_failed','source_runtime_unavailable',
+            'source_receipt_missing','source_time_budget','source_lease_or_time_budget','source_tool_unavailable',
+            'source_executor_identity_changed','source_rate_limited','source_transport_unavailable',
+            'source_recovery_scope_not_enabled','source_execution_scope_changed','source_raw_bytes_unverified',
+            'source_collector_identity_unverified','sealed_run_proof_missing','sealed_original_anchor_index_missing',
+            'native_original_schema_pending','sealed_original_demand_index_missing'}
+        return {'status':'pending','reason':'source_recovery_raw_ready' if state=='source_raw_ready' else
+                'source_recovery_queued' if state=='source_queued' else 'source_recovery_tool_pending' if technical else 'source_recovery_anchor_pending',
+                'task_id':task_id,'source_task_state':state,'business_complete':False,
+                'financial_applied':False,'source_reason_code':source_reason,
+                'independent_proof_sha256':value.get('proof_sha256')}
+
     def _execute(self, case, checker, mode):
         identifier = _hash({'case': case.get('id'), 'input_sha': case.get('input_sha')})
         folder = self.root / identifier / uuid.uuid4().hex
@@ -747,6 +794,9 @@ class Collector:
                         entry.update(status=exc.status, reason=exc.reason)
                         if exc.status in {'stale', 'denied'}:
                             raise
+                        if self.config.source_recovery_enabled and exc.reason in {'order_not_found_upstream','order_not_found_or_merged_member_pending'}:
+                            entry['request']=self._source_recovery(ctx,gap,request=mode!='poll')
+                            entry.update(status='pending',reason=entry['request']['reason'])
                     result['items'].append(entry)
                 self._fresh(ctx)
                 statuses = {r.get('status') for r in result['items']}

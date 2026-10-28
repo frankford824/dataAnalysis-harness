@@ -130,6 +130,8 @@ def install(app,workspace,model,actor,*,lease_seconds=180,clock=time.time):
             if changed:
                 conn.execute("UPDATE automation_attempt SET state='interrupted' WHERE state='worker_running' AND id IN (SELECT worker_attempt_id FROM automation_case WHERE lease_owner=?)",(identity['id'],))
                 conn.execute("UPDATE automation_case SET lease_owner='',lease_until=0,lease_token=lease_token+1 WHERE lease_owner=?",(identity['id'],))
+                from .source_recovery import configuration_changed
+                configuration_changed(ws,identity['id'],body.configuration_sha)
             for lease in body.leases:
                 try:
                     case,_=owned(ws,lease.job_id,identity,lease.lease_token)
@@ -142,11 +144,15 @@ def install(app,workspace,model,actor,*,lease_seconds=180,clock=time.time):
     def claim(body:Claim,request:Request):
         identity=service(request,body.agent_id);ws=workspace()
         if body.capabilities and 'recompute' not in body.capabilities:return Response(status_code=204)
+        source_capable='source_recovery' in body.capabilities
         from .automation_handoff import refresh_waiting
         refresh_waiting(ws,model())
+        if source_capable:
+            from .source_recovery import ensure_date_demands
+            ensure_date_demands(ws,model())
         with ws.transaction() as conn:
             for _ in range(32):
-                row=conn.execute("SELECT * FROM automation_case c WHERE status='processing' AND stage IN ('gathering','queued','retry_wait') AND lease_until<=? AND NOT EXISTS(SELECT 1 FROM period p WHERE p.store_id=c.store_id AND p.period=c.period AND p.state='closed') ORDER BY updated_at,id LIMIT 1",(int(clock()),)).fetchone()
+                row=conn.execute("SELECT * FROM automation_case c WHERE status='processing' AND stage IN ('gathering','queued','retry_wait') AND lease_until<=? AND (? OR NOT EXISTS(SELECT 1 FROM automation_attempt a WHERE a.case_id=c.id AND a.input_sha=c.input_sha AND a.state='source_queued')) AND NOT EXISTS(SELECT 1 FROM period p WHERE p.store_id=c.store_id AND p.period=c.period AND p.state='closed') ORDER BY updated_at,id LIMIT 1",(int(clock()),int(source_capable))).fetchone()
                 if not row:return Response(status_code=204)
                 from .automation_actions import month,_case
                 current=next(r for r in month(ws,model(),row['period'])['stores'] if r['store_id']==row['store_id'])
@@ -165,6 +171,10 @@ def install(app,workspace,model,actor,*,lease_seconds=180,clock=time.time):
             worker_configuration=conn.execute('SELECT configuration_sha FROM automation_worker WHERE id=?',(identity['id'],)).fetchone()
             metadata={'owner':identity['id'],'lease_token':token,'case_id':row['id'],'source_context_sha':source_context,
                 'worker_configuration_sha':worker_configuration[0] if worker_configuration else ''}
+            from . import source_recovery
+            source_task=source_recovery.queued(ws,row['id'],row['input_sha']) if source_capable else None
+            if source_task:
+                metadata['source_task_id']=source_task['id']
             conn.execute('INSERT INTO automation_attempt VALUES(?,?,?,?,?,?,?)',
                 (job_id,row['id'],job_id,row['input_sha'],'worker_running',journal.encoded(metadata),journal.now()))
             aid=service_auth(ws,'worker-claim:'+job_id,identity,'worker.claim',row['input_sha'],metadata)
@@ -172,6 +182,11 @@ def install(app,workspace,model,actor,*,lease_seconds=180,clock=time.time):
                 'reason_codes':[i['code'] for i in json.loads(row['issues_json'])],'run_id':row['run_id'],'source_context_sha':source_context}
             result={'id':job_id,'kind':'recompute','idempotency_key':journal.digest([row['id'],row['input_sha'],source_context,'business-evidence.v1']),
                 'payload':{'automation_case':case,'lease_token':token,'scope':'business'}}
+            if source_task:
+                source=json.loads(source_task['result_json'])
+                result['idempotency_key']=journal.digest([source_task['id'],source['plan_sha256'],token])
+                result['payload'].update(capability='source_recovery',source_task={
+                    'task_id':source_task['id'],'plan_sha256':source['plan_sha256']})
             journal.finish(conn,'worker-claim:'+job_id,'worker.claim',journal.digest(result),aid,result)
             return result
 
@@ -200,12 +215,17 @@ def install(app,workspace,model,actor,*,lease_seconds=180,clock=time.time):
             old=prior(conn,key,signature)
             if old:return old
             case,attempt=owned(ws,job_id,identity,body.lease_token,body.input_sha)
+            if json.loads(attempt['result_json']).get('source_task_id') and (success or not body.tool_outcomes):
+                raise HTTPException(409,'取证任务只能提交固定原始凭据回执，不能确认业务完成')
             frozen=ws.state(case['store_id'],case['period'])
             if frozen and frozen.closed:raise HTTPException(409,'本期已由人工冻结，旧取证任务不得更新终态')
             checked=checker.check(ws,case['store_id'],case['period'],model=model(),verify_artifacts=True)
             if checked['input_sha']!=body.input_sha:
                 raise HTTPException(409,'当前核算输入已变化，旧任务不能更新当前案件')
-            if body.tool_outcomes:
+            from . import source_recovery
+            source_pending=source_recovery.queued(ws,case['id'],case['input_sha'])
+            source_ready=source_recovery.ready(ws,case['id'],case['input_sha'])
+            if body.tool_outcomes and not source_pending:
                 if (body.result or body.message or body.error_code not in {'worker_failure','TrustedSourceHandoff'}
                     or set(body.model_extra or {})-{'job_id','worker_idempotency_key'}):
                     raise HTTPException(422,'来源交接只接受固定工具分类与本机证据引用，不接受金额或自由诊断文字')
@@ -225,16 +245,16 @@ def install(app,workspace,model,actor,*,lease_seconds=180,clock=time.time):
                 return journal.finish(conn,key,'worker.source_handoff',signature,aid,{'ok':True,'job':result})
             if success and not checked['allowed']:
                 raise HTTPException(409,{'message':'Worker回复不能代替独立业务复核','issues':checked['issues'],'input_sha':checked['input_sha']})
-            state='completed' if success else 'retry_wait' if body.retryable else 'failed'
+            state='completed' if success else 'source_queued' if source_pending else 'waiting_source_adoption' if source_ready else 'retry_wait' if body.retryable else 'failed'
             # The accepted envelope contains references and verification, never
             # LLM text as a proof that money or source completeness is correct.
             result={'job_id':job_id,'case_id':case['id'],'state':state,'verification':{
                 'allowed':checked['allowed'],'issues':checked['issues'],'input_sha':checked['input_sha']},
                 'references':body.result.get('artifact_refs',[]),'error_code':None if success else body.error_code}
             conn.execute('UPDATE automation_attempt SET state=?,result_json=? WHERE id=?',(state,journal.encoded(result),job_id))
-            delay=min(3600,30*2**min(body.lease_token,7)) if body.retryable and not success else 0
+            delay=min(3600,30*2**min(body.lease_token,7)) if body.retryable and not success and not (source_pending or source_ready) else 0
             conn.execute("UPDATE automation_case SET status=?,stage=?,lease_owner='',lease_until=?,input_sha=?,issues_json=?,updated_at=? WHERE id=? AND lease_token=?",
-                ('needs_decision' if success else 'processing','ready_for_close' if success else 'retry_wait' if body.retryable else 'maintenance',
+                ('needs_decision' if success else 'processing','ready_for_close' if success else 'gathering' if source_pending else 'waiting_source_adoption' if source_ready else 'retry_wait' if body.retryable else 'maintenance',
                  int(clock())+delay if delay else 0,checked['input_sha'],journal.encoded(checked['issues']),journal.now(),case['id'],body.lease_token))
             aid=service_auth(ws,key,identity,'worker.'+action,body.input_sha,{'job_id':job_id,'lease_token':body.lease_token})
             return journal.finish(conn,key,'worker.'+action,signature,aid,{'ok':True,'job':result})
@@ -258,4 +278,6 @@ def install(app,workspace,model,actor,*,lease_seconds=180,clock=time.time):
             'worker_healthy':any(w['alive'] and w['status'] in {'online','busy'} for w in workers),
             'processing_by_stage':stages,'workers':workers}
 
+    from .source_recovery import install_routes
+    install_routes(router,workspace,model,service,owned,service_auth,prior,clock)
     app.include_router(router)

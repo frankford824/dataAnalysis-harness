@@ -59,6 +59,8 @@ def source(tmp_path,ambiguous=False):
     grant=actions.decision_apply(ws,model,request_id='grant-apply',proposal_id=preview['proposal_id'],
         proposal_sha=preview['proposal_sha'],input_sha=preview['input_sha'],actor=human)
     aid=grant['decision_id']
+    from conftest import fixture_publication_scope
+    fixture_publication_scope(ws,model,['2026-07'])
     return ws,model,ing,rid,group,aid
 
 
@@ -114,7 +116,7 @@ def test_manager_source_arrival_runs_approved_exact_rule_then_existing_queue_rec
     import copy
     from ledger import service,order_feed,automation_checker
     from ledger.commission_registry import Registry
-    from ledger.commission_manager import Manager
+    from conftest import scoped_manager as Manager
     from ledger.model.schema import Metric,Check
     ws,model,ing,rid,group,aid=source(tmp_path)
     cost=Metric(id='goods_cost',name='原表已证明成本',source='order_detail',

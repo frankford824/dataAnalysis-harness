@@ -244,28 +244,52 @@ def _audit_cases(ws,model,period,request_id,action,result):
 def sync_month(ws,model,period,*,worker='native:commission-manager'):
     """Journal all expected stores after source arrival, never approve or close."""
     value=month(ws,model,period)
-    key='checker-refresh:'+journal.digest([period,value['input_sha'],[(r['store_id'],r['status'],r['stage'],r['source_context_sha']) for r in value['stores']]])
+    from . import publication_scope
+    publication=publication_scope.resolve(ws.root,model)
+    observed=value['stores']
+    if publication is not None:
+        observed=[row for row in observed if publication.allows(row['store_id'],period)]
+        if not observed:return {'period':period,'status':'outside_publication_scope','observed':0}
+    key_scope=[period,value['input_sha'],[(r['store_id'],r['status'],r['stage'],r['source_context_sha']) for r in observed]]
+    if publication is not None:key_scope.append(publication.identity)
+    key='checker-refresh:'+journal.digest(key_scope)
     signature=journal.digest([key,period])
     with ws.transaction() as conn:
+        if publication is not None:
+            for row in observed:publication.require(row['store_id'],period,workspace_root=ws.root)
         old=journal.receipt(conn,key,signature)
         if old:
-            for row in value['stores']:_case(conn,row)
+            for row in observed:_case(conn,row)
+            if publication is not None:publication.verify(ws.root,model)
             return old
         aid=journal.ident()
         conn.execute('INSERT INTO automation_authorization VALUES(?,?,?,?,?,?,?,?,?)',
             (aid,key,worker,'builtin_service','checker.refresh',value['input_sha'],'',journal.encoded({'period':period}),journal.now()))
-        for row in value['stores']:_case(conn,row)
-        return journal.finish(conn,key,'checker.refresh',signature,aid,{'period':period,'status':value['status'],'observed':len(value['stores'])})
+        for row in observed:_case(conn,row)
+        if publication is not None:publication.verify(ws.root,model)
+        return journal.finish(conn,key,'checker.refresh',signature,aid,{'period':period,'status':value['status'],'observed':len(observed)})
 
 
 def deliver(ws):
     """Recover the journal-to-existing-pending handoff; not another scheduler."""
     from .commission_registry import Registry
+    from . import publication_scope
+    publication=publication_scope.resolve(ws.root)
     registry=Registry(ws.root)
-    rows=ws.conn.execute("SELECT * FROM automation_attempt WHERE state='dispatch_pending' ORDER BY rowid").fetchall()
+    rows=ws.conn.execute("SELECT a.*,c.store_id AS case_store_id,c.period AS case_period FROM automation_attempt a "
+        "LEFT JOIN automation_case c ON c.id=a.case_id WHERE a.state='dispatch_pending' ORDER BY a.rowid").fetchall()
     delivered=0
     for row in rows:
         payload=json.loads(row['result_json'])
+        if publication is not None:
+            sid,period=row['case_store_id'],row['case_period']
+            if not sid or not period or payload.get('store_id')!=sid:
+                publication_scope.hold(publication,ws.root,row['id'],'dispatch_scope_metadata_unverified',store_id=sid,period=period)
+                continue
+            if not publication.allows(sid,period):
+                publication_scope.hold(publication,ws.root,row['id'],'dispatch_outside_approved_scope',store_id=sid,period=period)
+                continue
+            publication.require(sid,period,workspace_root=ws.root)
         try:
             registry.enqueue_automation({payload['store_id']},payload['fingerprint'])
             if payload.get('not_before'):
@@ -275,6 +299,7 @@ def deliver(ws):
                     queue.execute('UPDATE pending SET next_attempt=max(next_attempt,?) WHERE store_id=? AND source_fingerprint=?',
                         (int(payload['not_before']),payload['store_id'],payload['fingerprint']))
             with ws.transaction() as conn:
+                if publication is not None:publication.require(sid,period,workspace_root=ws.root)
                 conn.execute("UPDATE automation_attempt SET state='queued' WHERE id=? AND state='dispatch_pending'",(row['id'],))
             delivered+=1
         except Exception:

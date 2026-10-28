@@ -124,6 +124,22 @@ def prepare(ws,model,store,ingestion,sl,payload,allocation,source_context=None):
     evidence['commission']=_frame(details)
     cost_sources=_cost_sources(ws,store.id,sl.period,payload,ingestion,sl)
     evidence['approved_cost_sources']=cost_sources
+    date_sources=[]
+    frame=getattr(sl,'facts',None)
+    if frame is not None and 'source_note' in frame.columns:
+        used=frame.filter(frame['source_note'].cast(str).str.contains('原订单日期依据：',literal=True).fill_null(False))
+        keys=set()
+        for column in ('order_id','link_key'):
+            if column in used.columns:keys.update(str(v) for v in used[column].drop_nulls().to_list())
+        for value in getattr(ingestion,'original_date_source_evidence',[]):
+            fact=value['source_fact']
+            if fact['store_id']!=store.id or fact['platform_order_id'] not in keys:continue
+            refs=[value['input_ref'],*fact['source_refs']]
+            artifacts=[{'path':Path(r['path']).resolve().relative_to(ws.root.resolve()).as_posix(),
+                        'sha':r['sha256'],'sealed':False} for r in refs]
+            date_sources.append({'platform_order_id':fact['platform_order_id'],'original_day':fact['original_day'],
+                                 'source_task_id':fact['source_task_id'],'artifacts':artifacts})
+    evidence['verified_original_date_sources']=date_sources
     code=engine_version()
     from .version import assert_code_integrity
     code_state=assert_code_integrity()
@@ -136,10 +152,14 @@ def prepare(ws,model,store,ingestion,sl,payload,allocation,source_context=None):
         'period':sl.period,'store_id':store.id,'evidence_sha':evidence_sha,
         'effective_model_sha':journal.digest(model_part),'template_ids':sorted(used_templates),'subjects':sorted(subjects),
         'approved_cost_sources':cost_sources,
+        'verified_original_date_sources':date_sources,
         'collectable_scope':collectable_scope(getattr(sl,'pricing_gaps',None),getattr(sl,'coverage_gap_rows',None),getattr(sl,'order_issue_rows',None),payload),
         'registry_revision':(payload.get('commission') or {}).get('registry_revision'),
         'manual_revision':source_context.get('manual_versions',{}).get(sl.period,0) if source_context is not None else
             ws.conn.execute('SELECT coalesce(max(id),0) FROM cost_line_log WHERE store_id=? AND period=?',(store.id,sl.period)).fetchone()[0]}
+    from .source_recovery import anchor_index
+    manifest['source_recovery_index']=anchor_index(ingestion,store,sl.period,
+        getattr(sl,'pricing_gaps',None),getattr(sl,'coverage_gap_rows',None),getattr(sl,'facts',None))
     return {'dependency_sha':dep,'result_sha':result_sha,'evidence_sha':evidence_sha,'manifest':manifest}
 
 
@@ -179,7 +199,7 @@ def save(ws,run_id,proof):
             if not verified(path):return
             artifacts.append({'path':path.relative_to(ws.root).as_posix(),'sha':file_digest(path)})
     manifest={**proof['manifest'],'artifacts':artifacts}
-    for source in proof['manifest'].get('approved_cost_sources',[]):
+    for source in [*proof['manifest'].get('approved_cost_sources',[]),*proof['manifest'].get('verified_original_date_sources',[])]:
         for artifact in source['artifacts']:
             if not valid_artifact(ws,artifact):
                 ws.mark_evidence(run_id,ready=False,error='已采用历史成本的原始凭据缺失或哈希不一致')

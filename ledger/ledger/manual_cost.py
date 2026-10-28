@@ -135,19 +135,26 @@ def certified(model, result: dict, source_run_id: int, confirmed: dict,
         "gross": trial["gross"], "profit": trial["profit"],
         "method": "人工确认店期成本和提成，不改原始行",
     }
-    decided["cost_review"] = {"observed": trial["observed"],
+    decided["cost_review"] = {"schema":"cost_amount_completeness.v1","observed": trial["observed"],
+                              "known_partial":trial["observed"],"known_booked":trial["confirmed"],
+                              "amount_complete":{key:True for key in COST_KEYS},
+                              "authority":"approved_manual_total","source_run_id":source_run_id,
                               "confirmed": trial["confirmed"], "requires_human": False}
     from . import view
     cost_source = view.source_name(model, "order_cost")
     decided["missing_sources"] = [name for name in result.get("missing_sources") or []
                                   if name != cost_source]
+    resolved_cost_checks={"chk_goods_coverage", "historical_cost_evidence", "required_cost_unresolved", "dropship_cost_evidence"}
+    resolved_cost_checks.update(check.id for check in model.checks
+                                if check.kind=="spine_coverage" and check.metric=="goods_cost")
     for finding in decided.get("findings") or []:
-        if finding.get("id") in {"chk_goods_coverage", "historical_cost_evidence"}:
+        if finding.get("id") in resolved_cost_checks:
             finding.update(passed=True, blocking=False,
                            message="商品成本已按人工确认金额结账；原覆盖缺口与源明细保留")
     commission = deepcopy(result.get("commission") or {})
     for person in commission.get("people") or []:
         person["amount"] = money_float(amounts[person["person_id"]])
+        person["amount_complete"] = True
     basis_id = commission.get("base_node")
     basis = model.node(basis_id) if basis_id else model.commission_base_node(result.get("store_id"))
     if basis:
@@ -179,7 +186,7 @@ def certified(model, result: dict, source_run_id: int, confirmed: dict,
                     for pid, amount in sorted(amounts.items())],
                 "no_payout": no_payout, "reason": reason.strip(),
                 "original_findings": [finding for finding in result.get("findings") or []
-                                      if finding.get("id") in {"chk_goods_coverage", "historical_cost_evidence"}]}
+                                      if finding.get("id") in resolved_cost_checks]}
     return decided, decision
 
 
@@ -207,6 +214,7 @@ def payout_only(result: dict, source_run_id: int, payouts: list[dict],
     decided = deepcopy(result)
     for person in decided["commission"].get("people") or []:
         person["amount"] = money_float(amounts[person["person_id"]])
+        person["amount_complete"] = True
     decided["commission"].update(total=money_float(sum(amounts.values(), Decimal(0))),
                                    amount_complete=True, manual_confirmed=True,
                                    manual_amounts_after_labor=True)

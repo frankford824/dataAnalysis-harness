@@ -54,6 +54,40 @@ def login_client(client, root):
     client.cookies.set('commission_session',registry.login(name,password))
 
 
+def fixture_publication_scope(ws, model, periods, *, extend=True):
+    """Explicit synthetic execution enrollment; never production default scope."""
+    from ledger import publication_scope
+    pairs={(store.id, period) for store in model.stores for period in periods}
+    root=Path(ws.root).resolve()
+    previous=publication_scope._startup.get(root)
+    if extend and previous is not None:
+        assert previous.isolated, 'Synthetic scope must never replace a controller-owned scope'
+        pairs.update(previous.scopes)
+    scope=publication_scope.PublicationScope.for_isolated(root,sorted(pairs),
+        approval_reference='synthetic-explicit-test-publication-scope')
+    publication_scope.install_isolated(scope,replace=True)
+    return scope
+
+
+def scoped_manager(workspace, model, **kwargs):
+    """The existing Manager tests declare their synthetic 2026 fixture range."""
+    from ledger.commission_manager import Manager
+    def enrollment(ws, candidate):
+        from ledger import publication_scope
+        previous=publication_scope._startup.get(Path(ws.root).resolve())
+        if previous is not None:return previous.verify(ws.root,candidate)
+        if os.environ.get(publication_scope.FILE_ENV):return publication_scope.load_automatic(ws.root,candidate)
+        periods={row.period for row in getattr(candidate,'overheads',())}
+        if hasattr(ws,'conn'):
+            periods.update(row[0] for row in ws.conn.execute('SELECT DISTINCT period FROM period'))
+            periods.update(row[0] for row in ws.conn.execute('SELECT DISTINCT period FROM automation_case'))
+        # Pure queue-protocol fixtures have no financial periods yet; their
+        # explicitly named synthetic source range is 2026, never wall-clock.
+        return fixture_publication_scope(ws,candidate,sorted(periods) if periods else tuple(f'2026-{month:02}' for month in range(1,13)))
+    kwargs.setdefault('publication_scope',enrollment)
+    return Manager(workspace,model,**kwargs)
+
+
 def needs_real_data(fn):
     """标记一条要真实语料的测试。没语料就报失败，除非显式声明放弃。"""
 

@@ -30,7 +30,7 @@ def revisions(ws, registry):
     )
 
 
-def fingerprint(ws, model, store, ingestion, registry):
+def fingerprint(ws, model, store, ingestion, registry, *, publication_scope=None):
     version = engine_version()
     if not version or version == "unknown" or "dirty" in version:
         return None
@@ -38,7 +38,8 @@ def fingerprint(ws, model, store, ingestion, registry):
     state = revisions(ws, registry)
     h = hashlib.sha256(json.dumps([version, source_code_sha, model.model_dump_json(), store.id,
                                   state, ingestion.source_sync_pending, ingestion.validation_errors,
-                                  ingestion.deduplication], ensure_ascii=False, sort_keys=True).encode())
+                                  ingestion.deduplication,
+                                  publication_scope.identity if publication_scope is not None else None], ensure_ascii=False, sort_keys=True).encode())
     for item in ingestion.items:
         # All post-feed enrichment is included, not just the raw file hash or
         # amounts. Thus flags, identities, dates, quantities and price evidence
@@ -65,7 +66,7 @@ def _run_signature(row):
                                       row["input_fingerprint"]], ensure_ascii=False).encode()).hexdigest()
 
 
-def load(ws, store, signature, registry):
+def load(ws, store, signature, registry, *, publication_scope=None):
     if signature is None:
         return None
     with _lock:
@@ -74,6 +75,8 @@ def load(ws, store, signature, registry):
         return None
     output = []
     for period, run_id, recorded, paths in entry[1]:
+        if publication_scope is not None:
+            publication_scope.require(store.id,period,workspace_root=ws.root)
         row = ws.latest_run(store.id, period)
         if not row or row["id"] != run_id or not row["evidence_ready"] or row["evidence_error"]:
             return None
@@ -112,12 +115,14 @@ def load(ws, store, signature, registry):
     return output
 
 
-def remember(ws, store, signature, registry, periods):
+def remember(ws, store, signature, registry, periods, *, publication_scope=None):
     if signature is None or revisions(ws, registry) != signature[1] or not periods:
         return
     runs = []
     for payload in periods:
         run_id, period = payload["run_id"], payload["period"]
+        if publication_scope is not None:
+            publication_scope.require(store.id,period,workspace_root=ws.root)
         row = ws.latest_run(store.id, period)
         if not row or row["id"] != run_id or not row["evidence_ready"]:
             return

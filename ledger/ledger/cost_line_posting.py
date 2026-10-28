@@ -134,3 +134,5 @@ def apply(ws, result, store):
                 replace(f,passed=True,message='未覆盖商品成本已按逐单核对决定入账，原缺价证据保留')
                 if f.check_id=='historical_cost_evidence' and sl.cost_coverage.get('passed') else f
                 for f in sl.audit.findings]
+        from .cost_completeness import apply as apply_cost_completeness
+        apply_cost_completeness(sl,result.model,store.platform)

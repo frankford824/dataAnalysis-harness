@@ -162,7 +162,7 @@ def test_concurrent_rules_never_persist_under_wrong_key(tmp_path,monkeypatch):
 
 def test_missing_mapping_is_blocked_before_recompute_and_resumes(tmp_path,monkeypatch):
     from types import SimpleNamespace
-    from ledger.commission_manager import Manager
+    from conftest import scoped_manager as Manager
     from ledger.workspace import Workspace
     ws=Workspace(tmp_path);reg=Registry(tmp_path)
     feed(tmp_path,[])

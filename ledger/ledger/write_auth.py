@@ -24,6 +24,8 @@ SERVICE_ROUTES = (
     ('POST', r'/api/automation/months/\d{4}-\d{2}/advance', 'advance'),
     ('POST', r'/api/automation/service-actions', 'approved_action'),
     ('POST', r'/api/automation/service-facts', 'approved_action'),
+    ('POST', r'/api/automation/source-recovery/requests', 'agent_control'),
+    ('POST', r'/api/automation/source-recovery/requests/source-[0-9a-f]{40}/finish', 'agent_control'),
     ('POST', r'/api/v1/agents/heartbeat', 'agent_control'),
     ('POST', r'/api/v1/agent-jobs/claim', 'agent_control'),
     ('POST', r'/api/v1/agent-jobs/[^/]+/(progress|complete|fail)', 'agent_control'),

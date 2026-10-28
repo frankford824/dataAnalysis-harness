@@ -23,6 +23,12 @@ def enabled():
 
 
 def approved_rule(ws,store_id,period,grant_id=None,*,rule_id=RULE,rule_sha=RULE_SHA):
+    from . import publication_scope
+    try:
+        publication=(publication_scope.current() or publication_scope.load_automatic(ws.root))
+        publication.require(store_id,period,workspace_root=ws.root)
+    except publication_scope.PublicationScopeError as exc:
+        raise PermissionError('自动发布范围尚未验证或不含本店账期：'+str(exc)) from exc
     grant=journal.active_decisions(ws.conn,period).get((store_id,'rule_grant:'+rule_id))
     if not grant or (grant_id and grant['id']!=grant_id):raise PermissionError('缺少当前已批准的店月规则授权')
     value=grant['values'];stamp=datetime.now(timezone.utc)

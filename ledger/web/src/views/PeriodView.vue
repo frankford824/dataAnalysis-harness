@@ -30,6 +30,7 @@ import { periodDrillTarget } from '../periodDrill'
 import { count, money, percent, stamp } from '../format'
 import { useApp } from '../store'
 import { finalCloseIssues,needsMonthWorkspace } from '../closeView'
+import { initialCostInputs, needsManualCostInput, sourceCostText } from '../costReviewInputs'
 
 const props = defineProps({ id: { type: String, required: true } })
 const reviewingStatement=ref(false)
@@ -57,7 +58,7 @@ function openMonthWorkspace(){app.pick({store:'',platform:'',period:period.value
 
 async function beginClose() {
   if(needsCompanyDecision.value){reviewingPeriod.value=true;return}
-  if (snap.value?.cost_review?.requires_human || snap.value?.cost_review?.line_count) return openManualClose()
+  if (needsManualCostInput(snap.value?.cost_review)) return openManualClose()
   if (snap.value?.commission?.unassigned_orders) return openManualClose()
   if (snap.value?.can_close) return close()
   rail.value = 'checks'
@@ -172,23 +173,22 @@ const manualCostRows = [
 ]
 const manualPreviewKey = computed(() => JSON.stringify(manualCosts.value))
 const manualCloseBlockers = computed(() => manualBlockers.value.filter(f =>
-  !manualCostEnabled.value || !['chk_goods_coverage','historical_cost_evidence'].includes(f.id)))
+  !manualCostEnabled.value || !['chk_goods_coverage','historical_cost_evidence','required_cost_unresolved'].includes(f.id)))
 const centsInput = value => /^-?\d+(?:\.\d{1,2})?$/.test(String(value ?? '').trim())
 
 function openManualClose() {
   reviewingPeriod.value=false
   ignoredBlockers.value = []
   manualCloseNote.value = ''
-  manualCostEnabled.value = !!snap.value?.cost_review &&
-    (snap.value.cost_review.requires_human || !!snap.value.cost_review.line_count || profitUnavailable.value)
+  manualCostEnabled.value = needsManualCostInput(snap.value?.cost_review)
   manualPayoutEnabled.value = !manualCostEnabled.value &&
     !!snap.value?.commission?.unassigned_orders && !!snap.value?.commission?.people?.length
-  const amounts = snap.value?.cost_review?.observed || {}
-  manualCosts.value = Object.fromEntries(manualCostRows.map(([key]) =>
-    [key, amounts[key] == null ? '' : Number(amounts[key]).toFixed(2)]))
+  manualCosts.value = initialCostInputs(snap.value?.cost_review)
   manualPayouts.value = (snap.value?.commission?.people || []).map(person => ({
     person_id: person.person_id, person: person.person,
-    sales: person.sales, gross: person.gross, ...suggestedManualPayout(person),
+    sales: person.sales, gross: person.gross, ...suggestedManualPayout(person,{
+      complete:(person.amount_complete ?? snap.value?.commission?.amount_complete) === true && !needsCompanyDecision.value,
+    }),
   }))
   manualNoPayout.value = false
   manualRunId.value = snap.value?.run_id || null
@@ -434,10 +434,10 @@ watch(
             v-if="!closed"
             type="primary"
             :disabled="loading || !!app.busy || !snap"
-            :title="snap?.cost_review?.requires_human || snap?.cost_review?.line_count ? '人工确认成本后结账' : snap?.can_close ? `结账 ${period}` : '查看本月尚未完成的结账条件'"
+            :title="needsManualCostInput(snap?.cost_review) ? '成本尚未完整，请补齐凭据或核定完整金额' : snap?.can_close ? `结账 ${period}` : '查看本月尚未完成的结账条件'"
             @click="beginClose"
           >
-            {{ needsCompanyDecision ? '查看本月结账条件' : snap?.cost_review?.requires_human || snap?.cost_review?.line_count ? '人工确认成本' : snap?.commission?.unassigned_orders ? '人工确认提成' : snap?.can_close ? `结账 ${period}` : '查看结账条件' }}
+            {{ needsCompanyDecision ? '查看本月结账条件' : needsManualCostInput(snap?.cost_review) ? '核对未完整成本' : snap?.commission?.unassigned_orders ? '人工确认提成' : snap?.can_close ? `结账 ${period}` : '查看结账条件' }}
           </n-button>
           <n-button v-else size="small" :disabled="loading || !!app.busy" @click="asking = true">反结账</n-button>
         </template>
@@ -556,7 +556,7 @@ watch(
                 @click.stop
               >导出订单费项</a>
             </header>
-            <PricingPending v-if="snap.run_id" :closed="closed" ref="pricingPanel" :key="`${props.id}:${period}`" :run-id="snap.run_id" :count="snap.pricing_pending_count || 0" :coverage-rows="snap.cost_review?.coverage_lines || 0" :coverage="snap.cost_coverage" :posting="snap.cost_line_posting" :observed="snap.cost_review?.observed" :line-summary="snap.cost_review" :manual-decision="snap.manual_cost" :store-id="props.id" :period="period" @show-quality="rail = 'quality'" @request-manual="openManualClose" @line-saved="load(true,true);app.invalidate([props.id])" @request-recompute="refreshManualBasis" />
+            <PricingPending v-if="snap.run_id" :closed="closed" ref="pricingPanel" :key="`${props.id}:${period}`" :run-id="snap.run_id" :count="snap.pricing_pending_count || 0" :coverage-rows="snap.cost_review?.coverage_lines || 0" :coverage="snap.cost_coverage" :posting="snap.cost_line_posting" :observed="snap.cost_review?.observed" :review="snap.cost_review" :line-summary="snap.cost_review" :manual-decision="snap.manual_cost" :store-id="props.id" :period="period" @show-quality="rail = 'quality'" @request-manual="openManualClose" @line-saved="load(true,true);app.invalidate([props.id])" @request-recompute="refreshManualBasis" />
             <div class="statement">
               <div
                 v-for="row in snap.statement || []"
@@ -882,12 +882,12 @@ watch(
         <n-checkbox v-if="!manualCostEnabled" v-model:checked="manualPayoutEnabled" class="manual-choice">只确认提成，不修改店铺利润</n-checkbox>
         <template v-if="manualCostEnabled">
           <n-alert v-if="!snap?.calculation_inputs" type="info" :bordered="false">这次保存的计算记录尚无人工预览依据。<n-button size="small" @click="refreshManualBasis">重算后再确认</n-button></n-alert>
-          <p class="small muted manual-section-note">以下为系统从现有资料识别的金额。修改后请预览；未覆盖的订单不会被暗记为零。</p>
+          <p class="small muted manual-section-note">未完整的成本总额保持空白。请优先补齐原始凭据；如另有已核定总额，再填写并注明依据。已识别部分不能直接作为总额。</p>
           <p v-if="snap?.cost_review?.line_count" class="small muted">{{ snap.cost_review.line_count }} 笔订单已补录 {{ money(snap.cost_review.line_total) }} 元；本次看板已计入 {{ money(snap.cost_review.posted_line_total || 0) }} 元。下面输入框仍是来源表成本，不含补录；预览会合并最新补录一次，不要手工再加。<template v-if="snap.cost_review.line_posting_pending">最新补录正在等待自动核算，看板尚未更新。</template></p>
           <div class="manual-cost-grid">
             <label v-for="[key, label] in manualCostRows" :key="key">
-              <span>{{ label }}</span><small>系统已识别 {{ snap?.cost_review?.observed?.[key] == null ? '尚无记录' : money(snap.cost_review.observed[key]) }}</small>
-              <n-input v-model:value="manualCosts[key]" inputmode="decimal" :aria-label="`确认${label}金额`" @update:value="manualPreview = null" />
+              <span>{{ label }}</span><small>{{ sourceCostText(snap?.cost_review,key) }}</small>
+              <n-input v-model:value="manualCosts[key]" inputmode="decimal" :input-props="{'aria-label':`确认${label}金额`}" @update:value="manualPreview = null" />
             </label>
           </div>
           <div class="row manual-preview-row">
@@ -898,11 +898,11 @@ watch(
           <n-alert v-if="manualPreviewError" type="warning" :bordered="false">{{ manualPreviewError }}</n-alert>
         </template>
         <template v-if="manualCostEnabled || manualPayoutEnabled">
-          <div class="manual-payout-head"><b>逐人确认提成</b><small>系统已按本期兼职分摊折算建议金额，直接接受即为扣兼职后的确认额；也可改成最终发放数。</small></div>
+          <div class="manual-payout-head"><b>逐人确认提成</b><small>仅依据完整的建议金额会预填；空白项请补齐依据，或填写已有财务核定金额。试算与工资实际发放分别留痕。</small></div>
           <div v-if="manualPayouts.length" class="manual-payout-list">
             <label v-for="person in manualPayouts" :key="person.person_id">
-              <span>{{ person.person }}<small>参与销售 {{ money(person.sales) }} · 参与毛利 {{ money(person.gross) }}<template v-if="person.trial != null && person.suggested != null && person.trial !== person.suggested"> · 扣兼职前 {{ money(person.trial) }}</template><template v-if="person.suggested != null"> · 已扣兼职 {{ money(person.suggested) }}</template></small></span>
-              <n-input v-model:value="person.amount" inputmode="decimal" :aria-label="`${person.person}确认提成额`" placeholder="确认提成额" />
+              <span>{{ person.person }}<small>参与销售 {{ money(person.sales) }} · 参与毛利 {{ money(person.gross) }}<template v-if="person.trial != null && person.suggested != null && person.trial !== person.suggested"> · 扣兼职前试算 {{ money(person.trial) }}</template><template v-if="person.suggested != null"> · 折算参考 {{ money(person.suggested) }}</template></small></span>
+              <n-input v-model:value="person.amount" inputmode="decimal" :input-props="{'aria-label':`${person.person}确认提成额`}" placeholder="确认提成额" />
             </label>
           </div>
           <n-checkbox v-else v-model:checked="manualNoPayout">已确认本期没有提成人员，无需发放提成</n-checkbox>

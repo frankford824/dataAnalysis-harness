@@ -7,7 +7,7 @@ import json
 from pathlib import Path
 import sys
 import threading
-from dataclasses import asdict,is_dataclass
+from dataclasses import asdict,is_dataclass,replace
 
 ROOT=Path(__file__).resolve().parents[2]
 sys.path.insert(0,str(ROOT/'host-agent'))
@@ -29,6 +29,7 @@ class Control(ControlPlaneClient):
         self.status='online'
         self.configuration_sha=None
         self.configuration=None
+        self.source_recovery_enabled=False
         self.state.connection.execute('CREATE TABLE IF NOT EXISTS protocol_rejections(event_key TEXT PRIMARY KEY,endpoint TEXT NOT NULL,status INTEGER NOT NULL,detail TEXT NOT NULL)')
         self.state.connection.commit()
 
@@ -48,6 +49,15 @@ class Control(ControlPlaneClient):
         if lease and lease['job_id'] in body.get('rejected',[]):
             raise ControlPlaneError('The server rejected this worker lease')
         return body
+
+    def claim_job(self):
+        if not self.source_recovery_enabled:return super().claim_job()
+        from finance_agent.models import AgentJob
+        response=self.client.post('/api/v1/agent-jobs/claim',headers=self._headers(),
+            json={'agent_id':self.worker_id,'capabilities':['recompute','source_recovery']})
+        if response.status_code==204:return None
+        self._raise(response)
+        return AgentJob.from_payload(response.json())
 
     def queue_progress(self,job_id,sequence,stage,message,detail=None):
         if not self.lease or self.lease['job_id']!=job_id:
@@ -106,18 +116,39 @@ class Control(ControlPlaneClient):
 
 
 class Worker:
-    def __init__(self,runtime,control,catalog,*,renew_seconds=30):
+    def __init__(self,runtime,control,catalog,*,renew_seconds=30,source_executor=None):
         self.runtime,self.control,self.catalog=runtime,control,catalog
         self.renew_seconds=renew_seconds
+        self.source_executor=source_executor
+        control.source_recovery_enabled=bool(source_executor and source_executor.admitted())
         config=getattr(runtime,'config',None)
+        if source_executor and source_executor.admitted() and is_dataclass(config) and hasattr(config,'max_iters'):
+            # The fixed source phase already queried known paths. Remaining
+            # judgment has a small bound; a persistent task is never polled by
+            # the model for the full generic twenty-round budget.
+            runtime.config=replace(config,max_iters=min(config.max_iters,6))
+            config=runtime.config
+        self._runtime_config=config
         provider=getattr(catalog,'configuration_sha',None)
         # Only a one-way digest leaves this process; never transmit configured
         # credentials. Same config across restarts retains the same epoch.
         runtime_raw=json.dumps(asdict(config) if is_dataclass(config) else None,sort_keys=True,default=str).encode()
-        control.configuration={'runtime_sha':hashlib.sha256(runtime_raw).hexdigest(),
-            'source_sha':provider() if callable(provider) else hashlib.sha256(b'unknown-source-profile').hexdigest()}
+        self._runtime_sha=hashlib.sha256(runtime_raw).hexdigest()
+        self._source_configuration=provider
+        self._refresh_configuration()
+
+    def _refresh_configuration(self):
+        control=self.control
+        control.configuration={'runtime_sha':self._runtime_sha,
+            'source_sha':self._source_configuration() if callable(self._source_configuration) else hashlib.sha256(b'unknown-source-profile').hexdigest()}
+        if self.source_executor:
+            control.configuration['source_sha']=hashlib.sha256(json.dumps([
+                control.configuration['source_sha'],self.source_executor.configuration_sha()],sort_keys=True).encode()).hexdigest()
         raw=json.dumps(control.configuration,sort_keys=True,separators=(',',':')).encode()
         control.configuration_sha=hashlib.sha256(raw).hexdigest()
+        # Fixed, qualified reads remain available when the model is disabled
+        # or unavailable. Only entry into a model needs its matching profile.
+        control.source_recovery_enabled=bool(self.source_executor and self.source_executor.admitted())
 
     def _diagnostic(self,case,error_code):
         control=self.control;folder=control.state.state_dir/'worker-diagnostics'
@@ -132,6 +163,7 @@ class Worker:
 
     def once(self):
         control=self.control
+        self._refresh_configuration()
         control.heartbeat();control.flush_events()
         job=control.claim_job()
         if job is None:return None
@@ -149,6 +181,28 @@ class Worker:
                 except Exception:lease_failed.set();return
         thread=threading.Thread(target=renew,daemon=True);thread.start()
         try:
+            if job.payload.get('capability')=='source_recovery':
+                if not self.source_executor:raise ControlPlaneError('No qualified fixed source executor is configured')
+                task=job.payload.get('source_task') or {}
+                task_id=task.get('task_id')
+                response=control.client.get('/api/automation/source-recovery/requests/'+task_id+'/plan',
+                    headers=control._headers(),params={'job_id':job.id,'lease_token':control.lease['lease_token']})
+                control._raise(response);body=response.json()
+                if body.get('task_id')!=task_id or body.get('plan_sha256')!=task.get('plan_sha256'):
+                    raise ControlPlaneError('Source task plan receipt is not bound')
+                raw=self.source_executor.run(task,body['plan'],job_id=job.id,input_sha=case['input_sha'],
+                    current=lambda:not lease_failed.is_set())
+                stop.set();thread.join(timeout=2)
+                if lease_failed.is_set():raise ControlPlaneError('Source task lease lost before publication')
+                response=control.client.post('/api/automation/source-recovery/requests/'+task_id+'/finish',
+                    headers=control._headers(),json={'job_id':job.id,'lease_token':control.lease['lease_token'],
+                        'input_sha':case['input_sha'],'receipt_sha256':raw['receipt_sha256']})
+                control._raise(response);accepted=response.json()
+                if accepted.get('ok') is not True or accepted.get('business_complete') is not False:
+                    raise ControlPlaneError('Missing independent source receipt')
+                control.lease=None;control.heartbeat('online')
+                return {'state':accepted['task']['state'],'reason':accepted['task'].get('reason'),
+                    'task_id':task_id,'model_used':False,'business_complete':False,'financial_applied':False}
             def checker():
                 if lease_failed.is_set():return {'verified':False,'lease_active':False,'status':'lease_lost'}
                 response=control.client.get('/api/automation/months/'+case['period'],headers=control._headers())
@@ -165,14 +219,31 @@ class Worker:
                 value=provider(case)
                 return value if isinstance(value,list) else []
             outcomes=trusted_outcomes()
+            preflight=getattr(self.catalog,'source_preflight',None)
+            deferred=None
+            if control.source_recovery_enabled and callable(preflight) and not checker()['verified']:
+                observed=preflight(case,checker)
+                entries=observed.get('items',[]) if isinstance(observed,dict) else []
+                requests=[row.get('request') for row in entries if isinstance(row,dict) and isinstance(row.get('request'),dict)]
+                queued=[r for r in requests if r.get('source_task_state')=='source_queued']
+                ready=[r for r in requests if r.get('source_task_state')=='source_raw_ready']
+                if queued or ready:
+                    deferred={'state':'source_queued' if queued else 'source_raw_ready','model_used':False,
+                              'task_ids':sorted({r['task_id'] for r in queued+ready}),
+                              'financial_applied':False,'business_complete':False}
+                outcomes=trusted_outcomes()
             cached=control.state.completed_result(job.idempotency_key)
-            if outcomes and not checker()['verified']:
+            if deferred is not None:
+                result=deferred
+            elif outcomes and not checker()['verified']:
                 # A prior trusted local receipt can survive a process restart
                 # before terminal delivery. Do not buy another model run merely
                 # to rediscover the same unavailable/login/missing source.
                 result={'state':'waiting_source_receipt','model_used':False}
             elif cached is not None and checker()['verified']:
                 result=cached
+            elif self.source_executor and not getattr(self.source_executor,'model_qualified_for',self.source_executor.qualified_for)(self._runtime_config):
+                result={'state':'waiting_configuration','reason':'source_model_profile_unqualified','model_used':False}
             else:
                 control.queue_progress(job.id,1,JobStage.CLAIMED,'已认领案件，正在自动取证')
                 control.flush_events()

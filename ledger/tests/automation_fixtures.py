@@ -2,7 +2,9 @@
 
 This does not claim a service replay or a production acceptance receipt. Real
 raw-file/service/Registry integration is separately tested by test_replay_service.
-The helper never changes readiness, findings, income, scope or overhead policy.
+The helper never changes readiness, findings, income, business operating scope
+or overhead policy. It explicitly enrolls this synthetic period for isolated
+automatic-action tests; production has no such default enrollment.
 """
 import io
 import json
@@ -16,6 +18,8 @@ from ledger.storage_integrity import seal,verified
 
 def capture_synthetic_summary_fixture(ws,model,run_id):
     row=ws.conn.execute('SELECT * FROM run WHERE id=?',(run_id,)).fetchone()
+    from conftest import fixture_publication_scope
+    fixture_publication_scope(ws,model,[row['period']])
     body=json.loads(row['result'])
     source=ws.keep(f'synthetic-summary-{run_id}.json',io.BytesIO(row['result'].encode()),row['store_id'])
     with ws.conn:

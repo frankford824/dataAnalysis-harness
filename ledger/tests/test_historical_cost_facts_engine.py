@@ -13,7 +13,7 @@ from test_order_feed import _fixture,_write
 from test_replay_service import bundle as template_bundle,seed
 from ledger import automation_actions as actions,automation_checker as checker,automation_store as journal,service
 from ledger import historical_cost_facts as facts
-from ledger.commission_manager import Manager
+from conftest import scoped_manager as Manager
 from ledger.commission_registry import Registry
 from ledger.model.schema import Model,Overhead
 from ledger.model.loader import load_model
@@ -105,6 +105,8 @@ def native_factory(tmp_path,monkeypatch):
         feed._install_snapshot(manifest,{'stores':[{'order_store_id':'10','ledger_store_id':'s1','mapping_status':'confirmed'}]},
             {'healthy':True},source_revision=10,source_latest_seq=10,revision_etag='synthetic-fixed')
         ws=Workspace(root)
+        from conftest import fixture_publication_scope
+        fixture_publication_scope(ws,model,[source_period,'2026-05','2026-06'])
         source=write_xlsx(root/'甲店订单原表.xlsx',[['主订单号','子订单号','宝贝ID','买家实付','下单时间','物流单号'],*raw])
         ws.keep(source.name,source,'s1')
         registry=Registry(root);fixed=seed()

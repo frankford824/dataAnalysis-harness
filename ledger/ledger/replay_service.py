@@ -23,10 +23,127 @@ _offline_lock = threading.RLock()
 REQUIRED_SCOPE_FIELDS = {'state','statement','commission_total','commission_people',
     'confirmed_total','confirmed_people','cost_line_total','allocation_pending_count',
     'commission_complete','can_close','source_sync_pending'}
+REJECTION_OBSERVATION_FIELDS = {'run_present','state','outcome','source_state',
+    'checker_allowed','reason_codes','failure'}
+REJECTION_CATEGORIES = {'incomplete_data','safety_boundary','scope_coverage'}
+NON_BUSINESS_REASONS = {'code_source_drift','unverified_code_change',
+    'unverified_model_change','unverified_input_change','input_capture_unverified',
+    'manual_input_unverified','evidence_archive','stale_run','publication_scope_unverified'}
+NON_BUSINESS_FAILURES = {'maintenance','code_source_drift','publication_scope_unverified',
+    'publication_scope_changed','storage','storage_failure','internal_error'}
+SOURCE_FAILURE_KINDS = {'source_unavailable','source_missing','missing_sources',
+    'source_incomplete','source_invalid','period_source_missing','no_period_data',
+    'empty_inputs','no_sources','input_unavailable'}
 
 
 class ReplayError(RuntimeError):
     pass
+
+
+class ReplayServiceFailure(ReplayError):
+    """The service explicitly returned failure; never an arbitrary exception."""
+    def __init__(self, store_id, failure):
+        if not isinstance(failure,dict) or not failure:
+            raise ReplayError('服务失败缺少受信返回对象')
+        self.store_id=store_id
+        self.failure=dict(failure)
+        super().__init__('服务重算失败：'+json.dumps(failure,ensure_ascii=False))
+
+
+class ReplayActionRejection(ReplayError):
+    """A real business gate rejected the requested operation."""
+    def __init__(self, operation, store_id, period, reason_codes):
+        self.operation=operation;self.store_id=store_id;self.period=period
+        self.reason_codes=sorted(set(reason_codes))
+        super().__init__('离线业务入口拒绝：'+operation+'：'+','.join(self.reason_codes))
+
+
+def _partial_differences(expected, actual, path=''):
+    """Compare only explicitly evidenced fields; an absent field is not None.
+
+    Empty maps remain exact assertions (e.g. no confirmed people), rather than
+    silently matching every nonempty actual map.
+    """
+    _finite(expected);_finite(actual)
+    if isinstance(expected,dict) and expected:
+        if not isinstance(actual,dict):return differences(expected,actual,path)
+        result=[]
+        for key,value in expected.items():
+            child=path+'.'+str(key) if path else str(key)
+            if key not in actual:
+                result.append({'path':child,'expected':value,'actual':None,'kind':'missing_field'})
+            else:result.extend(_partial_differences(value,actual[key],child))
+        return result
+    return differences(expected,actual,path)
+
+
+def _leaf_paths(value,prefix=''):
+    if isinstance(value,dict) and value:
+        return {path for key,child in value.items() for path in _leaf_paths(child,prefix+'.'+str(key) if prefix else str(key))}
+    return {prefix}
+
+
+def _validate_rejection_financial(section, *, unknown):
+    if not isinstance(section,dict) or set(section)-REQUIRED_SCOPE_FIELDS:
+        raise ReplayError('拒绝期望的财务字段必须明确且属于服务合同')
+    for key,value in section.items():
+        if key=='statement':
+            if not isinstance(value,dict) or not value:raise ReplayError('拒绝期望不能用空statement跳过未知语义')
+            for node in value.values():
+                if not isinstance(node,dict) or set(node)!={'value','available'}:
+                    raise ReplayError('拒绝期望的金额节点必须同时声明value和available')
+                if unknown:
+                    if node['value'] is not None or node['available'] is not False:
+                        raise ReplayError('未知金额必须明确None/available=False，不能补零或放入部分金额')
+                elif (node['available'] is not True or isinstance(node['value'],bool)
+                        or not isinstance(node['value'],(int,float,Decimal))):
+                    raise ReplayError('已证金额必须是有限数值且available=True')
+        elif unknown:
+            def only_none(v):
+                return bool(v) and all(only_none(c) for c in v.values()) if isinstance(v,dict) else v is None
+            if not only_none(value):raise ReplayError('未知财务字段必须显式为None')
+        else:
+            if value is None:raise ReplayError('None应列入unknown而不是proved')
+            if key in {'commission_total','confirmed_total','cost_line_total'}:
+                if isinstance(value,bool) or not isinstance(value,(int,float,Decimal)):
+                    raise ReplayError('已证金额字段必须为有限数值，不能用布尔值或字符串')
+            if key=='allocation_pending_count' and (type(value) is not int or value<0):
+                raise ReplayError('已证计数必须为非负整数')
+            if key in {'commission_complete','can_close','source_sync_pending'} and type(value) is not bool:
+                raise ReplayError('已证完成/来源标志必须为布尔值')
+    _finite(section)
+
+
+def _posted_cost_line_total(ws,store_id,period,run_id,payload):
+    """Known empty local supplements are zero; missing external costs are not.
+
+    cost_line_log is the sole append-only entry for these extra amounts. A
+    completed run with no such records, or an explicitly captured revision
+    with no active save, has a proven empty contribution set. Existing saves
+    with no posted-result/context evidence remain unknown, never summed as if
+    they had already entered this run.
+    """
+    if run_id is None:return None
+    run=ws.conn.execute('SELECT id,evidence_ready FROM run WHERE id=? AND store_id=? AND period=?',
+        (run_id,store_id,period)).fetchone()
+    if not run or not run['evidence_ready']:return None
+    posting=payload.get('cost_line_posting')
+    if isinstance(posting,dict) and posting.get('total') is not None:return posting['total']
+    last=ws.conn.execute('SELECT coalesce(max(id),0) FROM cost_line_log WHERE store_id=? AND period=?',
+        (store_id,period)).fetchone()[0]
+    proof=ws.conn.execute('SELECT manifest_json FROM automation_run_proof WHERE run_id=?',(run_id,)).fetchone()
+    validation=ws.conn.execute('SELECT manifest_json FROM automation_run_validation WHERE run_id=? ORDER BY rowid DESC LIMIT 1',
+        (run_id,)).fetchone()
+    captured=json.loads((validation or proof)['manifest_json']) if validation or proof else {}
+    revision=captured.get('manual_revision')
+    if not last:return 0 if revision in (None,0) else None
+    if type(revision) is not int or not 0<=revision<=last:return None
+    active=ws.conn.execute('''SELECT 1 FROM cost_line_log l
+        WHERE l.store_id=? AND l.period=? AND l.id<=? AND l.action='save'
+        AND l.id=(SELECT max(x.id) FROM cost_line_log x WHERE x.store_id=l.store_id
+            AND x.period=l.period AND x.coverage_key=l.coverage_key AND x.id<=?) LIMIT 1''',
+        (store_id,period,revision,revision)).fetchone()
+    return None if active else 0
 
 
 def _ordered_people(people):
@@ -170,7 +287,7 @@ def _blocked(*_args, **_kwargs):
 
 
 def _finite(value):
-    if isinstance(value,float) and not math.isfinite(value):
+    if (isinstance(value,float) and not math.isfinite(value)) or (isinstance(value,Decimal) and not value.is_finite()):
         raise ReplayError('回放结果含非有限数字')
     if isinstance(value,dict):
         for item in value.values():
@@ -272,12 +389,14 @@ def restore_workspace_decisions(ws,registry,model,reference,*,fixture=False):
 
 class Session:
     """An isolated, temporary service instance over a verified input bundle."""
-    def __init__(self, bundle, registry_seed):
+    def __init__(self, bundle, registry_seed, *, publication_scopes=None):
         self.bundle = Path(bundle).resolve()
         self.registry_seed = registry_seed
         self.trace = []
         self.workspace_decisions = None
         self._workspace_reference = None
+        self.publication_scopes = publication_scopes
+        self.publication_scope = None
 
     def restore_workspace_decisions(self,reference,*,fixture=False):
         if self.workspace_decisions is not None:raise ReplayError('一轮回放只允许一份批准工作区决定，不能混用范围版本')
@@ -312,6 +431,20 @@ class Session:
                 raise ReplayError('服务回放模型与输入版本不符')
             self.ws = Workspace(self.root)
             self.stack.callback(self.ws.close)
+            if self.publication_scopes is not None:
+                from .publication_scope import PublicationScope,install_isolated,remove_isolated,bind
+                if not isinstance(self.publication_scopes,(dict,list,tuple,set)) or not self.publication_scopes:
+                    raise ReplayError('离线发布范围必须明确绑定店铺和账期')
+                scopes=[]
+                for key in self.publication_scopes:
+                    if not isinstance(key,str) or key.count('/')!=1:raise ReplayError('离线发布范围缺少明确店月')
+                    scopes.append(tuple(key.split('/')))
+                self.publication_scope=PublicationScope.for_isolated(self.root,scopes,
+                    approval_reference='offline-fixed-input:'+self.fingerprint)
+                self.publication_scope.verify(self.root,self.model)
+                install_isolated(self.publication_scope)
+                self.stack.callback(remove_isolated,self.publication_scope)
+                self.stack.enter_context(bind(self.publication_scope,self.root))
             for slot in self.inputs['slots']:
                 source = self.bundle/'files'/slot['sha'][:2]/slot['sha']
                 self.ws.keep(slot['name'],source,slot['store_id'],by='replay:input')
@@ -348,9 +481,10 @@ class Session:
 
     def recompute(self,store_id):
         from . import service
-        result = service.recompute(self.ws,self.model,self.model.store(store_id),note='离线服务整链回放')
+        result = service.recompute(self.ws,self.model,self.model.store(store_id),note='离线服务整链回放',
+            publication_scope=self.publication_scope)
         if result.failure:
-            raise ReplayError('服务重算失败：'+json.dumps(result.failure,ensure_ascii=False))
+            raise ReplayServiceFailure(store_id,result.failure)
         self.trace.append({'operation':'service.recompute','store_id':store_id,
             'runs':{s.period:s.run_id for s in self.ws.periods_of_store(store_id)}})
         return result
@@ -377,10 +511,12 @@ class Session:
     def drain_pending(self,max_passes=100):
         """Use the real manager to acknowledge durable work; never delete pending by hand."""
         from .commission_manager import Manager
-        manager=Manager(lambda:self.ws,lambda:self.model)
+        if self.publication_scope is None:raise ReplayError('离线Manager缺少明确publication_scopes，不能默认全部账期')
+        manager=Manager(lambda:self.ws,lambda:self.model,publication_scope=self.publication_scope)
+        stores=sorted({sid for sid,_ in self.publication_scope.scopes})
         for _ in range(max_passes):
             with self.registry.connect() as db:
-                remaining=db.execute('SELECT count(*) FROM pending').fetchone()[0]
+                remaining=db.execute('SELECT count(*) FROM pending WHERE store_id IN (%s)' % ','.join('?' for _ in stores),stores).fetchone()[0]
             if not remaining:
                 self.trace.append({'operation':'commission_manager.once','remaining_pending':0})
                 return
@@ -391,7 +527,7 @@ class Session:
         from . import commission_confirm
         state = self.ws.state(store_id,period)
         if state is None:
-            raise ReplayError('核定前缺少真实服务核算记录')
+            raise ReplayActionRejection('confirm',store_id,period,['no_result'])
         context = commission_confirm.context(self.ws,self.registry,self.model,store_id,period,expected_run=state.run_id)
         result = commission_confirm.confirm(self.ws,self.registry,self.model,store_id=store_id,period=period,
             run_id=state.run_id,source_sha=context['source_sha'],
@@ -412,7 +548,8 @@ class Session:
             'approval_reference':approval_reference,'input_sha':preview['input_sha'],
             'blocked':[{'store_id':row['store_id'],'issue_codes':[i['code'] for i in row['issues']]} for row in preview['blocked']]})
         if preview['blocked'] or len(preview['eligible'])!=1:
-            raise ReplayError('离线月结未通过原有Checker，不能忽略成本、公司条件或队列阻断')
+            codes=[i['code'] for row in preview['blocked'] for i in row['issues']]
+            raise ReplayActionRejection('close_approved',store_id,period,codes or ['not_eligible'])
         result=actions.close_confirm(self.ws,self.model,request_id=key+':confirm',proposal_id=preview['proposal_id'],
             proposal_sha=preview['proposal_sha'],input_sha=preview['input_sha'],actor=actor)
         state=self.ws.state(store_id,period)
@@ -428,6 +565,67 @@ class Session:
         return self.registry.save_scheme(store_id,product_id,body,'replay:decision',reason,
             expected=row['revision'] if row else 0,publish=True)
 
+    def _declared_scope_keys(self):
+        scope=getattr(self,'publication_scope',None)
+        if scope is not None:
+            scope.verify(self.root,self.model)
+            return sorted(sid+'/'+period for sid,period in scope.scopes)
+        return sorted(state.store_id+'/'+state.period for state in self.ws.overview())
+
+    def expect_failure(self,operation,arguments,expected):
+        """Observe a specifically expected domain refusal, never arbitrary errors.
+
+        Inputs and source identity errors remain ReplayError/ValueError and are
+        deliberately not caught. A failure to get the requested refusal fails.
+        """
+        from .workspace import WorkspaceError
+        from .commission_registry import RegistryError
+        if operation not in {'recompute','supplement','confirm','replace_scheme','drain_pending','close_approved'}:
+            raise ReplayError('拒绝观测不支持此步骤')
+        if (not isinstance(arguments,dict) or not isinstance(expected,dict)
+            or not {'exception_type','kind','code'}<=set(expected)
+            or set(expected)-{'exception_type','kind','code','reason_codes','message'}):
+            raise ReplayError('预期失败必须明确异常类型、kind与code')
+        declared=self._declared_scope_keys()
+        if getattr(self,'publication_scope',None) is None or not declared:
+            raise ReplayError('拒绝观测需要明确批准店月范围')
+        sid=arguments.get('store_id');period=arguments.get('period')
+        targets=[key for key in declared if (sid is None or key.split('/')[0]==sid)
+                 and (period is None or key.split('/')[1]==period)]
+        if not targets:raise ReplayError('拒绝步骤不在批准范围内')
+        try:
+            getattr(self,operation)(**arguments)
+        except (ReplayServiceFailure,ReplayActionRejection,WorkspaceError,RegistryError,PermissionError) as error:
+            actual={'exception_type':type(error).__name__,'kind':None,'code':None}
+            if isinstance(error,ReplayServiceFailure):
+                actual.update(kind=error.failure.get('kind'),code=error.failure.get('code'))
+            elif isinstance(error,ReplayActionRejection):
+                actual.update(kind='checker_rejected',code='business_action_rejected',reason_codes=error.reason_codes)
+            else:
+                actual.update(kind='domain_rejected',code=getattr(error,'code',None),message=str(error))
+                if not isinstance(expected.get('message'),str) or not expected['message']:
+                    raise ReplayError('没有稳定错误码的领域拒绝必须明确预期message，不能按异常父类吞错') from error
+            changes=differences(expected,actual)
+            if changes:raise ReplayError('实际失败类型或原因与明确预期不符：'+json.dumps(changes,ensure_ascii=False)) from error
+            self.trace.append({'operation':'expected_failure','requested_operation':operation,
+                'scope_keys':targets,'failure':actual})
+            return actual
+        raise ReplayError('预期的失败或拒绝没有发生，不能把成功执行算成负向通过')
+
+    def _failure_observations(self,declared):
+        failures={};attempted=set()
+        for step in self.trace:
+            if step.get('operation')=='expected_failure':
+                for key in step['scope_keys']:
+                    if key in declared:failures[key]=step['failure'];attempted.add(key)
+            elif step.get('operation')=='service.recompute':
+                for key in declared:
+                    if key.split('/')[0]==step['store_id']:
+                        failures.pop(key,None);attempted.add(key)
+            elif step.get('operation') in {'payout.confirm','close.confirm','cost_lines.save'}:
+                key=step['store_id']+'/'+step['period'];failures.pop(key,None)
+        return failures,attempted
+
     def snapshot(self):
         from .storage_integrity import verified
         from .commission_confirm import _last
@@ -435,13 +633,42 @@ class Session:
         if self._workspace_reference:
             reference,fixture=self._workspace_reference
             load_workspace_decisions(reference,fixture=fixture)
-        scopes = {}; proofs = {}
-        for state in self.ws.overview():
+        scopes = {}; proofs = {}; observations={}
+        states={state.store_id+'/'+state.period:state for state in self.ws.overview()}
+        declared=self._declared_scope_keys()
+        failures,attempted=self._failure_observations(set(declared))
+        companies={period:automation_checker.company_basis(self.ws,self.model,period)
+                   for period in sorted({key.split('/')[1] for key in declared})}
+        for key in declared:
+            store_id,period=key.split('/');state=states.get(key);run_id=state.run_id if state else None
+            checked=automation_checker.check(self.ws,store_id,period,model=self.model,
+                expected_run_id=run_id,verify_artifacts=True,company_context=companies[period])
+            if state is None and checked['run_id'] is not None:
+                raise ReplayError('存在孤立run但无对应账期，不能伪装成无资料')
+            failure=failures.get(key);payload=state.result or {} if state else {}
+            if failure:outcome='failed' if failure['exception_type']=='ReplayServiceFailure' else 'rejected'
+            elif not run_id:outcome='no_run' if key in attempted else 'not_started'
+            elif state.closed:outcome='closed'
+            else:outcome='ready' if checked['allowed'] else 'pending'
+            if failure:source_state='failed' if failure['exception_type']=='ReplayServiceFailure' else 'rejected'
+            elif not run_id:source_state='no_published_result' if key in attempted else 'not_attempted'
+            elif payload.get('source_sync_pending') is True:source_state='sync_pending'
+            elif payload.get('missing_sources'):source_state='missing_sources'
+            elif payload.get('source_sync_pending') is False:source_state='captured'
+            else:source_state='unknown'
+            company=companies[period];missing=sorted(company.get('missing_store_ids') or [])
+            income_complete=bool(company.get('basis')) and not missing
+            observations[key]={'run_present':bool(run_id),'state':state.state if state else None,
+                'outcome':outcome,'source_state':source_state,'checker_allowed':bool(checked['allowed']),
+                'reason_codes':sorted({p['code'] for p in checked['issues']}),'failure':failure,
+                'company':{'total':Decimal(str(company['total'])) if company.get('total') is not None else None,
+                    'basis_total':Decimal(str(company['basis_total'])) if income_complete and company.get('basis_total') is not None else None,
+                    'known_income_subtotal':Decimal(str(company['basis_total'])) if company.get('basis_total') is not None else None,
+                    'income_complete':income_complete,'missing_store_ids':missing}}
+            if not run_id:continue
             if not verified(self.ws.facts_path(state.run_id)):
                 raise ReplayError('服务事实留档缺失或未通过校验')
-            payload = state.result or {}; commission = payload.get('commission') or {}
-            checked=automation_checker.check(self.ws,state.store_id,state.period,model=self.model,
-                expected_run_id=state.run_id,verify_artifacts=True)
+            commission = payload.get('commission') or {}
             with self.registry.connect() as db:
                 confirmation = _last(db,state.store_id,state.period,state.run_id)
                 calculation = db.execute('SELECT path,sha FROM calculation WHERE finance_run=?',(state.run_id,)).fetchone()
@@ -449,27 +676,27 @@ class Session:
                 import hashlib
                 if not calculation or hashlib.sha256((self.registry.root/'calculations'/Path(calculation['path']).name).read_bytes()).hexdigest()!=calculation['sha']:
                     raise ReplayError('服务提成留档缺失或校验失败')
-            key = state.store_id+'/'+state.period
             scopes[key] = {'state':state.state,
-                'statement':{r['id']:{'value':r.get('value'),'available':bool(r.get('available',True))}
+                'statement':{r['id']:{'value':r.get('value'),'available':r.get('available')}
                     for r in payload.get('statement') or []},
                 'commission_total':commission.get('total'),
-                'commission_complete':bool(commission.get('amount_complete')),
+                'commission_complete':commission.get('amount_complete'),
                 'can_close':bool(checked['allowed'] and not state.closed),
-                'source_sync_pending':bool(payload.get('source_sync_pending')),
+                'source_sync_pending':payload.get('source_sync_pending'),
                 'commission_people':{p['person_id']:{'base':p.get('base'),'amount':p.get('amount')}
-                    for p in commission.get('people') or []},
+                    for p in commission['people']} if isinstance(commission.get('people'),list) else None,
                 'confirmed_total':float(confirmation['confirmed_total']) if confirmation else None,
                 'confirmed_people':{p['person_id']:p['amount'] for p in confirmation['payouts']} if confirmation else {},
-                'cost_line_total':(payload.get('cost_line_posting') or {}).get('total',0),
-                'allocation_pending_count':int(payload.get('allocation_pending_count') or 0)}
+                'cost_line_total':_posted_cost_line_total(self.ws,state.store_id,state.period,state.run_id,payload),
+                'allocation_pending_count':payload.get('allocation_pending_count')}
             row = self.ws.conn.execute('SELECT input_fingerprint,model_revision FROM run WHERE id=?',(state.run_id,)).fetchone()
             proofs[key] = {'run_id':state.run_id,'input_fingerprint':row['input_fingerprint'],
                 'model_revision':row['model_revision'],'calculation_sha':calculation['sha'] if calculation else None,
                 'engine_can_close':bool(payload.get('can_close')),
                 'close_issue_codes':sorted(p['code'] for p in checked['issues'])}
-        _finite(scopes)
-        return {'scopes':scopes,'proofs':proofs,'registry_revision':self.registry.revision(),
+        _finite(scopes);_finite(observations)
+        return {'scopes':scopes,'proofs':proofs,'observations':observations,'declared_scopes':declared,
+                'registry_revision':self.registry.revision(),
                 'input_bundle_fingerprint':self.fingerprint,'trace':list(self.trace),
                 'workspace_decisions':self.workspace_decisions}
 
@@ -488,33 +715,112 @@ class Session:
         return {'status':'failed' if changes else 'passed','differences':changes,
                 'checked_scopes':sorted(actual['scopes']),'actual':actual}
 
+    def check_rejection(self,expected):
+        """Assert explicitly incomplete/refused scopes without positive credit."""
+        if (not isinstance(expected,dict) or expected.get('schema_version')!=1
+            or expected.get('category') not in REJECTION_CATEGORIES
+            or not isinstance(expected.get('scopes'),dict) or not expected['scopes']):
+            raise ReplayError('拒绝期望缺少版本、明确分类和批准范围')
+        if getattr(self,'publication_scope',None) is None:
+            raise ReplayError('负向验收不能从现有run猜批准范围')
+        declared=self._declared_scope_keys()
+        if set(expected['scopes'])!=set(declared):
+            raise ReplayError('拒绝期望必须覆盖全部批准scope，包含没有run的店月')
+        category=expected['category'];actual=self.snapshot();changes=[];asserted=[];source_rejected=0
+        for key,contract in expected['scopes'].items():
+            if not isinstance(contract,dict) or set(contract)!={'observation','proved','unknown'}:
+                raise ReplayError('每个拒绝scope必须分别声明observation/proved/unknown')
+            observation=contract['observation']
+            if (not isinstance(observation,dict) or not REJECTION_OBSERVATION_FIELDS<=set(observation)
+                or set(observation)-REJECTION_OBSERVATION_FIELDS-{'company'}):
+                raise ReplayError('拒绝观测必须明确run、状态、来源状态、Checker与失败类型')
+            codes=observation['reason_codes']
+            if (not isinstance(codes,list) or not codes or any(not isinstance(c,str) or not c for c in codes)
+                or codes!=sorted(set(codes))):raise ReplayError('预期Checker原因码须为非空且排序去重的明确集合')
+            if not isinstance(observation['run_present'],bool) or not isinstance(observation['checker_allowed'],bool):
+                raise ReplayError('拒绝观测的run与Checker标志必须是布尔值')
+            if (observation['outcome'] not in {'not_started','no_run','pending','failed','rejected','ready','closed'}
+                or observation['source_state'] not in {'not_attempted','no_published_result','sync_pending','missing_sources','captured','unknown','failed','rejected'}
+                or observation['state'] not in {None,'open','closed'}):
+                raise ReplayError('拒绝观测的状态必须使用明确合同枚举')
+            failure=observation['failure']
+            if failure is not None and (not isinstance(failure,dict) or not {'exception_type','kind','code'}<=set(failure)):
+                raise ReplayError('拒绝观测的失败必须明确受信类型/kind/code，或显式None')
+            for name,unknown in [('proved',False),('unknown',True)]:
+                _validate_rejection_financial(contract[name],unknown=unknown)
+            if contract['proved'] and contract['unknown'] and _leaf_paths(contract['proved'])&_leaf_paths(contract['unknown']):
+                raise ReplayError('同一财务字段不能既声称已证又声称未知')
+            got=actual['observations'][key]
+            if category=='scope_coverage':
+                if contract['proved'] or contract['unknown'] or observation['outcome']!='not_started':
+                    raise ReplayError('纯清单基线不能冒充已执行资料拒绝或金额验证')
+            elif category=='incomplete_data':
+                if (observation['checker_allowed'] or observation['outcome'] in {'ready','closed','not_started'}
+                    or observation['state']=='closed' or NON_BUSINESS_REASONS&set(codes)):
+                    raise ReplayError('技术/身份故障、未开始或已完成不能冒充资料不足负例')
+                failure=observation['failure']
+                if failure:
+                    if (failure.get('exception_type') not in {'ReplayServiceFailure','ReplayActionRejection'}
+                        or failure.get('kind') in NON_BUSINESS_FAILURES or failure.get('kind') is None
+                        or (failure.get('exception_type')=='ReplayServiceFailure' and failure.get('kind') not in SOURCE_FAILURE_KINDS)):
+                        raise ReplayError('缺少明确业务来源失败类型；请求/权限/技术故障不能计入资料拒绝覆盖')
+                if got['outcome'] in {'pending','no_run','failed','rejected'} and not got['checker_allowed']:
+                    source_rejected+=1
+            elif observation['failure'] is None and not NON_BUSINESS_REASONS&set(codes):
+                raise ReplayError('安全边界案例必须明确真实拒绝或身份完整性阻断')
+            if not observation['run_present'] and (contract['proved'] or contract['unknown']):
+                raise ReplayError('没有run时金融结果缺席；不能伪造带金额字段的结果')
+            changes.extend(_partial_differences(observation,got,'observations.'+key))
+            if observation['run_present']:
+                if key not in actual['scopes']:
+                    changes.append({'path':'scopes.'+key,'expected':'financial_result','actual':None,'kind':'missing_field'})
+                else:
+                    for name in ('proved','unknown'):
+                        if contract[name]:
+                            changes.extend(_partial_differences(contract[name],actual['scopes'][key],'scopes.'+key))
+                            asserted.extend(key+'/'+p for p in _leaf_paths(contract[name]))
+        return {'status':'failed' if changes else 'passed','assertion_kind':'rejection',
+            'category':category,'differences':changes,'checked_scopes':declared,
+            'asserted_financial_fields':sorted(asserted),'source_rejection_scope_count':source_rejected if not changes else 0,
+            'positive_scope_count':0,'ready_scope_count':0,'closed_scope_count':0,
+            'eligible_for_financial_release':False,'actual':actual}
+
 
 def execute(case):
     if case.get('schema_version')!=1 or not case.get('case_id'):
         raise ReplayError('服务回放案例合同无效')
-    if case.get('kind') not in {'service_fixture','historical_golden'}:
+    if case.get('kind') not in {'service_fixture','historical_golden','service_rejection_fixture','source_rejection'}:
         raise ReplayError('必须区分服务夹具与真实历史黄金语料')
-    if case['kind']=='historical_golden' and not case.get('approval_reference'):
+    if case['kind'] in {'historical_golden','source_rejection'} and not case.get('approval_reference'):
         raise ReplayError('真实历史黄金语料缺批准依据')
     if not case.get('expected',{}).get('scopes'):
         raise ReplayError('真实语料或期望缺失，回放失败；不会自动录制基线')
-    with Session(case['bundle'],case.get('registry')) as session:
+    with Session(case['bundle'],case.get('registry'),publication_scopes=case['expected']['scopes']) as session:
         reference=case.get('workspace_decisions')
         if reference is not None:
             if not isinstance(reference,dict):raise ReplayError('工作区决定引用必须为对象')
-            if case['kind']=='historical_golden' and (case.get('source_evidence') or {}).get('workspace_decisions_sha256')!=reference.get('sha256'):
+            if case['kind'] in {'historical_golden','source_rejection'} and (case.get('source_evidence') or {}).get('workspace_decisions_sha256')!=reference.get('sha256'):
                 raise ReplayError('历史案例的工作区决定缺少source_evidence SHA绑定')
-            session.restore_workspace_decisions(reference,fixture=case['kind']=='service_fixture')
+            session.restore_workspace_decisions(reference,fixture=case['kind'] in {'service_fixture','service_rejection_fixture'})
         for step in case.get('steps',[]):
             arguments = {k:v for k,v in step.items() if k!='operation'}
             operation = step.get('operation')
-            if operation not in {'recompute','supplement','confirm','replace_scheme','drain_pending','close_approved'}:
+            if operation not in {'recompute','supplement','confirm','replace_scheme','drain_pending','close_approved','expect_failure'}:
                 raise ReplayError('不支持的离线回放步骤：'+str(operation))
+            if operation=='expect_failure' and case['kind'] not in {'service_rejection_fixture','source_rejection'}:
+                raise ReplayError('只有显式负向案例可以声明expected failure')
+            if case['kind']=='source_rejection' and operation not in {'recompute','drain_pending','expect_failure'}:
+                raise ReplayError('真实拒绝轨道不执行成功的金额确认、补录或结账步骤')
+            nested_close=(operation=='expect_failure' and arguments.get('operation')=='close_approved')
+            close_arguments=arguments.get('arguments',{}) if nested_close else arguments
+            if nested_close and (not case.get('approval_reference') or close_arguments.get('approval_reference')!=case['approval_reference']):
+                raise ReplayError('预期拒绝中的月结批准也必须与案例完全一致')
             if operation=='close_approved' and (not case.get('approval_reference')
                 or arguments.get('approval_reference')!=case['approval_reference']):
                 raise ReplayError('月结步骤的批准引用必须与批准案例完全一致')
             getattr(session,operation)(**arguments)
-        report = session.check(case['expected'])
+        report = (session.check_rejection(case['expected']) if case['kind'] in {'service_rejection_fixture','source_rejection'}
+                  else session.check(case['expected']))
         return {'case_id':case['case_id'],'kind':case['kind'],**report}
 
 

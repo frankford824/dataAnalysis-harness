@@ -1,4 +1,5 @@
 """Real temporary HTTP service for the Vue browser gate; never opens production."""
+from test_replay_service import fixture_session
 from pathlib import Path
 import argparse
 import shutil
@@ -56,7 +57,7 @@ def main():
         source=Path(args.root)/'original-service-inputs';source.mkdir()
         path,missing=bundle.__wrapped__(source)
         target=Path(args.root)/'service-workspace'
-        with Session(path,seed()) as session:
+        with fixture_session(path,seed()) as session:
             session.drain_pending()
             for scope,order in missing.items():
                 sid,period=scope.split('/')
@@ -141,7 +142,7 @@ def main():
             for row in body['overheads']:row['amount']='10.00'
         fixed=changed_bundle((original,missing),source/'approved-inputs',total_ten)
         target=source/'workspace'
-        with Session(fixed,seed()) as session:
+        with fixture_session(fixed,seed()) as session:
             session.drain_pending()
             for scope,order in missing.items():
                 sid,period=scope.split('/')

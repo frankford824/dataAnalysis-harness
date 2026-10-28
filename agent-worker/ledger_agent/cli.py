@@ -72,6 +72,13 @@ def main():
     host_state.set_secret('agent_id',raw['worker_id'])
     control = Control(AgentConfig(control_plane_url=raw['control_plane_url'],state_dir=state.root),host_state)
     from .upstream import Collector,Config as UpstreamConfig
+    source_executor=None
+    if raw.get('source_recovery'):
+        from .source_recovery import Config as SourceConfig,Executor
+        source_options=dict(raw['source_recovery'])
+        if source_options.get('evaluation'):
+            raise ValueError('Evaluation source executors cannot be enabled by the production worker command')
+        source_executor=Executor(SourceConfig(**source_options))
     options=dict(raw.get('upstream',{}))
     for name in ('order_token','cost_token'):
         filename=options.pop(name+'_file',None)
@@ -82,7 +89,9 @@ def main():
     options.setdefault('cost_token',os.environ.get('ERP_BRIDGE_COST_API_TOKEN',''))
     # Keep operational upstream writes independently disabled until rollout config enables them.
     options.setdefault('member_requests_enabled',False)
-    collector=Collector(UpstreamConfig(**options),state.root/'upstream')
+    options['source_recovery_enabled']=bool(source_executor and source_executor.qualified_for(config))
+    collector=Collector(UpstreamConfig(**options),state.root/'upstream',
+        capability_configuration=source_executor.configuration_sha if source_executor else None)
     configured=Catalog(raw.get('tools',{}),state.root/'tools')
     class Combined:
         def tools(self,checker):
@@ -93,7 +102,9 @@ def main():
             return collector.trusted_outcomes(case)
         def configuration_sha(self):
             return collector.configuration_sha()
-    worker = Worker(Runtime(config,state),control,Combined())
+        def source_preflight(self,case,checker):
+            return collector.tools(checker)['request_member_seller_evidence'](case,{})
+    worker = Worker(Runtime(config,state),control,Combined(),source_executor=source_executor)
     try:
         while True:
             try: result = worker.once()

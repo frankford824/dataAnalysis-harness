@@ -1,11 +1,12 @@
 """Real case/lease/HTTP waiting transitions in temporary workspaces."""
+from test_replay_service import fixture_session
 import hashlib
 import json
 
 import pytest
 
 from ledger import automation_actions as actions,automation_handoff as handoff
-from ledger.commission_manager import Manager
+from conftest import scoped_manager as Manager
 from ledger.commission_registry import Registry
 from test_worker_control_api import running,claim,terminal
 
@@ -229,8 +230,8 @@ def test_real_service_supplement_removes_current_gap_and_retires_wait(bundle,mon
     from test_replay_service import seed
     path,missing=bundle
     monkeypatch.setenv('LEDGER_DETERMINISTIC_AUTOMATION_ENABLED','1')
-    with replay_service.Session(path,seed()) as session:
-        session.recompute('s1');session.recompute('s2');session.drain_pending()
+    with replay_service.Session(path,seed(),publication_scopes=('s1/2026-06','s1/2026-07')) as session:
+        session.recompute('s1');session.drain_pending()
         ws,model=session.ws,session.model;stamp=datetime.now(timezone.utc)
         human={'id':'finance','kind':'human','authenticated':True}
         preview=actions.decision_preview(ws,model,request_id='real-grant-p',period='2026-06',store_id='s1',kind='rule_grant',
