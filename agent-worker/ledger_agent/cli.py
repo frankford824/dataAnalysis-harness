@@ -107,7 +107,9 @@ def main():
             return collector.configuration_sha()
         def source_preflight(self,case,checker):
             return collector.tools(checker)['request_member_seller_evidence'](case,{})
-    worker = Worker(Runtime(config,state),control,Combined(),source_executor=source_executor)
+    from .qa import Answerer
+    answerer=Answerer(config,state) if raw.get('questions_enabled',True) else None
+    worker = Worker(Runtime(config,state),control,Combined(),source_executor=source_executor,answerer=answerer)
     try:
         while True:
             try: result = worker.once()
@@ -117,6 +119,7 @@ def main():
             time.sleep(max(1,float(raw.get('poll_seconds',5))))
     finally:
         collector.close();control.close()
+        if answerer:answerer.client.close()
         host_state.connection.close()
 
 

@@ -95,6 +95,8 @@ print("evidence profile 已核验并写入配置")
 PY
 ```
 
+问答技能单独标定：`python -m ledger_agent.qa_evaluate --output …/qa-YYYYMMDD-01 --rounds 5 --price …`。二十个合成报表问题每题五轮，回答须通过与台账相同的数字拦截并点到相关报表项才算对；通过后把生成的 profile（`skills: ["qa"]`）作为 `models` 中的另一条加入。运行时按 `qa_sha`（绑定 `qa.py`、`privacy.py`、`state.py` 和 qa skill）准入；未通过时问题直接标为“暂时无法回答”，不调用模型。`"questions_enabled": false` 可关闭问答领取。
+
 不要手改 `evaluation.json`、`evaluation_sha`、`skills` 或 `passed` 来通过准入。`evaluation_path` 是该机器上的绝对路径；移动评估材料、修改运行时/技能文件或更换网关地址后，需要重新核验，必要时重新评估。当前 runtime 身份绑定 `runtime.py`、`privacy.py`、`state.py` 和 evidence skill；provider 身份绑定去掉末尾斜线的网关地址，**不证明网关背后的模型权重、路由或生产语料表现相同**。profile 中的 `price` 来自评估时的 `--price` 文件，`cost_per_correct` 按该价目对全部调用估算；有调用缺用量时保持 `null`，不能据此宣布最低成本。
 
 ## 4. 建立人工账号与独立服务身份

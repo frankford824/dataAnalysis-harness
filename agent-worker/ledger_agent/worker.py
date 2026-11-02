@@ -116,8 +116,9 @@ class Control(ControlPlaneClient):
 
 
 class Worker:
-    def __init__(self,runtime,control,catalog,*,renew_seconds=30,source_executor=None):
+    def __init__(self,runtime,control,catalog,*,renew_seconds=30,source_executor=None,answerer=None):
         self.runtime,self.control,self.catalog=runtime,control,catalog
+        self.answerer=answerer
         self.renew_seconds=renew_seconds
         self.source_executor=source_executor
         control.source_recovery_enabled=bool(source_executor and source_executor.admitted())
@@ -166,7 +167,10 @@ class Worker:
         self._refresh_configuration()
         control.heartbeat();control.flush_events()
         job=control.claim_job()
-        if job is None:return None
+        if job is None:
+            if self.answerer is None:return None
+            from .qa import serve_one
+            return serve_one(control,self.answerer)
         captured=job.payload.get('automation_case')
         if not isinstance(captured,dict) or not all(captured.get(k) for k in ('id','store_id','period','input_sha')):
             raise ControlPlaneError('The server returned an incomplete case scope')
