@@ -664,11 +664,16 @@ def close_preview(ws,model,*,request_id,period,store_ids,actor):
                 generation_sha=source_refresh['generation_sha'])
         verify_quote_refresh(ws,model,period,selected,quote_refresh['refresh_id'],quote_refresh['quote_sha'])
         eligible=[];blocked=[]
+        from .agent_authority import changes
+        automatic={}
+        for change in changes(ws,model,period):
+            if change['status']=='applied':automatic[change['store_id']]=automatic.get(change['store_id'],0)+1
         for sid in selected:
             state=ws.state(sid,period)
             if state and state.closed:continue
             result=checker.check(ws,sid,period,model=model,verify_artifacts=True)
-            value={'store_id':sid,'run_id':result['run_id'],'input_sha':result['input_sha'],'issues':result['issues']}
+            value={'store_id':sid,'run_id':result['run_id'],'input_sha':result['input_sha'],'issues':result['issues'],
+                   'automatic_changes':automatic.get(sid,0)}
             (eligible if result['allowed'] else blocked).append(value)
         sha=_scope_input(ws,model,period)
         company=checker.company_basis(ws,model,period)

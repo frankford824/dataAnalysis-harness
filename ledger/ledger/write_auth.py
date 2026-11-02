@@ -30,6 +30,8 @@ SERVICE_ROUTES = (
     ('POST', r'/api/v1/agents/heartbeat', 'agent_control'),
     ('POST', r'/api/v1/agent-jobs/claim', 'agent_control'),
     ('POST', r'/api/v1/agent-jobs/[^/]+/(progress|complete|fail)', 'agent_control'),
+    ('POST', r'/api/v1/agent-questions/claim', 'agent_control'),
+    ('POST', r'/api/v1/agent-questions/[0-9a-f]{32}/(answer|fail)', 'agent_control'),
 )
 
 

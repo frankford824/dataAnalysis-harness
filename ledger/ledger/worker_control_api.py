@@ -80,6 +80,19 @@ class ToolOutcome(BaseModel):
 Terminal.model_rebuild()
 
 
+class QuestionAnswer(BaseModel):
+    model_config=ConfigDict(extra='forbid')
+    lease_token:int
+    text:str=Field(min_length=1,max_length=4000)
+
+
+class QuestionFailure(BaseModel):
+    model_config=ConfigDict(extra='forbid')
+    lease_token:int
+    reason:str=Field(max_length=64)
+    retryable:bool=False
+
+
 def install(app,workspace,model,actor,*,lease_seconds=180,clock=time.time):
     router=APIRouter(tags=['automation-worker'])
 
@@ -191,6 +204,28 @@ def install(app,workspace,model,actor,*,lease_seconds=180,clock=time.time):
                     'task_id':source_task['id'],'plan_sha256':source['plan_sha256']})
             journal.finish(conn,'worker-claim:'+job_id,'worker.claim',journal.digest(result),aid,result)
             return result
+
+    @router.post('/api/v1/agent-questions/claim')
+    def claim_question(body:Claim,request:Request):
+        from . import agent_questions
+        identity=service(request,body.agent_id)
+        result=agent_questions.claim(workspace(),model(),identity,lease_seconds=lease_seconds,clock=clock)
+        return result if result else Response(status_code=204)
+
+    @router.post('/api/v1/agent-questions/{question_id}/answer')
+    def answer_question(question_id:str,body:QuestionAnswer,request:Request):
+        from . import agent_questions
+        identity=service(request)
+        try:return agent_questions.answer(workspace(),model(),question_id,identity,lease_token=body.lease_token,text=body.text,clock=clock)
+        except agent_questions.QuestionError as exc:raise HTTPException(409,str(exc)) from exc
+
+    @router.post('/api/v1/agent-questions/{question_id}/fail')
+    def fail_question(question_id:str,body:QuestionFailure,request:Request):
+        from . import agent_questions
+        identity=service(request)
+        try:return agent_questions.fail(workspace(),question_id,identity,lease_token=body.lease_token,
+            reason=body.reason,retryable=body.retryable,clock=clock)
+        except agent_questions.QuestionError as exc:raise HTTPException(409,str(exc)) from exc
 
     @router.post('/api/v1/agent-jobs/{job_id}/progress')
     def progress(job_id:str,body:Progress,request:Request,idempotency_key:str|None=Header(default=None,alias='Idempotency-Key')):

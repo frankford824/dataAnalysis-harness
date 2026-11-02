@@ -40,6 +40,24 @@ class ClosePreview(RequestId):
     store_ids: list[str]=Field(default_factory=list,max_length=500)
 
 
+class AgentAuthorityPreview(RequestId):
+    period_from: str
+    period_until: str
+    valid_days: int=Field(default=365,ge=1,le=366)
+    reason: str=Field(min_length=1,max_length=1000)
+
+
+class AgentAuthorityRevoke(RequestId):
+    period: str
+    reason: str=Field(min_length=1,max_length=1000)
+
+
+class Question(RequestId):
+    store_id: str=Field(min_length=1,max_length=128)
+    period: str
+    question: str=Field(min_length=1,max_length=500)
+
+
 class ServiceAction(RequestId):
     rule_id:str
     case_id:str
@@ -101,6 +119,36 @@ def install(app,workspace,model,actor=None,model_root=None):
         from .automation_rules import metadata
         return {'enabled':enabled(),'requires_human_grant':True,
                 'rules':metadata()}
+
+    @router.get('/agent-authority')
+    def agent_authority_status(period:str):
+        from . import agent_authority
+        return call(lambda:agent_authority.status(workspace(),model(),period),write=False)
+
+    @router.post('/agent-authority/preview')
+    def agent_authority_preview(body:AgentAuthorityPreview,request:Request):
+        from . import agent_authority
+        return call(lambda:agent_authority.preview(workspace(),model(),**body.model_dump(),actor=who(request)))
+
+    @router.post('/agent-authority/apply')
+    def agent_authority_apply(body:Confirmation,request:Request):
+        from . import agent_authority
+        return call(lambda:agent_authority.apply(workspace(),model(),**body.model_dump(),actor=who(request)))
+
+    @router.post('/agent-authority/revoke')
+    def agent_authority_revoke(body:AgentAuthorityRevoke,request:Request):
+        from . import agent_authority
+        return call(lambda:agent_authority.revoke(workspace(),model(),**body.model_dump(),actor=who(request)))
+
+    @router.get('/questions')
+    def questions(store_id:str,period:str):
+        from . import agent_questions
+        return call(lambda:agent_questions.listing(workspace(),store_id,period),write=False)
+
+    @router.post('/questions')
+    def ask(body:Question,request:Request):
+        from . import agent_questions
+        return call(lambda:agent_questions.ask(workspace(),model(),**body.model_dump(),actor=who(request)),write=False)
 
     @router.post('/service-actions')
     def service_action(body:ServiceAction,request:Request):

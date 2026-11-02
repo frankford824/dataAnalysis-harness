@@ -359,6 +359,8 @@ class Workspace:
             install_automation(conn)
             from .period_cost_inputs import install as install_period_cost_inputs
             install_period_cost_inputs(conn)
+            from .agent_questions import install as install_agent_questions
+            install_agent_questions(conn)
             conn.commit()
         finally:
             conn.close()
