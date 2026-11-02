@@ -1,6 +1,6 @@
 <script setup>
 import { useMessage } from 'naive-ui'
-import { LayoutDashboard, Store, Coins, Tags, RefreshCw, Truck } from '@lucide/vue'
+import { LayoutDashboard, Store, Coins, Tags, RefreshCw, Truck, Activity } from '@lucide/vue'
 import { computed, defineAsyncComponent, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 
@@ -191,11 +191,12 @@ defineExpose({ take })
       <router-link class="navlink" :class="{on:$route.name==='freight-review'}" to="/freight"><Truck class="nav-icon" aria-hidden="true"/>运费复核</router-link>
       <router-link class="navlink" :class="{on:$route.name==='labor'}" to="/labor"><Coins class="nav-icon" aria-hidden="true"/>兼职人工费用</router-link>
       <div class="grow" />
+      <router-link class="navlink" :class="{on:$route.name==='ops'}" to="/ops"><Activity class="nav-icon" aria-hidden="true"/>运维状态</router-link>
     </nav>
 
     <div class="body">
       <OperatorSession />
-      <header v-if="!['commission', 'commission-reports', 'commission-org', 'labor'].includes($route.name)" class="topbar">
+      <header v-if="!['commission', 'commission-reports', 'commission-org', 'labor', 'ops'].includes($route.name)" class="topbar">
         <FilterBar />
         <n-button quaternary size="small" :disabled="app.loading || !!app.busy" aria-label="刷新当前页面" title="刷新当前页面" @click="refreshCurrent"><RefreshCw :size="16"/></n-button>
         <!-- 上传只有这一个固定入口，每一页都在同一个地方。上一版侧栏最下角那个

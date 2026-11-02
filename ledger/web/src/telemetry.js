@@ -1,7 +1,7 @@
 // Bounded, best-effort human-operation measurements. Never reads input values or bodies.
 export const telemetryActions=new Set(['view_open','store_period_open','manual_amount_edit','month_advance','business_decision_preview','business_decision_apply','business_decision_revoke','month_close_preview','month_close_confirm','manual_cost_preview','period_close','cost_line_save','cost_batch_preview','cost_batch_apply','labor_total_save','payout_confirm','relationship_confirm','waiting_summary_open','waiting_deliver_open'])
 const kinds=new Set(['page_open','store_period_open','manual_amount_edit','manual_confirm','operation_complete'])
-const views=new Set(['board','period','deliver','commission','fees','labor','freight'])
+const views=new Set(['board','period','deliver','commission','fees','labor','freight','ops'])
 const outcomes=new Set(['success','failure','observed'])
 let queue=[],timer,authenticated=false,clientId='',context=()=>({}),originalFetch,installed=false,lastAuth=0
 export function clientRequestId(){

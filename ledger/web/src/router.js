@@ -35,6 +35,7 @@ export const router = createRouter({
     {
       path: '/labor', name: 'labor', component: () => import('./views/LaborView.vue'),
     },
+    { path: '/ops', name: 'ops', component: () => import('./views/OpsView.vue') },
     {
       path: '/fees',
       name: 'fees',

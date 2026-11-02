@@ -3,22 +3,22 @@ import {computed,ref,watch} from 'vue'
 import {useMessage} from 'naive-ui'
 import {api} from '../api'
 import {initialCostInputs,sourceCostText} from '../costReviewInputs'
-import {periodCostRequest,verifyPeriodCostProposal,verifyPeriodCostReceipt,periodCostRevocation} from '../periodCostInput'
+import {periodCostRequest,verifyPeriodCostProposal,verifyPeriodCostReceipt,periodCostRevocation,outcomeUnknown} from '../periodCostInput'
 import {money,prettyPeriod} from '../format'
 const props=defineProps({show:Boolean,revoke:Boolean,storeId:String,period:String,snapshot:Object})
 const emit=defineEmits(['update:show','saved']),message=useMessage()
 const rows=[['goods','商品成本'],['dropship','代发成本'],['reshipment','补发成本']]
 const costs=ref({goods:'',dropship:'',reshipment:''}),reason=ref(''),busy=ref(false),error=ref('')
-const basis=ref(null),proposal=ref(null),submission=ref(null),sourceRequest=ref(null)
+const basis=ref(null),proposal=ref(null),submission=ref(null),sourceRequest=ref(null),unsettled=ref(false)
 const scope=()=>JSON.stringify([props.storeId,props.period,props.snapshot?.run_id,props.snapshot?.period_cost_input?.id,props.revoke])
 const form=()=>JSON.stringify([costs.value,reason.value])
 const invalidated=computed(()=>!!basis.value&&basis.value!==scope())
 watch(()=>props.show,show=>{
   if(!show)return
   costs.value=initialCostInputs(props.snapshot?.cost_review);reason.value=''
-  basis.value=scope();proposal.value=null;submission.value=null;sourceRequest.value=null;error.value=''
+  basis.value=scope();proposal.value=null;submission.value=null;sourceRequest.value=null;error.value='';unsettled.value=false
 })
-watch([costs,reason],()=>{if(!busy.value){proposal.value=null;submission.value=null;sourceRequest.value=null}},{deep:true})
+watch([costs,reason],()=>{if(!busy.value&&!unsettled.value){proposal.value=null;submission.value=null;sourceRequest.value=null}},{deep:true})
 const eligible=computed(()=>{
   if(props.revoke)return !!reason.value.trim()&&reason.value.trim().length<=500&&!!props.snapshot?.period_cost_input?.decision_id
   try{periodCostRequest(props.storeId,props.period,props.snapshot?.run_id,costs.value,reason.value);return true}catch{return false}
@@ -43,7 +43,7 @@ async function preview(){
   finally{busy.value=false}
 }
 async function confirm(){
-  if(busy.value||invalidated.value||!proposal.value)return
+  if(busy.value||(invalidated.value&&!unsettled.value)||!proposal.value)return
   busy.value=true;error.value=''
   try{
     let result
@@ -51,12 +51,13 @@ async function confirm(){
       result=await api.automationDecisionRevoke(sourceRequest.value.decision_id,submission.value)
       if(result?.status!=='revoked'||result.decision_id!==sourceRequest.value.decision_id||!result.receipt_id)throw Error('尚未收到完整撤销回执；可按原请求重试核对')
     }else{
-      verifyPeriodCostProposal(proposal.value,sourceRequest.value)
+      if(!unsettled.value)verifyPeriodCostProposal(proposal.value,sourceRequest.value)
       result=await api.automationDecisionApply(submission.value);verifyPeriodCostReceipt(result,sourceRequest.value)
     }
+    unsettled.value=false
     message.success(props.revoke?'成本批准已撤销，核算队列会自动更新':'本期成本已保存，核算队列会自动更新')
     emit('saved',result);emit('update:show',false)
-  }catch(e){error.value=e.message}
+  }catch(e){error.value=e.message;if(outcomeUnknown(e))unsettled.value=true}
   finally{busy.value=false}
 }
 </script>
@@ -64,7 +65,8 @@ async function confirm(){
   <n-modal :show="show" @update:show="value=>{if(!value)close()}" preset="card" :title="revoke?'撤销本期成本批准':'确认本期成本'" style="max-width:620px;width:calc(100vw - 32px)">
     <p>{{prettyPeriod(period)}} · {{revoke?'撤销后重新按原始资料核算本店成本。':'保存本店本期已核定的三项成本，个人提成与月结仍须分别确认。'}}</p>
     <p class="small muted">{{revoke?'已结账和已核定实发的月份继续保护。':'缺少完整总额时，请先补原始凭据。逐单缺口继续保留，已有补录不能与整期金额重复相加。'}}</p>
-    <n-alert v-if="invalidated" type="warning" :bordered="false">核算依据已更新，请重新预览本期成本。</n-alert>
+    <n-alert v-if="unsettled" type="warning" :bordered="false" role="status">上次提交可能已经保存，只是没有收到回执。请点「核对提交结果」按原请求重新核对，不会重复保存。</n-alert>
+    <n-alert v-else-if="invalidated" type="warning" :bordered="false">核算依据已更新，请重新预览本期成本。</n-alert>
     <template v-if="!proposal">
       <div v-if="!revoke" class="period-cost-fields">
         <label v-for="[key,label] in rows" :key="key"><span>{{label}}总额</span><small>{{sourceCostText(snapshot?.cost_review,key)}}</small>
@@ -86,8 +88,9 @@ async function confirm(){
     <n-alert v-if="error" type="error" :bordered="false" role="alert">{{error}}</n-alert>
     <div class="period-cost-actions">
       <n-button :disabled="busy" @click="close">取消</n-button>
-      <n-button v-if="proposal" :disabled="busy" @click="proposal=null;submission=null">返回修改</n-button>
+      <n-button v-if="proposal&&!unsettled" :disabled="busy" @click="proposal=null;submission=null">返回修改</n-button>
       <n-button v-if="!proposal" type="primary" :loading="busy" :disabled="!eligible" @click="preview">{{revoke?'预览撤销成本批准':'预览本期成本'}}</n-button>
+      <n-button v-else-if="unsettled" type="primary" :loading="busy" @click="confirm">核对提交结果</n-button>
       <n-button v-else type="primary" :loading="busy" :disabled="invalidated" @click="confirm">{{revoke?'确认撤销成本批准':'确认保存成本'}}</n-button>
     </div>
   </n-modal>

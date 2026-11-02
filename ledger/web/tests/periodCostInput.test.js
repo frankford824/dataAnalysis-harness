@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import {costMoney,periodCostRequest,verifyPeriodCostProposal,verifyPeriodCostReceipt,periodCostRevocation} from '../src/periodCostInput.js'
+import {costMoney,periodCostRequest,verifyPeriodCostProposal,verifyPeriodCostReceipt,periodCostRevocation,outcomeUnknown} from '../src/periodCostInput.js'
 const request=()=>periodCostRequest('s1','2026-09',17,{goods:'-40.10',dropship:'0',reshipment:'2'},' 原采购凭据核定 ')
 const proposal=r=>({proposal_id:'proposal1',kind:'decision',proposal_sha:'a'.repeat(64),input_sha:'b'.repeat(64),store_id:r.store_id,period:r.period,expires_at:2000,effect:{kind:r.kind,values:r.values,reason:r.reason}})
 test('money stays exact including signed costs and maximum amounts',()=>{
@@ -33,4 +33,9 @@ test('revocation binds exact current approval and preserves monetary inputs',()=
   const cmd=periodCostRevocation(detail,scope,' 原批准凭据已被更正 ')
   assert.deepEqual(Object.keys(cmd).sort(),['input_sha','reason','request_id'])
   for(const change of [{decision_id:'d2'},{kind:'store_scope'},{values:{cost_input_id:'c2'}},{action:'revoke'}])assert.throws(()=>periodCostRevocation({...detail,...change},scope,'更正依据'))
+})
+test('only a definite rejection releases the original request; lost or failed replies keep it for an exact replay',()=>{
+  for(const status of [400,403,404,409,422])assert.equal(outcomeUnknown(Object.assign(Error('rejected'),{status})),false)
+  for(const error of [Error('连不上服务'),Object.assign(Error('server'),{status:500}),Object.assign(Error('gateway'),{status:502}),Error('尚未收到完整成本保存回执')])
+    assert.equal(outcomeUnknown(error),true)
 })

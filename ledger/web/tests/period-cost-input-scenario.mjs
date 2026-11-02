@@ -23,8 +23,11 @@ export async function periodCostInputScenario(page,{origin,base,artifacts}){
   assert.equal(await page.locator('vite-error-overlay').count(),0)
   await page.screenshot({path:path.join(artifacts,'period-cost-preview-desktop.png'),fullPage:false})
   const approve=page.getByRole('button',{name:'确认保存成本',exact:true})
+  const applied=page.waitForResponse(r=>r.request().method()==='POST'&&new URL(r.url()).pathname==='/api/automation/decisions/apply')
   await approve.evaluate(node=>{node.click();node.click()})
-  await approve.waitFor({state:'hidden'})
+  assert.equal((await applied).status(),200)
+  await page.getByText('本期成本已保存，核算队列会自动更新',{exact:true}).waitFor()
+  await page.getByRole('dialog').filter({hasText:'确认本期成本'}).waitFor({state:'hidden'})
   const state=await (await page.request.get(origin+'/api/_browser/period-cost-state')).json()
   assert.equal(state.closed,false);assert.equal(state.manual_finance_count,0);assert.equal(state.payout_confirmation_count,0)
   assert.equal(state.period_cost_inputs.length,1)
@@ -43,8 +46,24 @@ export async function periodCostInputScenario(page,{origin,base,artifacts}){
   await page.setViewportSize({width:390,height:844})
   assert.ok(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+2),'Mobile approval stays within viewport')
   await page.screenshot({path:path.join(artifacts,'period-cost-revoke-mobile.png'),fullPage:false})
+  const revokePath=/\/api\/automation\/decisions\/[^/]+\/revoke$/
+  let dropped=null
+  await page.route(url=>revokePath.test(url.pathname),async route=>{
+    if(dropped){await route.continue();return}
+    dropped=(await route.fetch()).status()
+    await route.abort('connectionreset')
+  })
   await page.getByRole('button',{name:'确认撤销成本批准',exact:true}).click()
-  await page.getByRole('button',{name:'确认撤销成本批准',exact:true}).waitFor({state:'hidden'})
+  const retry=page.getByRole('button',{name:'核对提交结果',exact:true})
+  await retry.waitFor()
+  assert.equal(dropped,200,'The server committed the first revoke before its reply was lost')
+  assert.equal(await page.getByRole('button',{name:'返回修改',exact:true}).count(),0,'An unsettled request cannot be edited into a second one')
+  const revokedReceipt=page.waitForResponse(r=>r.request().method()==='POST'&&revokePath.test(new URL(r.url()).pathname))
+  await retry.click()
+  assert.equal((await revokedReceipt).status(),200)
+  await page.unroute(url=>revokePath.test(url.pathname))
+  await page.getByText('成本批准已撤销，核算队列会自动更新',{exact:true}).waitFor()
+  await page.getByRole('dialog').filter({hasText:'撤销本期成本批准'}).waitFor({state:'hidden'})
   const revoked=await page.request.post(origin+'/api/_browser/drain-period-cost-case')
   assert.equal(revoked.status(),200,await revoked.text())
   const after=await (await page.request.get(origin+'/api/_browser/period-cost-state')).json()
@@ -52,6 +71,9 @@ export async function periodCostInputScenario(page,{origin,base,artifacts}){
   assert.deepEqual(after.period_cost_inputs,before,'Revocation appends a decision without rewriting approved cost facts')
   assert.equal(after.revocations,1)
   assert.equal(writes.some(w=>/\/close$|close-batches\/confirm|payout/.test(w.url)),false)
-  assert.deepEqual(errors,[])
-  return 'actual HTTP costs approved and revoked while open; no payout/close writes; exact preview and double-click protection; desktop/mobile'
+  assert.equal(writes.filter(w=>revokePath.test(w.url)).length,2,'The lost reply was replayed once with the original request')
+  const replays=writes.filter(w=>revokePath.test(w.url)).map(w=>w.body.request_id)
+  assert.equal(replays[0],replays[1])
+  assert.deepEqual(errors.filter(e=>!/ERR_CONNECTION_RESET|Failed to load resource/.test(e)),[])
+  return 'actual HTTP costs approved and revoked while open; lost revoke reply replayed once with the same request; no payout/close writes; exact preview and double-click protection; desktop/mobile'
 }

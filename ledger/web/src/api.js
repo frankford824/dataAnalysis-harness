@@ -27,7 +27,7 @@ async function call(path, init) {
   if (!res.ok) {
     const detail=typeof body?.detail==='string'?body.detail:null
     notifyAuthentication(res.status,detail)
-    throw new Error(detail || (res.status>=500?'服务暂时未能完成请求，请稍后重试':res.status===404?'没有找到对应数据，请刷新后重试':res.status===422?'请检查填写内容':`请求失败（${res.status}）`))
+    throw Object.assign(new Error(detail || (res.status>=500?'服务暂时未能完成请求，请稍后重试':res.status===404?'没有找到对应数据，请刷新后重试':res.status===422?'请检查填写内容':`请求失败（${res.status}）`)),{status:res.status})
   }
   return body
 }
@@ -53,6 +53,9 @@ export const api = {
   automationAdvance: (period, body) => call(`/api/automation/months/${encodeURIComponent(period)}/advance`,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(body)}),
   automationDecision: id => call(`/api/automation/decisions/${encodeURIComponent(id)}`),
   automationDecisionRevoke: (id,body) => call(`/api/automation/decisions/${encodeURIComponent(id)}/revoke`,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(body)}),
+  sentinelStatus: () => call('/api/operations/sentinel/status'),
+  sentinelNotifications: (limit=30) => call(`/api/operations/sentinel/notifications?limit=${limit}`),
+  sentinelEvents: (limit=50) => call(`/api/operations/sentinel/events?limit=${limit}`),
   automationDecisionPreview: body => call('/api/automation/decisions/preview',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(body)}),
   automationDecisionApply: body => call('/api/automation/decisions/apply',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(body)}),
   automationClosePreview: body => call('/api/automation/close-batches/preview',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(body)}),

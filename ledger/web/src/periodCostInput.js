@@ -32,6 +32,11 @@ export function verifyPeriodCostReceipt(r,request){
     !identity(r.cost_input_id)||!identity(r.decision_id)||!identity(r.receipt_id)||r.payouts_confirmed!==false||r.period_closed!==false)throw Error('尚未收到完整成本保存回执；可按原请求重试核对')
   return r
 }
+// A definite 4xx rejection wrote nothing. Lost responses, 5xx and malformed
+// receipts may have committed, so only the same request may be resent.
+export function outcomeUnknown(error){
+  return !(error?.status>=400&&error.status<500)
+}
 export function periodCostRevocation(detail,scope,reason){
   if(detail?.decision_id!==scope.decision_id||detail.kind!=='period_cost_input'||detail.action!=='apply'||
     detail.store_id!==scope.store_id||detail.period!==scope.period||
