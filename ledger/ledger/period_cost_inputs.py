@@ -121,7 +121,8 @@ def business_binding(model,store,result,sl,ingestion):
     if 'store' in native.columns:native=native.filter(pl.col('store').is_in([store.id,store.name]))
     if 'period' in native.columns:native=native.filter(pl.col('period').is_null()|pl.col('period').is_in([sl.period,'(未知账期)','(无账期)']))
     fact=sl.facts.filter(pl.col('metric_id').is_in(sorted(COST_METRICS))) if 'metric_id' in sl.facts.columns else sl.facts.head(0)
-    policy={'platform':{'id':store.platform,'cost_pricing':model.platform(store.platform).cost_pricing},
+    pricing=next((p.cost_pricing for p in model.platforms if p.id==store.platform),None)
+    policy={'platform':{'id':store.platform,'cost_pricing':pricing},
         'store':{'id':store.id,'cost_return_posting':store.cost_return_posting},
         'metrics':[policy_value({k:v for k,v in m.model_dump(mode='json').items() if k in metric_fields}) for m in active]}
     native_sources={src.id for src in model.sources if src.is_spine and src.platform in ('any',store.platform)}

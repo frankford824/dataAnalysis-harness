@@ -68,6 +68,30 @@ def test_human_cost_input_persists_before_company_close_and_never_approves_peopl
         assert payload(session)['period_cost_input']['status']=='applied'  # no self-invalidating approval fingerprint
 
 
+def test_approved_total_detail_and_export_never_present_order_rows_as_statement_cost(bundle,monkeypatch):
+    from urllib.parse import unquote
+    from fastapi.testclient import TestClient
+    from ledger import api
+    path,_=bundle
+    with fixture_session(path,seed()) as session:
+        session.recompute('s1');apply(session,preview(session));session.drain_pending()
+        run=session.ws.latest_run('s1','2026-06')['id']
+        monkeypatch.setattr(api,'workspace',lambda:session.ws);monkeypatch.setattr(api,'_model',lambda:session.model)
+        client=TestClient(api.app)
+        scoped=[n['id'] for n in payload(session)['statement'] if n.get('amount_scope')=='approved_store_period_total']
+        assert {'gross_profit','net_profit'}<=set(scoped)
+        for node in scoped:
+            drilled=client.get(f'/api/runs/{run}/drill/{node}')
+            assert drilled.status_code==409 and '整期成本总额' in drilled.json()['detail']
+        assert client.get(f'/api/runs/{run}/drill/n_receipt').status_code==200
+        exported=client.get(f'/api/runs/{run}/fees.csv')
+        assert exported.status_code==200
+        rows=exported.content.decode('utf-8-sig').splitlines()
+        assert rows[0].endswith(',核对状态') and len(rows)>1
+        assert all('人工批准的整期总额：商品成本40' in row and '不能相加核对' in row for row in rows[1:])
+        assert '费项明细-成本为整期批准总额' in unquote(exported.headers['content-disposition'])
+
+
 def test_same_request_returns_same_receipt_and_single_input(bundle):
     path,_=bundle
     with fixture_session(path,seed()) as s:
@@ -76,6 +100,16 @@ def test_same_request_returns_same_receipt_and_single_input(bundle):
         assert s.ws.conn.execute('SELECT count(*) FROM period_cost_input').fetchone()[0]==1
         with pytest.raises((ValueError,PermissionError)):
             apply(s,{**p,'proposal_sha':'a'*64})
+
+
+def test_lost_response_replay_after_preview_expiry_returns_original_receipt(bundle):
+    path,_=bundle
+    with fixture_session(path,seed()) as s:
+        prepare(s);p=preview(s);a=apply(s,p)
+        s.ws.conn.execute('UPDATE automation_proposal SET expires_at=0 WHERE id=?',(p['proposal_id'],));s.ws.conn.commit()
+        assert apply(s,p)==a
+        assert s.ws.conn.execute('SELECT count(*) FROM period_cost_input').fetchone()[0]==1
+        assert s.ws.conn.execute("SELECT count(*) FROM automation_decision WHERE kind='period_cost_input'").fetchone()[0]==1
 
 
 @pytest.mark.parametrize('actor',[{'id':'service','kind':'service','authenticated':True},{'id':'human','kind':'human','authenticated':False},{}])

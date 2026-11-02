@@ -17,7 +17,7 @@ class Event(BaseModel):
     event_id: UUID
     kind: Literal['page_open','store_period_open','manual_amount_edit','manual_confirm','operation_complete']
     at: datetime
-    view: Literal['board','period','deliver','commission','fees','labor','freight']
+    view: Literal['board','period','deliver','commission','fees','labor','freight','ops']
     store_id: str = Field(default='', max_length=128, pattern=r'^[\w.-]*$')
     period: str = Field(default='', pattern=r'^(\d{4}-(0[1-9]|1[0-2]))?$')
     action: str = Field(default='', pattern=r'^[a-z_]{0,48}$')

@@ -107,7 +107,7 @@ def render_wms_preview_items(ingestion, baseline, store, period, target, request
     identities = {tuple(m["physical_identity"]) for m in members}
     if len(identities) != len(members):
         raise Pending("wms_preview_physical_identity_reused")
-    mode = ingestion.model.platform(store.platform).cost_pricing
+    mode = next((p.cost_pricing for p in ingestion.model.platforms if p.id == store.platform), None)
     prices, financial = [], []
     if mode == "provided":
         groups = defaultdict(list)

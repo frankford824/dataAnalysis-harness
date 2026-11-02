@@ -131,11 +131,6 @@ async def request_metrics(request: Request, call_next):
 #: 仓库自带的模型。
 DEFAULT_MODEL = Path(__file__).resolve().parents[2] / "models" / "cn-ecommerce"
 
-#: 从网页做的操作记不到人头上。登录撤掉之后浏览器不带身份，与其编一个「本机操作员」
-#: 让留痕看起来有据，不如留空——界面上空的显示成破折号，一眼看得出这条没人签字。
-#: 需要签字的场合走命令行，`ledger submit --by` 还在。
-ANONYMOUS = ""
-
 #: 工作区。测试里换成临时目录。
 WORKSPACE_ROOT: Path | None = None
 
@@ -1679,6 +1674,10 @@ def drill(run_id: int, node_id: str, limit: int = view.DRILL_LIMIT,
         if node_id == view.UNCLASSIFIED_NODE:
             raise HTTPException(409, "该次核算的明细留档缺失，无法核对未归类行；不能显示为零，原账未改动")
         raise HTTPException(404, "这次算账没留明细，重算一次就有了")
+    state=workspace().state_by_run(run_id)
+    line=next((n for n in ((state.result or {}).get('statement') or []) if n.get('id')==node_id),{}) if state else {}
+    if line.get('amount_scope')=='approved_store_period_total':
+        raise HTTPException(409,"这个数是人工批准的整期成本总额，没有按订单分配，所以没有逐单明细；原始成本缺口请在成本复核里查看")
     try:
         model=_model()
         metrics=([node_id[len(view.METRIC_PREFIX):]] if node_id.startswith(view.METRIC_PREFIX) else view.node_metrics(model,node_id))
@@ -1697,8 +1696,6 @@ def drill(run_id: int, node_id: str, limit: int = view.DRILL_LIMIT,
                           value=_node_value(run_id, node_id), offset=offset,
                           subject=subject or None, file=file or None,
                           q=q or None, order=order, only=only)
-        state=workspace().state_by_run(run_id)
-        line=next((n for n in ((state.result or {}).get('statement') or []) if n.get('id')==node_id),{}) if state else {}
         response['statement_available']=line.get('available')
         from .fee_display import current_terms
         response['unavailable_reason']=current_terms(line.get('unavailable_reason',''))
@@ -1816,10 +1813,15 @@ def fees_export(run_id: int) -> PlainTextResponse:
             facts=frozen_costs.for_run(workspace(),run_id,facts,_model(),required=True)
         except WorkspaceError as exc:
             raise HTTPException(409,str(exc)) from exc
+    approved = (((state.result or {}).get("period_cost_input") or {}) if state else {})
+    approved = approved.get("costs") if approved.get("status") == "applied" else None
     review_status = ("已含本次结账冻结的人工成本；合计本行计入金额列核对，勿重复加分摊来源金额；不包含后续补录修改" if manual
+                     else ("报表成本为人工批准的整期总额：商品成本{goods}、代发成本{dropship}、补发成本{reshipment}，未按订单分配；"
+                           "本表成本源行只是原始证据，计入金额不等于报表成本，不能相加核对").format(**approved) if approved
                      else f"{gap_count}条成本未覆盖，现有源行金额需人工确认" if gap_count else "")
     body = "\ufeff" + view.fees_csv(facts, _model(), review_status=review_status)
-    suffix = "结账费项明细-含冻结人工成本" if manual else "费项明细-成本需确认" if gap_count else "费项明细"
+    suffix = ("结账费项明细-含冻结人工成本" if manual else "费项明细-成本为整期批准总额" if approved
+              else "费项明细-成本需确认" if gap_count else "费项明细")
     filename = f"{store}-{period}-{suffix}-核算状态版.csv"
     ascii_name = f"{store}-{period}-fees-v2.csv"
     return PlainTextResponse(
