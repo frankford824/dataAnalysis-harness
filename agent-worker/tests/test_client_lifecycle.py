@@ -15,6 +15,8 @@ from ledger_agent.commands import Catalog
 from finance_agent.config import AgentConfig
 from finance_agent.state import AgentState
 
+PRICE={'version':'unit-fixture','currency':'CNY','input_per_million':'1','output_per_million':'2'}
+
 
 @pytest.mark.parametrize('mode',['success','http_failure','timeout','agent_construction_failure'])
 def test_owned_sdk_client_is_closed_before_worker_starts_the_next_loop(tmp_path,monkeypatch,mode):
@@ -70,7 +72,7 @@ def test_owned_sdk_client_is_closed_before_worker_starts_the_next_loop(tmp_path,
         return httpx.Response(200,json={'ok':True})
     state=AgentState(tmp_path/'protocol');state.set_secret('agent_id','worker');state.set_secret('access_token','unit-key')
     control=Control(AgentConfig(control_plane_url='http://ledger',state_dir=tmp_path),state,transport=httpx.MockTransport(wire))
-    config=Config('http://127.0.0.1:'+str(server.server_port)+'/v1','unit-lifecycle-key',(ModelSpec('fixture'),),
+    config=Config('http://127.0.0.1:'+str(server.server_port)+'/v1','unit-lifecycle-key',(ModelSpec('fixture',price=PRICE),),
                   evaluation=True,timeout_seconds=.01 if mode=='timeout' else 5)
     running=Worker(Runtime(config,State(tmp_path/'audit')),control,Catalog({},tmp_path/'tools'))
     try:
@@ -114,7 +116,7 @@ def test_ops_phase_closes_its_own_public_client_in_each_owner_loop(tmp_path,monk
         def path(self,identifier):return tmp_path
         def model_tools(self,identifier):return {}
     config=Config('http://127.0.0.1:'+str(server.server_port)+'/v1','unit-ops-key',
-                  (ModelSpec('fixture',skills=('ops',)),),evaluation=True,max_iters=1)
+                  (ModelSpec('fixture',price=PRICE,skills=('ops',)),),evaluation=True,max_iters=1)
     try:
         for _ in range(2):
             asyncio.run(_model_phase(Repair(),'synthetic',config,State(tmp_path/'audit-ops'),config.models[0],None))

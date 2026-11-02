@@ -1,5 +1,6 @@
 """Actual AgentScope SDK + loopback provider wire; not a live-model benchmark."""
 import asyncio
+from decimal import Decimal
 import json
 from http.server import BaseHTTPRequestHandler,ThreadingHTTPServer
 from pathlib import Path
@@ -13,6 +14,8 @@ sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
 from ledger_agent.runtime import Config,ModelSpec,Runtime
 from ledger_agent.state import State
 from ledger_agent.privacy import check_outbound,render
+
+PRICE={'version':'unit-fixture','currency':'CNY','input_per_million':'1','output_per_million':'2'}
 
 
 @pytest.fixture
@@ -45,7 +48,7 @@ def provider():
 
 
 def config(url):
-    return Config(url,'synthetic-key',(ModelSpec('fixture'),),timeout_seconds=10,evaluation=True)
+    return Config(url,'synthetic-key',(ModelSpec('fixture',price=PRICE),),timeout_seconds=10,evaluation=True)
 
 
 def test_real_sdk_executes_tool_and_only_checker_proves_completion(tmp_path,provider):
@@ -65,7 +68,8 @@ def test_real_sdk_executes_tool_and_only_checker_proves_completion(tmp_path,prov
     assert 'ev_' in wire
     assert state.summary()['input_tokens']==80
     assert state.summary()['supplier_settled']=={}
-    assert state.summary()['price_unknown_calls']==2
+    assert state.summary()['price_unknown_calls']==0
+    assert Decimal(state.summary()['budget']['committed'])==Decimal(state.summary()['estimated_cost'])>0
 
 
 def test_successful_model_prose_cannot_override_failed_checker(tmp_path,provider):
@@ -94,7 +98,7 @@ def test_unsupported_model_numbers_are_discarded_not_displayed(tmp_path,provider
 
 def test_unvalidated_model_is_not_silently_production_enabled(tmp_path,provider):
     url,requests = provider
-    result = asyncio.run(Runtime(Config(url,'synthetic',(ModelSpec('fixture'),)),State(tmp_path))
+    result = asyncio.run(Runtime(Config(url,'synthetic',(ModelSpec('fixture',price=PRICE),)),State(tmp_path))
         .run({'id':'c'},{},lambda:{'verified':False}))
     assert result['reason']=='model_not_validated' and not requests
 

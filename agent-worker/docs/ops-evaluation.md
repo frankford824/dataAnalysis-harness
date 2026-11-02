@@ -10,10 +10,11 @@
 PYTHONPATH=agent-worker:.:ledger agent-worker/.venv/bin/python -m ledger_agent.ops_evaluate \
   --output /srv/example/sdk-ops-evaluation-unique \
   --runtime /home/example/dataAnalysis/ledger/.venv \
-  --model deepseek-v4-flash-0731 --rounds 5 --concurrency 2
+  --model deepseek-v4-flash-0731 --rounds 5 --concurrency 2 \
+  --price /srv/example/prices/deepseek-v4-flash-0731.json
 ```
 
-输出目录必须是仓库外的新目录。完整评估包含二十个不同的合成纯函数故障，每案五轮。子集或单轮可调试，但不生成可用 profile；实际会调用模型并记录供应商返回的 usage。未配置价格时费用保持未知，供应商账单单独核销，不能把 token 统计称作账单。
+输出目录必须是仓库外的新目录。完整评估包含二十个不同的合成纯函数故障，每案五轮。子集或单轮可调试，但不生成可用 profile；实际会调用模型并记录供应商返回的 usage。`--price` 必填（格式见 Worker README），每次调用都占用同一月度 2000 元上限；估算费用不等于账单，供应商账单单独核销。
 
 每轮先由父进程控制的 oracle 在真正断网 bwrap 中确认原始程序不符合独立预期，再让模型使用 `list_code/read_code/write_code/run_check`。补丁冻结后模型工具关闭；候选仅得到单个只读纯代码文件和输入，拿不到期望、权威输出目录、整个仓库或真实资料。父进程比较结果、自行写出收据；候选 JUnit 和退出码只作反馈，不能自行证明修复成功。
 

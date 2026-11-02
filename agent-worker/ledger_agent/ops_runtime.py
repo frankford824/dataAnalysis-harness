@@ -11,6 +11,9 @@ from pathlib import Path
 
 from .privacy import check_outbound
 from .runtime import runtime_identity
+from .state import BudgetExhausted, budget, worst_case
+
+MAX_OUTPUT_TOKENS=2500
 
 ROOT=Path(__file__).resolve().parents[2]
 OPS_FILES=('agent-worker/ledger_agent/ops_runtime.py','agent-worker/ledger_agent/ops_evaluate.py',
@@ -176,6 +179,7 @@ async def _model_phase(repair,identifier,config,state,spec,oracle):
     from agentscope.permission import PermissionDecision,PermissionBehavior
     from agentscope.tool import Toolkit,FunctionTool,ToolChunk,ToolChoice
     tools=repair.model_tools(identifier);steps={'listed':False,'read':False,'written':False,'passed':False}
+    cap=budget(getattr(config,'monthly_budget',None))
 
     class Audit(MiddlewareBase):
         async def on_model_call(self,agent,input_kwargs,next_handler):
@@ -189,6 +193,8 @@ async def _model_phase(repair,identifier,config,state,spec,oracle):
                         function['parameters']['properties']['check_id']['enum']=['',*[check['id'] for check in repair.config.get('checks',[])]]
             visible=[msg.model_dump(mode='json') for msg in input_kwargs['messages']]
             check_outbound(visible);sha=state.outbound(identifier,visible)
+            size=len(json.dumps([visible,input_kwargs.get('tools')],ensure_ascii=False,default=str).encode())
+            state.reserve(identifier,spec.name,spec.price,sha,size,MAX_OUTPUT_TOKENS,cap)
             try:response=await next_handler(**input_kwargs)
             except Exception:
                 state.usage(identifier,spec.name,None,sha,status='usage_unknown_failed');raise
@@ -248,7 +254,7 @@ async def _model_phase(repair,identifier,config,state,spec,oracle):
     event=json.loads((repair.path(identifier)/'event.json').read_text(encoding='utf-8'));check_outbound(event)
     model=OpenAIChatModel(credential=OpenAICredential(api_key=config.api_key,base_url=config.base_url),
         model=spec.name,stream=False,max_retries=0,client_kwargs={'timeout':30},
-        parameters=OpenAIChatModel.Parameters(max_tokens=2500,temperature=0))
+        parameters=OpenAIChatModel.Parameters(max_tokens=MAX_OUTPUT_TOKENS,temperature=0))
     try:
         agent=Agent(name='ledger_ops',system_prompt=prompt,model=model,toolkit=toolkit,middlewares=[Audit()],
             react_config=ReActConfig(max_iters=config.max_iters))
@@ -303,4 +309,9 @@ async def execute_repair(repair,identifier,config,state,spec,*,run_acceptance=Tr
 async def run_repair(repair,repair_id,config,state):
     try:spec=validate_ops_model(config)
     except (OSError,ValueError,TypeError,KeyError,AttributeError):return {'state':'waiting_configuration','reason':'ops_model_not_validated','published':False}
-    return await execute_repair(repair,repair_id,config,state,spec)
+    if worst_case(spec.price,0,MAX_OUTPUT_TOKENS) is None:
+        return {'state':'waiting_configuration','reason':'model_price_unknown_under_cap','published':False}
+    result=await execute_repair(repair,repair_id,config,state,spec)
+    if result.get('model_error')==BudgetExhausted.__name__ and result.get('state')!='reviewable':
+        return {**result,'state':'waiting_configuration','reason':'monthly_budget_exhausted'}
+    return result

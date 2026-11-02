@@ -1,5 +1,6 @@
 """Real SDK/loopback + real bwrap contract tests; not a live-model certificate."""
 import asyncio
+from decimal import Decimal
 import hashlib
 from http.server import BaseHTTPRequestHandler,ThreadingHTTPServer
 import json
@@ -15,6 +16,8 @@ from ledger_agent.runtime import Config,ModelSpec,runtime_identity
 from ledger_agent.ops_runtime import validate_ops_model,run_repair,ops_identity
 from ledger_agent.ops_evaluate import evaluate
 from ledger_agent.state import State
+
+PRICE={'version':'unit-fixture','currency':'CNY','input_per_million':'1','output_per_million':'2'}
 
 
 @pytest.fixture
@@ -52,7 +55,7 @@ def report_for(tmp_path,base,**changes):
         'kind':'synthetic_ops_evaluation','ops_runtime_sha':ops_identity(),'normal_case_count':20,
         'normal_trials':100,'normal_verified':100,'trusted_release_approved':False,'live_provider':True}
     report.update(changes);path=tmp_path/'contract-only-report.json';path.write_text(json.dumps(report))
-    return Config(base,'unit-secret',(ModelSpec('fixture',skills=('ops',),evaluation_path=str(path),
+    return Config(base,'unit-secret',(ModelSpec('fixture',price=PRICE,skills=('ops',),evaluation_path=str(path),
         evaluation_sha=hashlib.sha256(path.read_bytes()).hexdigest()),))
 
 
@@ -65,7 +68,7 @@ def test_core_or_evidence_certificate_cannot_be_relabelled_as_ops(tmp_path,chang
 
 
 def test_calibration_flag_does_not_authorize_production_repair(tmp_path):
-    config=Config('http://unit.invalid/v1','unit-secret',(ModelSpec('fixture',skills=('ops',)),),evaluation=True)
+    config=Config('http://unit.invalid/v1','unit-secret',(ModelSpec('fixture',price=PRICE,skills=('ops',)),),evaluation=True)
     with pytest.raises(ValueError):validate_ops_model(config)
     class Forbidden:
         def model_tools(self,*args):pytest.fail('Unqualified profile reached model tools')
@@ -83,14 +86,14 @@ def test_client_lifecycle_change_does_not_relabel_the_prior_actual_qualification
 
 def test_real_sdk_lists_fixes_and_independent_bwrap_rechecks_original_counterexample(tmp_path,provider):
     base,requests=provider
-    config=Config(base,'unit-secret',(ModelSpec('fixture',skills=('ops',)),),evaluation=True,timeout_seconds=30)
+    config=Config(base,'unit-secret',(ModelSpec('fixture',price=PRICE,skills=('ops',)),),evaluation=True,timeout_seconds=30)
     result=asyncio.run(evaluate(config,tmp_path/'evaluation',runtime=ROOT/'ledger/.venv',
         rounds=1,concurrency=1,selection=['inclusive_total'],live_provider=False))
     assert result['correct']==1 and result['normal_verified']==1
     assert result['passed'] is False and result['live_provider'] is False
     assert not (tmp_path/'evaluation'/'ops-model-profile.json').exists()
     assert len(requests)>=5 and result['usage']['calls']==len(requests)
-    assert result['usage']['supplier_settled']=={} and result['usage']['price_unknown_calls']==len(requests)
+    assert result['usage']['supplier_settled']=={} and result['usage']['price_unknown_calls']==0 and Decimal(result['usage']['budget']['committed'])>0
     row=result['results'][0];proof=json.loads((tmp_path/'evaluation'/row['proof_path']).read_text())
     assert proof['counterexample_verified'] and proof['original_tests_unchanged']
     assert proof['code_repair_status']=='verified' and proof['acceptance_state']=='blocked'
@@ -175,7 +178,7 @@ def test_evaluator_detects_a_false_verified_claim_with_actual_external_oracle(tm
     async def unsupported_claim(*args,**kwargs):
         return {'state':'repair_verified_release_blocked','code_repair_status':'verified','published':False}
     monkeypatch.setattr(ops_evaluate,'execute_repair',unsupported_claim)
-    config=Config('http://not-called.invalid/v1','unit-secret',(ModelSpec('fixture',skills=('ops',)),),evaluation=True)
+    config=Config('http://not-called.invalid/v1','unit-secret',(ModelSpec('fixture',price=PRICE,skills=('ops',)),),evaluation=True)
     result=asyncio.run(ops_evaluate.evaluate(config,tmp_path/'evaluation',runtime=ROOT/'ledger/.venv',
         rounds=1,concurrency=1,selection=['inclusive_total'],live_provider=False))
     assert result['false_completions']==1 and result['correct']==0 and result['passed'] is False

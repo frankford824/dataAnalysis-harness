@@ -9,7 +9,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from .privacy import check_outbound, render
-from .state import State
+from .state import BudgetExhausted, State, budget, worst_case
+
+MAX_OUTPUT_TOKENS = 1200
 
 
 def runtime_identity():
@@ -40,6 +42,7 @@ class Config:
     max_iters: int = 20
     timeout_seconds: float = 300
     evaluation: bool = False
+    monthly_budget: dict | None = None
 
     def select(self, skills):
         def validated(model):
@@ -84,9 +87,13 @@ class Runtime:
             spec = self.config.select(case.get('skills',('evidence',)))
         except ValueError:
             return {'state':'waiting_configuration','model_used':False,'reason':'model_not_validated'}
+        if worst_case(spec.price,0,MAX_OUTPUT_TOKENS) is None:
+            return {'state':'waiting_configuration','model_used':False,'reason':'model_price_unknown_under_cap'}
+        cap=budget(self.config.monthly_budget)
         runtime = self
         artifact_refs=[]
         attempted=set()
+        stopped={}
 
         class Audit(MiddlewareBase):
             async def on_model_call(self, agent, input_kwargs, next_handler):
@@ -108,6 +115,12 @@ class Runtime:
                 payload = [msg.model_dump(mode='json') for msg in input_kwargs['messages']]
                 check_outbound(payload)
                 request_sha = runtime.state.outbound(case['id'], payload)
+                size=len(json.dumps([payload,input_kwargs.get('tools')],ensure_ascii=False,default=str).encode())
+                try:
+                    runtime.state.reserve(case['id'],spec.name,spec.price,request_sha,size,MAX_OUTPUT_TOKENS,cap)
+                except BudgetExhausted as exc:
+                    stopped['reason']=exc.reason
+                    raise
                 try:
                     response = await next_handler(**input_kwargs)
                 except Exception:
@@ -154,7 +167,7 @@ class Runtime:
             if path.is_file(): prompt += '\n'+path.read_text(encoding='utf-8')
         model = OpenAIChatModel(credential=OpenAICredential(api_key=self.config.api_key,base_url=self.config.base_url),
                                 model=spec.name,stream=False,max_retries=0,client_kwargs={'timeout':30},
-                                parameters=OpenAIChatModel.Parameters(max_tokens=1200,temperature=0))
+                                parameters=OpenAIChatModel.Parameters(max_tokens=MAX_OUTPUT_TOKENS,temperature=0))
         try:
             agent = Agent(name='ledger_worker',system_prompt=prompt,model=model,toolkit=toolkit,
                           middlewares=[Audit()],react_config=ReActConfig(max_iters=self.config.max_iters))
@@ -172,12 +185,17 @@ class Runtime:
                 text = '自动取证已结束，剩余事项以系统复核为准。'
                 prose_guard = 'rejected_and_replaced'
         except Exception as exc:
+            if stopped:
+                return {'state':'waiting_configuration','model_used':True,'reason':stopped['reason']}
             return {'state':'maintenance','model_used':True,'error_code':type(exc).__name__}
         finally:
             # AgentScope 2.0.11 exposes the owned OpenAI AsyncClient publicly.
             # Close it on this loop before Worker.once starts its next loop.
             await model.client.close()
         after = checker()
+        if stopped and after.get('verified') is not True:
+            return {'state':'waiting_configuration','model_used':True,'reason':stopped['reason'],'checker':after,
+                    'artifact_refs':list(dict.fromkeys(artifact_refs))}
         return {'state':'verified' if after.get('verified') is True else 'waiting_evidence',
                 'model_used':True,'checker':after,'explanation':text,'prose_guard':prose_guard,
                 'artifact_refs':list(dict.fromkeys(artifact_refs))}

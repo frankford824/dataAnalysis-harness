@@ -12,7 +12,7 @@ import time
 
 from .ops_runtime import ROOT,ops_identity,execute_repair,file_sha,digest
 from .runtime import Config,ModelSpec,runtime_identity
-from .state import State
+from .state import State,cost_per_correct
 
 # The expected tests are original trusted fixture files. The model may read
 # them, but Repair refuses edits and the frozen verification hashes them again.
@@ -162,7 +162,7 @@ async def evaluate(config,output,*,runtime,rounds=5,concurrency=2,selection=None
     report=output/'ops-evaluation.json';report.write_text(json.dumps(result,ensure_ascii=False,indent=2))
     if result['passed']:
         profile={'name':spec.name,'skills':['ops'],'evaluation_path':str(report),'evaluation_sha':file_sha(report),
-            'price':None,'cost_per_correct':None}
+            'price':spec.price,'cost_per_correct':cost_per_correct(summary,result['normal_verified'])}
         (output/'ops-model-profile.json').write_text(json.dumps(profile,ensure_ascii=False,indent=2))
     return result
 
@@ -172,12 +172,15 @@ def main():
     parser.add_argument('--output',type=Path,required=True);parser.add_argument('--runtime',type=Path,required=True)
     parser.add_argument('--rounds',type=int,default=5);parser.add_argument('--concurrency',type=int,default=2)
     parser.add_argument('--case',action='append');parser.add_argument('--model',default='deepseek-v4-flash-0731')
+    parser.add_argument('--price',type=Path,required=True)
     args=parser.parse_args()
+    from .state import load_price
+    price=load_price(args.price)
     sys.path.insert(0,str(ROOT));sys.path.insert(0,str(ROOT/'ledger'))
     from ledger.assist import load_config
     saved=load_config()
     if not saved.ready:raise SystemExit('Existing ledger gateway is not configured')
-    config=Config(saved.base_url,saved.api_key,(ModelSpec(args.model,skills=('ops',)),),evaluation=True,timeout_seconds=180,max_iters=16)
+    config=Config(saved.base_url,saved.api_key,(ModelSpec(args.model,skills=('ops',),price=price),),evaluation=True,timeout_seconds=180,max_iters=16)
     result=asyncio.run(evaluate(config,args.output,runtime=args.runtime,rounds=args.rounds,concurrency=args.concurrency,selection=args.case,live_provider=True))
     print(json.dumps({key:value for key,value in result.items() if key!='results'},ensure_ascii=False))
     return 0 if result['passed'] else 1

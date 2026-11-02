@@ -49,8 +49,11 @@ worker CLI 的地址优先级为 JSON `base_url` → `FA_GATEWAY_BASE_URL` → `
 python -m ledger_agent.evaluate \
   --output /srv/example/ledger-worker/evaluations/evidence-20261027-01 \
   --rounds 5 \
-  --model example-evidence-model
+  --model example-evidence-model \
+  --price /srv/example/ledger-worker/prices/example-evidence-model.json
 ```
+
+`--price` 必填，内容为供应商当前标价（人民币，每百万 token）：`{"version":"供应商价目日期","currency":"CNY","input_per_million":"…","output_per_million":"…"}`，有缓存单价时另加 `cached_input_per_million`。业务 Agent、运维修复和三个评估器共享同一 `state_dir` 时共用一个月度上限：默认且最高 2000 元（按上海时区自然月），配置 `"monthly_budget":{"amount":"…","currency":"CNY"}` 只能调低。每次调用前按"全部输入字节都算未缓存 token、输出按上限"预留最坏费用，超出即不发送，案件进入 `waiting_configuration`（原因 `monthly_budget_exhausted`）；没有单价的模型直接不调用（原因 `model_price_unknown_under_cap`），未知价格不按零计。`--usage` 输出中的 `budget.committed` 是本月已占用额度。
 
 评估器覆盖二十个声明的合成案件，每案五轮；这些是带真实 provider 调用的合成取证用例，会产生模型调用费用。`evaluation.json` 始终记录结果，只有全部通过才生成 `model-profile.json`。`production_corpus_verified: false` 表示未验证真实财务语料；不能据此声称生产历史缺口已修复。`--case` 子集或少于五轮的调试结果不能用于运行时准入。
 
@@ -92,7 +95,7 @@ print("evidence profile 已核验并写入配置")
 PY
 ```
 
-不要手改 `evaluation.json`、`evaluation_sha`、`skills` 或 `passed` 来通过准入。`evaluation_path` 是该机器上的绝对路径；移动评估材料、修改运行时/技能文件或更换网关地址后，需要重新核验，必要时重新评估。当前 runtime 身份绑定 `runtime.py`、`privacy.py`、`state.py` 和 evidence skill；provider 身份绑定去掉末尾斜线的网关地址，**不证明网关背后的模型权重、路由或生产语料表现相同**。`price` 和 `cost_per_correct` 缺少可靠报价时保持 `null`；不能据此宣布最低成本。
+不要手改 `evaluation.json`、`evaluation_sha`、`skills` 或 `passed` 来通过准入。`evaluation_path` 是该机器上的绝对路径；移动评估材料、修改运行时/技能文件或更换网关地址后，需要重新核验，必要时重新评估。当前 runtime 身份绑定 `runtime.py`、`privacy.py`、`state.py` 和 evidence skill；provider 身份绑定去掉末尾斜线的网关地址，**不证明网关背后的模型权重、路由或生产语料表现相同**。profile 中的 `price` 来自评估时的 `--price` 文件，`cost_per_correct` 按该价目对全部调用估算；有调用缺用量时保持 `null`，不能据此宣布最低成本。
 
 ## 4. 建立人工账号与独立服务身份
 

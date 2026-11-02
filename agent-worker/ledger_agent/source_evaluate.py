@@ -209,12 +209,15 @@ async def evaluate(config,output:Path,*,rounds=5,concurrency=2,selection=None):
 def main():
     parser=argparse.ArgumentParser(description=__doc__);parser.add_argument('--output',type=Path,required=True)
     parser.add_argument('--rounds',type=int,default=5);parser.add_argument('--concurrency',type=int,default=2)
-    parser.add_argument('--case',action='append');parser.add_argument('--model',default='deepseek-v4-flash-0731');args=parser.parse_args()
+    parser.add_argument('--case',action='append');parser.add_argument('--model',default='deepseek-v4-flash-0731')
+    parser.add_argument('--price',type=Path,required=True);args=parser.parse_args()
+    from .state import load_price
+    price=load_price(args.price)
     sys.path.insert(0,str(Path(__file__).resolve().parents[2]/'ledger'))
     from ledger.assist import load_config
     saved=load_config()
     if not saved.ready:raise SystemExit('Configured gateway unavailable')
-    report=asyncio.run(evaluate(Config(saved.base_url,saved.api_key,(ModelSpec(args.model),),evaluation=True),args.output,
+    report=asyncio.run(evaluate(Config(saved.base_url,saved.api_key,(ModelSpec(args.model,price=price),),evaluation=True),args.output,
                                 rounds=args.rounds,concurrency=args.concurrency,selection=args.case))
     print(json.dumps({k:v for k,v in report.items() if k!='results'},ensure_ascii=False));raise SystemExit(0 if report['passed'] else 1)
 

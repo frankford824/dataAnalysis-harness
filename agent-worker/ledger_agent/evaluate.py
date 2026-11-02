@@ -9,7 +9,7 @@ import sys
 import time
 
 from .runtime import Config,ModelSpec,Runtime,runtime_identity
-from .state import State
+from .state import State,cost_per_correct
 
 CASES = (
     ('split_shipment','freight',True),('merged_parents','freight',True),
@@ -73,8 +73,8 @@ async def evaluate(config,output:Path,*,rounds=5,concurrency=2,selection=None):
     report_path.write_text(json.dumps(result,ensure_ascii=False,indent=2))
     if result['passed']:
         profile={'name':config.models[0].name,'skills':['evidence'],'evaluation_path':str(report_path.resolve()),
-                 'evaluation_sha':hashlib.sha256(report_path.read_bytes()).hexdigest(),'price':None,
-                 'cost_per_correct':None}
+                 'evaluation_sha':hashlib.sha256(report_path.read_bytes()).hexdigest(),'price':config.models[0].price,
+                 'cost_per_correct':cost_per_correct(result['usage'],result['correct'])}
         (output/'model-profile.json').write_text(json.dumps(profile,ensure_ascii=False,indent=2))
     return result
 
@@ -86,12 +86,15 @@ def main():
     parser.add_argument('--concurrency',type=int,default=2)
     parser.add_argument('--case',action='append')
     parser.add_argument('--model')
+    parser.add_argument('--price',type=Path,required=True)
     args=parser.parse_args()
+    from .state import load_price
+    price=load_price(args.price)
     sys.path.insert(0,str(Path(__file__).resolve().parents[2]/'ledger'))
     from ledger.assist import load_config
     saved=load_config()
     if not saved.ready:raise SystemExit('Existing ledger gateway is not configured')
-    config=Config(saved.base_url,saved.api_key,(ModelSpec(args.model or saved.model),),evaluation=True)
+    config=Config(saved.base_url,saved.api_key,(ModelSpec(args.model or saved.model,price=price),),evaluation=True)
     result=asyncio.run(evaluate(config,args.output,rounds=args.rounds,concurrency=args.concurrency,selection=args.case))
     print(json.dumps({k:v for k,v in result.items() if k!='results'},ensure_ascii=False))
     raise SystemExit(0 if result['passed'] else 1)

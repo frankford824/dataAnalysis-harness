@@ -48,7 +48,7 @@ Worker 配置示例（以下路径须按实际已安装运行时核对）：
 - 无 Node、会话失效、字节或时间预算、过期输入、租约丢失均保留真实 pending/maintenance。
 - 心跳只传配置及会话的单向摘要。宿主恢复后，在新的配置 epoch 下重试同一持久任务；原失败收据不覆盖。
 - 通用与运维模型每轮都在所属事件循环关闭公开 AsyncClient。必需回归包括真实 Worker 连续新循环的成功、HTTP 失败、超时和 Agent 构造失败；仅在一个长 async loop 下评估不能替代这些检查。
-- 运行 `python -m ledger_agent.source_evaluate`，至少二十案例、每例五次。逻辑运行数、确定性零模型运行、真实网关调用、停服探针和 token 分开报告。合成 I/O 资格不是财务黄金样本，也不是生产结账观察。
+- 运行 `python -m ledger_agent.source_evaluate --price <价目文件>`，至少二十案例、每例五次，调用计入同一月度上限。逻辑运行数、确定性零模型运行、真实网关调用、停服探针和 token 分开报告。合成 I/O 资格不是财务黄金样本，也不是生产结账观察。
 - 任何来源漂移、未完成评估或中断尝试均不能准入。调用及 unknown usage 全部保留，报价和结算未知时不能报告人民币实付为零。
 
 成本 v3 的预览、授权及采用独立于原日输入。后端通过 `verified_source()` 重读原件、原 raw 与完整原字段；缺失标志保持 unknown，不能将 Split 改成 Sent，不能默认 `is_suspect`、gift 或 virtual 为 false。

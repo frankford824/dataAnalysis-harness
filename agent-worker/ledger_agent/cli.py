@@ -39,10 +39,13 @@ def main():
         from ledger.assist import load_config
         inherited=load_config()
         base,key=base or inherited.base_url,key or inherited.api_key
+    from .state import budget
+    budget(raw.get('monthly_budget'))
     config = Config(base_url=base,
-                    api_key=key,models=tuple(ModelSpec(**row) for row in raw.get('models',[])))
+                    api_key=key,models=tuple(ModelSpec(**row) for row in raw.get('models',[])),
+                    monthly_budget=raw.get('monthly_budget'))
     if raw.get('model_enabled',True) is False or os.environ.get('LEDGER_AGENT_MODEL_ENABLED')=='0':
-        config=Config(base_url='',api_key='',models=config.models)
+        config=Config(base_url='',api_key='',models=config.models,monthly_budget=config.monthly_budget)
     if args.repair_event:
         from .ops_runtime import run_repair,validate_ops_model
         from .worker import ROOT
