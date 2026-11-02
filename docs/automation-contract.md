@@ -1,6 +1,6 @@
 # 月度自动化执行合同
 
-所有财务终态仍由已认证人工确认。服务身份不能批准规则授权、营业范围、公摊总额、月结、反结账或实发。经营页和专家页的 `can_close` 是当前最终 Checker 的读视图；封存原核算的引擎标记保留为 `engine_can_close`，不能用它判定最终就绪。
+所有财务终态仍由已认证人工确认。服务身份不能批准规则授权（含 Agent 全面授权）、营业范围、公摊总额、月结、反结账或实发。经营页和专家页的 `can_close` 是当前最终 Checker 的读视图；封存原核算的引擎标记保留为 `engine_can_close`，不能用它判定最终就绪。
 
 ## 本次上线范围：只自动处理新账期
 
@@ -16,6 +16,20 @@
 ## 原生确定性规则
 
 `GET /api/automation/rules` 返回规则语义及 `rule_sha`。`LEDGER_DETERMINISTIC_AUTOMATION_ENABLED` 默认关闭。开启后仍需人工用现有决定 preview/apply 流程批准 `kind=rule_grant`；服务无权自行授权。
+
+### Agent 全面授权（模型判断、引擎计算、人最终确认）
+
+2026-11-02 用户决定：Worker 可直接修改，人可同时主动修改，结账由人最终确认。实现方式是一次人工确认的全面授权：
+
+- `POST /api/automation/agent-authority/preview|apply` 只接受已登录人工身份。确认后为起始业务月每家营业店铺 × 每条已发布规则各写一条标准 `rule_grant`，各自带人工 `decision.apply` 认证并在 `scope_json.agent_authority` 标注来源，因此 Checker、规则执行器、撤销和审计与逐条批准完全一致。一次最多 24 个业务月、执行有效期 1 至 366 天；确认后立即触发一次已授权规则。
+- 金额只由规则执行器按原始依据计算，模型和 Worker 不提交金额。已结账店月不被执行器改动；不自动反结账、不改实发。
+- `GET /api/automation/agent-authority?period=` 返回覆盖情况与本月 Agent 已自动处理的改动；人可逐项用现有决定撤销接口撤回（流水规则撤回原因至少 8 字）。`POST .../revoke` 一键撤销本月仍生效的全部委托授权，人工单独批准的授权不受影响。
+- 月结预览的每家可结店铺带 `automatic_changes`；确认月结即对这些改动做最终确认。
+- 起始业务月之后新开的店铺需要再次授权；规则版本变化后授权失效，需续授权。
+
+### 随时提问
+
+`POST /api/automation/questions`（人工）创建问题；Worker 经 `/api/v1/agent-questions/claim|{id}/answer|{id}/fail` 按租约领取和回答。模型只看到报表结构、可用状态、正负号、公式关系、掩码后的原因和问题代码，看不到金额；回答中的金额只能写 `{{node:编号}}`，读取时由台账用领取时的核算结果填入。占位符以外出现数字（账期写法除外）即拒绝显示。Worker 只有在 `qa` 技能评测（≥20 案例 × 5 轮全对、`qa_sha` 与当前代码一致）通过后才调用模型，并与业务、运维共用每月 2000 元预算。
 
 授权值包含 `rule_id`、`rule_sha`、`enabled`、带时区的执行有效期 `valid_from` / `valid_until`。可另外指定业务账期范围 `period_from` / `period_until`（`YYYY-MM`，两端包含）。不填写业务账期范围时仅作用于决定的本月；执行时间有效不等于可处理任何历史月。授权失效、撤销或规则版本变化后拒绝新效果。
 
