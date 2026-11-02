@@ -1,0 +1,138 @@
+{
+  "review_commit": "ca30b27463c717401c22798a0cb0e3bb426ae763",
+  "scope": {
+    "since": "2026-09-26T00:00:00-07:00",
+    "until": "2026-10-26T23:59:59-07:00",
+    "ledger_commits": 54,
+    "fix": 39,
+    "feat": 15,
+    "commits_changing_test_files": 54
+  },
+  "backend_fast": {
+    "tests": 2201,
+    "passed": 2196,
+    "failed": 5,
+    "skipped": 0,
+    "failures": [
+      "tests.test_order_components::test_bad_embedded_component_row_is_isolated_without_guessing_cost",
+      "tests.test_taobao_douyin_history::test_original_platform_day_controls_cost_evidence[register-2026-06-05-2026-06-05-True-taobao]",
+      "tests.test_taobao_douyin_history::test_original_platform_day_controls_cost_evidence[register-2026-06-05-2026-06-05-True-douyin]",
+      "tests.test_taobao_douyin_history::test_original_platform_day_controls_cost_evidence[register_first-2026-06-05-2026-06-05-True-taobao]",
+      "tests.test_taobao_douyin_history::test_original_platform_day_controls_cost_evidence[register_first-2026-06-05-2026-06-05-True-douyin]"
+    ]
+  },
+  "backend_real": {
+    "tests": 14,
+    "passed": 3,
+    "failed": 11,
+    "skipped": 0,
+    "failures": [
+      "tests.test_acceptance::test_store_reconciles_exactly[\\u6296\\u97f3\\u6d45\\u82b1\\u6da7\\u8282\\u65e5\\u88c5\\u9970]",
+      "tests.test_acceptance::test_store_reconciles_exactly[\\u6dd8\\u5b9d\\u559c\\u5fc5\\u987a]",
+      "tests.test_acceptance::test_store_can_close[taobao_xibishun]",
+      "tests.test_acceptance::test_store_can_close[alibaba1688_xingze]",
+      "tests.test_acceptance::test_store_can_close[douyin_qianhuajian]",
+      "tests.test_acceptance::test_coverage_denominator_is_scoped[taobao_xibishun]",
+      "tests.test_acceptance::test_coverage_denominator_is_scoped[alibaba1688_xingze]",
+      "tests.test_acceptance::test_coverage_denominator_is_scoped[douyin_qianhuajian]",
+      "tests.test_acceptance::test_spine_source_not_reported_missing[taobao_xibishun]",
+      "tests.test_acceptance::test_spine_source_not_reported_missing[douyin_qianhuajian]",
+      "tests.test_replay::test_nothing_moved_since_baseline"
+    ]
+  },
+  "targeted_component": {
+    "tests": 1,
+    "passed": 0,
+    "failed": 1,
+    "skipped": 0,
+    "failures": [
+      "tests.test_order_components::test_bad_embedded_component_row_is_isolated_without_guessing_cost"
+    ]
+  },
+  "targeted_history": {
+    "tests": 21,
+    "passed": 17,
+    "failed": 4,
+    "skipped": 0,
+    "failures": [
+      "tests.test_taobao_douyin_history::test_original_platform_day_controls_cost_evidence[register-2026-06-05-2026-06-05-True-taobao]",
+      "tests.test_taobao_douyin_history::test_original_platform_day_controls_cost_evidence[register-2026-06-05-2026-06-05-True-douyin]",
+      "tests.test_taobao_douyin_history::test_original_platform_day_controls_cost_evidence[register_first-2026-06-05-2026-06-05-True-taobao]",
+      "tests.test_taobao_douyin_history::test_original_platform_day_controls_cost_evidence[register_first-2026-06-05-2026-06-05-True-douyin]"
+    ]
+  },
+  "frontend": {
+    "node_passed": 56,
+    "node_failed": 0,
+    "build": "passed"
+  },
+  "gate_probes": {
+    "accept_changed_derived_only": {
+      "human_profit": 100,
+      "actual_profit": 999,
+      "returned_gap": 0.0
+    },
+    "accept_unavailable_metric": {
+      "returned_gap": 0.0
+    },
+    "accept_missing_metric": {
+      "returned_gap": 0.0
+    },
+    "accept_later_period_changed": {
+      "first_period_sales": 100,
+      "later_period_sales": 900,
+      "returned_gap": 0.0
+    },
+    "accept_cli_with_unexplained_gap": {
+      "gap": 123.45,
+      "exit_code": 0
+    },
+    "record_dirty_baseline": {
+      "written": true,
+      "recorded_version": "abc1234-dirty"
+    },
+    "replay_ratio_tolerance": {
+      "before": 0.949,
+      "after": 0.952,
+      "reported_clean": true
+    }
+  },
+  "baseline": {
+    "engine_version": "90ae2b8-dirty",
+    "stores": 6,
+    "store_periods": 6,
+    "periods": [
+      "2026-05",
+      "2026-06"
+    ],
+    "last_change_commit": "cb87a83"
+  },
+  "corpus": {
+    "xlsx_files": 49,
+    "bytes": 275611339,
+    "sha256_manifest": "artifacts/ledger-stability-audit-20261026/corpus-manifest.json",
+    "changed_files": 0
+  },
+  "preservation": {
+    "preexisting_dirty_files": [
+      " M ledger/README.md",
+      " M ledger/ledger/commission_manager.py",
+      " M ledger/ledger/order_feed.py",
+      " M ledger/tests/test_commission_manager.py",
+      " M ledger/tests/test_order_feed.py"
+    ],
+    "checked_working_files_unchanged": true,
+    "production_databases_opened": false,
+    "production_writes": false
+  },
+  "method": {
+    "source_export": "git archive exact commit; preexisting working changes excluded",
+    "fast_export_has_version_stamp": false,
+    "real_suite_repeated_with_exact_version_stamp": true,
+    "same_real_failure_set_in_both_exports": true,
+    "all_fast_failures_reproduced_in_stamped_export": true,
+    "initial_frontend_missing_dependency": "isolated export excluded node_modules; rerun linked existing dependencies and passed",
+    "formal_baseline_recorded": false
+  },
+  "artifacts_root": "/home/wsfwk/dataAnalysis/artifacts/ledger-stability-audit-20261026"
+}
