@@ -142,3 +142,27 @@ def test_acceptance_helpers_check_every_declared_period_with_original_assertions
     assert set(selected)=={('audit','2026-05'),('audit','2026-06')}
     monkeypatch.setattr(acceptance,'_run_store',lambda _: (model,store,selected))
     with pytest.raises(AssertionError):getattr(acceptance,family).__wrapped__(store.id)
+
+
+@pytest.mark.parametrize('delta',[0.005,0.006,0.01,0.015])
+def test_half_cent_boundary_and_one_cent_errors_are_not_silently_discarded(delta):
+    assert verdict({'sales':node(100+delta),'net_profit':node()})>=accept.ACCEPT_TOLERANCE
+
+
+def test_each_tolerated_float_noise_is_not_added_to_a_false_amount_error():
+    assert verdict({'sales':node(100.004),'net_profit':node(100.004)})==0
+
+
+@pytest.mark.parametrize('part',['human','actual','explanation'])
+def test_boolean_is_not_monetary_authority(part):
+    checked=case(explained={'sales':(True,'invalid synthetic explanation')} if part=='explanation' else {})
+    human={'sales':True if part=='human' else 100,'profit':100}
+    nodes={'sales':node(True if part=='actual' else 100),'net_profit':node()}
+    assert not math.isfinite(accept.compare_case(checked,N(nodes=nodes),human,N(statement=[])))
+
+
+@pytest.mark.parametrize('gap',[0.005,0.006,0.01,0.015])
+def test_cli_uses_the_same_half_cent_verdict_as_the_declared_pytest_gate(monkeypatch,gap):
+    monkeypatch.setattr('sys.argv',['accept.py'])
+    monkeypatch.setattr(accept,'run_case',lambda _:gap)
+    assert accept.main()==1

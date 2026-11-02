@@ -29,8 +29,8 @@ CHILD = Path(__file__).with_name('financial_oracle_child.py')
 CHECKER = ROOT/'tools/verify-ledger-service-cases.py'
 SCOPE_FIELDS = {'state','statement','commission_total','commission_people','confirmed_total',
     'confirmed_people','cost_line_total','allocation_pending_count','commission_complete','can_close','source_sync_pending'}
-IMMUTABLE_TABLES = ('run_labor','automation_overhead_close','payout_confirmation','settlement')
-SERVICE_OPERATIONS=frozenset({'recompute','supplement','confirm','replace_scheme','drain_pending','close_approved'})
+IMMUTABLE_TABLES = ('manual_finance','run_labor','automation_overhead_close','payout_confirmation','settlement')
+SERVICE_OPERATIONS=frozenset({'recompute','supplement','confirm','replace_scheme','drain_pending','close_approved','restore_approved_manual_finance'})
 SHA = re.compile('[0-9a-f]{64}')
 
 
@@ -66,6 +66,42 @@ def _reference(base, reference):
     path=Path(reference.get('path',''));path=path if path.is_absolute() else base/path
     if path.is_symlink() or not path.is_file() or file_sha(path)!=reference['sha256']:raise OracleBlocked('oracle_reference_changed')
     return path.resolve()
+
+
+def _manual_input(case, step, bundle, *, fixture=False):
+    """Bind documentary approval to a sealed source, never parent expected data."""
+    fields={'path','sha256','source_run_id','decision_sha256','original_result_sha256','decision_at'}
+    reference=step.get('reference')
+    if (step.get('approval_reference')!=case['approval_reference'] or 'fixture' in step
+        or not isinstance(reference,dict) or set(reference)!=fields
+        or type(reference.get('source_run_id')) is not int or reference['source_run_id']<=0
+        or any(not SHA.fullmatch(str(reference.get(k,''))) for k in ('sha256','decision_sha256','original_result_sha256'))
+        or not isinstance(reference.get('decision_at'),str) or not reference['decision_at']):
+        raise OracleBlocked('manual_finance_approval_invalid')
+    path=_reference(bundle,reference)
+    if not Path(reference['path']).is_absolute() or not path.is_relative_to(bundle.resolve()):
+        raise OracleBlocked('manual_finance_source_outside_bundle')
+    body=_read(path,limit=32*1024*1024)
+    method='declared_synthetic_manual_decisions' if fixture else 'sqlite_mode_ro_query_only_transaction'
+    if (body.get('method')!=method or body.get('no_engine_result_amounts_read') is not True
+        or not isinstance(body.get('rows'),list) or any(not isinstance(row,dict) for row in body['rows'])):
+        raise OracleBlocked('manual_finance_source_invalid')
+    rows=[row for row in body['rows'] if row.get('store_id')==step.get('store_id') and row.get('period')==step.get('period')
+          and type(row.get('run_id')) is int and row['run_id']==reference['source_run_id']]
+    if len(rows)!=1:raise OracleBlocked('manual_finance_source_identity_mismatch')
+    row=rows[0];raw=row.get('decision_json')
+    if (not isinstance(raw,str) or hashlib.sha256(raw.encode()).hexdigest()!=reference['decision_sha256']
+        or row.get('original_sha')!=reference['original_result_sha256'] or row.get('at')!=reference['decision_at']):
+        raise OracleBlocked('manual_finance_source_identity_mismatch')
+    decision=json.loads(raw,parse_constant=lambda _:(_ for _ in ()).throw(ValueError()))
+    if (not isinstance(decision,dict) or decision.get('source_run_id')!=reference['source_run_id']
+        or not isinstance(decision.get('confirmed'),dict) or set(decision['confirmed'])!={'goods','dropship','reshipment'}
+        or not isinstance(decision.get('payouts'),list) or type(decision.get('no_payout')) is not bool
+        or not isinstance(decision.get('reason'),str) or not decision['reason'].strip()):
+        raise OracleBlocked('manual_finance_source_invalid')
+    if not fixture and case.get('source_evidence',{}).get('manual_finance_decisions_sha256')!=reference['sha256']:
+        raise OracleBlocked('manual_finance_source_provenance_missing')
+    return path.relative_to(bundle.resolve()).as_posix()
 
 
 def _inventory(root):
@@ -225,6 +261,13 @@ class FinancialOracle:
             if not isinstance(expected,dict) or not expected:raise OracleBlocked('approved_expected_missing')
             for key,value in expected.items():
                 if not re.fullmatch(r'[^/]+/\d{4}-(0[1-9]|1[0-2])',key) or set(value)!=SCOPE_FIELDS or not {'n_receipt','gross_profit','net_profit'}<=set(value['statement']):raise OracleBlocked('approved_expected_incomplete')
+                if not self.allow_fixtures:
+                    for metric in ('n_receipt','gross_profit','net_profit'):
+                        node=value['statement'][metric]
+                        if (not isinstance(node,dict) or node.get('available') is not True
+                            or isinstance(node.get('value'),bool) or not isinstance(node.get('value'),(int,float,Decimal))
+                            or not Decimal(str(node['value'])).is_finite()):
+                            raise OracleBlocked('historical_required_amount_unproven')
             union.update(expected)
             if not self.allow_fixtures:
                 evidence=case.get('source_evidence') or {};slots={r['sha'] for r in inputs.get('slots',[])}
@@ -239,11 +282,14 @@ class FinancialOracle:
                 if not self.allow_fixtures and case.get('source_evidence',{}).get('workspace_decisions_sha256')!=reference['sha256']:raise OracleBlocked('workspace_source_provenance_missing')
             elif body.get('workspace_decisions'):raise OracleBlocked('workspace_approval_case_missing')
             if not isinstance(case.get('steps'),list) or not case['steps']:raise OracleBlocked('service_steps_missing')
-            for step in case['steps']:
+            manual_inputs={}
+            for step_index,step in enumerate(case['steps']):
                 if not isinstance(step,dict) or step.get('operation') not in SERVICE_OPERATIONS:raise OracleBlocked('service_operation_unsupported')
                 if step.get('operation')=='close_approved' and step.get('approval_reference')!=case['approval_reference']:raise OracleBlocked('close_approval_mismatch')
+                if step.get('operation')=='restore_approved_manual_finance':
+                    manual_inputs[step_index]=_manual_input(case,step,bundle,fixture=self.allow_fixtures)
             inventory.append({'case_sha':file_sha(path),'bundle':str(bundle.resolve()),'inventory':_inventory(bundle),'decision_sha':file_sha(decision_path) if decision_path else None})
-            output.append({'case':case,'bundle':bundle.resolve(),'fingerprint':fingerprint,'decisions':decision_path})
+            output.append({'case':case,'bundle':bundle.resolve(),'fingerprint':fingerprint,'decisions':decision_path,'manual_inputs':manual_inputs})
         if len(models)!=1 or union!=set(targets):raise OracleBlocked('complete_approved_scope_mismatch')
         if not self.allow_fixtures:
             # Reuse the pinned host preflight's actual resolver for operating
@@ -276,6 +322,9 @@ class FinancialOracle:
                 relative=path.relative_to(source);dest=target/'ledger/ledger'/relative;dest.parent.mkdir(parents=True,exist_ok=True);shutil.copyfile(path,dest)
                 manifest.append({'path':'ledger/ledger/'+relative.as_posix(),'sha256':file_sha(dest)})
         if not manifest:raise OracleBlocked('candidate_code_missing')
+        # API import registers a static mount even for an offline finance call.
+        # No web content is served in this namespace; provide its directory.
+        (target/'ledger/ledger/static').mkdir(exist_ok=True)
         # An isolated development checkout activates the existing source guard;
         # this is not a fabricated release acceptance or the user's checkout.
         for args in [('init','-q'),('add','ledger'),('-c','user.name=Offline Oracle','-c','user.email=oracle@localhost','commit','-qm','private code projection')]:
@@ -302,7 +351,11 @@ class FinancialOracle:
                 temp=Path(temporary);projection=temp/'code';projection.mkdir();code_manifest=self._project(candidate_root,projection)
                 child=temp/'child';child.mkdir();request=[];mounts=[]
                 for index,row in enumerate(cases):
-                    case=row['case'];public={k:case[k] for k in ('kind','registry','steps')}
+                    case=row['case'];public={k:case[k] for k in ('kind','registry')}
+                    public['steps']=[dict(step) for step in case['steps']]
+                    for step_index,relative in row['manual_inputs'].items():
+                        step=public['steps'][step_index]
+                        step['reference']={**step['reference'],'path':'/inputs/'+str(index)+'/'+relative}
                     # Scope names are execution authority metadata, never the
                     # expected monetary results or the parent's manifest.
                     public['publication_scopes']=sorted(case['expected']['scopes'])

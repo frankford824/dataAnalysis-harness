@@ -40,7 +40,7 @@ CASES=(
   "assert solve(['a','b','a'])=={'a':2,'b':1}; assert solve([])=={}"),
  ('parse_boolean','Parse true/yes/1 and false/no/0 case-insensitively after strip; reject other values.',
   'def solve(value):\n    return bool(value)\n',
-  "assert solve(' FALSE ') is False; assert solve('yes') is True; assert solve('0') is False\n    import pytest\n    with pytest.raises(ValueError): solve('maybe')"),
+  "assert solve(' FALSE ') is False; assert solve('yes') is True; assert solve('0') is False\n    import pytest\n    for invalid in ('maybe','t','f','y','n','on','off',''):\n        with pytest.raises(ValueError): solve(invalid)"),
  ('flatten_once','Flatten one level of a sequence of lists, preserving order.',
   'def solve(values):\n    result=[]\n    for value in values: result.append(value)\n    return result\n',
   'assert solve([[1,2],[],[3]])==[1,2,3]; assert solve([])==[]'),

@@ -263,10 +263,119 @@ def test_child_failure_retains_actual_private_stderr(oracle_case,tmp_path):
     assert file_sha(log)==report['child_log_sha256']
 
 
-def test_unimplemented_manual_transport_step_is_explicitly_blocked_before_child(oracle_case,tmp_path):
+def test_manual_transport_without_source_approval_is_blocked_before_child(oracle_case,tmp_path):
     manifest,path,case,_missing=oracle_case
     case['steps'].append({'operation':'restore_approved_manual_finance','store_id':'s1','period':'2026-06'})
     rewrite_case(manifest,path,case)
     report=make_oracle(manifest).verify(candidate_root=ROOT,candidate_code_sha='0'*40,output=tmp_path/'authority')
-    assert report['status']=='blocked' and report['reason_code']=='service_operation_unsupported'
+    assert report['status']=='blocked' and report['reason_code']=='manual_finance_approval_invalid'
     assert report['candidate_execution_isolated'] is False
+
+
+def prepare_documentary_case(oracle_case,tmp_path):
+    from test_replay_manual_finance import reference
+    from ledger import freight_experiments_inputs as frozen
+    manifest,path,case,_missing=oracle_case
+    bundle=Path(case['bundle'])
+    ref,_body=reference(bundle/'evidence')
+    frozen.seal(bundle)
+    case['steps']=[{'operation':'drain_pending'},
+        {'operation':'restore_approved_manual_finance','store_id':'s1','period':'2026-06',
+         'reference':ref,'approval_reference':case['approval_reference']},
+        {'operation':'recompute','store_id':'s1'}]
+    case['expected']['scopes']['s1/2026-06'].update(state='closed',can_close=False)
+    rewrite_case(manifest,path,case)
+    return manifest,path,case
+
+
+def test_original_manual_totals_reach_real_api_inside_external_oracle(oracle_case,tmp_path):
+    manifest,path,case=prepare_documentary_case(oracle_case,tmp_path)
+    before=path.read_bytes()
+    report=make_oracle(manifest).verify(candidate_root=ROOT,candidate_code_sha='8'*40,output=tmp_path/'authority')
+    assert report['status']=='passed',report.get('reason_code')
+    assert report['candidate_execution_isolated'] is True
+    assert report['cases'][0]['frozen_count']==1
+    assert path.read_bytes()==before  # sandbox path rewriting never mutates approved input
+    checkpoint=tmp_path/'authority/child-artifacts/0/1'
+    with sqlite3.connect(checkpoint/'workspace.db') as db:
+        decision=json.loads(db.execute('SELECT decision_json FROM manual_finance').fetchone()[0])
+        assert decision['confirmed']=={'goods':40.0,'dropship':0.0,'reshipment':0.0}
+        assert db.execute('SELECT count(*) FROM cost_line_log').fetchone()[0]==0
+    assert report['financial_approval_granted'] is False
+    assert not (tmp_path/'authority/acceptance-receipt.json').exists()
+
+
+@pytest.mark.parametrize('fault',['source_run','decision_sha','result_sha','decision_at','source_sha',
+    'fixture_override','approval_mismatch','outside_bundle','source_kind'])
+def test_manual_source_substitution_never_reaches_candidate(oracle_case,tmp_path,fault):
+    manifest,path,case=prepare_documentary_case(oracle_case,tmp_path)
+    step=case['steps'][1];ref=step['reference']
+    if fault=='source_run':ref['source_run_id']+=1
+    elif fault=='decision_sha':ref['decision_sha256']='a'*64
+    elif fault=='result_sha':ref['original_result_sha256']='a'*64
+    elif fault=='decision_at':ref['decision_at']='2026-08-03'
+    elif fault=='source_sha':ref['sha256']='a'*64
+    elif fault=='fixture_override':step['fixture']=True
+    elif fault=='approval_mismatch':step['approval_reference']='unrelated approval'
+    elif fault=='outside_bundle':
+        dest=tmp_path/'outside-source.json';shutil.copyfile(ref['path'],dest);ref['path']=str(dest)
+    else:
+        from ledger import freight_experiments_inputs as frozen
+        source=Path(ref['path']);body=json.loads(source.read_text());body['method']='sqlite_mode_ro_query_only_transaction'
+        source.write_text(json.dumps(body));ref['sha256']=file_sha(source);frozen.seal(Path(case['bundle']))
+    rewrite_case(manifest,path,case)
+    report=make_oracle(manifest).verify(candidate_root=ROOT,candidate_code_sha='9'*40,output=tmp_path/'authority')
+    assert report['status']=='blocked'
+    assert report['candidate_execution_isolated'] is False
+    assert not (tmp_path/'authority/acceptance-receipt.json').exists()
+
+
+def test_manual_step_sandbox_contains_source_but_no_expected_contract(oracle_case,tmp_path):
+    manifest,path,case=prepare_documentary_case(oracle_case,tmp_path)
+    candidate=tmp_path/'candidate';shutil.copytree(ROOT/'ledger/ledger',candidate/'ledger/ledger',ignore=shutil.ignore_patterns('__pycache__'))
+    target=candidate/'ledger/ledger/__init__.py'
+    probe=("from pathlib import Path\nimport json\n"
+        +"_request=json.loads(Path('/request.json').read_text())\n"
+        +"assert all('expected' not in case and 'approval_reference' not in case for case in _request['cases'])\n"
+        +"_step=_request['cases'][0]['steps'][1]\n"
+        +"assert _step['reference']['path']=='/inputs/0/evidence/human-inputs.json'\n"
+        +"assert Path(_step['reference']['path']).is_file()\n")
+    target.write_text(probe+target.read_text())
+    report=make_oracle(manifest).verify(candidate_root=candidate,candidate_code_sha='0'*40,output=tmp_path/'authority')
+    assert report['status']=='passed',report.get('reason_code')
+
+
+def test_original_manual_decision_cannot_be_changed_while_frozen_result_stays_equal(oracle_case,tmp_path):
+    manifest,path,case=prepare_documentary_case(oracle_case,tmp_path)
+    candidate=tmp_path/'candidate';shutil.copytree(ROOT/'ledger/ledger',candidate/'ledger/ledger',ignore=shutil.ignore_patterns('__pycache__'))
+    target=candidate/'ledger/ledger/replay_service.py'
+    target.write_text(target.read_text()+'''\n
+_before_manual_oracle_recompute=Session.recompute
+def _tampered_manual_recompute(self,store_id):
+    result=_before_manual_oracle_recompute(self,store_id)
+    if self.ws.conn.execute('SELECT 1 FROM manual_finance').fetchone():
+        self.ws.conn.execute('DROP TRIGGER manual_finance_no_update')
+        self.ws.conn.execute("UPDATE manual_finance SET decision_json=?",('{"reason":"modified after approval"}',))
+        self.ws.conn.commit()
+    return result
+Session.recompute=_tampered_manual_recompute
+''')
+    report=make_oracle(manifest).verify(candidate_root=candidate,candidate_code_sha='1'*40,output=tmp_path/'authority')
+    assert report['status']=='blocked'
+    assert report['reason_code']=='frozen_financial_layer_changed'
+    assert not (tmp_path/'authority/acceptance-receipt.json').exists()
+
+
+@pytest.mark.parametrize('value,available',[(None,False),(None,True),(160,False),(True,True),
+    (float('nan'),True),(float('inf'),True),('160.00',True)])
+def test_real_positive_oracle_requires_finite_available_financial_values(oracle_case,tmp_path,value,available):
+    manifest,path,case,_missing=oracle_case
+    case['kind']='historical_golden'
+    case['expected']['scopes']['s1/2026-06']['statement']['gross_profit']={'value':value,'available':available}
+    rewrite_case(manifest,path,case)
+    body=json.loads(manifest.read_text());body['kind']='historical_golden';manifest.write_text(json.dumps(body))
+    oracle=FinancialOracle(manifest=manifest,manifest_sha256=file_sha(manifest),
+        runtime=ROOT/'ledger/.venv',implementation_sha256=implementation_sha(),allow_fixtures=False)
+    nonfinite=isinstance(value,float) and (value!=value or abs(value)==float('inf'))
+    with (pytest.raises(ValueError) if nonfinite else pytest.raises(OracleBlocked,match='historical_required_amount_unproven')):
+        oracle._cases()

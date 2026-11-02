@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import os
 from dataclasses import dataclass, field
+from decimal import Decimal
 import math
 import sys
 from pathlib import Path
@@ -26,6 +27,10 @@ from ledger.model import load_model  # noqa: E402
 
 DATA = Path(os.environ.get("LEDGER_ACCEPTANCE_CORPUS", "/home/wsfwk/data/platform"))
 MODEL = Path(__file__).resolve().parents[2] / "models/cn-ecommerce"
+
+# The CLI and pytest share the existing half-cent acceptance boundary.
+ACCEPT_TOLERANCE = 0.005
+_ACCEPT_TOLERANCE_DECIMAL = Decimal("0.005")
 
 #: 人工表里这些列存的是正数但含义是费用，对账时要取反才能和引擎口径比。
 #: 三家店共用同一批成本列名，只有平台侧的列各不相同。
@@ -312,7 +317,7 @@ def main() -> int:
             known = math.fsum(abs(a) for a in items.values())
             tail = f"，另有已解释差异 {known:,.2f}（{len(items)} 项）" if items else ""
             print(f"  {store:<22} 未解释 {gap:>10,.2f}{tail}")
-    return 0 if gaps and all(math.isfinite(gap) and gap < 0.02 for gap in gaps.values()) else 1
+    return 0 if gaps and all(math.isfinite(gap) and gap < ACCEPT_TOLERANCE for gap in gaps.values()) else 1
 
 
 def compare_case(case: Case, target, human: dict[str, float], model) -> float:
@@ -324,17 +329,18 @@ def compare_case(case: Case, target, human: dict[str, float], model) -> float:
             print(f"  验收失败：必需指标 {name} 缺失或未出数")
             return float("inf")
         h, actual = human[name], nv.value
-        if not isinstance(h, (int, float)) or not isinstance(actual, (int, float)):
-            return float("inf")
-        if not math.isfinite(h) or not math.isfinite(actual):
+        explanation = case.explained.get(name, (0, ""))[0]
+        if any(isinstance(v, bool) or not isinstance(v, (int, float))
+               or not math.isfinite(v) for v in (h, actual, explanation)):
             return float("inf")
         if name in STORED_POSITIVE_COSTS:
             h = -h
-        expected = h + case.explained.get(name, (0, ""))[0]
-        delta = abs(actual - expected)
-        # Do not add tolerated float noise across dozens of columns.
-        if delta >= 0.02:
-            gaps.append(delta)
+        # Decimal text avoids losing the exact half-cent boundary in subtraction.
+        # It does not round either the original value or its approved explanation.
+        delta = abs(Decimal(str(actual)) - Decimal(str(h)) - Decimal(str(explanation)))
+        # Tolerated per-field float noise is not accumulated across columns.
+        if delta >= _ACCEPT_TOLERANCE_DECIMAL:
+            gaps.append(float(delta))
     # Verify formulas independently of the human cache and explained differences.
     for node in model.statement:
         expr = getattr(node, "formula", None)
@@ -465,13 +471,13 @@ def run_case(case: Case) -> float:
         e = nv.value
         gap = e - h
         known = case.explained.get(name)
-        if known is not None and abs(gap - known[0]) < 0.02:
+        if known is not None and abs(gap - known[0]) < ACCEPT_TOLERANCE:
             mark = "  ← 已解释"
         elif known is not None:
             mark = f"  ← 登记的是 {known[0]:,.2f}，原因可能变了"
             total_gap += abs(gap)
         else:
-            mark = "" if abs(gap) < 0.02 else ("  ←" if abs(gap) < 1 else "  ← 差异大")
+            mark = "" if abs(gap) < ACCEPT_TOLERANCE else ("  ←" if abs(gap) < 1 else "  ← 差异大")
             if node_id not in ("gross_profit", "net_profit"):
                 total_gap += abs(gap)
         print(f"  {name:<16}{h:>16,.2f}{e:>16,.2f}{gap:>14,.2f}{mark}")

@@ -222,3 +222,27 @@ def test_literal_format_is_pure_but_object_traversal_format_is_rejected(tmp_path
     assert configured_oracle(repair,identifier)()['passed'] is True
     for field in ('{0.gi_frame.f_builtins}','{0[__import__]}','{0:{1.gi_frame}}'):
         with pytest.raises(ValueError):pure_source('def solve(value):\n    return '+repr(field)+'.format(value)\n')
+
+def test_module_constructor_rejection_returns_safe_actionable_policy_hint(tmp_path):
+    from ledger_agent.ops_oracle import configured_oracle
+    from ledger_agent.ops_evaluate import create_case,CASES
+    item=next(case for case in CASES if case[0]=='parse_boolean')
+    repair,identifier=create_case(tmp_path/'trial',item,ROOT/'ledger/.venv')
+    repair.write_code(identifier,'ledger/ledger/synthetic_case.py',
+        "_YES=frozenset(('true','yes','1'))\\ndef solve(value):\\n    return value.strip().lower() in _YES\\n".replace('\\n','\n'))
+    checked=configured_oracle(repair,identifier)()
+    assert checked['executed'] is False and checked['passed'] is False
+    assert checked['failure_category']=='policy_rejected'
+    assert checked['policy_hint']=='Module side effects are not pure code'
+
+
+def test_boolean_oracle_rejects_undocumented_convenience_aliases(tmp_path):
+    from ledger_agent.ops_oracle import configured_oracle
+    from ledger_agent.ops_evaluate import create_case,CASES
+    item=next(case for case in CASES if case[0]=='parse_boolean')
+    repair,identifier=create_case(tmp_path/'trial',item,ROOT/'ledger/.venv')
+    source="def solve(value):\\n    value=value.strip().lower()\\n    if value in ('true','yes','1','t','y','on'): return True\\n    if value in ('false','no','0','f','n','off'): return False\\n    raise ValueError('invalid')\\n".replace('\\n','\n')
+    repair.write_code(identifier,'ledger/ledger/synthetic_case.py',source)
+    checked=configured_oracle(repair,identifier)()
+    assert checked['executed'] is True and checked['passed'] is False
+    assert checked['failure_category']=='contract_mismatch'

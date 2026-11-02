@@ -243,7 +243,7 @@ async def _model_phase(repair,identifier,config,state,spec,oracle):
         '调用write_code后必须run_check，失败则根据代码合同继续修复。已有失败测试是待修反例。'
         '代码中的合成常量不是财务核定；不读取原始账目、凭据、密钥或完整日志。'
         '你不能宣布发布、结账或修复了真实财务缺口。原测试与冻结补丁由外部程序独立验证。')
-    if oracle is not None:prompt+='本案件有外部纯函数oracle：仅允许math/collections/itertools/functools/statistics/calendar指定纯操作，无模块副作用、IO或私有反射；字面量format仅可简单字段，不可属性/下标/嵌套遍历。原有失败反例已由外部程序确认。'
+    if oracle is not None:prompt+='本案件有外部纯函数oracle：仅允许math/collections/itertools/functools/statistics/calendar指定纯操作，模块顶层赋值只能是字面量（例如元组/集合），不能调用frozenset等构造器；需要构造时放在函数内部。禁止IO或私有反射；严格按函数合同限定的取值域，不擅自扩大接受集合。字面量format仅可简单字段，不可属性/下标/嵌套遍历。原有失败反例已由外部程序确认。'
     prompt+='\n'+(ROOT/'agent-worker/skills/ops/SKILL.md').read_text(encoding='utf-8')
     event=json.loads((repair.path(identifier)/'event.json').read_text(encoding='utf-8'));check_outbound(event)
     model=OpenAIChatModel(credential=OpenAICredential(api_key=config.api_key,base_url=config.base_url),

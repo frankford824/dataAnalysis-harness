@@ -15,10 +15,10 @@ import math
 import pytest
 from conftest import needs_real_data
 
-from tools.accept import CASES, run_case, select_case_slice
+from tools.accept import ACCEPT_TOLERANCE, CASES, run_case, select_case_slice
 
-#: 一分钱以内算对得上。再严就成了浮点数比较游戏，再松就藏得住真问题。
-TOLERANCE = 0.005
+#: 与命令行共用半分边界；一分钱差异必须拒绝。
+TOLERANCE = ACCEPT_TOLERANCE
 
 
 @needs_real_data

@@ -37,7 +37,7 @@ def cases(name):
       'chunk_tail':([[[1,2,3,4,5],2],[[],2],[[1],0],[[1,2,3],8]],_chunks),
       'normalize_key':([[' A_B '],['Straße'],[''],['  MIXED  ']],lambda text:text.strip().casefold()),
       'count_groups':([[['a','b','a']],[[]],[[1,2,1,3,3,3]]],lambda values:dict(Counter(values))),
-      'parse_boolean':([[' FALSE '],['yes'],['0'],['maybe'],['TRUE']],_boolean),
+      'parse_boolean':([[value] for value in (' FALSE ','yes','0','maybe','TRUE',' true ',' YES ','1','false',' NO ','t','f','y','n','on','off','')],_boolean),
       'flatten_once':([ [ [[1,2],[],[3]] ], [ [] ], [ [[],[4],[5,6]] ] ],lambda values:[item for group in values for item in group]),
       'adjacent_pairs':([[[1,2,3]],[[1]],[[]],[[9,4,8,2]]],lambda values:list(zip(values,values[1:]))),
       'binary_index':([[[1,4,7,9],7],[[1],1],[[],1],[[1,4],3],[[2,4,8,16],16]],_index),
@@ -113,7 +113,10 @@ def pure_source(text):
         if isinstance(node,(ast.Import,ast.ImportFrom,ast.FunctionDef)):continue
         if isinstance(node,ast.Expr) and isinstance(node.value,ast.Constant) and isinstance(node.value.value,str):continue
         if isinstance(node,(ast.Assign,ast.AnnAssign)):
-            ast.literal_eval(node.value);continue
+            try:ast.literal_eval(node.value)
+            except (ValueError,TypeError):
+                raise ValueError('Module side effects are not pure code') from None
+            continue
         raise ValueError('Module side effects are not pure code')
     for node in ast.walk(tree):
         if isinstance(node,ast.Name) and (node.id in BANNED or node.id.startswith('__')):raise ValueError('Non-pure name')

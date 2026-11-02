@@ -134,7 +134,7 @@ def anchor_index(ingestion, store, period, pricing, coverage, facts=None):
         return {'schema': CAPABILITY, 'status': 'pending', 'reason': 'parsed_original_index_unavailable', 'orders': {}}
     native_sources = {s.id for s in ingestion.model.sources if s.is_spine and s.platform in ('*', 'any', store.platform)}
     cost_sources = {m.source for m in ingestion.model.metrics if m.id == 'goods_cost'}
-    result = {key: {'native': [], 'cost': [], 'internal_order_ids': []} for key in wanted}
+    result = {key: {'native': [], 'cost': [], 'separate_cost_anchors': [], 'internal_order_ids': []} for key in wanted}
     for item in getattr(ingestion,'source_recovery_originals',ingestion.known):
         template, frame = item.template, item.frame
         if template is None or frame is None or template.source not in native_sources | cost_sources:
@@ -148,13 +148,23 @@ def anchor_index(ingestion, store, period, pricing, coverage, facts=None):
         if not {parent, '__sheet__', '__row__'} <= set(frame.columns):
             continue
         rows = frame.filter(pl.col(parent).cast(pl.Utf8).is_in(sorted(wanted)))
-        columns = [parent, '__sheet__', '__row__'] + [k for k in ('internal_order_id', 'store_name') if k in frame.columns]
+        columns = [parent, '__sheet__', '__row__'] + [k for k in ('internal_order_id', 'store_name', 'order_type') if k in frame.columns]
         for row in rows.select(columns).to_dicts():
             if row.get('store_name') not in (None, '', store.id, store.name, *store.aliases):
                 continue
             key = str(row[parent])
             anchor = {'sha256': sha, 'sheet': str(row['__sheet__']), 'row': int(row['__row__'])}
             if anchor['row'] <= 2:
+                continue
+            # A replacement shipment has its own cost metric. Sharing a
+            # native parent ID does not make it an ordinary sale's original
+            # ERP source root. Retain its original anchor in the sealed index
+            # without mixing it into the ordinary member-proof request.
+            # Missing/unknown types remain candidates and fail closed later.
+            if role == 'cost' and row.get('order_type') == '补发订单':
+                separate = {**anchor, 'reason': 'reshipment_cost_separate'}
+                if separate not in result[key]['separate_cost_anchors']:
+                    result[key]['separate_cost_anchors'].append(separate)
                 continue
             if anchor not in result[key][role]:
                 result[key][role].append(anchor)

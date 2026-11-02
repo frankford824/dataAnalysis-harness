@@ -165,6 +165,25 @@ def verify(target, *, full=True):
     return inputs, manifest['fingerprint']
 
 
+def _feed_store_record(record):
+    if (not isinstance(record,dict) or not str(record.get('order_store_id') or '')
+            or not isinstance(record.get('mapping_status'),str) or not record['mapping_status']):
+        raise InputError('冻结店铺映射缺少明确身份或状态')
+    identity={'order_store_id':str(record['order_store_id']),
+              'ledger_store_id':str(record.get('ledger_store_id') or ''),
+              'mapping_status':record['mapping_status']}
+    if 'payload_json' not in record:
+        return {**record,**identity,'payload_json':json.dumps(record,ensure_ascii=False,separators=(',',':'))}
+    try:
+        payload=json.loads(record['payload_json'])
+    except (ValueError,TypeError):
+        raise InputError('冻结店铺映射已有payload无效，不能替换为推测内容') from None
+    if (not isinstance(payload,dict) or any(
+            str(payload.get(key) or '')!=value for key,value in identity.items())):
+        raise InputError('冻结店铺映射字段与原payload冲突')
+    return {**record,**identity}
+
+
 def materialize_feed(bundle, scratch):
     """Create a writable adapter cache only inside the experiment scratch folder."""
     from .order_feed import OrderFeed
@@ -178,6 +197,11 @@ def materialize_feed(bundle, scratch):
             columns = [r['name'] for r in db.execute('PRAGMA table_info(' + table + ')')]
             db.execute('DELETE FROM ' + table)
             for record in records:
+                if table == 'feed_store':
+                    # Frozen production exports can contain the public mapping
+                    # DTO instead of a SQLite cache row. Match the real snapshot
+                    # installer without guessing a missing mapping or its status.
+                    record = _feed_store_record(record)
                 keys = [k for k in columns if k in record]
                 db.execute('INSERT INTO ' + table + '(' + ','.join(keys) + ') VALUES(' + ','.join('?' for _ in keys) + ')', [record[k] for k in keys])
     for folder in ('order-components', 'order-date-context'):

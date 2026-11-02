@@ -65,9 +65,13 @@ def main():
                 session.restore_workspace_decisions(case['workspace_decisions'], fixture=case['kind']=='service_fixture')
             for step_index, step in enumerate(case['steps']):
                 operation = step['operation']
-                if operation not in {'recompute','supplement','confirm','replace_scheme','drain_pending','close_approved'}:
+                if operation not in {'recompute','supplement','confirm','replace_scheme','drain_pending','close_approved','restore_approved_manual_finance'}:
                     raise ValueError('Unsupported service operation')
-                getattr(session, operation)(**{k:v for k,v in step.items() if k!='operation'})
+                arguments={k:v for k,v in step.items() if k!='operation'}
+                if operation=='restore_approved_manual_finance':
+                    if 'fixture' in arguments:raise ValueError('Case cannot override manual source kind')
+                    arguments['fixture']=case['kind']=='service_fixture'
+                getattr(session, operation)(**arguments)
                 export(session, Path('/results')/str(index)/str(step_index))
     Path('/results/transport-completed.json').write_text(json.dumps({'cases':len(request['cases'])}))
 
