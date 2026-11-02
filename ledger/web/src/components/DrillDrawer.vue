@@ -26,7 +26,7 @@ const props = defineProps({
   liveIndex: { type: Boolean, default: false },
   reviewContext: { type: Object, default: null },
 })
-const emit = defineEmits(['close','select-record'])
+const emit = defineEmits(['close','select-record','dispute'])
 const money=value=>ledgerMoney(props.reviewContext?.expense && value!=null ? -Number(value) : value)
 const reviewRecord=computed(()=>props.reviewContext?.records?.find(r=>r.run_id===props.runId))
 
@@ -435,6 +435,9 @@ function close() {
                   <template v-if="r.file_name==='人工补录订单成本'">补录记录 #{{ r.row_no }}</template><template v-else>第 {{ r.row_no }} 行</template>
                   <button v-if="liveIndex && r.file_sha && r.file_name!=='人工补录订单成本'" class="link" @click="previewFact(r)">
                     预览 →
+                  </button>
+                  <button class="link" @click="emit('dispute', { node_id: node, row: { metric_id: r.metric_id || r.metric || '', file_name: r.file_name || '', sheet: r.sheet || '', row_no: r.row_no ?? null, accounting_status: r.accounting_status || '' } })">
+                    这笔不对
                   </button>
                 </td>
               </tr>

@@ -27,6 +27,8 @@ api.operationsReport=async()=>({period:'2026-09',summary:{net_income:'100.00',gr
   version:'synthetic-declared',input_sha:'input-one',scope_sha:'scope-one',metrics:[],rows:[],total:0,issues:[],run_refs:[]})
 api.operationsExport=()=>'#synthetic-export'
 api.automationRuleContracts=async()=>({enabled:false,rules:[]})
+api.agentAuthority=async period=>({period,enabled:false,rules:[],store_count:1,grant_total:0,covered:0,delegated:0,missing:[],missing_count:0,active:false,valid_until:null,financial_close:'human_confirmation',changes:[],standing:{active:false,actor:null,at:null,outdated_rules:[]}})
+api.agentInbox=async period=>({period,upgrade:{period,engine:'e',items:[],same:0,changed:0,pending_recompute:0,needs_confirmation:false,input_sha:'0'.repeat(64)},disputes:[]})
 api.automationMonth=async()=>({period:'2026-09',status:'needs_decision',input_sha:'input-one',
   counts:{total:1,completed:0,processing:0,needs_decision:1,waiting:0},
   stores:[{store_id:scope.id,store:scope.name,status:'needs_decision',stage:'ready_for_close',message:'等待本批复核',actions:[]}],

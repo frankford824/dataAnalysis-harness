@@ -1,6 +1,7 @@
 <script setup>
 import AllocationNotice from '../components/AllocationNotice.vue'
 import PeriodCostApproval from '../components/PeriodCostApproval.vue'
+import AgentQuestions from '../components/AgentQuestions.vue'
 /* 一家店一个账期：损益表、自检、所需资料、质量、结账。
  *
  * 损益表每一行都能点开——这是这套系统和一张普通报表的唯一区别。数字点不开，
@@ -34,7 +35,7 @@ import { finalCloseIssues,needsMonthWorkspace } from '../closeView'
 import { initialCostInputs, needsManualCostInput, sourceCostText } from '../costReviewInputs'
 
 const props = defineProps({ id: { type: String, required: true } })
-const reviewingCostInput=ref(false),revokingCostInput=ref(false)
+const reviewingCostInput=ref(false),revokingCostInput=ref(false),questioning=ref(false),disputeSubject=ref(null)
 const reviewingStatement=ref(false)
 const reviewingPeriod=ref(false)
 async function statementUpdated(){reviewingStatement.value=false;app.invalidate();await load(true)}
@@ -112,6 +113,7 @@ async function load(force=false, quiet=false) {
 }
 watch(()=>[props.id,period.value],()=>{reviewingPeriod.value=false;drill.value=null;orderIssue.value=null;load()}, {immediate:true})
 watch(()=>app.uiRefresh,()=>load(true))
+watch(questioning,value=>{if(!value)disputeSubject.value=null})
 
 let refreshTimer, refreshing=false
 async function refreshVisiblePeriod() {
@@ -430,6 +432,7 @@ watch(
       >
         <template #actions>
           <n-button size="small" @click="fixing = true">核对金额</n-button>
+          <n-button v-if="snap?.run_id" size="small" @click="questioning = true">问 Agent</n-button>
           <n-button v-if="snap?.run_id" size="small" @click="reviewingStatement=true">流水关联核对</n-button>
           <n-button v-if="app.ingestMode !== 'nas'" size="small" :loading="!!app.busy" :disabled="loading" @click="recompute">重算</n-button>
           <n-tag v-else size="small" :type="refreshFailed?'warning':'info'" :bordered="false">{{refreshFailed?'更新失败，请刷新重试':'结果自动更新'}}</n-tag>
@@ -449,6 +452,7 @@ watch(
         </template>
       </PageHead>
 
+      <AgentQuestions v-if="snap?.run_id" v-model:show="questioning" :store-id="id" :period="period" :subject="disputeSubject"/>
       <PeriodCostApproval v-model:show="reviewingCostInput" :revoke="revokingCostInput" :store-id="id" :period="period" :snapshot="snap" @saved="app.invalidate();load(true)"/>
       <PeriodStrip
         :periods="info.periods || []"
@@ -965,6 +969,7 @@ watch(
       :platform="info.store?.platform || ''"
       :live-index="app.ingestMode === 'nas'"
       @close="drill = null"
+      @dispute="subject => { disputeSubject = { ...subject, node_name: drill.name }; questioning = true }"
     />
   </n-spin>
 </template>
