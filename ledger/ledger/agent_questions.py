@@ -37,7 +37,26 @@ class QuestionError(WorkspaceError):
     pass
 
 
-def install(conn):conn.executescript(SCHEMA)
+ADDED = {'subject_json': "TEXT NOT NULL DEFAULT ''", 'acknowledged_by': "TEXT NOT NULL DEFAULT ''",
+         'acknowledged_at': "TEXT NOT NULL DEFAULT ''"}
+
+
+def install(conn):
+    conn.executescript(SCHEMA)
+    present = {r[1] for r in conn.execute('PRAGMA table_info(agent_question)')}
+    for column, kind in ADDED.items():
+        if column not in present:conn.execute(f'ALTER TABLE agent_question ADD COLUMN {column} {kind}')
+
+
+def _subject(ws, store_id, period, subject):
+    if not subject:return ''
+    run = ws.latest_run(store_id, period)
+    nodes = {n['id']: n['name'] for n in _result(ws, run['id']).get('statement', [])} if run else {}
+    if subject.get('node_id') not in nodes:raise QuestionError('异议的报表项不在本期报表中')
+    row = subject.get('row') or {}
+    clean = {k: str(row.get(k) or '')[:200] for k in ('metric_id', 'file_name', 'sheet', 'accounting_status')}
+    clean['row_no'] = row.get('row_no') if isinstance(row.get('row_no'), int) else None
+    return journal.encoded({'node_id': subject['node_id'], 'node_name': nodes[subject['node_id']], 'row': clean})
 
 
 def _mask(text):return re.sub(r'\d+(?:\.\d+)?', 'N', str(text or ''))[:200]
@@ -54,7 +73,7 @@ def _result(ws, run_id):
     return json.loads(row[0]) if row else {}
 
 
-def ask(ws, model, *, request_id, store_id, period, question, actor):
+def ask(ws, model, *, request_id, store_id, period, question, actor, subject=None):
     if not actor or actor.get('kind') != 'human' or not actor.get('authenticated') or not actor.get('id'):
         raise PermissionError('请使用已登录的人工身份提问')
     journal.period(period)
@@ -62,15 +81,16 @@ def ask(ws, model, *, request_id, store_id, period, question, actor):
     if not text or len(text) > 500:raise QuestionError('问题需为1至500字')
     if store_id not in {s.id for s in model.stores}:raise QuestionError('请选择已登记店铺')
     if not ws.latest_run(store_id, period):raise QuestionError('本店本月还没有核算结果，暂时无法提问')
+    encoded = _subject(ws, store_id, period, subject)
     with ws.transaction() as conn:
         row = conn.execute('SELECT * FROM agent_question WHERE request_id=?', (request_id,)).fetchone()
         if row:
-            if (row['store_id'], row['period'], row['question'], row['asked_by']) != (store_id, period, text, actor['id']):
+            if (row['store_id'], row['period'], row['question'], row['asked_by'], row['subject_json']) != (store_id, period, text, actor['id'], encoded):
                 raise QuestionError('同一请求编号不能用于不同问题')
             return view(ws, dict(row))
         qid = journal.ident()
-        conn.execute('INSERT INTO agent_question(id,request_id,store_id,period,question,asked_by,asked_at,state) VALUES(?,?,?,?,?,?,?,?)',
-            (qid, request_id, store_id, period, text, actor['id'], journal.now(), 'queued'))
+        conn.execute('INSERT INTO agent_question(id,request_id,store_id,period,question,asked_by,asked_at,state,subject_json) VALUES(?,?,?,?,?,?,?,?,?)',
+            (qid, request_id, store_id, period, text, actor['id'], journal.now(), 'queued', encoded))
     return view(ws, dict(ws.conn.execute('SELECT * FROM agent_question WHERE id=?', (qid,)).fetchone()))
 
 
@@ -93,7 +113,30 @@ def view(ws, row, clock=time.time):
         'asked_by': row['asked_by'], 'asked_at': row['asked_at'], 'state': row['state'],
         'answer': _render(ws, row) if answered else '', 'answered_at': row['answered_at'],
         'failure': FAILURES.get(row['failure'], '') if row['state'] == 'failed' else '',
-        'numbers_from': 'engine_run' if answered else None, 'run_id': row['run_id'] if answered else None}
+        'numbers_from': 'engine_run' if answered else None, 'run_id': row['run_id'] if answered else None,
+        'subject': json.loads(row['subject_json']) if row.get('subject_json') else None,
+        'acknowledged_by': row.get('acknowledged_by', ''), 'acknowledged_at': row.get('acknowledged_at', '')}
+
+
+def open_disputes(ws, model, period, limit=50):
+    """Disputes the Agent has finished with and a person has not yet closed."""
+    journal.period(period)
+    names = {s.id: s.name for s in model.stores}
+    rows = ws.conn.execute("SELECT * FROM agent_question WHERE period=? AND subject_json<>'' AND acknowledged_at='' ORDER BY asked_at LIMIT ?",
+        (period, limit*2)).fetchall()
+    items = [view(ws, dict(r)) for r in rows]
+    return [{**i, 'store_name': names.get(i['store_id'], i['store_id'])} for i in items if i['state'] in ('answered', 'failed')][:limit]
+
+
+def acknowledge(ws, question_id, *, actor):
+    if not actor or actor.get('kind') != 'human' or not actor.get('authenticated') or not actor.get('id'):
+        raise PermissionError('请使用已登录的人工身份确认')
+    with ws.transaction() as conn:
+        row = conn.execute('SELECT * FROM agent_question WHERE id=?', (question_id,)).fetchone()
+        if not row:raise QuestionError('问题不存在')
+        if not row['acknowledged_at']:
+            conn.execute('UPDATE agent_question SET acknowledged_by=?,acknowledged_at=? WHERE id=?', (actor['id'], journal.now(), question_id))
+    return view(ws, dict(ws.conn.execute('SELECT * FROM agent_question WHERE id=?', (question_id,)).fetchone()))
 
 
 def listing(ws, store_id, period, limit=50):
@@ -121,7 +164,16 @@ def context(ws, model, row):
         'findings': [{'id': f.get('id'), 'name': f.get('name'), 'passed': f.get('passed'), 'blocking': f.get('blocking'),
             'head': _mask(f.get('head'))} for f in result.get('findings', [])],
         'case_stage': case['stage'] if case else '', 'case_issue_codes': sorted({i.get('code', '') for i in json.loads(case['issues_json'])}) if case else [],
-        'period_cost_approved': approved, 'missing_source_names': [_mask(s) for s in result.get('missing_sources', [])]}
+        'period_cost_approved': approved, 'missing_source_names': [_mask(s) for s in result.get('missing_sources', [])],
+        'dispute': _dispute(row)}
+
+
+def _dispute(row):
+    """A staff member's objection to one source line: names only, no identifiers."""
+    if not row.get('subject_json'):return None
+    subject = json.loads(row['subject_json']);line = subject.get('row') or {}
+    return {'node_id': subject['node_id'], 'node_name': subject['node_name'], 'metric': _mask(line.get('metric_id')),
+        'source_sheet': _mask(line.get('sheet')), 'accounting_status': _mask(line.get('accounting_status'))}
 
 
 def claim(ws, model, identity, *, lease_seconds=180, clock=time.time):

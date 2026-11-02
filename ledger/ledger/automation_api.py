@@ -42,9 +42,28 @@ class ClosePreview(RequestId):
 
 class AgentAuthorityPreview(RequestId):
     period_from: str
-    period_until: str
+    period_until: str=''
     valid_days: int=Field(default=365,ge=1,le=366)
+    standing: bool=False
     reason: str=Field(min_length=1,max_length=1000)
+
+
+class DisputeRow(Strict):
+    metric_id: str=Field(default='',max_length=200)
+    file_name: str=Field(default='',max_length=300)
+    sheet: str=Field(default='',max_length=200)
+    row_no: int|None=None
+    accounting_status: str=Field(default='',max_length=200)
+
+
+class DisputeSubject(Strict):
+    node_id: str=Field(min_length=1,max_length=128)
+    row: DisputeRow|None=None
+
+
+class UpgradeConfirmation(RequestId):
+    period: str
+    input_sha: str=Field(min_length=64,max_length=64)
 
 
 class AgentAuthorityRevoke(RequestId):
@@ -56,6 +75,7 @@ class Question(RequestId):
     store_id: str=Field(min_length=1,max_length=128)
     period: str
     question: str=Field(min_length=1,max_length=500)
+    subject: DisputeSubject|None=None
 
 
 class ServiceAction(RequestId):
@@ -149,6 +169,22 @@ def install(app,workspace,model,actor=None,model_root=None):
     def ask(body:Question,request:Request):
         from . import agent_questions
         return call(lambda:agent_questions.ask(workspace(),model(),**body.model_dump(),actor=who(request)),write=False)
+
+    @router.post('/questions/{question_id}/acknowledge')
+    def acknowledge(question_id:str,request:Request):
+        from . import agent_questions
+        return call(lambda:agent_questions.acknowledge(workspace(),question_id,actor=who(request)),write=False)
+
+    @router.get('/inbox')
+    def inbox(period:str):
+        from . import agent_questions,agent_upgrade
+        return call(lambda:{'period':period,'upgrade':agent_upgrade.check(workspace(),model(),period),
+            'disputes':agent_questions.open_disputes(workspace(),model(),period)},write=False)
+
+    @router.post('/upgrade/confirm')
+    def upgrade_confirm(body:UpgradeConfirmation,request:Request):
+        from . import agent_upgrade
+        return call(lambda:agent_upgrade.confirm(workspace(),model(),**body.model_dump(),actor=who(request)))
 
     @router.post('/service-actions')
     def service_action(body:ServiceAction,request:Request):

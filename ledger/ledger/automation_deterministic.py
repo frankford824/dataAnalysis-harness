@@ -29,6 +29,8 @@ def approved_rule(ws,store_id,period,grant_id=None,*,rule_id=RULE,rule_sha=RULE_
         publication.require(store_id,period,workspace_root=ws.root)
     except publication_scope.PublicationScopeError as exc:
         raise PermissionError('自动发布范围尚未验证或不含本店账期：'+str(exc)) from exc
+    from . import agent_upgrade
+    if agent_upgrade.blocking(ws,None,period):raise PermissionError('新版本核算结果有变化，等待人工确认后才自动处理')
     grant=journal.active_decisions(ws.conn,period).get((store_id,'rule_grant:'+rule_id))
     if not grant or (grant_id and grant['id']!=grant_id):raise PermissionError('缺少当前已批准的店月规则授权')
     value=grant['values'];stamp=datetime.now(timezone.utc)
@@ -102,6 +104,9 @@ def apply_statement(ws,model,plan,parent_authorization):
 def run_available(ws,model,period,parent_authorization=None,store_ids=None):
     """Run from source arrival/Manager as well as explicit advance, using grants."""
     if not enabled():return []
+    from . import agent_authority,agent_upgrade
+    if agent_upgrade.blocking(ws,model,period):return []
+    agent_authority.extend(ws,model,period)
     scopes=journal.active_decisions(ws.conn,period)
     candidates=[sid for (sid,kind),grant in scopes.items() if kind=='rule_grant:'+RULE]
     if store_ids is not None:candidates=[sid for sid in candidates if sid in store_ids]
