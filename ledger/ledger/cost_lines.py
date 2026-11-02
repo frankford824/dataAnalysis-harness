@@ -384,6 +384,9 @@ def batch_apply(ws, store_id: str, period: str, run_id: int, content: bytes,
 def save(ws, store_id: str, period: str, run_id: int, *, coverage_key: str,
          context_sha: str, amount, reason: str, action: str = 'save',
          expected_line_revision: int = 0, by: str = '人工操作') -> dict:
+    from .period_cost_inputs import latest as period_cost_input
+    whole=period_cost_input(ws,store_id,period)
+    if whole and not whole['revoked']:raise WorkspaceError('整期成本已有批准输入，不能再逐笔叠加；请先撤销该批准后核对')
     if action not in {'save','remove'} or not reason.strip() or len(reason.strip()) > 500:
         raise WorkspaceError("补录或撤销成本必须填写不超过 500 字的依据")
     if action == 'save':

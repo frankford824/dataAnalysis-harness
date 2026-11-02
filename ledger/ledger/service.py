@@ -624,8 +624,14 @@ def _recompute_locked(
                                            and person.get('amount') is not None)
         if allocation:allocation[2]['summary_json']=json.dumps(c,ensure_ascii=False)
         from .storage_integrity import verified, digest
+        from . import period_cost_inputs
+        cost_business_sha=period_cost_inputs.business_binding(model,store,result,sl,ing)
+        if period_cost_inputs.latest(ws,store.id,sl.period):
+            period_cost_inputs.apply_payload(ws,model,store.id,sl.period,payload,cost_business_sha,sl,ing)
+            if allocation:allocation[2]['summary_json']=json.dumps(payload['commission'],ensure_ascii=False)
         period_proof = automation_period_proof.prepare(
             ws,model,store,ing,sl,payload,allocation,captured_source)
+        if period_proof:period_proof['manifest']['period_cost_business_binding_sha']=cost_business_sha
         from .version import assert_code_integrity
         assert_code_integrity()
         reused = (automation_period_proof.reusable(ws,store.id,sl.period,period_proof,registry)
@@ -684,6 +690,7 @@ def _recompute_locked(
                     assert_code_integrity()
                     if scope is not None:scope.require(store.id,sl.period,workspace_root=ws.root)
                     ing.frozen_refund_context.validate()
+                    period_cost_inputs.assert_captured(ws,store.id,sl.period,captured_source.get('period_cost_input_versions',{}).get(sl.period,0))
                     if period_proof:automation_period_proof.save(ws,previous_id,period_proof)
                     from .automation_shared_fee import capture as capture_shared_fees
                     capture_shared_fees(ws,previous_id,model=model,payload=previous_payload)
@@ -697,6 +704,7 @@ def _recompute_locked(
             assert_code_integrity()
             if scope is not None:scope.require(store.id,sl.period,workspace_root=ws.root)
             ing.frozen_refund_context.validate()
+            period_cost_inputs.assert_captured(ws,store.id,sl.period,captured_source.get('period_cost_input_versions',{}).get(sl.period,0))
             run_id = ws.record(
                 store.id, sl.period, payload, shas, evidence_ready=False,
                 model_revision=model_revision, input_fingerprint=fingerprint,

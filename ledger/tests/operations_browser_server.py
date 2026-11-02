@@ -21,6 +21,8 @@ def main():
     ws,model,registry,runs=create_fixture(Path(args.root),overhead=None,engine_can_close=True)
     registry.operator_add('browser','fixture-password-2030',admin=True)
     app=FastAPI()
+    period_cost_context=None
+    period_cost_session=None
     operations_api.install(app,lambda:ws,lambda:model)
     commission_api.install(app,lambda:ws,lambda:model)
     def actor(request):
@@ -177,6 +179,37 @@ def main():
         import json
         state=ws.state('s1','2026-07')
         return {'run_id':state.run_id,'labor_cut':state.labor_cut,'result_sha':hashlib.sha256(json.dumps(state.result,sort_keys=True,ensure_ascii=False).encode()).hexdigest()}
+    @app.post('/api/_browser/prepare-period-cost-case')
+    def prepare_period_cost_case(request:Request):
+        nonlocal ws,model,registry,period_cost_context,period_cost_session
+        if not actor(request):raise HTTPException(403,'Test setup requires the temporary operator')
+        from test_replay_service import bundle,seed
+        source=Path(args.root)/'period-cost-original-inputs';source.mkdir()
+        original,unused_missing=bundle.__wrapped__(source)
+        period_cost_context=fixture_session(original,seed())
+        period_cost_session=period_cost_context.__enter__()
+        period_cost_session.drain_pending()
+        ws.close()
+        ws,model,registry=period_cost_session.ws,period_cost_session.model,period_cost_session.registry
+        registry.operator_add('browser','fixture-password-2030',admin=True)
+        return {'period':'2026-06','store_id':'s1','synthetic_originals':True}
+    @app.post('/api/_browser/drain-period-cost-case')
+    def drain_period_cost_case(request:Request):
+        if not actor(request) or period_cost_session is None:raise HTTPException(403,'Temporary cost case required')
+        period_cost_session.drain_pending()
+        return {'completed':True}
+    @app.get('/api/_browser/period-cost-state')
+    def period_cost_state(request:Request):
+        if not actor(request) or period_cost_session is None:raise HTTPException(403,'Temporary cost case required')
+        import json
+        state=ws.state('s1','2026-06')
+        with registry.connect() as db:
+            payouts=db.execute('SELECT count(*) FROM payout_confirmation').fetchone()[0]
+        rows=[dict(r) for r in ws.conn.execute('SELECT * FROM period_cost_input ORDER BY rowid')]
+        return {'closed':state.closed,'run_id':state.run_id,'period_cost_inputs':rows,
+            'manual_finance_count':ws.conn.execute('SELECT count(*) FROM manual_finance').fetchone()[0],
+            'payout_confirmation_count':payouts,
+            'revocations':ws.conn.execute("SELECT count(*) FROM automation_decision WHERE kind='period_cost_input' AND action='revoke'").fetchone()[0]}
     @app.get('/api/navigation')
     def navigation():
         periods={state.period for state in ws.overview()}|{item.period for item in model.overheads}
@@ -188,7 +221,10 @@ def main():
     def progress():return {'items':[]}
     @app.get('/api/version')
     def version():return {'version':'browser-fixture'}
-    uvicorn.run(app,host='127.0.0.1',port=args.port,log_level='warning')
+    try:
+        uvicorn.run(app,host='127.0.0.1',port=args.port,log_level='warning')
+    finally:
+        if period_cost_context is not None:period_cost_context.__exit__(None,None,None)
 
 
 if __name__=='__main__':main()

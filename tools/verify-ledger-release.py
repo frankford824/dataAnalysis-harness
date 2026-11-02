@@ -268,6 +268,9 @@ def snapshot(root,reader=read_json):
         company_table=bool(db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='automation_overhead_close'").fetchone())
         workspace_immutable['automation_overhead_close']=immutable_rows(db,'automation_overhead_close') if company_table else {}
         workspace_schema={'automation_overhead_close':'present' if company_table else 'legacy_absent'}
+        cost_table=bool(db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='period_cost_input'").fetchone())
+        workspace_immutable['period_cost_input']=immutable_rows(db,'period_cost_input') if cost_table else {}
+        workspace_schema['period_cost_input']='present' if cost_table else 'legacy_absent'
     with readonly(root/'commission/registry.db') as db:
         db.execute('BEGIN')
         immutable={table:immutable_rows(db,table) for table in ('payout_confirmation','settlement','profit_exclusion')}
@@ -276,7 +279,7 @@ def snapshot(root,reader=read_json):
 
 
 def compare_history(baseline,current,code_sha):
-    required={'workspace_immutable':{'manual_finance','run_labor','automation_overhead_close'},
+    required={'workspace_immutable':{'manual_finance','run_labor','automation_overhead_close','period_cost_input'},
               'immutable':{'payout_confirmation','settlement','profit_exclusion'}}
     for snapshot_value in (baseline,current):
         if snapshot_value.get('schema')!=2 or not isinstance(snapshot_value.get('closed'),dict):
@@ -288,9 +291,16 @@ def compare_history(baseline,current,code_sha):
         company_rows=snapshot_value['workspace_immutable']['automation_overhead_close']
         if company_status not in {'present','legacy_absent'} or not isinstance(company_rows,dict) or (company_status=='legacy_absent' and company_rows):
             raise ValueError('Frozen-history receipt lacks explicit company basis metadata')
+        cost_status=(snapshot_value.get('workspace_schema') or {}).get('period_cost_input')
+        cost_rows=snapshot_value['workspace_immutable']['period_cost_input']
+        if cost_status not in {'present','legacy_absent'} or not isinstance(cost_rows,dict) or (cost_status=='legacy_absent' and cost_rows):
+            raise ValueError('Frozen-history receipt lacks explicit period cost input metadata')
     if (baseline['workspace_schema']['automation_overhead_close']=='present'
             and current['workspace_schema']['automation_overhead_close']!='present'):
         raise ValueError('Frozen financial history changed: company basis table was removed')
+    if (baseline['workspace_schema']['period_cost_input']=='present'
+            and current['workspace_schema']['period_cost_input']!='present'):
+        raise ValueError('Frozen financial history changed: period cost input table was removed')
     if current['version'].get('version')!=code_sha:raise ValueError('Live version differs from acceptance receipt')
     changed={k:[baseline['closed'].get(k),current['closed'].get(k)] for k in set(baseline['closed'])|set(current['closed'])
              if current['closed'].get(k)!=baseline['closed'].get(k)}

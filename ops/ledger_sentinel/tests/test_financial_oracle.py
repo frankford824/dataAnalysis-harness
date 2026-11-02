@@ -379,3 +379,47 @@ def test_real_positive_oracle_requires_finite_available_financial_values(oracle_
     nonfinite=isinstance(value,float) and (value!=value or abs(value)==float('inf'))
     with (pytest.raises(ValueError) if nonfinite else pytest.raises(OracleBlocked,match='historical_required_amount_unproven')):
         oracle._cases()
+
+
+def prepare_cost_input_only_case(oracle_case,tmp_path):
+    manifest,path,case=prepare_documentary_case(oracle_case,tmp_path)
+    case['steps'][1]['cost_input_only']=True
+    case['steps'][2]={'operation':'drain_pending'}
+    scope=case['expected']['scopes']['s1/2026-06']
+    scope.update(state='open',can_close=True,commission_complete=True)
+    rewrite_case(manifest,path,case)
+    return manifest,path,case
+
+
+def test_documentary_cost_input_source_is_verified_by_external_parent(oracle_case,tmp_path):
+    manifest,path,case=prepare_cost_input_only_case(oracle_case,tmp_path)
+    report=make_oracle(manifest).verify(candidate_root=ROOT,candidate_code_sha='2'*40,output=tmp_path/'authority')
+    assert report['status']=='passed',report.get('reason_code')
+    with sqlite3.connect(tmp_path/'authority/child-artifacts/0/1/workspace.db') as db:
+        db.row_factory=sqlite3.Row
+        fact=db.execute('SELECT * FROM period_cost_input').fetchone()
+        assert fact['identity_kind']=='documentary_history_replay'
+        assert json.loads(fact['costs_json'])=={'goods':'40.00','dropship':'0.00','reshipment':'0.00'}
+        assert not db.execute('SELECT 1 FROM manual_finance').fetchone()
+        assert db.execute("SELECT state FROM period WHERE store_id='s1' AND period='2026-06'").fetchone()[0]=='open'
+    assert not (tmp_path/'authority/acceptance-receipt.json').exists()
+
+
+def test_cost_input_tampering_after_disabling_candidate_trigger_is_still_rejected(oracle_case,tmp_path):
+    manifest,path,case=prepare_cost_input_only_case(oracle_case,tmp_path)
+    candidate=tmp_path/'candidate';shutil.copytree(ROOT/'ledger/ledger',candidate/'ledger/ledger',ignore=shutil.ignore_patterns('__pycache__'))
+    target=candidate/'ledger/ledger/replay_service.py'
+    target.write_text(target.read_text()+'''\n
+_original_cost_drain=Session.drain_pending
+def _tamper_cost_drain(self,*args,**kwargs):
+    value=_original_cost_drain(self,*args,**kwargs)
+    if self.ws.conn.execute('SELECT 1 FROM period_cost_input').fetchone():
+        self.ws.conn.execute('DROP TRIGGER period_cost_input_no_update')
+        self.ws.conn.execute("UPDATE period_cost_input SET reason='candidate changed prior approval'")
+        self.ws.conn.commit()
+    return value
+Session.drain_pending=_tamper_cost_drain
+''')
+    report=make_oracle(manifest).verify(candidate_root=candidate,candidate_code_sha='3'*40,output=tmp_path/'authority')
+    assert report['status']=='blocked' and report['reason_code']=='frozen_financial_layer_changed'
+    assert not (tmp_path/'authority/acceptance-receipt.json').exists()

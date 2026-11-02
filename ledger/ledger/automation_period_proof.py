@@ -62,7 +62,8 @@ def source_manifest(ws,store_id):
     slots=[tuple(r) for r in ws.conn.execute('SELECT store_id,name,sha FROM slot WHERE store_id IN (?,?) ORDER BY store_id,name',(store_id,'__shared__'))]
     version=ws.conn.execute('SELECT coalesce(max(id),0) FROM version WHERE store_id IN (?,?)',(store_id,'__shared__')).fetchone()[0]
     manual={r[0]:r[1] for r in ws.conn.execute('SELECT period,max(id) FROM cost_line_log WHERE store_id=? GROUP BY period',(store_id,))}
-    return {'slots':slots,'version':version,'manual_versions':manual}
+    approved={r[0]:r[1] for r in ws.conn.execute("SELECT period,max(rowid) FROM automation_decision WHERE kind='period_cost_input' AND store_id=? GROUP BY period",(store_id,))}
+    return {'slots':slots,'version':version,'manual_versions':manual,'period_cost_input_versions':approved}
 
 
 def effective_model(model,store,template_ids=(),subjects=()):
@@ -134,6 +135,8 @@ def prepare(ws,model,store,ingestion,sl,payload,allocation,source_context=None):
     evidence['commission']=_frame(details)
     cost_sources=_cost_sources(ws,store.id,sl.period,payload,ingestion,sl)
     evidence['approved_cost_sources']=cost_sources
+    if payload.get('period_cost_input'):
+        evidence['period_cost_input']=payload['period_cost_input']
     date_sources=[]
     frame=getattr(sl,'facts',None)
     if frame is not None and 'source_note' in frame.columns:
@@ -167,7 +170,7 @@ def prepare(ws,model,store,ingestion,sl,payload,allocation,source_context=None):
         'source_refs':sorted({r.ref.sha256 for r in ingestion.items}),
         'period':sl.period,'store_id':store.id,'evidence_sha':evidence_sha,
         'effective_model_sha':journal.digest(model_part),'template_ids':sorted(used_templates),'subjects':sorted(subjects),
-        'approved_cost_sources':cost_sources,'frozen_refund_artifacts':frozen_refund_artifacts,
+        'approved_cost_sources':cost_sources,'period_cost_input':payload.get('period_cost_input'),'frozen_refund_artifacts':frozen_refund_artifacts,
         'frozen_refund_event_index':event_index(ingestion,sl.facts,store.id,sl.period),
         'verified_original_date_sources':date_sources,
         'original_date_dependencies':date_dependencies,'original_date_facts_sha':date_source_sha,
@@ -236,6 +239,11 @@ def save(ws,run_id,proof):
                 ws.mark_evidence(run_id,ready=False,error='已采用历史成本的原始凭据缺失或哈希不一致')
                 return
             artifacts.append(artifact)
+    for artifact in (proof['manifest'].get('period_cost_input') or {}).get('artifacts',[]):
+        if not valid_artifact(ws,artifact):
+            ws.mark_evidence(run_id,ready=False,error='整期成本批准原件失效')
+            return
+        artifacts.append(artifact)
     for artifact in proof['manifest'].get('frozen_refund_artifacts',[]):
         if not valid_artifact(ws,artifact):
             ws.mark_evidence(run_id,ready=False,error='已结退款归属档案失效，当前结果保持待核')

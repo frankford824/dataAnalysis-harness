@@ -10,6 +10,7 @@ import {chromium} from 'playwright'
 import {createHash} from 'node:crypto'
 import {costCompletenessScenario} from './cost-completeness-scenario.mjs'
 import {closeRefreshScenario} from './close-refresh-scenario.mjs'
+import {periodCostInputScenario} from './period-cost-input-scenario.mjs'
 
 const web=fileURLToPath(new URL('..',import.meta.url)),repo=path.resolve(web,'../..')
 const temporary=await mkdtemp(path.join(tmpdir(),'ledger-browser-'))
@@ -425,6 +426,11 @@ try{
     financeSetup=financePage
     console.log(`PASS company finance live HTTP (${mixed?'real source work continues':'only historical conflict'}): one role card -> read-only frozen/current evidence -> no financial writes or historical rewrite`)
   }
+  const costPrepared=await financeSetup.request.post(origin+'/api/_browser/prepare-period-cost-case')
+  assert.equal(costPrepared.status(),200,await costPrepared.text())
+  const costPage=await newPage({viewport:{width:1440,height:1000}})
+  console.log('PASS period cost live HTTP: '+await periodCostInputScenario(costPage,{origin,base,artifacts}))
+  await costPage.close()
   assert.deepEqual([...new Set(warnings)],[],'Browser warnings require explicit review')
 }catch(error){
   console.error(error.stack)

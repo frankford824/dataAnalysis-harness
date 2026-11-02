@@ -35,6 +35,8 @@ def fingerprint(ws, model, store, ingestion, registry, *, publication_scope=None
     # compute; a warm process cache must not bypass that validation.
     from .automation_source_cost_v3 import active as physical_facts
     if physical_facts(ws.conn,store.id):return None
+    cost_periods=[r[0] for r in ws.conn.execute('SELECT DISTINCT period FROM period_cost_input WHERE store_id=?',(store.id,))]
+    if any(publication_scope is None or publication_scope.allows(store.id,period) for period in cost_periods):return None
     version = engine_version()
     if not version or version == "unknown" or "dirty" in version:
         return None

@@ -1,5 +1,6 @@
 <script setup>
 import AllocationNotice from '../components/AllocationNotice.vue'
+import PeriodCostApproval from '../components/PeriodCostApproval.vue'
 /* 一家店一个账期：损益表、自检、所需资料、质量、结账。
  *
  * 损益表每一行都能点开——这是这套系统和一张普通报表的唯一区别。数字点不开，
@@ -33,6 +34,7 @@ import { finalCloseIssues,needsMonthWorkspace } from '../closeView'
 import { initialCostInputs, needsManualCostInput, sourceCostText } from '../costReviewInputs'
 
 const props = defineProps({ id: { type: String, required: true } })
+const reviewingCostInput=ref(false),revokingCostInput=ref(false)
 const reviewingStatement=ref(false)
 const reviewingPeriod=ref(false)
 async function statementUpdated(){reviewingStatement.value=false;app.invalidate();await load(true)}
@@ -155,6 +157,8 @@ async function close() {
   }
 }
 
+const costInputRecomputing = computed(() => (snap.value?.close_verification?.issues || []).some(issue => issue.code === 'period_cost_input_unverified'))
+const costInputNeedsRecovery = computed(() => (snap.value?.close_verification?.issues || []).some(issue => issue.code === 'period_cost_input_source_unverified'))
 const manualClosing = ref(false)
 const ignoredBlockers = ref([])
 const manualCloseNote = ref('')
@@ -440,9 +444,12 @@ watch(
             {{ needsCompanyDecision ? '查看本月结账条件' : needsManualCostInput(snap?.cost_review) ? '核对未完整成本' : snap?.commission?.unassigned_orders ? '人工确认提成' : snap?.can_close ? `结账 ${period}` : '查看结账条件' }}
           </n-button>
           <n-button v-else size="small" :disabled="loading || !!app.busy" @click="asking = true">反结账</n-button>
+          <n-button v-if="!closed && (needsManualCostInput(snap?.cost_review) || snap?.period_cost_input?.status==='stale')" size="small" :disabled="loading || !!app.busy || costInputRecomputing || costInputNeedsRecovery" @click="revokingCostInput=false;reviewingCostInput=true">{{costInputRecomputing?'成本决定已保存，正在核算':costInputNeedsRecovery?'成本凭据待恢复':'确认本期成本'}}</n-button>
+          <n-button v-if="!closed && ['applied','stale'].includes(snap?.period_cost_input?.status)" size="small" :disabled="loading || !!app.busy" @click="revokingCostInput=true;reviewingCostInput=true">撤销本期成本批准</n-button>
         </template>
       </PageHead>
 
+      <PeriodCostApproval v-model:show="reviewingCostInput" :revoke="revokingCostInput" :store-id="id" :period="period" :snapshot="snap" @saved="app.invalidate();load(true)"/>
       <PeriodStrip
         :periods="info.periods || []"
         :model-value="period"

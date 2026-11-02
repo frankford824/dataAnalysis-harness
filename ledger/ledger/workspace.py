@@ -357,6 +357,8 @@ class Workspace:
             install_read_versions(conn)
             from .automation_store import install as install_automation
             install_automation(conn)
+            from .period_cost_inputs import install as install_period_cost_inputs
+            install_period_cost_inputs(conn)
             conn.commit()
         finally:
             conn.close()

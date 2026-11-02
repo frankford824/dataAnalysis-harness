@@ -1319,7 +1319,7 @@ def _mark_counted(facts: pl.DataFrame, spine_facts: pl.DataFrame,
     contribution = pl.col("amount") * pl.col("__share__")
     if "__control_contribution" in marked.columns:
         contribution = pl.coalesce(pl.col("__control_contribution"), contribution)
-    return (
+    marked = (
         marked
         .with_columns(
             (claim & pl.col("__share__").is_not_null() & ~_statement_pending(marked)).alias("counted"),
@@ -1332,6 +1332,123 @@ def _mark_counted(facts: pl.DataFrame, spine_facts: pl.DataFrame,
         )
         .drop([c for c in ("__share__", "__control_contribution") if c in marked.columns])
     )
+    return _contributions_at_projection_precision(marked, spine_facts)
+
+
+def _contributions_at_projection_precision(marked: pl.DataFrame, spine_facts: pl.DataFrame) -> pl.DataFrame:
+    """Evidence uses the projection's existing six-decimal currency boundary.
+
+    Original ``amount`` values and the booked projection remain untouched.
+    Floating multiplication just below a half-cent must not make the evidence
+    show a different cent amount from the already-rounded ledger projection.
+    A genuine discrepancy is never hidden: only groups agreeing before the
+    existing six-decimal rounding step may receive its deterministic residue.
+    Unknown/nonfinite groups are preserved, not filled with zero.
+    """
+    if "amount" not in spine_facts.columns:
+        # Factor-only evidence readers have no booked amount to reconcile.
+        # Preserve that contract; absence cannot confer a zero ledger value.
+        return marked.with_columns(pl.col("contribution").round(6))
+    row_id, raw_credit = "__ledger_credit_row__", "__ledger_raw_credit__"
+    pool = "__ledger_credit_pool__"
+    helper_columns = {row_id, raw_credit, pool, "__ledger_new_credit__"}
+    if helper_columns & set(marked.columns):
+        raise ValueError("记账贡献精度计算出现保留字段冲突")
+    keys = ["metric_id", "store", "period", "link_key"]
+    pooled = "__control_pool" in spine_facts.columns
+    original_columns = marked.columns
+    marked = marked.with_row_index(row_id).with_columns(pl.col("contribution").alias(raw_credit))
+    marked = marked.with_columns(pl.col("contribution").round(6))
+    if pooled:
+        wide = (pl.col("link_key") == STORE_WIDE_PRODUCT).fill_null(False)
+        normal = marked.filter(~wide).with_columns(pl.lit(None, dtype=pl.String).alias(pool))
+        controls = marked.filter(wide)
+        if controls.height:
+            cols = [c for c in ("file_name", "sheet", "period", "promotion_scope") if c in controls.columns]
+            controls = controls.with_columns(pl.struct(cols).map_elements(
+                _promotion_periods, return_dtype=pl.List(pl.String)).list.join("|").alias(pool))
+        else:
+            controls = controls.with_columns(pl.lit(None, dtype=pl.String).alias(pool))
+        marked = pl.concat([normal, controls], how="diagonal_relaxed")
+        spine_facts = spine_facts.with_columns(pl.col("__control_pool").alias(pool))
+        keys.append(pool)
+    source_valid = pl.col(raw_credit).is_not_null() & pl.col(raw_credit).is_finite()
+    bad = marked.filter(pl.col("counted") & ~source_valid.fill_null(False)).select(keys).unique()
+    eligible = marked.filter(pl.col("counted") & source_valid.fill_null(False))
+    if bad.height:
+        eligible = eligible.join(bad, on=keys, how="anti", nulls_equal=True)
+    target_valid = pl.col("amount").is_not_null() & pl.col("amount").is_finite()
+    invalid_target = spine_facts.filter(~target_valid.fill_null(False)).select(keys).unique()
+    if invalid_target.height:
+        eligible = eligible.join(invalid_target, on=keys, how="anti", nulls_equal=True)
+    if eligible.is_empty():
+        return marked.sort(row_id).select(original_columns)
+    # Round exactly where project() already rounds, then convert via decimal
+    # text so Float64's representation does not become a different Decimal.
+    decimal6 = pl.Decimal(precision=38, scale=6)
+    control_fields = ("__projection_factor_total", "__projection_dropped_zero_factor",
+                      "__projection_dropped_zero_count", "__projection_target_count")
+    control_present = set(control_fields) <= set(spine_facts.columns)
+    target_expressions = [pl.col("amount").round(6).cast(pl.String).cast(decimal6).sum().alias("__ledger_projected_credit__")]
+    if control_present:
+        target_expressions.extend([pl.col("factor").sum().alias("__ledger_retained_factor__"),
+                                   pl.len().alias("__ledger_retained_targets__")])
+        for field in control_fields:
+            target_expressions.extend([pl.col(field).first(),
+                (pl.col(field).is_not_null().all() & (pl.col(field).n_unique() == 1)).alias(field + "__valid")])
+    target = spine_facts.filter(target_valid.fill_null(False)).group_by(keys).agg(target_expressions)
+    totals = eligible.group_by(keys).agg(
+        pl.col(raw_credit).sum().alias("__ledger_raw_total__"),
+        pl.col("amount").sum().alias("__ledger_source_total__"),
+        (pl.col("amount").is_not_null() & pl.col("amount").is_finite()).all().alias("__ledger_source_complete__"),
+        pl.col("contribution").cast(pl.String).cast(decimal6).sum().alias("__ledger_rounded_total__"))
+    totals = totals.join(target, on=keys, how="inner", nulls_equal=True)
+    consistent = (pl.col("__ledger_raw_total__") - pl.col("__ledger_projected_credit__").cast(pl.Float64)).abs() <= 0.0000005
+    if control_present:
+        full = pl.col("__projection_factor_total")
+        omitted = pl.col("__projection_dropped_zero_factor")
+        zero_count = pl.col("__projection_dropped_zero_count")
+        total_count = pl.col("__projection_target_count")
+        # Factor totals are dimensionless; this floating summation bound derives
+        # from the exact number of actual targets, not a monetary tolerance.
+        factor_error = (full.abs() + 1.) * total_count * 2.220446049250313e-16
+        control_valid = pl.all_horizontal([pl.col(field + "__valid") for field in control_fields])
+        control_valid &= (zero_count > 0) & (zero_count < total_count)
+        control_valid &= (zero_count + pl.col("__ledger_retained_targets__") == total_count)
+        control_valid &= full.is_finite() & omitted.is_finite() & (full >= 0) & (omitted >= 0) & (omitted <= full)
+        control_valid &= ((pl.col("__ledger_retained_factor__") + omitted - full).abs() <= factor_error)
+        # A zero destination can also be the recipient of project()'s final
+        # residue. Per-target half-quantum rounding plus that single bounded
+        # residue gives at most one quantum per actual target in the group.
+        # A missing five-currency-unit factor is not a micro-unit residue.
+        control_valid &= (pl.col("__ledger_source_total__") * omitted).abs() <= total_count * 0.000001
+        control_valid &= pl.col("__ledger_source_complete__")
+        control_valid &= ((pl.col("__ledger_source_total__") * full
+                           - pl.col("__ledger_projected_credit__").cast(pl.Float64)).abs() <= 0.0000005)
+        consistent = consistent | control_valid.fill_null(False)
+    totals = totals.filter(consistent).with_columns(
+        (pl.col("__ledger_projected_credit__") - pl.col("__ledger_rounded_total__")).alias("__ledger_credit_residue__"))
+    if totals.is_empty():
+        return marked.sort(row_id).select(original_columns)
+    # Stable evidence identity chooses the recipient; input row order is only
+    # the last tie for otherwise indistinguishable observations. Never assign
+    # residue to an exempt zero row when a nonzero source row exists.
+    identity = [c for c in ("file_sha", "sheet", "row_no", "template_id", "order_id", "internal_order_id", "sku")
+                if c in eligible.columns and c not in keys]
+    priority = "__ledger_nonzero_credit__"
+    candidates = eligible.with_columns((pl.col(raw_credit) != 0).alias(priority))
+    order = [*keys, priority, *identity, raw_credit, row_id]
+    recipients = candidates.sort(order, descending=[c == priority for c in order], nulls_last=True).group_by(keys).agg(
+        pl.col(row_id).first())
+    updates = recipients.join(totals.select([*keys, "__ledger_credit_residue__"]),
+                              on=keys, how="inner", nulls_equal=True).select(row_id, "__ledger_credit_residue__")
+    updates = eligible.join(updates, on=row_id, how="inner").select(row_id,
+        (pl.col("contribution").cast(pl.String).cast(decimal6) + pl.col("__ledger_credit_residue__"))
+        .cast(pl.Float64).alias("__ledger_new_credit__"))
+    return (marked.join(updates, on=row_id, how="left", maintain_order="left")
+        .with_columns(pl.when(pl.col("__ledger_new_credit__").is_not_null())
+            .then(pl.col("__ledger_new_credit__")).otherwise(pl.col("contribution")).alias("contribution"))
+        .sort(row_id).select(original_columns))
 
 
 def _empty_spine_facts() -> pl.DataFrame:

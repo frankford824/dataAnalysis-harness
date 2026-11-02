@@ -54,6 +54,9 @@ def _frozen_scope_check(conn,store_id,start,end,included):
 
 
 def _decision_input(ws,model,kind,store_id,anchor,values):
+    if kind=='period_cost_input':
+        from .period_cost_inputs import approval_input,revoke_input
+        return revoke_input(ws,model,store_id,anchor,values) if 'cost_input_id' in values else approval_input(ws,model,store_id,anchor,values)
     base=_scope_input(ws,model,anchor,'' if kind in {'overhead_total','store_scope'} else store_id)
     start,end=_policy_range(kind,values,anchor)
     if start==end==anchor or kind not in {'store_scope','rule_grant'}:return base
@@ -210,7 +213,7 @@ def month(ws,model,period):
             codes={p['code'] for p in problems}
             if codes and codes<={'company_revenue_unknown','overhead_basis_empty','overhead_total_unknown'}:
                 stage,message='waiting_company','本店核算已完成，等待公司其他营业店资料与公摊依据完整'
-            elif codes and codes<={'recompute_pending','unverified_input_change','input_capture_unverified','manual_input_unverified','unverified_code_change','original_date_input_unverified','source_fact_input_unverified'}:
+            elif codes and codes<={'recompute_pending','unverified_input_change','input_capture_unverified','manual_input_unverified','unverified_code_change','original_date_input_unverified','source_fact_input_unverified','period_cost_input_unverified'}:
                 stage,message='calculating','新资料已进入现有核算队列，完成后自动更新'
         waiting=None
         if waiting_items and status!='completed' and not checked['allowed']:
@@ -220,7 +223,7 @@ def month(ws,model,period):
             status='processing'
             message=waiting['summary']
         codes={p['code'] for p in problems}
-        local_recompute=(bool(codes&{'unverified_input_change','unverified_model_change','manual_input_unverified','input_capture_unverified','unverified_code_change'})
+        local_recompute=(bool(codes&{'unverified_input_change','unverified_model_change','manual_input_unverified','input_capture_unverified','unverified_code_change','period_cost_input_unverified'})
             or ('no_result' in codes and bool(ws.active_files(store.id))))
         if not waiting and status!='completed' and 'recompute_pending' in codes and local_recompute:
             status='processing'
@@ -244,6 +247,18 @@ def month(ws,model,period):
         if status!='completed' and (close_refresh_pending(ws,case_id,checked['input_sha']) or retry_queued(ws,case_id,checked['input_sha'])):
             status,stage,message='processing','gathering','正在刷新月结所需的上游凭据，完成后继续预览'
             waiting=None
+        cost_conflict=None
+        if status!='completed' and 'period_cost_input_source_unverified' in codes:
+            status,stage,message='processing','maintenance','成本审批原档校验失败，已转维护恢复；无需重新录入或确认金额'
+            waiting=None
+        elif status!='completed' and 'period_cost_input_unverified' in codes:
+            status,stage,message='processing','calculating','成本已经批准，系统正在应用并核算；无需再次确认金额'
+            waiting=None
+        elif status!='completed' and 'period_cost_input_stale' in codes:
+            from .period_cost_inputs import conflict_details
+            cost_conflict=conflict_details(ws,model,store.id,period)
+            status,stage,message='needs_decision','period_cost_conflict','原成本批准与新依据冲突，请选择依据；无需重录三个金额'
+            waiting=None
         if status!='completed' and 'code_source_drift' in codes:
             from .version import CODE_MAINTENANCE
             status,stage,message='processing','maintenance',CODE_MAINTENANCE
@@ -254,11 +269,11 @@ def month(ws,model,period):
         rows.append({'case_id':case_id,'store_id':store.id,'store':store.name,'period':period,
             'status':status,'stage':stage,'message':message,'run_id':state.run_id if state else None,
             'input_sha':checked['input_sha'],'issues':problems,'actions':actions,
-            'waiting':waiting,'source_context_sha':handoff.context_sha(ws,model,store.id,period,checked['input_sha']),
+            'waiting':waiting,'period_cost_input_conflict':cost_conflict,'source_context_sha':handoff.context_sha(ws,model,store.id,period,checked['input_sha']),
             'verification':{'allowed':checked['allowed'] and not bool(state and state.closed),
                             'input_sha':checked['input_sha']}})
         if status=='needs_decision' and stage!='company_finance':
-            kind='close' if stage=='ready_for_close' else 'business_decision'
+            kind='close' if stage=='ready_for_close' else 'period_cost_conflict' if stage=='period_cost_conflict' else 'business_decision'
             groups.setdefault(kind,[]).append(store.id)
     counts={k:sum(r['status']==k for r in rows) for k in ('completed','processing','needs_decision')}
     counts['total']=len(rows)
@@ -273,7 +288,7 @@ def month(ws,model,period):
     eligible=[r['store_id'] for r in rows if r['stage']=='ready_for_close']
     can_advance=any(a['kind']=='advance' for r in rows for a in r['actions'])
     finance_only=bool(finance_decision) and all(r['status']=='completed' or r['stage']=='company_finance' for r in rows)
-    decision_groups=[{'kind':k,'title':'确认月结' if k=='close' else '确认本月兼职总额' if k=='overhead_total' else '业务决定',
+    decision_groups=[{'kind':k,'title':'确认月结' if k=='close' else '确认本月兼职总额' if k=='overhead_total' else '核对成本批准与新依据' if k=='period_cost_conflict' else '业务决定',
         'store_ids':v,'count':len(v)} for k,v in groups.items()]
     if finance_decision:decision_groups.append({**finance_decision,'title':'核对公司冻结公摊依据',
         'store_ids':[r['store_id'] for r in rows],'count':1})
@@ -438,6 +453,9 @@ def decision_preview(ws,model,*,request_id,period,store_id,kind,values,reason,ac
         journal.period(first);journal.period(last)
         if last<first:raise Conflict('授权业务月范围无效')
         values.update(period_from=first,period_until=last)
+    elif kind=='period_cost_input':
+        from .period_cost_inputs import normalize
+        values=normalize(ws,model,store_id,period,values)
     elif kind=='cost_line':
         allowed={'run_id','coverage_key','context_sha','amount','action','expected_line_revision'}
         if set(values)-allowed:raise Conflict('成本决定包含未知字段')
@@ -455,6 +473,9 @@ def decision_preview(ws,model,*,request_id,period,store_id,kind,values,reason,ac
         sha=_decision_input(ws,model,kind,store_id,period,values)
         aid=journal.authorize(conn,key,actor,'decision.preview',sha,'',{'period':period,'store_id':store_id})
         payload={'kind':kind,'values':values,'reason':reason.strip()}
+        if kind=='period_cost_input':
+            from .period_cost_inputs import preview_effect
+            payload['preview']=preview_effect(ws,model,store_id,period,values)
         first,last=_policy_range(kind,values,period)
         payload['effective_month_range']={'from':first,'until':last,'default_single_month':first==last==period}
         if kind=='rule_grant':payload['rule_contract']=RULE_CONTRACT
@@ -473,6 +494,10 @@ def _load_proposal(conn,pid,sha,input_sha,actor,kind):
 
 def decision_apply(ws,model,*,request_id,proposal_id,proposal_sha,input_sha,actor):
     human(actor);_request(request_id)
+    candidate=ws.conn.execute('SELECT payload_json FROM automation_proposal WHERE id=?',(proposal_id,)).fetchone()
+    if candidate and json.loads(candidate['payload_json']).get('kind')=='period_cost_input':
+        from .period_cost_inputs import apply_proposal
+        return apply_proposal(ws,model,request_id=request_id,proposal_id=proposal_id,proposal_sha=proposal_sha,input_sha=input_sha,actor=actor)
     key='decision-apply:'+request_id;signature=journal.digest([key,proposal_id,proposal_sha,input_sha,actor['id']])
     with ws.transaction() as conn:
         old=journal.receipt(conn,key,signature)
@@ -547,6 +572,7 @@ def _decision_revoke(ws,model,decision_id,*,request_id,reason,input_sha,actor):
         from .automation_deterministic import RULE as statement_rule
         affects_cost=row['kind'] in {'cost_line',history_rule}
         affects_statement=row['kind']==statement_rule
+        affects_period_cost=row['kind']=='period_cost_input'
         from .automation_source_cost_v3 import RULE as physical_source_rule
         source_rule_grant=(row['kind']=='rule_grant' and json.loads(row['values_json']).get('rule_id') in {source_facts_rule,physical_source_rule})
         affects_source_facts=row['kind'] in {source_facts_rule,physical_source_rule} or source_rule_grant
@@ -576,6 +602,10 @@ def _decision_revoke(ws,model,decision_id,*,request_id,reason,input_sha,actor):
             conn.execute('INSERT INTO automation_attempt VALUES(?,?,?,?,?,?,?)',
                 (journal.ident(),journal.digest([row['store_id'],row['period']])[:32],key,input_sha,'dispatch_pending',
                  journal.encoded({'store_id':row['store_id'],'fingerprint':'automation:'+journal.digest([decision_id,key])}),journal.now()))
+        if affects_period_cost:
+            conn.execute('INSERT INTO automation_attempt VALUES(?,?,?,?,?,?,?)',
+                (journal.ident(),journal.digest([row['store_id'],row['period']])[:32],key,input_sha,'dispatch_pending',
+                 journal.encoded({'store_id':row['store_id'],'fingerprint':'automation:'+journal.digest(['period-cost-revoke',decision_id,key])}),journal.now()))
         if affects_source_facts:
             conn.execute('INSERT INTO automation_attempt VALUES(?,?,?,?,?,?,?)',
                 (journal.ident(),journal.digest([row['store_id'],row['period']])[:32],key,input_sha,'dispatch_pending',
@@ -584,7 +614,7 @@ def _decision_revoke(ws,model,decision_id,*,request_id,reason,input_sha,actor):
             (journal.ident(),key,row['kind'],row['period'],row['store_id'],'revoke',decision_id,'{}',reason.strip(),input_sha,'',actor['id'],journal.now()))
         _audit_cases(ws,model,row['period'],key,'decision_revoked',{'decision_id':decision_id})
         result=journal.finish(conn,key,'decision.revoke',signature,aid,{'decision_id':decision_id,'status':'revoked'})
-    if affects_cost or affects_statement or affects_source_facts:deliver(ws)
+    if affects_cost or affects_statement or affects_source_facts or affects_period_cost:deliver(ws)
     return result
 
 

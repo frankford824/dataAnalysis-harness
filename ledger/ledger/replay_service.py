@@ -369,7 +369,7 @@ def load_workspace_decisions(reference, *, fixture=False):
 
 
 
-def load_manual_finance_decision(reference,store_id,period,*,fixture=False):
+def load_manual_finance_decision(reference,store_id,period,*,fixture=False,return_raw=False):
     """Read documentary human inputs, never run.result/observed as an oracle."""
     fields={'path','sha256','source_run_id','decision_sha256','original_result_sha256','decision_at'}
     if (not isinstance(reference,dict) or set(reference)!=fields
@@ -419,11 +419,12 @@ def load_manual_finance_decision(reference,store_id,period,*,fixture=False):
         if not isinstance(decision['base_costs'],dict) or set(decision['base_costs'])!={'goods','dropship','reshipment'}:
             raise ReplayError('历史成本基数必须明确三个科目')
         for value in decision['base_costs'].values():_cents(value)
-    return decision,{'path':str(path),'capture_sha256':reference['sha256'],
+    document={'path':str(path),'capture_sha256':reference['sha256'],
         'decision_sha256':reference['decision_sha256'],'historical_source_run_id':reference['source_run_id'],
         'historical_result_sha256':reference['original_result_sha256'],'decision_at':reference['decision_at'],
         'historical_authenticated_actor_proved':False,'production_authority':False,
         'documentary_history_only':not fixture}
+    return (decision,document,raw) if return_raw else (decision,document)
 
 def _offline_actor(ws,registry):
     root=Path(ws.root).resolve();temporary=Path(tempfile.gettempdir()).resolve()
@@ -593,11 +594,15 @@ class Session:
         if self.publication_scope is None:raise ReplayError('离线Manager缺少明确publication_scopes，不能默认全部账期')
         manager=Manager(lambda:self.ws,lambda:self.model,publication_scope=self.publication_scope)
         stores=sorted({sid for sid,_ in self.publication_scope.scopes})
+        from .automation_actions import deliver
         for _ in range(max_passes):
+            deliver(self.ws)
+            outbox=sum(self.publication_scope.allows(row['store_id'],row['period']) for row in self.ws.conn.execute(
+                "SELECT c.store_id,c.period FROM automation_attempt a JOIN automation_case c ON c.id=a.case_id WHERE a.state='dispatch_pending'"))
             with self.registry.connect() as db:
                 remaining=db.execute('SELECT count(*) FROM pending WHERE store_id IN (%s)' % ','.join('?' for _ in stores),stores).fetchone()[0]
-            if not remaining:
-                self.trace.append({'operation':'commission_manager.once','remaining_pending':0})
+            if not remaining and not outbox:
+                self.trace.append({'operation':'commission_manager.once','remaining_pending':0,'remaining_outbox':0})
                 return
             manager.once()
         raise ReplayError('固定输入的待核算队列未清空，不能把排队当作服务回放完成')
@@ -638,7 +643,7 @@ class Session:
             'approval_reference':approval_reference,'input_sha':preview['input_sha'],'reason':reason})
         return result
 
-    def restore_approved_manual_finance(self,store_id,period,*,reference,approval_reference,fixture=False):
+    def restore_approved_manual_finance(self,store_id,period,*,reference,approval_reference,fixture=False,cost_input_only=False):
         """Replay a whole-period approval through real preview AND close.
 
         The production API has no pre-close manual-total confirmation writer.
@@ -654,10 +659,19 @@ class Session:
         if (not fixture and (not isinstance(reference,dict)
             or not Path(reference.get('path','')).resolve().is_relative_to(self.bundle))):
             raise ReplayError('真实整期决定材料必须纳入新封存bundle，报告不得覆盖外置原件')
-        actor=_offline_actor(self.ws,self.registry)
         decision,document=load_manual_finance_decision(reference,store_id,period,fixture=fixture)
         _,fingerprint=frozen.verify(self.bundle)
         if fingerprint!=self.fingerprint:raise ReplayError('人工确认前冻结输入身份已变化')
+        if type(cost_input_only) is not bool:raise ReplayError('cost_input_only必须明确为布尔值')
+        if cost_input_only:
+            from .period_cost_inputs import restore_documentary
+            result=restore_documentary(self.ws,self.model,store_id,period,reference=reference,decision=decision,bundle=self.bundle,approval_reference=approval_reference,fixture=fixture)
+            self._manual_finance_references.append((dict(reference),store_id,period,fixture))
+            self.trace.append({'operation':'period_cost_input.restore','store_id':store_id,'period':period,
+                'document':document,'historical_authenticated_actor_proved':False,'production_authority':False,
+                'payouts_confirmed':False,'period_closed':False})
+            return result
+        actor=_offline_actor(self.ws,self.registry)
         if self.publication_scope is None or not self.publication_scope.allows(store_id,period):
             raise ReplayError('人工整期确认不在显式隔离回放店月范围')
         with guard(self.root,store_id,period),self.ws.transaction():

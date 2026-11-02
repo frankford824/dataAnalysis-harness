@@ -127,6 +127,10 @@ def protected_runs(root, versions):
     with sqlite3.connect((root/'workspace.db').as_uri()+'?mode=ro',uri=True) as conn:
         keep={r[0] for r in conn.execute('SELECT run_id FROM period WHERE run_id IS NOT NULL')}
         keep.update(r[0] for r in conn.execute('SELECT id FROM (SELECT id,row_number() OVER\n            (PARTITION BY store_id,period ORDER BY id DESC) n FROM run) WHERE n<=?',(versions,)))
+        # An aggregate approval retains the original pre-approval context too,
+        # including after a later run supersedes it or a human withdraws it.
+        if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='period_cost_input'").fetchone():
+            keep.update(r[0] for r in conn.execute('SELECT source_run_id FROM period_cost_input'))
         known={r[0] for r in conn.execute('SELECT id FROM run WHERE evidence_ready=1')}
     return keep,known
 

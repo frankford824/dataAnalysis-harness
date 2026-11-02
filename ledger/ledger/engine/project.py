@@ -223,9 +223,21 @@ def project(
     # 财务逐单核对时把它们当成少算了的收入报过来——单号对、科目对、金额对，
     # 界面却说没进账，只能一单一单去查，查完发现是相抵的。
     zeroed = by_key.filter(pl.col("amount") == 0.0).get_column("link_key").to_list()
+    dropped_zero = (pl.col("amount") == 0.0) & pl.col("link_key").is_in(list(matched_keys)) & ~pl.col("link_key").is_in(zeroed)
+    if facts.filter(dropped_zero).height:
+        # Preserve the factor control before omitting zero-valued destinations.
+        # This is evidence metadata only: ledger amounts, factors, row selection
+        # and their existing six-decimal residue remain unchanged.
+        group = ["metric_id", "store", "period", "link_key"]
+        facts = facts.with_columns(
+            pl.col("factor").sum().over(group).alias("__projection_factor_total"),
+            pl.when(dropped_zero).then(pl.col("factor")).otherwise(0.).sum().over(group)
+                .alias("__projection_dropped_zero_factor"),
+            dropped_zero.sum().over(group).alias("__projection_dropped_zero_count"),
+            pl.len().over(group).alias("__projection_target_count"))
     out = facts.filter(pl.col("amount") != 0.0)
     if not pending_frame.is_empty():
-        out=pl.concat([out,pending_frame],how='vertical_relaxed')
+        out=pl.concat([out,pending_frame],how='diagonal_relaxed')
     if zeroed:
         out = pl.concat(
             [out, facts.filter((pl.col("amount") == 0.0)

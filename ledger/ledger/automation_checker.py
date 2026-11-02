@@ -315,6 +315,16 @@ def check(ws,store_id,period,*,model=None,expected_run_id=None,ignored_blockers=
             current=source_manifest(ws,store_id)
             if journal.digest(current['slots'])!=journal.digest(recorded.get('slots',[])) or current['version']!=recorded.get('version'):
                 problems.append(issue('unverified_input_change','本店新输入尚未完成本账期等价复核'))
+            if current.get('period_cost_input_versions',{}).get(period,0)!=recorded.get('period_cost_input_versions',{}).get(period,0):
+                problems.append(issue('period_cost_input_unverified','新批准的整期成本尚未进入本次核算'))
+            cost_input=payload.get('period_cost_input') or {}
+            if cost_input.get('status')=='stale':
+                problems.append(issue('period_cost_input_stale','原成本批准所依据的输入已变化，需按新证据重新确认'))
+            if cost_input.get('status') in {'applied','superseded_by_complete_sources'}:
+                from .period_cost_inputs import verify_applied
+                from .workspace import WorkspaceError
+                try:verify_applied(ws,store_id,period,cost_input)
+                except (WorkspaceError,ValueError,OSError,KeyError):problems.append(issue('period_cost_input_source_unverified','整期成本原始批准凭据失效，请恢复原档并复核'))
             if not manual_result and current['manual_versions'].get(period,0)!=recorded.get('manual_revision',0):
                 problems.append(issue('manual_input_unverified','新补录决定尚未全部进入当前账期核算'))
             from .automation_period_proof import valid_artifact
@@ -330,6 +340,10 @@ def check(ws,store_id,period,*,model=None,expected_run_id=None,ignored_blockers=
                 problems.append(issue(code,str(finding.get('message') or finding.get('name') or '核算依据待核对'),hard))
         if payload.get('missing_sources'):problems.append(issue('missing_sources','还缺：'+'、'.join(map(str,payload['missing_sources']))))
         if payload.get('source_sync_pending'):problems.append(issue('source_sync_pending','本次输入捕获时来源尚未追平'))
+        from .period_cost_inputs import verify_period_records
+        from .workspace import WorkspaceError
+        try:verify_period_records(ws,store_id,period)
+        except (WorkspaceError,ValueError,OSError,KeyError):problems.append(issue('period_cost_input_source_unverified','成本审批原档或身份凭据校验失败，需维护恢复；无需重录金额'))
         cost_review=payload.get('cost_review') or {}
         amount_complete=cost_review.get('amount_complete')
         if amount_complete is not None:
@@ -369,6 +383,7 @@ def check(ws,store_id,period,*,model=None,expected_run_id=None,ignored_blockers=
         'payload_sha':journal.digest(payload),'engine':row['engine'] if row else None,
         'model_revision':row['model_revision'] if row else None,
         'cost_line_revision':ws.conn.execute('SELECT coalesce(max(id),0) FROM cost_line_log WHERE store_id=? AND period=?',(store_id,period)).fetchone()[0],
+        'period_cost_input_revision':ws.conn.execute("SELECT coalesce(max(rowid),0) FROM automation_decision WHERE kind='period_cost_input' AND store_id=? AND period=?",(store_id,period)).fetchone()[0],
         'period_state':state.state if state else 'open','feed':feed['identity'],
         'unverified_source_sha':pending_input_identity(ws,store_id,period,recorded=recorded),
         'pending':{k:work.get(k) for k in ('revision','source_seq','source_fingerprint','files_revision','files_applied_revision')} if work else None,

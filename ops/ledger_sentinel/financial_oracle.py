@@ -29,7 +29,7 @@ CHILD = Path(__file__).with_name('financial_oracle_child.py')
 CHECKER = ROOT/'tools/verify-ledger-service-cases.py'
 SCOPE_FIELDS = {'state','statement','commission_total','commission_people','confirmed_total',
     'confirmed_people','cost_line_total','allocation_pending_count','commission_complete','can_close','source_sync_pending'}
-IMMUTABLE_TABLES = ('manual_finance','run_labor','automation_overhead_close','payout_confirmation','settlement')
+IMMUTABLE_TABLES = ('automation_authorization','automation_receipt','automation_decision','period_cost_input','manual_finance','run_labor','automation_overhead_close','payout_confirmation','settlement')
 SERVICE_OPERATIONS=frozenset({'recompute','supplement','confirm','replace_scheme','drain_pending','close_approved','restore_approved_manual_finance'})
 SHA = re.compile('[0-9a-f]{64}')
 
@@ -72,6 +72,7 @@ def _manual_input(case, step, bundle, *, fixture=False):
     """Bind documentary approval to a sealed source, never parent expected data."""
     fields={'path','sha256','source_run_id','decision_sha256','original_result_sha256','decision_at'}
     reference=step.get('reference')
+    if type(step.get('cost_input_only',False)) is not bool:raise OracleBlocked('manual_cost_input_mode_invalid')
     if (step.get('approval_reference')!=case['approval_reference'] or 'fixture' in step
         or not isinstance(reference,dict) or set(reference)!=fields
         or type(reference.get('source_run_id')) is not int or reference['source_run_id']<=0
@@ -190,7 +191,7 @@ def _logical(value):
 
 def inspect_checkpoint(folder, *, source_code_sha=None):
     """Read real databases and original proof-bound artifacts with stdlib only."""
-    snapshot=_read(folder/'snapshot.json');scopes={};frozen={};immutable={}
+    snapshot=_read(folder/'snapshot.json');scopes={};frozen={};immutable={};cost_inputs={};run_ids={}
     with closing(_open(folder/'workspace.db')) as ws, closing(_open(folder/'registry.db')) as registry:
         _real_tables(ws,{'period','run','automation_run_proof'})
         _real_tables(registry,{'payout_confirmation'})
@@ -199,6 +200,7 @@ def inspect_checkpoint(folder, *, source_code_sha=None):
                 ws.execute('SELECT * FROM run WHERE store_id=? AND period=? ORDER BY id DESC LIMIT 1',(period['store_id'],period['period'])).fetchone())
             if run is None or (run['store_id'],run['period'])!=(period['store_id'],period['period']) or not run['evidence_ready'] or run['evidence_error']:raise OracleBlocked('financial_run_unsealed')
             payload=_resolve(ws,run['result']);key=period['store_id']+'/'+period['period']
+            run_ids[key]=run['id']
             proof=ws.execute('SELECT * FROM automation_run_proof WHERE run_id=?',(run['id'],)).fetchone()
             if proof is None:raise OracleBlocked('financial_run_proof_missing')
             if digest(_logical(payload))!=proof['result_sha']:raise OracleBlocked('financial_result_proof_changed')
@@ -226,6 +228,22 @@ def inspect_checkpoint(folder, *, source_code_sha=None):
             if period['state']=='closed':
                 if scopes[key]['can_close']:raise OracleBlocked('closed_scope_reported_open')
                 frozen[key]={'run_id':run['id'],'result_sha':digest(payload),'proof_sha':digest(dict(proof)),'artifact_sha':digest(artifacts)}
+        tables={r[0] for r in ws.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        if 'period_cost_input' in tables:
+            _real_tables(ws,{'period_cost_input','automation_authorization','automation_receipt','automation_decision'})
+            for row in ws.execute('SELECT * FROM period_cost_input'):
+                item=dict(row);item['costs']=json.loads(item.pop('costs_json'));item['evidence']=json.loads(item.pop('evidence_json'))
+                auth=ws.execute('SELECT * FROM automation_authorization WHERE id=?',(item['authorization_id'],)).fetchone()
+                if not auth:raise OracleBlocked('period_cost_authorization_missing')
+                item['authorization']=dict(auth)
+                receipts=ws.execute("SELECT * FROM automation_receipt WHERE authorization_id=? AND action='period_cost_input.apply'",(item['authorization_id'],)).fetchall()
+                if len(receipts)!=1:raise OracleBlocked('period_cost_receipt_missing')
+                item['receipt']=dict(receipts[0]);result=json.loads(receipts[0]['result_json'])
+                decision=ws.execute("SELECT * FROM automation_decision WHERE id=? AND action='apply' AND kind='period_cost_input'",(result.get('decision_id'),)).fetchone()
+                if not decision:raise OracleBlocked('period_cost_decision_missing')
+                item['decision']=dict(decision)
+                item['revoked']=bool(ws.execute("SELECT 1 FROM automation_decision WHERE action='revoke' AND ref_id=?",(decision['id'],)).fetchone())
+                cost_inputs[item['id']]=item
         for name,db in [('workspace',ws),('registry',registry)]:
             tables={r[0] for r in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
             for table in IMMUTABLE_TABLES:
@@ -234,7 +252,62 @@ def inspect_checkpoint(folder, *, source_code_sha=None):
                         item=dict(row);identity=str(item.get('id',item.get('run_id',digest(item))))
                         immutable[name+':'+table+':'+identity]=digest(item)
     if set(snapshot.get('scopes',{}))!=set(scopes):raise OracleBlocked('rpc_scope_mismatch')
-    return {'scopes':scopes,'frozen':frozen,'immutable':immutable,'input_bundle_fingerprint':snapshot.get('input_bundle_fingerprint')}
+    return {'scopes':scopes,'frozen':frozen,'immutable':immutable,'period_cost_inputs':cost_inputs,'run_ids':run_ids,'input_bundle_fingerprint':snapshot.get('input_bundle_fingerprint')}
+
+
+def _approved_cost_control(case, step, bundle):
+    ref=step['reference'];body=_read(Path(ref['path']),limit=32*1024*1024)
+    rows=[r for r in body['rows'] if r.get('store_id')==step['store_id'] and r.get('period')==step['period'] and r.get('run_id')==ref['source_run_id']]
+    if len(rows)!=1:raise OracleBlocked('period_cost_source_identity_mismatch')
+    source=rows[0];decision=json.loads(source['decision_json'],parse_constant=lambda _:(_ for _ in ()).throw(ValueError()))
+    return {'store_id':step['store_id'],'period':step['period'],'costs':decision['confirmed'],
+        'reference':{k:v for k,v in ref.items() if k!='path'},'capture_sha256':ref['sha256'],
+        'replay_approval_reference':case['approval_reference'],'source_kind':'fixture' if case['kind']=='service_fixture' else 'real_history'}
+
+
+def _verify_cost_inputs(checkpoint, observed, controls):
+    """Validate original source authority outside candidate code and SQLite triggers."""
+    for row in observed['period_cost_inputs'].values():
+        evidence=row['evidence'];reference=evidence.get('reference') or {};auth=row['authorization']
+        matching=[c for c in controls if c['store_id']==row['store_id'] and c['period']==row['period']
+            and all(reference.get(k)==v for k,v in c['reference'].items())
+            and evidence.get('replay_approval_reference')==c['replay_approval_reference']]
+        if len(matching)!=1:raise OracleBlocked('period_cost_source_not_approved')
+        control=matching[0]
+        doc=evidence.get('document') or {}
+        expected_doc={'capture_sha256':control['capture_sha256'],'decision_sha256':control['reference']['decision_sha256'],
+            'historical_source_run_id':control['reference']['source_run_id'],'historical_result_sha256':control['reference']['original_result_sha256'],
+            'decision_at':control['reference']['decision_at'],'historical_authenticated_actor_proved':False,'production_authority':False}
+        if evidence.get('source_kind')!=control['source_kind'] or any(doc.get(k)!=v for k,v in expected_doc.items()):raise OracleBlocked('period_cost_documentary_lineage_invalid')
+        def money(value):
+            if isinstance(value,bool):raise OracleBlocked('period_cost_amount_invalid')
+            try:result=Decimal(str(value))
+            except Exception:raise OracleBlocked('period_cost_amount_invalid') from None
+            if not result.is_finite() or abs(result)>Decimal('999999999999.99') or result!=result.quantize(Decimal('.01')):raise OracleBlocked('period_cost_amount_invalid')
+            return result
+        if set(row['costs'])!={'goods','dropship','reshipment'} or any(money(row['costs'][k])!=money(control['costs'][k]) for k in control['costs']):
+            raise OracleBlocked('period_cost_approved_amount_difference')
+        receipt=row['receipt'];decision=row['decision'];result=json.loads(receipt['result_json']);decision_value=json.loads(decision['values_json'])
+        if (row['revoked'] or receipt['request_id']!=row['request_id'] or auth['request_id']!=row['request_id']
+            or decision['request_id']!=row['request_id'] or decision['actor']!=row['actor']
+            or decision['store_id']!=row['store_id'] or decision['period']!=row['period']
+            or result.get('cost_input_id')!=row['id'] or result.get('payouts_confirmed') is not False or result.get('period_closed') is not False
+            or decision_value.get('cost_input_id')!=row['id'] or decision_value.get('costs')!=row['costs']):
+            raise OracleBlocked('period_cost_transaction_receipt_invalid')
+        scope=json.loads(auth['scope_json'])
+        if (row['identity_kind']!='documentary_history_replay' or auth['identity_kind']!='documentary_history_replay'
+            or auth['actor']!=row['actor'] or auth['action']!='period_cost_input.apply'
+            or scope.get('store_id')!=row['store_id'] or scope.get('period')!=row['period']
+            or scope.get('historical_authenticated_actor_proved') is not False or scope.get('production_authority') is not False
+            or evidence.get('historical_authenticated_actor_proved') is not False or evidence.get('production_authority') is not False):
+            raise OracleBlocked('period_cost_documentary_authority_invalid')
+        artifacts=evidence.get('artifacts')
+        if not isinstance(artifacts,list) or len(artifacts)!=1 or artifacts[0].get('sha')!=control['capture_sha256']:
+            raise OracleBlocked('period_cost_original_capture_missing')
+        artifact=artifacts[0];relative=Path(str(artifact.get('path','')));path=checkpoint/relative
+        if relative.is_absolute() or '..' in relative.parts or path.is_symlink() or not path.resolve().is_relative_to(checkpoint.resolve()) or not path.is_file() or file_sha(path)!=control['capture_sha256']:
+            raise OracleBlocked('period_cost_original_capture_changed')
+    return set(observed['period_cost_inputs'])
 
 
 class FinancialOracle:
@@ -393,9 +466,29 @@ class FinancialOracle:
                 shutil.copytree(child,output/'child-artifacts')
                 if exit_code!=0 or not (child/'transport-completed.json').is_file() or _read(child/'transport-completed.json')!={'cases':len(cases)}:raise OracleBlocked('financial_transport_incomplete')
                 for index,row in enumerate(cases):
-                    previous_frozen={};previous_immutable={};last=None
+                    previous_frozen={};previous_immutable={};last=None;cost_controls=[];approved_cost_ids=set()
                     for step_index,_step in enumerate(row['case']['steps']):
                         observed=inspect_checkpoint(child/str(index)/str(step_index),source_code_sha=digest(code_manifest))
+                        if _step.get('operation')=='restore_approved_manual_finance' and _step.get('cost_input_only') is True:
+                            control=_approved_cost_control(row['case'],_step,row['bundle'])
+                            if control not in cost_controls:cost_controls.append(control)
+                            target=_step['store_id']+'/'+_step['period'];now_scope=observed['scopes'].get(target)
+                            before_scope=last['scopes'].get(target) if last else None
+                            if (not now_scope or now_scope['state']!='open' or before_scope and (
+                                _different(before_scope['confirmed_people'],now_scope['confirmed_people'])
+                                or _different(before_scope['confirmed_total'],now_scope['confirmed_total'])
+                                or before_scope['commission_complete'] is False and now_scope['commission_complete'] is True)):
+                                raise OracleBlocked('period_cost_input_conferred_financial_close')
+                            ids=_verify_cost_inputs(child/str(index)/str(step_index),observed,cost_controls)
+                            if len(ids-approved_cost_ids)>1 or not any(r['store_id']==control['store_id'] and r['period']==control['period'] for r in observed['period_cost_inputs'].values()):raise OracleBlocked('period_cost_source_input_missing')
+                            for new_id in ids-approved_cost_ids:
+                                cost_row=observed['period_cost_inputs'][new_id]
+                                target_key=cost_row['store_id']+'/'+cost_row['period']
+                                if not last or cost_row['source_run_id']!=last['run_ids'].get(target_key):raise OracleBlocked('period_cost_source_run_unverified')
+                            approved_cost_ids=ids
+                        else:
+                            ids=_verify_cost_inputs(child/str(index)/str(step_index),observed,cost_controls)
+                            if ids!=approved_cost_ids:raise OracleBlocked('period_cost_input_outside_approved_step')
                         if set(observed['scopes'])-set(row['case']['expected']['scopes']):raise OracleBlocked('financial_scope_outside_approved')
                         if any(observed['frozen'].get(k)!=v for k,v in previous_frozen.items()) or any(observed['immutable'].get(k)!=v for k,v in previous_immutable.items()):raise OracleBlocked('frozen_financial_layer_changed')
                         previous_frozen.update(observed['frozen']);previous_immutable.update(observed['immutable']);last=observed

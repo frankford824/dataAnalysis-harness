@@ -111,6 +111,9 @@ def suggested_payouts(commission, labor_cut, *, operating=None, registry=None, d
     Payouts use the original rate-allocated profit, including cut participants.
     Production ownership is a separate display basis and cannot zero their pay.
     """
+    if (commission.get('period_cost_input_scope')=='store_period_only'
+            and not commission.get('manual_amounts_after_labor')):
+        return {}
     people = commission.get('people') or []
     profits = (attributed_profit(commission, operating, labor_cut, registry, duties=duties)
                if operating is not None else {})
@@ -267,6 +270,10 @@ def attributed_profit(commission, operating, labor, registry, *, store_id='', ma
     profit goes 100% to producers; cut-only members get 0. A person who
     also has 做货 product IDs is a producer even if the store default is 抽点.
     """
+    if commission.get('period_cost_input_scope')=='store_period_only' and not _labor_only:
+        # A store-total approval supplies no order/person cost ownership.
+        # Confirmed payments remain a separate immutable financial layer.
+        return {}
     people = commission.get('people') or []
     if (operating is None and not _labor_only) or not people:
         return {}
@@ -319,6 +326,21 @@ def attributed_profit(commission, operating, labor, registry, *, store_id='', ma
 
 
 def attributed_outputs(commission, store_sales, store_gross, registry, *, duties=None, production=False):
+    result=_attributed_outputs(commission,store_sales,store_gross,registry,duties=duties,production=production)
+    if commission.get('period_cost_input_scope')!='store_period_only':return result
+    # Sales retain the existing independently evidenced ownership policy. A
+    # period-total cost cannot supply gross or creator profit for those owners.
+    output={}
+    for pid,values in result.items():
+        value={**values,'gross':None,'cost_input_scope':'store_period_only'}
+        for field in ('creator_cost','creator_gross','creator_profit'):
+            if field in value:value[field]=None
+        if value.get('creator_active'):value['creator_pending']=True
+        output[pid]=value
+    return output
+
+
+def _attributed_outputs(commission, store_sales, store_gross, registry, *, duties=None, production=False):
     if production and store_sales is not None:
         store_sales = money_float(decimal(store_sales) - sum((decimal(v) for v in (commission.get('managed_sales') or {}).values()), Decimal(0)))
     people=commission.get('people') or []

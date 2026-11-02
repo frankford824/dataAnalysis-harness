@@ -31,8 +31,11 @@ def export(session, target):
     # evidence. Export precisely those dependencies instead of dropping every
     # artifact outside runs/. The host independently rechecks every SHA.
     root=session.root.resolve()
-    for row in session.ws.conn.execute('SELECT manifest_json FROM automation_run_proof'):
-        manifest=json.loads(row[0])
+    manifests=[json.loads(row[0]) for row in session.ws.conn.execute('SELECT manifest_json FROM automation_run_proof')]
+    tables={r[0] for r in session.ws.conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    if 'period_cost_input' in tables:
+        manifests.extend(json.loads(row[0]) for row in session.ws.conn.execute('SELECT evidence_json FROM period_cost_input'))
+    for manifest in manifests:
         for artifact in manifest.get('artifacts',[]):
             relative=Path(str(artifact.get('path','')));expected=artifact.get('sha')
             if (relative.is_absolute() or '..' in relative.parts or not relative.parts

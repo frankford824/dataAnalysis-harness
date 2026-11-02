@@ -230,6 +230,7 @@ class StoreInput:
     frozen_labor: object = None
     detail_loaded: bool = True
     income: dict | None = None
+    cost_input_scope: str = ''
 
 
 def public_income(income):
@@ -303,6 +304,7 @@ def build_month(inputs, model, period, overhead_total, roster=(), labor_shares=N
         base['labor_cost'] = cuts.get(item.store_id) if cuts is not None else None
         if item.state=='closed' and decimal(item.frozen_labor) is not None:
             base['labor_cost']=decimal(item.frozen_labor)
+        aggregate_cost_only=item.cost_input_scope=='approved_store_period_total'
         by_order = {}
         for projection in item.projections:
             key = projection.get('spine_row')
@@ -311,16 +313,17 @@ def build_month(inputs, model, period, overhead_total, roster=(), labor_shares=N
             row = by_order.setdefault(key, {'spine_row':None if key == 'unallocated' else key,
                 'product_id':str(projection.get('product_id') or ''),'product_name':projection.get('product_name') or '',
                 'order_id':str(projection.get('order_id') or ''),'sub_order_id':str(projection.get('sub_order_id') or ''),
-                'link_keys':set(), 'values':{name:(Decimal(0) if item.evidence_complete and base[name] is not None else None) for name in ROW_PRIMITIVES}})
+                'link_keys':set(), 'values':{name:(Decimal(0) if item.evidence_complete and base[name] is not None and not (aggregate_cost_only and name=='goods_cost') else None) for name in ROW_PRIMITIVES}})
             row['link_keys'].update(projection.get('link_keys') or [str(projection.get('link_key') or '')])
             if 'values' in projection:
                 for name,value in projection['values'].items():
                     amount=decimal(value)
-                    if name in NODES and amount is not None and base[name] is not None:
+                    if name in NODES and amount is not None and base[name] is not None and not (aggregate_cost_only and name=='goods_cost'):
                         row['values'][name]=(row['values'][name] or Decimal(0))+amount
                 continue
             name = category.get(projection.get('metric_id'))
             value = decimal(projection.get('amount'))
+            if aggregate_cost_only and name=='goods_cost':continue
             if name and value is not None:
                 if row['values'][name] is None and base[name] is not None:
                     row['values'][name] = Decimal(0)
@@ -328,7 +331,7 @@ def build_month(inputs, model, period, overhead_total, roster=(), labor_shares=N
                     row['values'][name] += value if name == 'receipts' else -value
         if not by_order:
             by_order['unallocated'] = {'spine_row':None,'product_id':'','product_name':'','order_id':'','sub_order_id':'','link_keys':set(),
-                'values':{name:Decimal(0) if item.evidence_complete and base[name] is not None else None for name in ROW_PRIMITIVES}}
+                'values':{name:Decimal(0) if item.evidence_complete and base[name] is not None and not (aggregate_cost_only and name=='goods_cost') else None for name in ROW_PRIMITIVES}}
         for row in by_order.values():
             if item.income is not None:
                 basis = item.income.get('by_spine',{}).get(row['spine_row'],{})
@@ -351,7 +354,7 @@ def build_month(inputs, model, period, overhead_total, roster=(), labor_shares=N
             common = {'store_id':item.store_id,'store':item.store,'platform':item.platform,'period':period,'run_id':item.run_id,
                 'product_id':row['product_id'],'product_key':f'{item.store_id}:{row["product_id"]}' if row['product_id'] else '',
                 'product_name':row['product_name'],'order_id':row['order_id'],'sub_order_id':row['sub_order_id'],
-                'spine_row':row['spine_row'],'link_keys':sorted(row['link_keys']),'managed':classification}
+                'spine_row':row['spine_row'],'link_keys':sorted(row['link_keys']),'managed':classification,'cost_input_scope':item.cost_input_scope}
             weights = {pid:owner['weight'] for pid,owner in owners.items()}
             splits = {name:spread(value, weights, Decimal('.000001')) for name,value in row['values'].items()}
             if not weights or sum(weights.values(), Decimal(0)) <= 0:
@@ -361,13 +364,13 @@ def build_month(inputs, model, period, overhead_total, roster=(), labor_shares=N
                 for pid,owner in owners.items():
                     values = {name:split.get(pid) if split is not None else None for name,split in splits.items()}
                     atoms.append({**common,**{k:v for k,v in owner.items() if k not in ('weight','total_rate')},
-                                  'values':{**values,'labor_cost':None,'commission':owner['commission']},'unclaimed':False})
+                                  'values':{**values,'labor_cost':None,'commission':None if aggregate_cost_only else owner['commission']},'unclaimed':False})
             for ref in refs:
                 factor = ref['weight'] / ref['total_rate'] if ref['total_rate'] is not None and ref['total_rate'] > 0 else None
                 values = {name:value * factor if factor is not None and value is not None else None for name,value in row['values'].items()}
                 reference_atoms.append({**common,**{k:v for k,v in ref.items() if k not in ('weight','total_rate')},
                                         '_reference_factor':factor,
-                                        'values':{**values,'labor_cost':None,'commission':ref['commission']},'reference_only':True})
+                                        'values':{**values,'labor_cost':None,'commission':None if aggregate_cost_only else ref['commission']},'reference_only':True})
         owned = [row for row in atoms if row['store_id'] == item.store_id and not row['unclaimed']]
         labor_weights = {index:row['values']['receipts'] for index,row in enumerate(owned)}
         labor = spread(base['labor_cost'],labor_weights)
@@ -496,7 +499,8 @@ def load_inputs(ws, model, period, *, details=True):
             getattr(st,'state','open'),getattr(st,'stale',False),digest([run_id,payload,proof_sha,(calc or {}).get('sha') if run_id else '',assignments_verified,complete,public_income(income)]),payload.get('statement') or [],
             projections,assignments,complete,issues,getattr(st,'at',''),getattr(st,'engine',''),
             (payload.get('commission') or {}).get('total') if (payload.get('commission') or {}).get('amount_complete',False) else None,
-            getattr(st,'labor_cut',None) if st and st.state=='closed' else None,details,income))
+            getattr(st,'labor_cut',None) if st and st.state=='closed' else None,details,income,
+            'approved_store_period_total' if (payload.get('period_cost_input') or {}).get('status')=='applied' else ''))
     return inputs, roster, revision
 
 
@@ -535,14 +539,14 @@ def select_report(month, *, level='store', platform='', store_id='', team_id='',
             'order_count':None if store_summary and not source['input'].detail_loaded else len({(row['store_id'],row['order_id'],row['sub_order_id']) for row in group if row['order_id'] or row['sub_order_id']}),
             'unclaimed':False if store_summary else all(row['unclaimed'] for row in group),'metrics':public_metrics(metrics),
             'run_ids':sorted({row['run_id'] for row in group if row['run_id']}),
-            'managed':sorted({row['managed'] for row in group})})
+            'managed':sorted({row['managed'] for row in group}),'cost_input_scope':head.get('cost_input_scope','')})
     summary_values = {name:_sum(metrics.get(name) for metrics in raw_metrics) for name in (*PRIMITIVES,'commission')}
     summary = derive(summary_values,net_income=summary_values['net_income'])
     rows.sort(key=lambda row:(row['metrics']['profit_after_labor'] is None,-(decimal(row['metrics']['profit_after_labor']) or Decimal(0)),row['id']))
     for index,row in enumerate(rows):
         row['rank'] = index + 1 if not row['unclaimed'] and row['metrics']['profit_after_labor'] is not None else None
     all_runs = [{'store_id':row['input'].store_id,'run_id':row['input'].run_id,'input_sha':row['input'].input_sha,'state':row['input'].state,
-             'stale':row['input'].stale,'at':row['input'].at,'engine':row['input'].engine,'evidence_complete':row['input'].evidence_complete}
+             'stale':row['input'].stale,'at':row['input'].at,'engine':row['input'].engine,'evidence_complete':row['input'].evidence_complete,'cost_input_scope':row['input'].cost_input_scope}
             for row in month['stores']]
     runs = [row for row in all_runs if not store_id or row['store_id'] == store_id]
     input_sha = digest([VERSION,month['period'],all_runs,month.get('organization_revision'),month.get('model_sha'),month.get('overhead_total')])
@@ -557,7 +561,7 @@ def select_report(month, *, level='store', platform='', store_id='', team_id='',
         'amount_precision':{'money':'source_decimal','subcent_minimum_fraction_digits':6,'display_fraction_digits':2,'aggregation':'before_display_rounding'},
         'display_rounding':display_rounding(raw_metrics,summary),
         'summary':public_metrics(summary),'rows':rows,'reference_rows':[{**{k:v for k,v in row.items() if k not in ('values','link_keys') and not k.startswith('_')},'metrics':public_metrics(derive(row['values'],net_income=row['values'].get('net_income')))} for row in refs],
-        'issues':sorted({issue for row in month['stores'] for issue in row['input'].issues}),
+        'issues':sorted({issue for row in month['stores'] for issue in row['input'].issues} | ({'店月成本已批准，商品与人员尚无完整成本分配依据，明细利润保持待补齐'} if not store_summary and any(row['input'].cost_input_scope=='approved_store_period_total' for row in month['stores']) else set())),
         'unclaimed_count':sum(row['unclaimed'] for row in atoms) if detail_loaded else None,
         'classification_pending_count':sum(row['managed']=='unknown' for row in month['atoms']) if detail_loaded else None,
         'labor_unallocated':public_metrics({'labor_cost':_sum(row['labor_unallocated'] for row in month['stores'])})['labor_cost']}

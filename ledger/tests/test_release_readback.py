@@ -193,7 +193,7 @@ def test_frozen_snapshot_includes_all_financial_layers(stored):
     verify=module()
     before=verify.snapshot(stored['root'],reader=lambda url:{'version':'b'*40})
     after=verify.snapshot(stored['root'],reader=lambda url:{'version':CODE})
-    assert set(before['workspace_immutable'])=={'manual_finance','run_labor','automation_overhead_close'}
+    assert set(before['workspace_immutable'])=={'manual_finance','run_labor','automation_overhead_close','period_cost_input'}
     assert before['workspace_schema']['automation_overhead_close']=='present'
     assert set(before['immutable'])=={'payout_confirmation','settlement','profit_exclusion'}
     assert len(before['closed'])==2
@@ -761,3 +761,32 @@ def test_matching_disk_source_does_not_certify_an_unapproved_runtime(stored,stat
         with pytest.raises(ValueError,match='approved runtime'):
             verify.business_readback(base,PERIOD,CODE,expected_source_sha=expected,
                 source_lookup=lambda run:verify.saved_run(stored['root'],run))
+
+
+def test_period_cost_input_frozen_layer_detects_amount_and_receipt_changes(stored):
+    verify=module();ws=stored['ws'];run_id=stored['runs'][PERIOD,'s1']
+    ws.conn.execute('INSERT INTO period_cost_input VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)',
+        ('approved-cost-fixture','s1',PERIOD,run_id,'8'*64,'{"goods":"20.00","dropship":"0.00","reshipment":"0.00"}',
+         '{"kind":"declared synthetic financial history"}','approved-authority','approved-history-fixture','human',
+         'cost-request','original approval','2030-02-01'))
+    ws.conn.commit()
+    baseline=verify.snapshot(stored['root'],reader=reader_for(responses(stored)))
+    assert baseline['workspace_schema']['period_cost_input']=='present'
+    assert set(baseline['workspace_immutable']['period_cost_input'])=={'approved-cost-fixture'}
+    ws.conn.execute('DROP TRIGGER period_cost_input_no_update')
+    ws.conn.execute("UPDATE period_cost_input SET costs_json=? WHERE id='approved-cost-fixture'",('{"goods":"21.00","dropship":"0.00","reshipment":"0.00"}',));ws.conn.commit()
+    current=verify.snapshot(stored['root'],reader=reader_for(responses(stored)))
+    with pytest.raises(ValueError,match='Frozen financial history changed'):verify.compare_history(baseline,current,CODE)
+
+
+def test_period_cost_input_empty_schema_upgrade_is_allowed_but_removal_is_not(stored):
+    from ledger.period_cost_inputs import install
+    verify=module();ws=stored['ws'];ws.conn.execute('DROP TABLE period_cost_input');ws.conn.commit()
+    before=verify.snapshot(stored['root'],reader=reader_for(responses(stored)))
+    assert before['workspace_schema']['period_cost_input']=='legacy_absent'
+    assert before['workspace_immutable']['period_cost_input']=={}
+    install(ws.conn);ws.conn.commit()
+    after=verify.snapshot(stored['root'],reader=reader_for(responses(stored)))
+    assert after['workspace_schema']['period_cost_input']=='present'
+    verify.compare_history(before,after,CODE)
+    with pytest.raises(ValueError,match='period cost input table was removed'):verify.compare_history(after,before,CODE)
