@@ -240,7 +240,7 @@ def readonly_uri(path):
 
 @contextmanager
 def _readonly(path):
-    connection=sqlite3.connect(readonly_uri(path),uri=True)
+    connection=sqlite3.connect(readonly_uri(path),uri=True,timeout=60)
     try:yield connection
     finally:connection.close()
 

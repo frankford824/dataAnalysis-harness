@@ -349,11 +349,13 @@ class Workspace:
     def __post_init__(self) -> None:
         self.root = Path(self.root)
         (self.root / "files").mkdir(parents=True, exist_ok=True)
-        conn = sqlite3.connect(self.root / "workspace.db")
+        # A writer killed at release cutover leaves a WAL whose recovery holds
+        # the lock for longer than the 5 s default; wait before any pragma.
+        conn = sqlite3.connect(self.root / "workspace.db", timeout=60)
         conn.row_factory = sqlite3.Row
         try:
+            conn.execute("pragma busy_timeout=60000")
             conn.execute("pragma journal_mode=wal")
-            conn.execute("pragma busy_timeout=30000")
             conn.executescript(_SCHEMA)
             _migrate(conn)
             from .workspace_read_version import install as install_read_versions
