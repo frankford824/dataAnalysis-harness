@@ -44,6 +44,10 @@ _sync_guards: dict[Path, threading.RLock] = {}
 REPLACED_SOURCES = frozenset({"order_cost", "after_sales"})
 ACCOUNTING_ENTITIES = frozenset({"order", "order_item", "order_cost", "order_relation", "after_sale", "after_sale_item"})
 CATALOG_ENTITIES = frozenset({"shop", "shop_group", "user", "shop_item", "department", "sku_cost"})
+# 聚水潭合单/拆单后头上的线上单号是「P,店铺:P」这类列表；商品行自己的线上单号能证明
+# 它属于列表里哪一笔平台订单时，订单脊柱和成本都用这笔平台订单号，不用整串列表。
+# 1688 同样是 19 位平台主订单号，挂成本用主订单号，整串列表对不上上传的订单明细。
+MEMBER_PARENT_PLATFORMS = frozenset({"taobao", "douyin", "alibaba1688"})
 # 一行商品成本超过该行售价这么多倍、且金额超过这个门槛，视为数量或成本写错，不计。
 # 正常亏本引流是 1 分钱卖 1 块成本的东西，绝对金额小；5 倍 + 100 元把它们都放过。
 IMPLAUSIBLE_COST_TO_PRICE = 5.0
@@ -1715,13 +1719,13 @@ class OrderFeed:
         parent=pl.col('online_order_no_order').fill_null(pl.col('online_order_no')).cast(pl.Utf8)
         origin_day=pl.lit(None,dtype=pl.Date)
         origin_supplied=pl.lit(False)
-        if store.platform in {'taobao','douyin'}:
+        if store.platform in MEMBER_PARENT_PLATFORMS:
             shop_name=('order_store_id_order' if 'order_store_id' in items.columns and 'order_store_id' in orders.columns else 'order_store_id')
             shop=(pl.col(shop_name) if 'order_store_id' in items.columns or 'order_store_id' in orders.columns else pl.lit(None,dtype=pl.String))
             parent,bound=original_parent(pl.col('online_order_no'),parent,shop,
                 pl.col('outer_sku').fill_null(pl.col('sub_order_id')),exported_orders,
                 item_shop=pl.col('order_store_id') if 'order_store_id' in items.columns and 'order_store_id' in orders.columns else None)
-            if 'original_order_date' in items.columns:
+            if store.platform in {'taobao','douyin'} and 'original_order_date' in items.columns:
                 raw_day=pl.col('original_order_date').cast(pl.String).str.slice(0,10)
                 origin_supplied=bound & raw_day.is_not_null() & (raw_day!='')
                 origin_day=pl.when(bound).then(raw_day.str.strptime(pl.Date,'%Y-%m-%d',strict=False)).otherwise(None)
@@ -1971,7 +1975,7 @@ class OrderFeed:
             else []
         )
         line_parent=pl.col('online_order_no')
-        if store.platform in {'taobao','douyin'}:
+        if store.platform in MEMBER_PARENT_PLATFORMS:
             line_parent,_=original_parent(pl.col('item_order_no'),line_parent,
                 pl.coalesce('__parent_store_id','__item_store_id'),
                 pl.col('outer_sku').fill_null(pl.col('sub_order_id')),exported_orders,item_shop=pl.col('__item_store_id'))
