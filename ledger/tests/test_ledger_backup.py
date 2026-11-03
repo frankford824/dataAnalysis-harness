@@ -143,3 +143,18 @@ def test_windows_share_keeps_its_acl_but_local_folders_are_made_private(tmp_path
     tool.private_directory(tmp_path/'share');assert calls==[] and made[-1]==('share',None)
     tool.private_directory(tmp_path/'local')
     assert calls and calls[0][0]=='icacls' and '/inheritance:r' in calls[0]
+
+
+def test_read_only_uri_of_a_unc_share_has_no_authority():
+    tool=module()
+    class Share:
+        def resolve(self):return self
+        def as_uri(self):return 'file://192.168.0.125/dataAnalysis/backups/workspace.db'
+    import pathlib
+    original=pathlib.Path
+    tool.Path=lambda value:Share() if value=='share' else original(value)
+    try:
+        assert tool.readonly_uri('share')=='file:////192.168.0.125/dataAnalysis/backups/workspace.db?mode=ro'
+        assert tool.readonly_uri('/tmp/x.db')=='file:///tmp/x.db?mode=ro'
+    finally:tool.Path=original
+    assert tool.readback().readonly_uri('/tmp/x.db')=='file:///tmp/x.db?mode=ro'

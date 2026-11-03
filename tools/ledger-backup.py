@@ -81,12 +81,19 @@ def sqlite_copy(source,target):
     target.parent.mkdir(parents=True,exist_ok=True)
     # SQLite backup includes committed WAL contents. Copying the main file alone
     # would silently omit transactions in a running service.
-    with closing(sqlite3.connect(source.resolve().as_uri()+'?mode=ro',uri=True)) as origin:
+    with closing(sqlite3.connect(readonly_uri(source),uri=True)) as origin:
         with closing(sqlite3.connect(target)) as destination:
             origin.backup(destination)
-    with closing(sqlite3.connect(target.resolve().as_uri()+'?mode=ro',uri=True)) as restored:
+    with closing(sqlite3.connect(readonly_uri(target),uri=True)) as restored:
         if restored.execute('PRAGMA quick_check').fetchall()!=[('ok',)]:
             raise ValueError('Restored financial database failed integrity check')
+
+
+def readonly_uri(path):
+    uri=Path(path).resolve().as_uri()
+    # SQLite rejects a URI authority; a UNC share needs an empty one.
+    if uri.startswith('file://') and not uri.startswith('file:///'):uri='file:////'+uri[len('file://'):]
+    return uri+'?mode=ro'
 
 
 def network_share(path):
@@ -121,7 +128,7 @@ def create(root,application,model,target,version):
     code,configuration=files(application,application=True),files(model)
     sizes=0
     for name in ('workspace.db','commission/registry.db'):
-        with closing(sqlite3.connect((root/name).as_uri()+'?mode=ro',uri=True)) as db:
+        with closing(sqlite3.connect(readonly_uri(root/name),uri=True)) as db:
             sizes+=db.execute('PRAGMA page_count').fetchone()[0]*db.execute('PRAGMA page_size').fetchone()[0]
     sizes+=sum((application/row['path']).stat().st_size for row in code)
     sizes+=sum((model/row['path']).stat().st_size for row in configuration)
@@ -190,7 +197,7 @@ def verify(path,version,max_age=86400,compare_root=None,allow_extra_roles=False)
         current=tool.snapshot(Path(compare_root).resolve(),reader=lambda _:{'version':version,'source':'backup_source'})
         tool.compare_history(restored,current,version)
     for role in ('workspace','registry'):
-        with closing(sqlite3.connect(by_role[role].resolve().as_uri()+'?mode=ro',uri=True)) as db:
+        with closing(sqlite3.connect(readonly_uri(by_role[role]),uri=True)) as db:
             if db.execute('PRAGMA quick_check').fetchall()!=[('ok',)]:raise ValueError('Restored database is not readable')
     return {'passed':True,'manifest_sha256':sha(path),'code_sha':version,'roles':sorted(ROLES|extra),
         'restore_verified_roles':sorted(ROLES),'extra_roles_hash_checked':sorted(extra),'live_restore_performed':False}

@@ -65,12 +65,12 @@ for item in frontend:
         raise SystemExit('Frontend changed after acceptance')
 runtime_roots=('ops/ledger_sentinel','agent-worker/ledger_agent','agent-worker/skills','agent-worker/pyproject.toml',
                'agent-worker/requirements.lock','host-agent/finance_agent','host-agent/pyproject.toml','host-agent/README.md')
-paths = ('ledger/ledger',*runtime_roots,'models/cn-ecommerce/templates.yaml','models/cn-ecommerce/sources.yaml','models/cn-ecommerce/metrics.yaml')
+paths = ('ledger/ledger',*runtime_roots,'models/cn-ecommerce/templates.yaml','models/cn-ecommerce/sources.yaml','models/cn-ecommerce/metrics.yaml','models/cn-ecommerce/dictionary.csv')
 removed = git('diff','--name-only','--diff-filter=D',base,version,'--',*paths).decode().splitlines()
 code_removed = [p for p in removed if not p.startswith('ledger/ledger/static/')]
 if code_removed:
     raise SystemExit('Deletion requires an explicit rollback/migration manifest: '+', '.join(code_removed))
-allowed_models = {'models/cn-ecommerce/templates.yaml','models/cn-ecommerce/sources.yaml','models/cn-ecommerce/metrics.yaml'}
+allowed_models = {'models/cn-ecommerce/templates.yaml','models/cn-ecommerce/sources.yaml','models/cn-ecommerce/metrics.yaml','models/cn-ecommerce/dictionary.csv'}
 changed_models = git('diff','--name-only',base,version,'--','models/cn-ecommerce').decode().splitlines()
 if set(changed_models)-allowed_models:
     raise SystemExit('Model changes outside approved release contracts: '+', '.join(sorted(set(changed_models)-allowed_models)))

@@ -8,7 +8,8 @@ param(
   [string]$BackupManifest = $env:LEDGER_BACKUP_MANIFEST,
   [switch]$AllowTemplateUpdate,
   [switch]$AllowSourceUpdate,
-  [switch]$AllowMetricUpdate
+  [switch]$AllowMetricUpdate,
+  [switch]$AllowDictionaryUpdate
 )
 $ErrorActionPreference = 'Stop'
 [Console]::OutputEncoding = [Text.Encoding]::UTF8
@@ -42,7 +43,8 @@ try {
         $Name -notin @('agent-worker/pyproject.toml','agent-worker/requirements.lock','host-agent/pyproject.toml','host-agent/README.md') -and
         -not ($AllowTemplateUpdate -and $Name -eq 'models/cn-ecommerce/templates.yaml') -and
         -not ($AllowSourceUpdate -and $Name -eq 'models/cn-ecommerce/sources.yaml') -and
-        -not ($AllowMetricUpdate -and $Name -eq 'models/cn-ecommerce/metrics.yaml')) { throw "Unexpected file: $Name" }
+        -not ($AllowMetricUpdate -and $Name -eq 'models/cn-ecommerce/metrics.yaml') -and
+        -not ($AllowDictionaryUpdate -and $Name -eq 'models/cn-ecommerce/dictionary.csv')) { throw "Unexpected file: $Name" }
     $Destination = [IO.Path]::GetFullPath((Join-Path $AppRoot $Name))
     if (-not $Destination.StartsWith($AppRoot + '\',[StringComparison]::OrdinalIgnoreCase)) { throw "Unsafe destination: $Name" }
   }
@@ -253,6 +255,8 @@ try {
     if ($AllowSourceUpdate -and $Name -eq 'sources.yaml' -and $SourcePayload.Count -eq 1) { $ExpectedHash = $SourcePayload[0].sha256 }
     $MetricPayload = @($Manifest.files | Where-Object { $_.path -eq 'models/cn-ecommerce/metrics.yaml' })
     if ($AllowMetricUpdate -and $Name -eq 'metrics.yaml' -and $MetricPayload.Count -eq 1) { $ExpectedHash = $MetricPayload[0].sha256 }
+    $DictionaryPayload = @($Manifest.files | Where-Object { $_.path -eq 'models/cn-ecommerce/dictionary.csv' })
+    if ($AllowDictionaryUpdate -and $Name -eq 'dictionary.csv' -and $DictionaryPayload.Count -eq 1) { $ExpectedHash = $DictionaryPayload[0].sha256 }
     if ((Get-FileHash -LiteralPath (Join-Path $AppRoot ('models\cn-ecommerce\'+$Name)) -Algorithm SHA256).Hash -ne $ExpectedHash) { throw "Model changed during code release: $Name" }
   }
   # Warm immutable read projections while background writers are stopped.

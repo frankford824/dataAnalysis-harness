@@ -231,9 +231,16 @@ def readonly(path):
     return _readonly(path)
 
 
+def readonly_uri(path):
+    uri=Path(path).resolve().as_uri()
+    # SQLite rejects a URI authority; a UNC share needs an empty one.
+    if uri.startswith('file://') and not uri.startswith('file:///'):uri='file:////'+uri[len('file://'):]
+    return uri+'?mode=ro'
+
+
 @contextmanager
 def _readonly(path):
-    connection=sqlite3.connect(path.resolve().as_uri()+'?mode=ro',uri=True)
+    connection=sqlite3.connect(readonly_uri(path),uri=True)
     try:yield connection
     finally:connection.close()
 
