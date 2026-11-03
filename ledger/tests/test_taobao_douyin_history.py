@@ -40,6 +40,31 @@ def test_original_platform_day_controls_cost_evidence(platform,source,day,eviden
     assert sl.nodes['profit'].value==(-10 if available else None)
     assert result.pricing_gaps.height==(0 if available else 1)
     if not available:assert result.pricing_gaps['order_date'].item()=='2026-06-05'
+    if source in {'register','register_first'}:
+        assert '历史有效期未证实' in result.pricing_gaps['reason'].item()
+
+
+def test_later_first_register_price_does_not_become_history_by_repeating_sale_day():
+    frame = pl.DataFrame({'order_id': ['SALE'], 'cost_source': ['register_first'],
+        'cost_status': ['priced'], 'unit_cost': [40.838], 'quantity': [1.],
+        'cost_as_of': ['2026-08-05'], '__spine_order_date__': [datetime(2026, 8, 5).date()],
+        'pricing_suspect': [False], 'pricing_missing': [False],
+        'pricing_evidence': [json.dumps({'order_date': '2026-08-05',
+            'register_basis': 'first', 'register_effective_on': '2026-09-17'})]})
+    known, wanted = historical_price_evidence(frame, trusted_feed_history=True)
+    assert not frame.select(known).item()
+    assert frame.select(wanted).item() == datetime(2026, 8, 5).date()
+
+
+@pytest.mark.parametrize('basis',['register','change_log','change_log_prior','first'])
+def test_inventory_metadata_before_sale_does_not_certify_register_effectiveness(basis):
+    frame=pl.DataFrame({'order_id':['SALE'],'cost_source':['register'],
+        'cost_status':['priced'],'unit_cost':[12.64],'quantity':[1.],
+        'cost_as_of':['2026-08-05'],'__spine_order_date__':[datetime(2026,8,5).date()],
+        'pricing_evidence':[json.dumps({'order_date':'2026-08-05','register_basis':basis,
+            'register_effective_on':'2025-10-23','changed_at':'2026-08-29'})]})
+    known,_=historical_price_evidence(frame,trusted_feed_history=True)
+    assert frame.select(known).item() is False
 
 
 @pytest.mark.parametrize('source,quoted,proof,available',[

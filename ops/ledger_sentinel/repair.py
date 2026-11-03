@@ -25,7 +25,7 @@ CONTROL_PATHS=('models/','ledger/tests/baseline/','ledger/tests/conftest.py','le
     'ledger/ledger/historical_close.py','ledger/ledger/commission_','ledger/ledger/labor_api.py',
     'ledger/ledger/cost_','ledger/ledger/manual_cost.py','ledger/ledger/statement_review.py',
     'ledger/ledger/upstream_history.py','ledger/ledger/storage_integrity.py',
-    'ledger/ledger/version.py','ledger/ledger/snapshot_store.py','ledger/ledger/run_artifacts.py',
+    'ledger/ledger/version.py','ledger/ledger/snapshot_store.py','ledger/ledger/run_artifacts.py','ledger/ledger/period_snapshot.py',
     'ledger/ledger/operations_income.py','ledger/ledger/__init__.py',
     'ledger/ledger/recompute_reuse.py','ledger/ledger/service.py','ledger/ledger/model/',
     'ledger/ledger/engine/cost_policy.py','ledger/ledger/sentinel_api.py',

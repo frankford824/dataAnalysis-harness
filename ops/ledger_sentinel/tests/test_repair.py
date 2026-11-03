@@ -161,7 +161,7 @@ def test_trusted_acceptance_uses_private_corpus_and_real_gate_without_model_log_
     'ledger/ledger/write_auth.py','ledger/ledger/automation_checker.py','ledger/ledger/automation_actions.py',
     'ledger/ledger/automation_store.py','ledger/ledger/automation_period_proof.py','ledger/ledger/worker_control_api.py',
     'ledger/ledger/workspace.py','ledger/ledger/finance_guard.py','ledger/ledger/api.py','ledger/ledger/upstream_history.py',
-    'ledger/ledger/version.py','ledger/ledger/snapshot_store.py','ledger/ledger/run_artifacts.py',
+    'ledger/ledger/version.py','ledger/ledger/snapshot_store.py','ledger/ledger/run_artifacts.py','ledger/ledger/period_snapshot.py',
     'ledger/ledger/operations_income.py','ledger/ledger/__init__.py',
     'ledger/ledger/cost_lines.py','ledger/ledger/manual_cost.py','ledger/ledger/commission_registry.py',
     'agent-worker/ledger_agent/runtime.py','agent-worker/ledger_agent/privacy.py','agent-worker/ledger_agent/state.py',

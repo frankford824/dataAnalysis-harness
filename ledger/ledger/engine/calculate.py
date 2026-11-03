@@ -374,7 +374,7 @@ def evaluate_metric(
             .when((col('failure_reason') == 'missing_original_order_date') & wanted.is_not_null()
                   & (col('source_pricing_day').cast(pl.String).str.slice(0,10) == wanted.dt.strftime('%Y-%m-%d')))
             .then(pl.lit('原订单日期已确认，等待历史成本取价'))
-            .when(col('cost_source') == 'register_first').then(pl.lit('首次登记价晚于下单日，需补历史成本凭据'))
+            .when(col('cost_source') == 'register_first').then(pl.lit('首次登记价晚于下单日，登记价历史有效期未证实；需补历史成本凭据'))
             .when((col('cost_source') == 'register') & (col('pricing_evidence').cast(pl.String).str.json_path_match('$.register_basis') == 'change_log_prior'))
             .then(pl.lit('后续调价前的旧值不能证明下单日价格，需补历史凭据'))
             .when((col('cost_source') == 'register') & (col('pricing_evidence').cast(pl.String).str.json_path_match('$.register_basis') == 'change_log'))

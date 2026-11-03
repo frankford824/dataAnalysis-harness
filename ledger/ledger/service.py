@@ -653,7 +653,14 @@ def _recompute_locked(
             out.periods.append({**shown,'run_id':reused['id'],'state':state.state if state else 'open',
                                 'stale':bool(state and state.stale)})
             continue
-        same = ws.identical_run(store.id, sl.period, payload, fingerprint)
+        from .run_artifacts import policy as storage_policy
+        period_fingerprint = None
+        if storage_policy(ws.root).get('period_snapshot_reuse') is True:
+            from .period_snapshot import fingerprint as period_identity
+            period_fingerprint = period_identity(engine_version(), model_revision,
+                                                  sl.period, payload, sl, allocation)
+        saved_fingerprint = period_fingerprint or fingerprint
+        same = ws.identical_run(store.id, sl.period, payload, saved_fingerprint)
         if same:
             previous_id, previous_payload = same
             reusable = (sl.facts.is_empty() or verified(ws.facts_path(previous_id)))
@@ -707,7 +714,7 @@ def _recompute_locked(
             period_cost_inputs.assert_captured(ws,store.id,sl.period,captured_source.get('period_cost_input_versions',{}).get(sl.period,0))
             run_id = ws.record(
                 store.id, sl.period, payload, shas, evidence_ready=False,
-                model_revision=model_revision, input_fingerprint=fingerprint,
+                model_revision=model_revision, input_fingerprint=saved_fingerprint,
             )
             if allocation:
                 try:
@@ -765,6 +772,17 @@ def simulate(ws: Workspace, model: Model, store: Store) -> list[dict[str, Any]]:
 
 def _keep_facts(ws: Workspace, run_id: int, sl: Slice) -> None:
     """把事实行落一份；失败会把本次快照降级为不可结账。"""
+    from .run_artifacts import prepare
+    try:
+        frames = [getattr(sl, name, pl.DataFrame()) for name in
+                  ('facts', 'pricing_gaps', 'coverage_gap_rows',
+                   'allocation_evidence', 'order_issue_rows',
+                   'raw_pricing_gaps', 'operations_evidence')]
+        if any(not frame.is_empty() for frame in frames) or 'goods_scope_version' in frames[2].columns:
+            prepare(ws, run_id)
+    except Exception as exc:
+        ws.mark_evidence(run_id, ready=False, error=str(exc))
+        return
     path = ws.facts_path(run_id)
     pricing_path = ws.pricing_gaps_path(run_id)
     coverage_path = ws.coverage_gaps_path(run_id)
@@ -802,6 +820,8 @@ def _keep_facts(ws: Workspace, run_id: int, sl: Slice) -> None:
             from .storage_integrity import seal
             seal(coverage_path)
         if sl.facts.is_empty():
+            from .run_artifacts import finalize
+            finalize(ws, run_id)
             ws.mark_evidence(run_id, ready=True)
             return
         facts = sl.facts
@@ -818,6 +838,8 @@ def _keep_facts(ws: Workspace, run_id: int, sl: Slice) -> None:
             # Test doubles and compatible frame implementations keep the old
             # minimal protocol; their own write error is the evidence to log.
             facts.write_parquet(path)
+        from .run_artifacts import finalize
+        finalize(ws, run_id)
         ws.mark_evidence(run_id, ready=True)
     except Exception as exc:  # 磁盘满、权限之类必须显式拦住结账
         path.unlink(missing_ok=True)

@@ -132,6 +132,10 @@ enum Command {
         #[arg(long)]
         data: PathBuf,
     },
+    CollectGarbage {
+        #[arg(long)]
+        data: PathBuf,
+    },
     Search {
         #[arg(long)]
         data: PathBuf,
@@ -277,6 +281,7 @@ async fn run_cli() -> Result<()> {
             );
         }
         Command::ScanOnce { root, data } => println!("{}", scan_once(&root, &data)?),
+        Command::CollectGarbage { data } => println!("{}", collect_index_garbage(&data)?),
         Command::Search { data, query, limit } => {
             println!(
                 "{}",
@@ -941,6 +946,10 @@ fn index_file(
     }
     temporary.keep = true;
     index_writer.commit()?;
+    // Batch writers must join their merge workers before releasing ownership.
+    // Dropping each file's writer while merges still run leaves cleanup work
+    // behind and makes Windows mapped-file failures accumulate indefinitely.
+    index_writer.wait_merging_threads()?;
     let mtime_ns = modified_ns(&metadata);
     let conn = Connection::open(data.join("catalog.db"))?;
     conn.execute(
@@ -1216,6 +1225,15 @@ fn scan_once_with_progress(root: &Path, data: &Path, health: Option<&Mutex<ScanH
     if let Err(error) = prune_hot_cache(data) {
         hot_errors.push(error.to_string());
     }
+    // Run even when no source file changed: mapped files can become deletable
+    // only after the search reader released an older segment generation.
+    if generation % 120 == 0 || !indexed.is_empty() || !data.join("index-gc-status.json").exists() {
+        if let Err(error) = collect_index_garbage(data) {
+            warnings.push(format!("index garbage collection deferred: {error:#}"));
+            let _ = write_gc_status(data, &json!({"at":Utc::now().to_rfc3339(),
+                "ok":false,"error":format!("{error:#}")}));
+        }
+    }
     let conn = Connection::open(data.join("catalog.db"))?;
     if visibility_errors.is_empty() {
         conn.execute("update file_catalog set missing_scans=missing_scans+1,missing_since=coalesce(missing_since,?) where last_seen_generation<>?",
@@ -1245,6 +1263,30 @@ fn unix_seconds() -> i64 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs() as i64
+}
+
+fn collect_index_garbage(data: &Path) -> Result<Value> {
+    if !data.join(INDEX_DIR).join("meta.json").is_file() {
+        bail!("an existing index manifest is required for garbage collection");
+    }
+    let index = open_or_create_index(&data.join(INDEX_DIR))?;
+    // Tantivy owns the writer lock and liveness set. Never guess which segment
+    // prefixes are disposable while writers/search readers are running.
+    let writer = index.writer_with_num_threads::<TantivyDocument>(1, 15_000_000)?;
+    let collected = writer.garbage_collect_files().wait()?;
+    writer.wait_merging_threads()?;
+    let status = json!({"at":Utc::now().to_rfc3339(),"ok":true,
+        "deleted_files":collected.deleted_files.len(),
+        "deferred_files":collected.failed_to_delete_files.len()});
+    write_gc_status(data, &status)?;
+    Ok(status)
+}
+
+fn write_gc_status(data: &Path, status: &Value) -> Result<()> {
+    let temporary = data.join("index-gc-status.json.tmp");
+    fs::write(&temporary, serde_json::to_vec(&status)?)?;
+    fs::rename(temporary, data.join("index-gc-status.json"))?;
+    Ok(())
 }
 
 #[cfg(windows)]
@@ -1666,6 +1708,8 @@ async fn storage_handler(State(state): State<AppState>) -> Json<Value> {
             "hot_entries": hot_entries,
             "hot_limit_bytes": HOT_LIMIT_BYTES,
             "hot_max_age_days": 30,
+            "garbage_collection": fs::read(state.data.join("index-gc-status.json"))
+                .ok().and_then(|raw|serde_json::from_slice::<Value>(&raw).ok()),
         })
     }).await.unwrap_or_else(|_| json!({"error":"storage unavailable"}));
     Json(value)
@@ -1674,6 +1718,32 @@ async fn storage_handler(State(state): State<AppState>) -> Json<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn engine_gc_removes_managed_orphans_and_preserves_searchable_documents() {
+        use tantivy::directory::Directory;
+        let root = std::env::temp_dir().join(format!("ledger-gc-{}-{}", std::process::id(),
+            SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()));
+        fs::create_dir_all(&root).unwrap();
+        let source = root.join("orders.csv");
+        fs::write(&source, "order,amount\n5127714397003039243,12.34\n").unwrap();
+        let data = root.join("index");
+        let stats = index_file(&data, &source, &source, "taobao", "s", "orders", "calculation", None).unwrap();
+        let index = open_or_create_index(&data.join(INDEX_DIR)).unwrap();
+        let orphan = Path::new("ffffffffffffffffffffffffffffffff.store");
+        index.directory().atomic_write(orphan, b"unused managed segment").unwrap();
+        let reader = open_search_runtime(&data).unwrap();
+        let before = reader.reader.searcher().num_docs();
+        assert_eq!(before, stats.rows);
+        let collected = collect_index_garbage(&data).unwrap();
+        assert!(collected["deleted_files"].as_u64().unwrap() >= 1);
+        assert!(!data.join(INDEX_DIR).join(orphan).exists());
+        assert_eq!(collect_index_garbage(&data).unwrap()["ok"], true);
+        reader.reader.reload().unwrap();
+        assert_eq!(reader.reader.searcher().num_docs(), before);
+        drop(reader);
+        drop(index);
+        fs::remove_dir_all(root).unwrap();
+    }
     #[test]
     fn no_scan_yet_is_not_claimed_healthy() {
         let report = ScanHealth::default().report(true, true);

@@ -255,6 +255,9 @@ from .snapshot_store import SCHEMA as SNAPSHOT_SCHEMA
 _SCHEMA += SNAPSHOT_SCHEMA
 
 #: 后加的列。老工作区打开时补上，不用导数据。
+from .snapshot_store import SCHEMA as SNAPSHOT_SCHEMA
+_SCHEMA += SNAPSHOT_SCHEMA
+
 _COLUMNS = {
     "run_report_slice": {"overview_json": "text"},
     "period": {"at_version": "integer not null default 0"},
@@ -1207,6 +1210,7 @@ class Workspace:
         """
         if not by.strip() or not note.strip():
             raise WorkspaceError("历史快照补证必须写操作人和原因")
+        from .snapshot_store import store
         with self.conn as conn:
             row = conn.execute(
                 "select p.state,p.run_id,r.* from period p join run r on r.id=p.run_id "

@@ -146,6 +146,37 @@ def test_independent_member_proof_exempts_only_its_verified_parent():
     assert result.slices[(STORE.name, '2026-07')].coverage_gap_rows['order_id'].to_list() == ['B']
 
 
+@pytest.mark.parametrize('state', ['Merged', 'Split'])
+def test_trace_only_original_does_not_block_proven_brushing_zero(state):
+    proof = evidence([member_header([member('A'), member('B', status='missing')])])
+    trace = {**missing_cost(), 'order_state': state}
+    result = calculate(proof, costs=[trace])
+    sl = result.slices[(STORE.name, '2026-07')]
+    assert sl.cost_coverage['uncovered'] == 1
+    assert sl.coverage_gap_rows['order_id'].to_list() == ['B']
+    zero = result.facts.filter(pl.col('template_id') == 'order_console_brushing_zero_v1')
+    assert set(zero['link_key']) == {'A1', 'A2'}
+    assert zero['contribution'].sum() == 0
+    from ledger.order_lifecycle import superseded_cost_fact
+    assert result.facts.filter(superseded_cost_fact(result.facts)).height == 1
+
+
+def test_trace_only_original_stays_uncovered_without_independent_member_proof():
+    result = calculate(evidence(), costs=[{**missing_cost(), 'order_state': 'Merged'}])
+    assert result.slices[(STORE.name, '2026-07')].cost_coverage['uncovered'] == 3
+
+
+def test_real_cost_is_not_replaced_by_brushing_supplement_alongside_trace():
+    trace = {**missing_cost(), 'order_state': 'Merged'}
+    real = {**missing_cost(), 'internal_order_id': 'actual-shipment', 'unit_cost': 10.,
+            'cost_source': 'history', 'cost_status': 'priced', 'cost_as_of': '2026-07-02',
+            'pricing_evidence': json.dumps({'order_date': '2026-07-02'})}
+    result = calculate(evidence([member_header([member('A')])]), costs=[trace, real])
+    zeros = result.facts.filter(pl.col('template_id') == 'order_console_brushing_zero_v1')
+    assert 'A1' not in zeros['link_key']
+    assert result.facts['contribution'].sum() == -10
+
+
 @pytest.mark.parametrize('override', [{'source_is_merge': True}, {'order_store_id': '18'},
     {'scope': 'internal_order_header'}, {'source': 'copied_root_header'}, {'evidence_sha': 'bad'},
     {'captured_at': None}, {'order_remark': 'by买家秀'}, {'status': 'conflict'}])
