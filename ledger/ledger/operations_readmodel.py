@@ -19,11 +19,14 @@ from pathlib import Path
 
 import polars as pl
 
-VERSION = 'operations-20261027.v2'
+VERSION = 'operations-20261027.v3'
 _cache = OrderedDict()
 _cache_lock = threading.Lock()
-PRIMITIVES = ('receipts', 'refunds', 'net_income', 'goods_cost', 'promotion_cost', 'platform_cost', 'freight_cost', 'aftersales_cost', 'labor_cost')
-MONEY = (*PRIMITIVES, 'gross_profit', 'profit', 'profit_after_labor', 'commission')
+# Board bucket for 本金佣金（补单）. Moving it into promotion is a pending business decision;
+# either bucket keeps 利润 unchanged.
+AFTERSALES = ('small_payment_cost', 'brushing_cost')
+PRIMITIVES = ('receipts', 'refunds', 'net_income', 'goods_cost', 'promotion_cost', 'platform_cost', 'freight_cost', *AFTERSALES, 'labor_cost')
+MONEY = (*PRIMITIVES, 'aftersales_cost', 'gross_profit', 'profit', 'profit_after_labor', 'commission')
 RATES = {'refund_rate': ('refunds', 'receipts'), 'goods_rate': ('goods_cost', 'net_income'),
          'gross_margin': ('gross_profit', 'net_income'), 'promotion_rate': ('promotion_cost', 'net_income'),
          'freight_rate': ('freight_cost', 'net_income'), 'profit_margin': ('profit', 'net_income'),
@@ -32,16 +35,18 @@ LABELS = {'receipts':'对账销售收入（未扣退款）','refunds':'销售退
           'refund_rate':'退款率','goods_cost':'商品成本','goods_rate':'货本率','gross_profit':'商品毛利',
           'gross_margin':'毛利率','promotion_cost':'推广费用','promotion_rate':'推广费用占比',
           'platform_cost':'平台费用','freight_cost':'发货运费','freight_rate':'发货运费占比',
-          'aftersales_cost':'客服售后费用','profit':'利润（扣兼职前）','profit_margin':'利润率',
+          'aftersales_cost':'客服售后费用','small_payment_cost':'其中：客服打款','brushing_cost':'其中：本金佣金（补单）',
+          'profit':'利润（扣兼职前）','profit_margin':'利润率',
           'labor_cost':'兼职人工费用','labor_rate':'兼职人工费用占比','profit_after_labor':'利润额（扣兼职后）',
           'after_labor_margin':'利润额率','commission':'已保存提成','order_count':'订单数'}
 DISPLAY = ('net_income','refund_rate','goods_cost','goods_rate','gross_profit','gross_margin',
            'promotion_cost','promotion_rate','platform_cost','freight_cost','freight_rate',
-           'aftersales_cost','profit','profit_margin','labor_cost','labor_rate','profit_after_labor','after_labor_margin')
+           'aftersales_cost',*AFTERSALES,'profit','profit_margin','labor_cost','labor_rate','profit_after_labor','after_labor_margin')
+COMPONENTS = {name:'aftersales_cost' for name in AFTERSALES}
 NODES = {'receipts': ('n_receipt',), 'refunds': ('n_refund',),
          'goods_cost': ('n_goods','n_dropship','n_reshipment'), 'promotion_cost': ('n_ad',),
          'platform_cost': ('g_platform',), 'freight_cost': ('n_freight',),
-         'aftersales_cost': ('n_brushing','n_small_payment')}
+         'small_payment_cost': ('n_small_payment',), 'brushing_cost': ('n_brushing',)}
 
 ROW_PRIMITIVES = (*NODES, 'net_income')
 _UNSET = object()
@@ -90,6 +95,7 @@ def derive(values, *, net_income=_UNSET):
     result = dict(values)
     result['net_income'] = (_difference(result.get('receipts'), result.get('refunds')) if net_income is _UNSET else net_income)
     result['gross_profit'] = _difference(result['net_income'], result.get('goods_cost'))
+    result['aftersales_cost'] = _sum(result.get(key) for key in AFTERSALES)
     result['profit'] = _difference(result['gross_profit'], *[result.get(k) for k in ('promotion_cost','platform_cost','freight_cost','aftersales_cost')])
     result['profit_after_labor'] = _difference(result['profit'], result.get('labor_cost'))
     for key, (numerator, denominator) in RATES.items():
@@ -255,7 +261,7 @@ def _team(person_id, roster):
 
 def _ownership(assignments, roster):
     producers = {}
-    references = []
+    references = {}
     managed = {bool(row['managed']) for row in assignments if row.get('managed') is not None}
     classification = 'managed' if managed == {True} else 'standard' if managed == {False} else 'unknown'
     for row in assignments:
@@ -267,16 +273,16 @@ def _ownership(assignments, roster):
             continue
         item = {'person_id':pid, 'person':row.get('person') or roster.get(pid,{}).get('name') or pid,
                 'team_id':_team(pid,roster)[0], 'team':_team(pid,roster)[1], 'weight':rate,
-                'commission':decimal(row.get('amount')), 'total_rate':decimal(row.get('total_rate'))}
-        if row.get('duty') == 'produce':
-            if pid in producers:
-                producers[pid]['weight'] += rate
-                producers[pid]['commission'] = _sum([producers[pid]['commission'], item['commission']])
-            else:
-                producers[pid] = item
-        elif row.get('duty') == 'cut':
-            references.append(item)
-    return producers, references, classification
+                'commission':decimal(row.get('amount'))}
+        duty = {'produce':producers, 'cut':references}.get(row.get('duty'))
+        if duty is None:
+            continue
+        if pid in duty:
+            duty[pid]['weight'] += rate
+            duty[pid]['commission'] = _sum([duty[pid]['commission'], item['commission']])
+        else:
+            duty[pid] = item
+    return producers, list(references.values()), classification
 
 
 def build_month(inputs, model, period, overhead_total, roster=(), labor_shares=None):
@@ -363,31 +369,28 @@ def build_month(inputs, model, period, overhead_total, roster=(), labor_shares=N
             else:
                 for pid,owner in owners.items():
                     values = {name:split.get(pid) if split is not None else None for name,split in splits.items()}
-                    atoms.append({**common,**{k:v for k,v in owner.items() if k not in ('weight','total_rate')},
+                    atoms.append({**common,**{k:v for k,v in owner.items() if k != 'weight'},
                                   'values':{**values,'labor_cost':None,'commission':None if aggregate_cost_only else owner['commission']},'unclaimed':False})
+            # A cut sees the order's complete (produce + cut) basis it was paid on; never additive.
             for ref in refs:
-                factor = ref['weight'] / ref['total_rate'] if ref['total_rate'] is not None and ref['total_rate'] > 0 else None
-                values = {name:value * factor if factor is not None and value is not None else None for name,value in row['values'].items()}
-                reference_atoms.append({**common,**{k:v for k,v in ref.items() if k not in ('weight','total_rate')},
-                                        '_reference_factor':factor,
-                                        'values':{**values,'labor_cost':None,'commission':None if aggregate_cost_only else ref['commission']},'reference_only':True})
+                reference_atoms.append({**common,**{k:v for k,v in ref.items() if k != 'weight'},
+                                        'values':{**row['values'],'labor_cost':None,'commission':None if aggregate_cost_only else ref['commission']},'reference_only':True})
         owned = [row for row in atoms if row['store_id'] == item.store_id and not row['unclaimed']]
         labor_weights = {index:row['values']['receipts'] for index,row in enumerate(owned)}
         labor = spread(base['labor_cost'],labor_weights)
         for index,row in enumerate(owned):
             row['values']['labor_cost'] = labor.get(index) if labor is not None else None
-        order_labor=defaultdict(list)
-        for row in owned:
-            order_labor[row['spine_row']].append(row['values']['labor_cost'])
-        for row in reference_atoms:
-            if row['store_id']==item.store_id:
-                basis=_sum(order_labor[row['spine_row']])
-                factor=row['_reference_factor']
-                row['values']['labor_cost']=basis*factor if basis is not None and factor is not None else None
         # Unclaimed business is visible but does not take a share from the claimed pool.
         for row in atoms:
             if row['store_id'] == item.store_id and row['unclaimed']:
                 row['values']['labor_cost'] = Decimal(0) if labor is not None else None
+        order_labor=defaultdict(list)
+        for row in atoms:
+            if row['store_id']==item.store_id:
+                order_labor[row['spine_row']].append(row['values']['labor_cost'])
+        for row in reference_atoms:
+            if row['store_id']==item.store_id:
+                row['values']['labor_cost']=_sum(order_labor[row['spine_row']])
         store['metrics'] = derive(base,net_income=base['net_income'])
         store['labor_unallocated'] = base['labor_cost'] if labor is None else Decimal(0)
     return {'period':period,'stores':stores,'atoms':atoms,'references':reference_atoms,
@@ -512,55 +515,84 @@ def select_report(month, *, level='store', platform='', store_id='', team_id='',
         return all(not value or row.get(key) == value for key,value in (('platform',platform),('store_id',store_id),('team_id',team_id),('person_id',person_id),('product_id',product_id))) and (managed == 'all' or row['managed'] == managed)
     atoms = [row for row in month['atoms'] if match(row)]
     refs = [row for row in month['references'] if match(row)]
-    groups = defaultdict(list)
-    for atom in atoms:
-        key = {'store':atom['store_id'],'team':atom['team_id'] or '__unclaimed__','person':atom['person_id'] or '__unclaimed__',
-               'product':atom['product_key'] or f'{atom["store_id"]}:__unallocated__',
-               'order':f'{atom["store_id"]}:{atom["order_id"]}:{atom["sub_order_id"]}:{atom["spine_row"]}'}[level]
-        groups[key].append(atom)
+    detail_loaded=all(row['input'].detail_loaded for row in month['stores'])
+    def grouped(items, per_person=False):
+        groups = defaultdict(list)
+        for atom in items:
+            key = {'store':atom['store_id'],'team':atom['team_id'] or '__unclaimed__','person':atom['person_id'] or '__unclaimed__',
+                   'product':atom['product_key'] or f'{atom["store_id"]}:__unallocated__',
+                   'order':f'{atom["store_id"]}:{atom["order_id"]}:{atom["sub_order_id"]}:{atom["spine_row"]}'}[level]
+            groups[f'{key}|{atom["person_id"]}' if per_person and level != 'person' else key].append(atom)
+        return groups
+    def total(group):
+        values = {name:_sum(row['values'].get(name) for row in group) for name in (*PRIMITIVES,'commission')}
+        return derive(values,net_income=values['net_income'])
+    def managed_part(group):
+        # Unknown classification keeps the managed share unknown; it is never read as non-managed.
+        if not detail_loaded or any(row['managed']=='unknown' and any(row['values'].get(key)!=0 for key in ROW_PRIMITIVES) for row in group):
+            return None
+        selected=[row for row in group if row['managed']=='managed']
+        if not selected:
+            return derive({name:Decimal(0) for name in (*PRIMITIVES,'commission')},net_income=Decimal(0))
+        return total(selected)
+    def describe(key, group, metrics):
+        head = group[0]
+        name = {'store':head['store'],'team':head['team'],'person':head['person'],
+                'product':head['product_name'] or head['product_id'] or '待归属商品',
+                'order':head['sub_order_id'] or head['order_id'] or '待归属金额'}[level]
+        part = managed_part(group)
+        return {'id':key,'name':name,'store_id':head['store_id'] if len({row['store_id'] for row in group}) == 1 else '',
+            'store':head['store'] if len({row['store_id'] for row in group}) == 1 else '',
+            'platform':head['platform'] if len({row['platform'] for row in group}) == 1 else '',
+            'person_id':head['person_id'] if level == 'person' else '', 'team_id':head['team_id'] if level in {'person','team'} else '',
+            'team':head['team'] if level in {'person','team'} else '',
+            'product_id':head['product_id'] if level in {'product','order'} else '',
+            'order_id':head['order_id'] if level=='order' else '', 'sub_order_id':head['sub_order_id'] if level=='order' else '',
+            'order_count':len({(row['store_id'],row['order_id'],row['sub_order_id']) for row in group if row['order_id'] or row['sub_order_id']}),
+            'metrics':public_metrics(metrics),'managed_metrics':None if part is None else public_metrics(part),
+            'run_ids':sorted({row['run_id'] for row in group if row['run_id']}),
+            'managed':sorted({row['managed'] for row in group}),'cost_input_scope':head.get('cost_input_scope','')}
     # Store summary remains authoritative even if historical order detail is absent.
     store_summary = level == 'store' and not any((team_id,person_id,product_id)) and managed == 'all'
     rows, raw_metrics = [], []
-    for key,group in groups.items():
-        head = group[0]
-        values = {name:_sum(row['values'].get(name) for row in group) for name in (*PRIMITIVES,'commission')}
-        metrics = derive(values,net_income=values['net_income'])
+    for key,group in grouped(atoms).items():
+        metrics = total(group)
         if store_summary:
             source = next(row for row in month['stores'] if row['input'].store_id == key)
             metrics = source['metrics']
         raw_metrics.append(metrics)
-        name = {'store':head['store'],'team':head['team'],'person':head['person'],
-                'product':head['product_name'] or head['product_id'] or '待归属商品',
-                'order':head['sub_order_id'] or head['order_id'] or '待归属金额'}[level]
-        rows.append({'id':key,'name':name,'store_id':head['store_id'] if len({row['store_id'] for row in group}) == 1 else '',
-            'person_id':head['person_id'] if level == 'person' else '', 'team_id':head['team_id'] if level in {'person','team'} else '',
-            'product_id':head['product_id'] if level in {'product','order'} else '',
-            'order_id':head['order_id'] if level=='order' else '', 'sub_order_id':head['sub_order_id'] if level=='order' else '',
-            'order_count':None if store_summary and not source['input'].detail_loaded else len({(row['store_id'],row['order_id'],row['sub_order_id']) for row in group if row['order_id'] or row['sub_order_id']}),
-            'unclaimed':False if store_summary else all(row['unclaimed'] for row in group),'metrics':public_metrics(metrics),
-            'run_ids':sorted({row['run_id'] for row in group if row['run_id']}),
-            'managed':sorted({row['managed'] for row in group}),'cost_input_scope':head.get('cost_input_scope','')})
+        row = describe(key,group,metrics)
+        if store_summary and not source['input'].detail_loaded:
+            row['order_count'] = None
+        row['unclaimed'] = False if store_summary else all(item['unclaimed'] for item in group)
+        rows.append(row)
     summary_values = {name:_sum(metrics.get(name) for metrics in raw_metrics) for name in (*PRIMITIVES,'commission')}
     summary = derive(summary_values,net_income=summary_values['net_income'])
     rows.sort(key=lambda row:(row['metrics']['profit_after_labor'] is None,-(decimal(row['metrics']['profit_after_labor']) or Decimal(0)),row['id']))
     for index,row in enumerate(rows):
         row['rank'] = index + 1 if not row['unclaimed'] and row['metrics']['profit_after_labor'] is not None else None
+    # Each cut sees a complete order basis, so cut groups are never merged across people.
+    reference_groups = [{**describe(key,group,total(group)),'person_id':group[0]['person_id'],'person':group[0]['person'],
+                         'team_id':group[0]['team_id'],'team':group[0]['team'],'duty':'cut','reference_only':True}
+                        for key,group in grouped(refs,per_person=True).items()]
+    reference_groups.sort(key=lambda row:(row['metrics']['net_income'] is None,-(decimal(row['metrics']['net_income']) or Decimal(0)),row['id']))
+    managed_summary = managed_part(atoms)
     all_runs = [{'store_id':row['input'].store_id,'run_id':row['input'].run_id,'input_sha':row['input'].input_sha,'state':row['input'].state,
              'stale':row['input'].stale,'at':row['input'].at,'engine':row['input'].engine,'evidence_complete':row['input'].evidence_complete,'cost_input_scope':row['input'].cost_input_scope}
             for row in month['stores']]
     runs = [row for row in all_runs if not store_id or row['store_id'] == store_id]
     input_sha = digest([VERSION,month['period'],all_runs,month.get('organization_revision'),month.get('model_sha'),month.get('overhead_total')])
-    detail_loaded=all(row['input'].detail_loaded for row in month['stores'])
     attribution_pending=any(row['unclaimed'] and any(row['values'].get(key) not in (None,Decimal(0)) for key in ROW_PRIMITIVES) for row in atoms) if detail_loaded else None
     return {'version':VERSION,'period':month['period'],'scope':scope,'input_sha':input_sha,'scope_sha':digest([input_sha,scope]),
         'run_refs':runs,'is_final':bool(runs) and all(row['state']=='closed' and not row['stale'] and row['evidence_complete'] for row in runs) and all(summary.get(key) is not None for key in PRIMITIVES) and not any(row['input'].issues for row in month['stores']) and (store_summary or not attribution_pending),
         'details_loaded':detail_loaded,'attribution_pending':attribution_pending,
         'organization_mode':month['organization_mode'],'organization_revision':month.get('organization_revision'),
-        'metrics':[{'key':key,'label':LABELS[key],'kind':'rate' if key in RATES else 'money'} for key in DISPLAY],
+        'metrics':[{'key':key,'label':LABELS[key],'kind':'rate' if key in RATES else 'money',**({'component_of':COMPONENTS[key]} if key in COMPONENTS else {})} for key in DISPLAY],
         'income_evidence':{row['input'].store_id:public_income(row['input'].income) for row in month['stores'] if row['input'].income is not None and (not store_id or row['input'].store_id==store_id)},
         'amount_precision':{'money':'source_decimal','subcent_minimum_fraction_digits':6,'display_fraction_digits':2,'aggregation':'before_display_rounding'},
         'display_rounding':display_rounding(raw_metrics,summary),
-        'summary':public_metrics(summary),'rows':rows,'reference_rows':[{**{k:v for k,v in row.items() if k not in ('values','link_keys') and not k.startswith('_')},'metrics':public_metrics(derive(row['values'],net_income=row['values'].get('net_income')))} for row in refs],
+        'summary':public_metrics(summary),'managed_summary':None if managed_summary is None else public_metrics(managed_summary),
+        'rows':rows,'reference_groups':reference_groups,'reference_rows':[{**{k:v for k,v in row.items() if k not in ('values','link_keys') and not k.startswith('_')},'metrics':public_metrics(derive(row['values'],net_income=row['values'].get('net_income')))} for row in refs],
         'issues':sorted({issue for row in month['stores'] for issue in row['input'].issues} | ({'店月成本已批准，商品与人员尚无完整成本分配依据，明细利润保持待补齐'} if not store_summary and any(row['input'].cost_input_scope=='approved_store_period_total' for row in month['stores']) else set())),
         'unclaimed_count':sum(row['unclaimed'] for row in atoms) if detail_loaded else None,
         'classification_pending_count':sum(row['managed']=='unknown' for row in month['atoms']) if detail_loaded else None,

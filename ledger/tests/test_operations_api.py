@@ -27,7 +27,18 @@ def test_saved_report_export_and_drill_share_input_identity(tmp_path):
     assert people['summary']['net_income']=='320.00'
     assert people['summary']['labor_cost']=='10.00'
     assert len(people['reference_rows'])==2
+    assert [(row['person_id'],row['team'],row['metrics']['net_income'],row['metrics']['commission']) for row in people['reference_groups']]==[('cut','经营测试团队','320.00','4.00')]
+    assert people['rows'][0]['team']=='经营测试团队' and people['rows'][0]['rank']==1
+    assert people['rows'][0]['managed_metrics']['net_income']=='240.00'
     assert people['input_sha']==result['input_sha']
+    assert result['rows'][0]['managed_metrics'] is None
+    split=client.get('/api/operations/month?period=2030-01&managed_split=true').json()
+    assert {row['store_id']:row['managed_metrics']['net_income'] for row in split['rows']}=={'s1':'0.00','s2':'240.00'}
+    assert split['managed_summary']['net_income']=='240.00' and split['input_sha']==result['input_sha']
+    person_export=list(csv.DictReader(io.StringIO(client.get('/api/operations/export.csv',params={'period':'2030-01','level':'person'}).text.lstrip('\ufeff'))))
+    assert [(row['记录类型'],row['身份'],row['名称'],row['团队'],row['排名']) for row in person_export]==[
+        ('归属业绩','做货','做货甲','经营测试团队','1'),('抽点参考（不计业绩）','抽点','抽点乙','经营测试团队','')]
+    assert person_export[0]['托管：销售收入（到账）']=='240.00' and person_export[1]['已保存提成']=='4.00'
     export=client.get('/api/operations/export.csv',params={'period':'2030-01','expected_input_sha':result['input_sha']})
     assert export.status_code==200
     assert export.headers['x-operations-scope']==result['scope_sha']

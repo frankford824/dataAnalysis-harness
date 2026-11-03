@@ -69,6 +69,55 @@ def test_doers_own_all_business_and_cut_is_non_additive_reference(model):
     assert select_report(month,level='person',managed='managed')['summary']['net_income']=='80.00'
 
 
+def test_aftersales_components_are_visible_without_changing_profit(model):
+    report=select_report(build_month([sample()],model,'2030-01','10'),level='person')
+    summary=report['summary']
+    assert summary['small_payment_cost']=='4.00' and summary['brushing_cost']=='2.00'
+    assert summary['aftersales_cost']=='6.00' and summary['promotion_cost']=='10.00'
+    assert summary['profit']=='16.00'
+    assert [item.get('component_of') for item in report['metrics'] if item['key'] in ('small_payment_cost','brushing_cost')]==['aftersales_cost']*2
+    unknown=sample();unknown.statement[-1]['available']=False
+    store=select_report(build_month([unknown],model,'2030-01','10'))['summary']
+    assert store['small_payment_cost'] is None and store['brushing_cost']=='2.00'
+    assert store['aftersales_cost'] is None and store['profit'] is None
+
+
+def test_cut_identity_groups_show_complete_order_basis_per_person_and_stay_non_additive(model):
+    item=sample(assignments=[crew('a',managed=True,amount='3'),crew('cut','.1','cut',True,amount='1'),crew('cut','.1','cut',True,amount='.5'),
+                             crew('other','.2','cut',True,amount='2')])
+    month=build_month([item],model,'2030-01','10')
+    person=select_report(month,level='person')
+    groups={row['person_id']:row for row in person['reference_groups']}
+    assert set(groups)=={'cut','other'}
+    assert groups['cut']['metrics']['net_income']=='80.00'
+    assert groups['cut']['metrics']['profit_after_labor']=='6.00'
+    assert groups['cut']['metrics']['commission']=='1.50'
+    assert groups['other']['metrics']['commission']=='2.00'
+    assert groups['cut']['order_count']==1 and groups['cut']['duty']=='cut'
+    assert person['summary']['net_income']=='80.00' and person['summary']['commission']=='3.00'
+    store=select_report(month,level='store',managed='managed')
+    assert sorted(row['person_id'] for row in store['reference_groups'])==['cut','other']
+    assert {row['metrics']['net_income'] for row in store['reference_groups']}=={'80.00'}
+
+
+def test_managed_split_is_exact_for_classified_rows_and_unknown_otherwise(model):
+    first=projections(60,spine=0,refunds=0);second=projections(40,spine=1,refunds=0)
+    item=sample(statement=statement(100,0,60),projections=[*first,*second],
+                assignments=[crew('a',spine=0,managed=True),crew('a',spine=1,managed=False),crew('b',spine=1,managed=False)])
+    month=build_month([item],model,'2030-01','10')
+    rows={row['id']:row for row in select_report(month,level='person')['rows']}
+    assert rows['a']['metrics']['net_income']=='80.00'
+    assert rows['a']['managed_metrics']['net_income']=='60.00'
+    assert rows['b']['managed_metrics']['net_income']=='0.00'
+    assert rows['a']['team']=='未分团队' and rows['a']['platform']=='taobao'
+    mixed=sample(assignments=[crew('a',managed=True),crew('b',managed=False)])
+    report=select_report(build_month([mixed],model,'2030-01','10'),level='person')
+    assert all(row['managed_metrics'] is None for row in report['rows'])
+    assert report['managed_summary'] is None
+    summary_only=build_month([sample(detail_loaded=False)],model,'2030-01','10')
+    assert select_report(summary_only)['rows'][0]['managed_metrics'] is None
+
+
 def test_labor_uses_full_claimed_pre_refund_sales_and_includes_managed(model):
     first=projections(60,spine=0,refunds=50)
     second=projections(40,spine=1,refunds=0)
