@@ -205,6 +205,45 @@ class TestTheGateActuallyCatchesThings:
         assert not rp.clean
 
 
+class TestCommissionFollowsItsBase:
+    """基数不出数，基线里的提成也不能是个数。"""
+
+    def _inputs(self):
+        from test_commission import _model, _rule, _run
+
+        model = _model([_rule("2026-05-01", "P1", "张三", 0.1, 0.1)])
+        result = _run([("A1", "P1", "2026-05-03", 1000.0)])
+        return model, result
+
+    @staticmethod
+    def _gross(available: bool):
+        from ledger.engine.calculate import NodeValue
+
+        return {"gross": NodeValue(
+            id="gross", name="毛利", level=1, display="amount",
+            value=1000.0 if available else None, available=available,
+            missing_sources=[] if available else ["cost"],
+            unavailable_reason="" if available else "必需成本金额尚未核齐",
+        )}
+
+    def test_unavailable_base_records_no_payout(self) -> None:
+        from ledger.replay import _commission
+
+        model, result = self._inputs()
+        got = _commission(result, model, "s1", "2026-05", nodes=self._gross(False))
+        assert set(got) == {"error"}
+        assert "必需成本金额尚未核齐" in got["error"]
+
+    def test_available_base_still_records_people(self) -> None:
+        from ledger.replay import _commission
+
+        model, result = self._inputs()
+        got = _commission(result, model, "s1", "2026-05", nodes=self._gross(True))
+        assert got["base_total"] == pytest.approx(1000.0)
+        assert [p["person"] for p in got["people"]] == ["张三"]
+        assert got["total"] == pytest.approx(100.0)
+
+
 class TestVersionStamp:
     """引擎版本。回滚要回滚到一个说得清的东西上。"""
 

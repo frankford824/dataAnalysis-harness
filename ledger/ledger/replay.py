@@ -202,7 +202,8 @@ def snapshot(model: Model, corpus: Path, store_ids: Iterable[str] | None = None)
             (sl.period or NO_PERIOD): _strip(
                 slice_dict(sl, store, model)
                 | {"commission": _commission(result, model, store.id, sl.period,
-                                              allow_partial_pricing=bool(sl.cost_coverage.get("passed")))}
+                                              allow_partial_pricing=bool(sl.cost_coverage.get("passed")),
+                                              nodes=sl.nodes)}
             )
             for sl in result.slices.values()
         }
@@ -212,7 +213,8 @@ def snapshot(model: Model, corpus: Path, store_ids: Iterable[str] | None = None)
 
 
 def _commission(result: Any, model: Model, store_id: str, period: str,
-                *, allow_partial_pricing: bool = False) -> dict[str, Any]:
+                *, allow_partial_pricing: bool = False,
+                nodes: dict[str, Any] | None = None) -> dict[str, Any]:
     """这个店期的提成，进基线一起比。
 
     提成本来不在 `slice_dict` 里——它算在 Slice 外面。于是回放门这道「改引擎不能
@@ -222,7 +224,15 @@ def _commission(result: Any, model: Model, store_id: str, period: str,
     逐商品那几百行不进基线：它们随商品清单每月变，进来只会让基线天天在变，
     没人再看得动 diff。按人的金额和几个合计足以钉住结果——分配逻辑要是错了，
     一定会落在某个人的数上。
+
+    损益表上提成基数那一行不出数时，提成也不出数。逐单汇总只看得到已入账的那部分
+    成本，缺的成本在这里等于按零算；把这样的数录进基线，下次就会拿它当正确答案比。
     """
+    base = model.commission_base_node(store_id)
+    value = (nodes or {}).get(base.id) if base is not None else None
+    if value is not None and not value.available:
+        reason = value.unavailable_reason or f"缺 {'、'.join(value.missing_sources)}"
+        return {"error": f"{base.name}未出数，提成不能按已入账部分计算：{reason}"}
     try:
         c = commission.compute(result, model, store_id, period,
                                allow_partial_pricing=allow_partial_pricing)
