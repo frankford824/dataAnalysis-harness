@@ -182,7 +182,11 @@ function Stop-LedgerOnly {
     }
     foreach ($Item in $OwnedWriters) {
       $Live = Get-CimInstance Win32_Process -Filter ("ProcessId="+$Item.ProcessId) -ErrorAction SilentlyContinue
-      if ($Live -and $Live.CreationDate -eq $Item.CreationDate) { Stop-Process -Id $Item.ProcessId -Force -ErrorAction Stop }
+      if ($Live -and $Live.CreationDate -eq $Item.CreationDate) {
+        # Stopping the task makes writers exit on their own; one may be gone already.
+        try { Stop-Process -Id $Item.ProcessId -Force -ErrorAction Stop }
+        catch { if (Get-Process -Id $Item.ProcessId -ErrorAction SilentlyContinue) { throw } }
+      }
     }
     if (-not $OwnedWriters.Count -and -not $Listeners.Count -and (Get-ScheduledTask -TaskName 'LedgerHarness').State -ne 'Running') { return }
     Start-Sleep -Milliseconds 250
