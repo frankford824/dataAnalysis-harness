@@ -87,7 +87,9 @@ foreach ($File in $Manifest.files) {
   if ((Get-FileHash -LiteralPath $Source -Algorithm SHA256).Hash.ToLower() -ne $File.sha256) { throw "Payload hash mismatch: $($File.path)" }
   if ($File.is_new -and $File.path.EndsWith('.py') -and (Test-Path -LiteralPath $Target)) { throw "New module already exists on production: $($File.path)" }
   if ($File.before_sha256 -and (Test-Path -LiteralPath $Target)) {
-    if ((Get-FileHash -LiteralPath $Target -Algorithm SHA256).Hash.ToLower() -ne $File.before_sha256) { throw "Production file changed: $($File.path)" }
+    # A production hot fix may already be exactly the accepted release content.
+    $Current = (Get-FileHash -LiteralPath $Target -Algorithm SHA256).Hash.ToLower()
+    if ($Current -ne $File.before_sha256 -and $Current -ne $File.sha256) { throw "Production file changed: $($File.path)" }
   }
 }
 & 'D:\ledger\venv\Scripts\python.exe' (Join-Path $Stage 'ledger\ledger\release_gate.py') --receipt $ReceiptPath --version $Manifest.version --model-sha $Manifest.model_sha
