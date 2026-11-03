@@ -201,3 +201,103 @@ def test_explicit_store_selection_and_unsafe_requests_are_refused(production, tm
         '--target-period', '2026-07', '--approval-reference', 'synthetic approval', '--output', str(tmp_path / 'other')]) == 2
     assert run(production, root, output) == 2  # never overwrite
     assert not (root / 'golden').exists() and not (tmp_path / 'other').exists()
+
+
+LEGACY_ENGINE = 'a4bb7b2'
+
+
+@pytest.fixture(scope='module')
+def legacy_production(tmp_path_factory):
+    """A source written entirely by the old engine: old schema, run.shas, run_labor."""
+    import io
+    import subprocess
+    import sys
+    import tarfile
+    tmp = tmp_path_factory.mktemp('legacy')
+    archive = subprocess.run(['git', '-C', str(ROOT), 'archive', '--format=tar', LEGACY_ENGINE, 'ledger/ledger', 'models'],
+                             capture_output=True)
+    if archive.returncode:
+        pytest.skip('legacy engine revision is not in this clone: ' + LEGACY_ENGINE)
+    engine = tmp / 'engine'
+    with tarfile.open(fileobj=io.BytesIO(archive.stdout)) as tar:
+        tar.extractall(engine, filter='data')
+    (engine / 'VERSION').write_text(LEGACY_ENGINE)
+    bundle, _missing = service_fixture_bundle(tmp, fully_priced=True)
+    workspace = tmp / 'workspace'
+    done = subprocess.run([sys.executable, str(Path(__file__).with_name('legacy_engine_fixture.py')), str(engine / 'ledger'),
+                           str(bundle), str(workspace), '10'], capture_output=True, text=True, cwd=tmp)
+    assert done.returncode == 0, done.stderr[-3000:]
+    for path in list(workspace.rglob('*-wal')) + list(workspace.rglob('*-shm')):
+        path.unlink()
+    body = json.loads((bundle / 'model.json').read_text())
+    body.update(id='cn-closed-history', name='历史月结模型', overheads=[])  # candidate has no 06/07 totals
+    model = tmp / 'candidate-model.json'
+    model.write_text(json.dumps(body, ensure_ascii=False))
+    return {'workspace': workspace, 'feed': bundle / 'feed', 'model': model}
+
+
+def test_legacy_schema_uses_version_history_original_engine_proof_and_run_labor(legacy_production, tmp_path):
+    root = source_copy(legacy_production, tmp_path)
+    db = root / 'workspace.db'
+    assert query(db, "SELECT count(*) FROM sqlite_master WHERE name='automation_run_proof'") == 0
+    old = query(db, "SELECT sha FROM slot WHERE store_id='s1'")
+    raw = b'changed after close'
+    sha = hashlib.sha256(raw).hexdigest()
+    (root / 'files' / sha[:2]).mkdir(exist_ok=True)
+    (root / 'files' / sha[:2] / sha).write_bytes(raw)
+    execute(db, "INSERT INTO file VALUES(?,'甲店订单原表.xlsx',?,'2026-08-03T00:00:00+08:00')", (sha, len(raw)))
+    execute(db, "INSERT INTO version(store_id,name,sha,at,by) VALUES('s1','甲店订单原表.xlsx',?,'2026-08-03T00:00:00+08:00','upload')", (sha,))
+    execute(db, "UPDATE slot SET sha=? WHERE store_id='s1'", (sha,))
+    original = tree(root)
+    output = tmp_path / 'golden'
+    assert run(legacy_production, root, output) == 0
+    assert tree(root) == original
+
+    selection = json.loads((output / 'selection.json').read_text())
+    assert len(selection['selected']) == 4 and not selection['excluded']
+    assert {r['slots_from'] for r in selection['selected']} == {'version_history_at_close+original_engine_run_shas'}
+    fallbacks = selection['legacy_fallbacks']
+    assert {'automation_run_proof', 'automation_overhead_close', 'automation_decision', 'period_cost_input'} <= set(
+        fallbacks['missing_candidate_tables_treated_as_empty']['workspace'])
+    assert set(fallbacks['company_basis_sources'].values()) == {'legacy_model_overheads_verified_by_run_labor'}
+    decisions = json.loads((output / 'workspace-decisions.json').read_text())['decisions']
+    assert sorted((d['period'], d['values']['amount']) for d in decisions if d['kind'] == 'overhead_total') == [
+        ('2026-06', '10.00'), ('2026-07', '10.00')]
+    manifest = json.loads((output / 'approved.json').read_text())
+    case_path = next(output / row['path'] for row in manifest['cases'] if 's1' in row['path'] and '2026-07' in row['path'])
+    case = json.loads(case_path.read_text())
+    inputs, _fingerprint = frozen.verify((case_path.parent / case['bundle']).resolve())
+    assert [s['sha'] for s in inputs['slots']] == [old] and inputs['close_time']['slots_from'].startswith('version_history_at_close')
+    attempt = gate.evaluate(legacy_production['model'], output / 'approved.json', target_period='2026-07')
+    assert attempt['status'] == 'passed', json.dumps([attempt['issues'], [(c['case_id'], c['issues'], (c.get('result') or {}).get('differences'))
+                                                     for c in attempt['cases']]], ensure_ascii=False, default=str)
+
+
+@pytest.mark.parametrize('mutation', ['version_gap', 'feed_changed', 'dirty_engine', 'labor_changed'])
+def test_legacy_fallbacks_exclude_or_report_what_cannot_be_proved(legacy_production, tmp_path, mutation):
+    root = source_copy(legacy_production, tmp_path)
+    db, feed = root / 'workspace.db', root / 'order-feed.db'
+    if mutation == 'version_gap':
+        execute(db, "DELETE FROM version WHERE store_id='s2'")
+    elif mutation == 'feed_changed':
+        execute(feed, "INSERT INTO feed_entity VALUES('order','41',11,2,'delete','20','41',NULL,NULL,NULL)")
+        execute(feed, 'UPDATE feed_state SET consumed_seq=11,source_latest_seq=11 WHERE id=1')
+    elif mutation == 'dirty_engine':
+        execute(db, "UPDATE run SET engine='a4bb7b2-dirty' WHERE store_id='s1' AND period='2026-06'")
+    else:
+        execute(db, 'DROP TRIGGER run_labor_no_update')
+        execute(db, "UPDATE run_labor SET amount='4.99' WHERE store_id='s1' AND period='2026-06'")
+    output = tmp_path / 'golden'
+    run(legacy_production, root, output)
+    selection = json.loads((output / 'selection.json').read_text())
+    excluded = {(r['store_id'], r['period']): r['reasons'] for r in selection['excluded']}
+    if mutation == 'version_gap':
+        assert excluded == {('s2', p): ['close_time_slots_unproven'] for p in ('2026-06', '2026-07')}
+    elif mutation == 'feed_changed':
+        assert excluded == {('s2', p): ['legacy_inputs_not_reproduced'] for p in ('2026-06', '2026-07')}
+    elif mutation == 'dirty_engine':
+        assert excluded == {('s1', '2026-06'): ['legacy_engine_unavailable']}
+    else:
+        assert not excluded and len(selection['selected']) == 4
+        assert selection['company_basis']['2026-06']['unproven_code'] == 'run_labor_not_reproduced'
+        assert selection['workspace_decisions']['overhead_total_periods'] == ['2026-07']
