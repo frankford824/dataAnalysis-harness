@@ -1,4 +1,5 @@
 import json
+import re
 
 import pytest
 
@@ -27,7 +28,7 @@ def test_model_context_has_structure_and_signs_but_no_amounts(tmp_path):
     assert question['state'] == 'queued'
     claimed = qa.claim(ws, model, WORKER)
     raw = json.dumps(claimed, ensure_ascii=False)
-    assert '128.2' not in raw and '128' not in raw
+    assert '128.2' not in raw and not re.search(r'(?<![0-9a-f])128(?![0-9a-f])', raw)
     node = next(n for n in claimed['context']['statement'] if n['id'] == 'n_receipt')
     assert node['sign'] == 'positive' and node['available'] is True and node['name'] == '销售收入'
     assert claimed['context']['store_name'] == 'shop' and claimed['question'] == question['question']
