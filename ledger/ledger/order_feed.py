@@ -47,7 +47,10 @@ CATALOG_ENTITIES = frozenset({"shop", "shop_group", "user", "shop_item", "depart
 # 聚水潭合单/拆单后头上的线上单号是「P,店铺:P」这类列表；商品行自己的线上单号能证明
 # 它属于列表里哪一笔平台订单时，订单脊柱和成本都用这笔平台订单号，不用整串列表。
 # 1688 同样是 19 位平台主订单号，挂成本用主订单号，整串列表对不上上传的订单明细。
-MEMBER_PARENT_PLATFORMS = frozenset({"taobao", "douyin", "alibaba1688"})
+# 京东订单台、聚水潭成本表和平台订单明细里的订单号实测只有 16 位和早期的 12 位两种。
+# 拼多多另由 _pdd_original 从子单号取；没登记的平台保留表头原样，不猜号码格式。
+MEMBER_PARENT_NUMBERS = {"taobao": r"\d{19}", "douyin": r"\d{19}", "alibaba1688": r"\d{19}",
+                         "jd": r"\d{16}|\d{12}"}
 # 一行商品成本超过该行售价这么多倍、且金额超过这个门槛，视为数量或成本写错，不计。
 # 正常亏本引流是 1 分钱卖 1 块成本的东西，绝对金额小；5 倍 + 100 元把它们都放过。
 IMPLAUSIBLE_COST_TO_PRICE = 5.0
@@ -1725,12 +1728,13 @@ class OrderFeed:
         parent=pl.col('online_order_no_order').fill_null(pl.col('online_order_no')).cast(pl.Utf8)
         origin_day=pl.lit(None,dtype=pl.Date)
         origin_supplied=pl.lit(False)
-        if store.platform in MEMBER_PARENT_PLATFORMS:
+        if store.platform in MEMBER_PARENT_NUMBERS:
             shop_name=('order_store_id_order' if 'order_store_id' in items.columns and 'order_store_id' in orders.columns else 'order_store_id')
             shop=(pl.col(shop_name) if 'order_store_id' in items.columns or 'order_store_id' in orders.columns else pl.lit(None,dtype=pl.String))
             parent,bound=original_parent(pl.col('online_order_no'),parent,shop,
                 pl.col('outer_sku').fill_null(pl.col('sub_order_id')),exported_orders,
-                item_shop=pl.col('order_store_id') if 'order_store_id' in items.columns and 'order_store_id' in orders.columns else None)
+                item_shop=pl.col('order_store_id') if 'order_store_id' in items.columns and 'order_store_id' in orders.columns else None,
+                number=MEMBER_PARENT_NUMBERS[store.platform])
             if store.platform in {'taobao','douyin'} and 'original_order_date' in items.columns:
                 raw_day=pl.col('original_order_date').cast(pl.String).str.slice(0,10)
                 origin_supplied=bound & raw_day.is_not_null() & (raw_day!='')
@@ -1981,10 +1985,11 @@ class OrderFeed:
             else []
         )
         line_parent=pl.col('online_order_no')
-        if store.platform in MEMBER_PARENT_PLATFORMS:
+        if store.platform in MEMBER_PARENT_NUMBERS:
             line_parent,_=original_parent(pl.col('item_order_no'),line_parent,
                 pl.coalesce('__parent_store_id','__item_store_id'),
-                pl.col('outer_sku').fill_null(pl.col('sub_order_id')),exported_orders,item_shop=pl.col('__item_store_id'))
+                pl.col('outer_sku').fill_null(pl.col('sub_order_id')),exported_orders,item_shop=pl.col('__item_store_id'),
+                number=MEMBER_PARENT_NUMBERS[store.platform])
         frame = certified.join(
             orders.select("order_id", "online_order_no", "order_time", "order_status_raw", "tracking_no",
                           (pl.col('order_store_id').cast(pl.String) if 'order_store_id' in orders.columns else pl.lit(None,dtype=pl.String)).alias('__parent_store_id'),

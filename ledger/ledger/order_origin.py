@@ -2,13 +2,13 @@
 import polars as pl
 
 
-def original_parent(raw, header, shop, child, exported=None, item_shop=None):
+def original_parent(raw, header, shop, child, exported=None, item_shop=None, number=r'\d{19}'):
     raw=raw.cast(pl.String).str.strip_chars()
     header=header.cast(pl.String)
     shop=shop.cast(pl.String)
     normalized=header.str.replace_all('[，;；]',',').str.replace_all(r'\s+','')
-    member=raw.str.extract(r'^(?:\d+:)?(\d{19})$',1)
-    prefix=raw.str.extract(r'^(\d+):\d{19}$',1)
+    member=raw.str.extract(rf'^(?:\d+:)?({number})$',1)
+    prefix=raw.str.extract(rf'^(\d+):(?:{number})$',1)
     shop_known=shop.str.contains(r'^\d+$').fill_null(False)
     prefix_ok=prefix.is_null() | (shop_known & (prefix==shop)).fill_null(False)
     allowed_prefix=pl.when(shop_known).then(pl.concat_str([pl.lit('(?:'),shop,pl.lit(':)?')])).otherwise(pl.lit(''))
