@@ -114,7 +114,7 @@ for path in [*files, 'VERSION','RELEASE-ACCEPTANCE.json', *('ledger/ledger/stati
         before_sha=baseline_files.get(path,'');is_new=path not in baseline_files
     contents[path]=content
     manifest.append(dict(path=path,sha256=hashlib.sha256(content).hexdigest(),
-        before_sha256=before_sha,is_new=is_new,allow_absent=path.startswith(('ops/ledger_sentinel/','agent-worker/','host-agent/'))))
+        before_sha256=before_sha,is_new=is_new,allow_absent=path.startswith(('ops/ledger_sentinel/','agent-worker/','host-agent/','tools/'))))
 target = Path(output).resolve()
 if target.exists():raise SystemExit('Release output already exists; never overwrite it')
 descriptor, name = tempfile.mkstemp(prefix='.ledger-package-',suffix='.zip',dir=target.parent)

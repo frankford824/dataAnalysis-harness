@@ -119,7 +119,7 @@ try {
     $BeforeExistence[$File.path] = [bool](Test-Path -LiteralPath $Target)
     if ($File.before_sha256 -and -not ($File.allow_absent -and -not $BeforeExistence[$File.path])) {
       if (-not (Test-Path -LiteralPath $Target) -or
-          (Get-FileHash -LiteralPath $Target -Algorithm SHA256).Hash.ToLower() -ne $File.before_sha256) {
+          ((Get-FileHash -LiteralPath $Target -Algorithm SHA256).Hash.ToLower() -notin @($File.before_sha256,$File.sha256))) {
         throw "Production file changed during staging: $($File.path)"
       }
     }
@@ -239,7 +239,7 @@ try {
     $ExistsNow = [bool](Test-Path -LiteralPath $Target)
     if ($ExistsNow -ne $BeforeExistence[$File.path]) { throw "Production file existence changed before cutover: $($File.path)" }
     if ($File.before_sha256 -and -not ($File.allow_absent -and -not $ExistsNow) -and ((-not $ExistsNow) -or
-        (Get-FileHash -LiteralPath $Target -Algorithm SHA256).Hash.ToLower() -ne $File.before_sha256)) {
+        ((Get-FileHash -LiteralPath $Target -Algorithm SHA256).Hash.ToLower() -notin @($File.before_sha256,$File.sha256)))) {
       throw "Production changed before cutover: $($File.path)"
     }
   }
