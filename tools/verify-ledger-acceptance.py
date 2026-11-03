@@ -37,6 +37,8 @@ def main():
     parser.add_argument('--agent-python', default=str(REPO/'agent-worker/.venv/bin/python'))
     parser.add_argument('--regression-manifest',type=Path)
     parser.add_argument('--service-cases',type=Path)
+    parser.add_argument('--baseline-attestation',type=Path,
+                        help='Owner attestation that no closed store-month has an engine baseline (instead of --service-cases)')
     parser.add_argument('--target-period',required=True)
     parser.add_argument('--runtime-model',type=Path,default=REPO/'models/cn-ecommerce')
     args = parser.parse_args()
@@ -50,7 +52,10 @@ def main():
     version = git('rev-parse', 'HEAD')
     source_manifest=source_code_manifest(REPO)
     runtime_model=args.runtime_model.resolve()
+    if args.service_cases and args.baseline_attestation:
+        raise SystemExit('Use either approved service cases or a baseline attestation')
     service_manifest_sha=file_sha(args.service_cases) if args.service_cases and args.service_cases.is_file() else None
+    attestation_sha=file_sha(args.baseline_attestation) if args.baseline_attestation and args.baseline_attestation.is_file() else None
     regressions=[]
     if args.regression_manifest:
         supplied=json.loads(args.regression_manifest.read_text(encoding='utf-8'))
@@ -65,7 +70,7 @@ def main():
                 raise SystemExit('Untrusted regression path/hash is not allowed')
             regressions.append({'path':row['path'],'sha256':row['sha256']})
         if len({row['path'] for row in regressions})!=len(regressions):raise SystemExit('Duplicate regression path')
-    input_roots,inputs = capture_inputs(args.corpus,args.service_cases)
+    input_roots,inputs = capture_inputs(args.corpus,args.service_cases,args.baseline_attestation)
     models = identities(runtime_model)
     if not inputs:
         raise SystemExit('Empty real corpus cannot certify a release')
@@ -76,6 +81,9 @@ def main():
     commands = [
         ('backend', REPO / 'ledger', pytest + ['-m', 'not slow']),
         ('corpus', REPO / 'ledger', pytest + ['-m', 'slow']),
+        ('baseline_attestation', REPO, [args.python,str(REPO/'tools/verify-baseline-attestation.py'),
+            '--attestation',str(args.baseline_attestation.resolve()),'--target-period',args.target_period,
+            '--junit',str((args.output/'baseline_attestation.xml').resolve())]) if args.baseline_attestation else
         ('service_replay', REPO, [args.python,str(REPO/'tools/verify-ledger-service-cases.py'),
             '--candidate-model',str(runtime_model),'--target-period',args.target_period,
             '--junit',str((args.output/'service_replay.xml').resolve()),
@@ -98,7 +106,7 @@ def main():
            'LEDGER_ACCEPTANCE_CORPUS': str(args.corpus.resolve()),'BUILD_SOURCEMAP':'0'}
     for name, cwd, command in commands:
         report = args.output / (name + ('.xml' if name not in {'browser', 'frontend_build'} else '.json'))
-        argv = command + (['--junitxml=' + str(report.resolve())] if report.suffix == '.xml' and name!='service_replay' else [])
+        argv = command + (['--junitxml=' + str(report.resolve())] if report.suffix == '.xml' and name not in {'service_replay','baseline_attestation'} else [])
         with (args.output / (name + '.log')).open('w', encoding='utf-8') as log:
             completed = subprocess.run(argv, cwd=cwd, env=env, stdout=log, stderr=subprocess.STDOUT)
         if report.suffix == '.xml' and report.exists():
@@ -116,7 +124,8 @@ def main():
     unchanged = (version == git('rev-parse', 'HEAD') and not git('status', '--porcelain', '--', 'ledger', 'models', 'tools', 'ops', 'agent-worker', 'host-agent')
                  and source_manifest==source_code_manifest(REPO)
                  and inputs == input_inventory(input_roots) and models == identities(runtime_model)
-                 and (not args.service_cases or (args.service_cases.is_file() and file_sha(args.service_cases)==service_manifest_sha)))
+                 and (not args.service_cases or (args.service_cases.is_file() and file_sha(args.service_cases)==service_manifest_sha))
+                 and (not args.baseline_attestation or (args.baseline_attestation.is_file() and file_sha(args.baseline_attestation)==attestation_sha)))
     receipt = dict(schema=1, code_sha=version, model_sha=digest(models), model_manifest=models,
                    gate_runner={'sha256':file_sha(Path(__file__).resolve()),'kind':'controlled_full_gate.v1'},
                    source_code_manifest=source_manifest,source_code_sha=digest(source_manifest),
@@ -125,11 +134,16 @@ def main():
                    corpus_root=str(args.corpus.resolve()),
                    frontend_artifacts=identities(REPO / 'ledger/ledger/static'),
                    input_sha=digest(inputs), checks=checks,
-                   unresolved_differences=0 if all(c['exit_code']==0 and c['failures']==0 and c['errors']==0 and c['skipped']==0 for c in checks if c['name'] in {'backend','corpus','service_replay','invariants'}) else None,
+                   unresolved_differences=0 if all(c['exit_code']==0 and c['failures']==0 and c['errors']==0 and c['skipped']==0 for c in checks if c['name'] in {'backend','corpus','service_replay','baseline_attestation','invariants'}) else None,
                    target_period=args.target_period,
                    inputs_unchanged=unchanged)
     if args.service_cases:
         receipt['approved_service_cases']={'path':str(args.service_cases.resolve()),'sha256':service_manifest_sha}
+    if args.baseline_attestation:
+        attested=json.loads(args.baseline_attestation.read_text(encoding='utf-8'))
+        receipt['baseline_attestation']={'kind':'no_engine_baseline','path':str(args.baseline_attestation.resolve()),
+            'sha256':attestation_sha,'approval_reference':attested.get('approval_reference',''),
+            'evidence_sha256':(attested.get('evidence') or {}).get('sha256')}
     if (args.output/'service_cases.json').is_file():
         receipt['service_case_attempt']={'path':'service_cases.json','sha256':file_sha(args.output/'service_cases.json')}
     if regressions:

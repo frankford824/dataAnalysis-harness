@@ -66,3 +66,23 @@ def test_resealed_report_cannot_claim_empty_or_failed_cases_passed(tmp_path,repo
     seal(value)
     with pytest.raises(ValueError, match='outside'):
         validate(value, version='a' * 40, evidence_root=tmp_path)
+
+
+def attested(tmp_path):
+    value = receipt(tmp_path)
+    for check in value['checks']:
+        if check['name'] == 'service_replay':check['name'] = 'baseline_attestation'
+    value['inputs'].append({'path': 'attestation/attestation.json', 'sha256': 'f' * 64})
+    value['input_sha'] = digest(value['inputs'])
+    value['baseline_attestation'] = {'kind': 'no_engine_baseline', 'sha256': 'f' * 64, 'approval_reference': '业务负责人确认'}
+    return seal(value)
+
+
+def test_owner_attestation_replaces_replay_only_when_bound_to_inputs(tmp_path):
+    validate(attested(tmp_path), version='a' * 40, model_sha='c' * 64, evidence_root=tmp_path)
+    for mutate in (lambda v: v.pop('baseline_attestation'), lambda v: v['baseline_attestation'].update(sha256='e' * 64),
+                   lambda v: v['baseline_attestation'].update(approval_reference=' '),
+                   lambda v: v['checks'].append({**v['checks'][0], 'name': 'service_replay'})):
+        value = attested(tmp_path);mutate(value);seal(value)
+        with pytest.raises(ValueError):
+            validate(value, version='a' * 40, model_sha='c' * 64, evidence_root=tmp_path)

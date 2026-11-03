@@ -8,7 +8,12 @@ import re
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
-REQUIRED_CHECKS = frozenset({'backend', 'corpus', 'service_replay', 'invariants', 'browser', 'frontend_build', 'agent_worker', 'ops'})
+COMMON_CHECKS = frozenset({'backend', 'corpus', 'invariants', 'browser', 'frontend_build', 'agent_worker', 'ops'})
+REQUIRED_CHECKS = COMMON_CHECKS | {'service_replay'}
+# When no closed store-month was produced by the engine, the owner attests that
+# fact instead of approving replay cases; the verifier rejects the attestation
+# as soon as any closed month could have been replayed.
+ATTESTED_CHECKS = COMMON_CHECKS | {'baseline_attestation'}
 
 
 def digest(value) -> str:
@@ -55,7 +60,17 @@ def validate(receipt: dict, *, version: str, model_sha: str | None = None,
     checks = receipt.get('checks', [])
     if len({c.get('name') for c in checks}) != len(checks):
         raise ValueError('Duplicate check name')
-    if not REQUIRED_CHECKS.issubset({c.get('name') for c in checks}):
+    names = {c.get('name') for c in checks}
+    if 'baseline_attestation' in names:
+        attestation = receipt.get('baseline_attestation')
+        if 'service_replay' in names or not ATTESTED_CHECKS.issubset(names):
+            raise ValueError('Required checks were not run')
+        if (not isinstance(attestation, dict) or attestation.get('kind') != 'no_engine_baseline'
+                or not str(attestation.get('approval_reference') or '').strip()
+                or not re.fullmatch('[0-9a-f]{64}', str(attestation.get('sha256', '')))
+                or attestation['sha256'] not in {row.get('sha256') for row in inputs}):
+            raise ValueError('Baseline attestation is missing or not bound to the inputs')
+    elif not REQUIRED_CHECKS.issubset(names):
         raise ValueError('Required checks were not run')
     for check in checks:
         if (any(type(check.get(k)) is not int for k in ('exit_code','tests','failures','errors','skipped'))

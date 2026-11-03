@@ -13,6 +13,16 @@ ledger/.venv/bin/python tools/verify-ledger-acceptance.py \
   --output /controlled/new-release-evidence
 ```
 
+### 没有引擎基准时的业务负责人声明
+
+2026-11-02 生产核查：2026-06 的 42 个、2026-07 的 43 个已结账店月全部经人工结账（`manual_finance`，且均忽略过检查项），更早月份为旧版留档结账，生产历史中没有“引擎算出、财务直接认可”的店月可作服务链案例。业务负责人当日决定以声明代替服务链案例：
+
+1. 在生产机上只读运行 `tools/build-historical-golden.py`，得到 `selection.json`；
+2. 业务负责人签署 `kind: no_engine_baseline_attestation` 的声明，`evidence` 以 SHA 绑定该 `selection.json`；
+3. `verify-ledger-acceptance.py --baseline-attestation 声明.json`（与 `--service-cases` 二选一）以 `baseline_attestation` 检查代替 `service_replay`，其余检查不变。
+
+`tools/verify-baseline-attestation.py` 只在报告未选出任何店月、且目标月与上月的每个店月都因 `manual_finance` 或 `not_closed` 被排除时通过；只要存在可重放的店月就失败，必须改用已核准的服务链案例。收据记录 `baseline_attestation`（声明 SHA、批准引用），声明和证据文件同属收据输入清单。上线后由生产机的升级核对把关：新旧版本结果有变化的店月，人确认前规则执行器不自动改账；结账、实发仍由人确认。
+
 旧语料红灯不能通过放宽金额阈值、跳过、把未知补零或重新录基线消除。财务核准后的输入修复和案例预期变更需要保留证据及原因。
 
 ## 生产版本漂移

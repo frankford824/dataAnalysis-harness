@@ -61,8 +61,17 @@ def inventory(roots):
     return rows
 
 
-def capture(corpus,service_cases=None):
+def capture(corpus,service_cases=None,attestation=None):
     roots={'corpus':{'path':str(Path(corpus).resolve()),'kind':'corpus_xlsx'}}
+    if attestation is not None:
+        if service_cases is not None:raise ValueError('Use either approved service cases or a baseline attestation')
+        path=Path(attestation).resolve()
+        if not path.is_file():raise ValueError('Baseline attestation is missing')
+        evidence=read(path).get('evidence') or {}
+        report=relative_file(path.parent,evidence.get('path'))
+        if sha(report)!=evidence.get('sha256'):raise ValueError('Attestation evidence changed')
+        roots['attestation']={'path':str(path.parent),'kind':'explicit_files',
+            'files':{path.name:sha(path),evidence['path']:evidence['sha256']}}
     if service_cases is not None:
         manifest=Path(service_cases).resolve()
         if not manifest.is_file():raise ValueError('Approved service manifest is missing')
