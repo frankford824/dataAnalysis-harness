@@ -190,6 +190,47 @@ class Case:
     #: 都是一片「差异大」，真正的回归会被淹掉。
     #: 登记值和实测不符也要报出来：那说明原因变了，得重新查。
     explained: dict[str, tuple[float, str]] = field(default_factory=dict)
+    #: 现行规则下必须不出数的列：列名 → 原因。验收断言它确实不出数；出了数、
+    #: 被当成零或被跳过都算失败。与 explained 互斥。
+    expected_unavailable: dict[str, str] = field(default_factory=dict)
+    #: 现行规则下这个店期必须出现的结账拦截：check_id → (detail 中逐项相等的计数, 原因)。
+    #: 为空表示必须能结账。
+    expected_blockers: dict[str, tuple[dict, str]] = field(default_factory=dict)
+    #: 商品成本覆盖的精确计数：(已覆盖, 分母, 原因)。为空时沿用 98% 下限。
+    expected_goods_coverage: tuple[int, int, str] | None = None
+
+
+#: 旧语料 2026-05 预期按已发布规则更新的授权。见 docs/legacy-corpus-20261103.md。
+LEGACY_APPROVAL = "业务负责人2026-11-03授权：按已发布规则更新旧语料预期"
+
+_HISTORICAL_PRICE = (
+    "9a2afa2 起淘宝、抖店成本须有下单日历史单价（docs/reports/taobao-douyin-root-fix-20260910.md），"
+    "旧导出只有当前单价，相关行待核价、不入账；2f3621f/614fd55 起覆盖率按实际入账事实计，"
+    "f557faf 起必需成本未核齐不出数。未知不是零。"
+)
+_SUPERSEDED_PARENT = (
+    "49bf485 起已拆分/合并的 ERP 父行只作追溯、不计有效成本；237 个已发货订单缺有效成员成本"
+    "（docs/reports/ledger-corpus-adjudication-20261027.md），覆盖 81.2% 低于 95%，"
+    "f557faf 起必需成本未核齐不出数。若补齐，已知口径差为 b5e41de 补发分列 +349.25 与 "
+    "64c6e7c 邮费补差价 HQT00365 计零 +12.00。未知不是零。"
+)
+_DROPSHIP_MISSING = (
+    "eded430 起代发订单须有已入账的代发支出（docs/reports/dropship-guofeng-20260911.md），"
+    "f557faf 起代发金额不完整不出数。未知不是零。"
+)
+_STRICT_ALLOCATION = (
+    "94afb1c 起子订单分配率须完整有效、不按笔数兜底，金额守恒；店铺合计随之变化。"
+)
+_STORE_WIDE_PROMOTION = (
+    "095f421 起挂不上订单的有日期推广费按店月全店分摊（模型 unmatched: store_wide），"
+    "人工表只计挂得上商品的部分。"
+)
+_SHARED_STORE = (
+    "36ab752 起共享表店名缺失、认不出或与订单店铺冲突时不回退当前店、不入账，并拦截结账"
+    "（docs/july-ledger-repairs.md）。"
+)
+_REQUIRED_COST = "f557faf 起必需成本金额或有效价格未核齐时拦截结账，不按零确认利润。"
+_GOODS_COVERAGE = "2f3621f 结账门槛 95%；614fd55 起覆盖只认实际入账的成本事实。"
 
 
 CASES = {
@@ -202,31 +243,38 @@ CASES = {
             "交易赔付": "n_compensation", "营销费用": "n_marketing",
             "客服打款": "n_small_payment", **_COST_COLUMNS,
         },
+        # 销售收入原登记 -561.28（归因外部工作簿）；94afb1c 严格分配后引擎与人工表一致，登记撤销。
         explained={
-            "软件服务费": (10004.64, _TAOBAO_UI_RULES),
-            "营销费用": (-7916.43, _TAOBAO_UI_RULES),
-            "物流运费": (-1222.88, _TAOBAO_UI_RULES),
-            "交易赔付": (447.09, _TAOBAO_UI_RULES),
-            "利润": (1064.60, _TAOBAO_UI_RULES),
+            "软件服务费": (9817.38, f"{_TAOBAO_UI_RULES} {_STRICT_ALLOCATION}原登记 10,004.64。"),
+            "营销费用": (-7930.22, f"{_TAOBAO_UI_RULES} {_STRICT_ALLOCATION}原登记 -7,916.43。"),
+            "物流运费": (-1295.51, f"{_TAOBAO_UI_RULES} {_STRICT_ALLOCATION}原登记 -1,222.88。"),
+            "交易赔付": (576.39, f"{_TAOBAO_UI_RULES} {_STRICT_ALLOCATION}原登记 447.09。"),
+            "发货运费": (-829.83, f"{_STRICT_ALLOCATION}原登记 24.81（{_TAOBAO_STALE}）"),
+            "推广费用": (-442.11, f"{_STORE_WIDE_PROMOTION}本店 77 个未匹配键。"),
             "销售退款": (-12.91, _TAOBAO_STALE),
-            "发货运费": (24.81, _TAOBAO_STALE),
             "客服打款": (10.00, _TAOBAO_STALE),
             "刷单/本金佣金": (37.20, _TAOBAO_STALE),
-            "毛利": (114.58, _TAOBAO_STALE),
-            "聚水潭成本": (675.85,
-                      "人工表的公式引用外部工作簿 '[7]聚水潭订单5+6月'，和交上来的"
-                      "「聚水潭成本-淘宝喜必顺.xlsx」不是同一份。逐子订单比对：21,988 行里"
-                      "有 72 行金额不一致，差额合计正好 675.85，其中若干子订单在交付文件里"
-                      "根本查不到。公式形状全表一致、没有手填值，按交付文件原样重算得到的"
-                      "正是引擎的 167,956.22。"),
-            "销售收入": (-561.28,
-                     "人工表的公式引用外部工作簿 [1] 里一张叫「对账」的表，交上来的"
-                     "「对账-淘宝喜必顺.xlsx」里没有这张表（只有支付宝、微信两张明细和"
-                     "两张透视汇总）。逐子订单比对：60 个子订单不一致，差额合计正好 561.28。"
-                     "抽查主订单 3300490887757001161：分配率 0.7939、汇总表交易收款 89.89，"
-                     "引擎算 71.36；人工缓存值 90.51 反推需要交易收款 114.01，"
-                     "比交付文件里的多 24。是数据源版本差异，不是分摊算法差异。"),
         },
+        # 原登记 聚水潭成本 675.85、毛利 114.58、利润 1,064.60 在现行规则下不再可比。
+        expected_unavailable={
+            "聚水潭成本": _HISTORICAL_PRICE,
+            "补发成本": _HISTORICAL_PRICE,
+            "代发成本": _DROPSHIP_MISSING,
+            "毛利": _HISTORICAL_PRICE,
+            "利润": f"{_HISTORICAL_PRICE} {_DROPSHIP_MISSING}",
+        },
+        expected_blockers={
+            "chk_goods_coverage": ({"spine_keys": 18450, "uncovered": 18423},
+                                   f"{_GOODS_COVERAGE} {_HISTORICAL_PRICE}"),
+            "shared_store_identity": ({"count": 17}, _SHARED_STORE),
+            "allocation_basis": ({"count": 160, "orders": 46}, _STRICT_ALLOCATION),
+            "dropship_cost_evidence": ({"count": 1}, _DROPSHIP_MISSING),
+            "required_cost_unresolved": ({
+                "unresolved_targets_count": {"goods": 18423, "dropship": 1, "reshipment": 0},
+                "unresolved_price_count": {"goods": 26892, "dropship": 0, "reshipment": 460},
+            }, _REQUIRED_COST),
+        },
+        expected_goods_coverage=(27, 18450, f"{_GOODS_COVERAGE} {_HISTORICAL_PRICE}"),
     ),
     "1688星泽气球派对": Case(
         store="1688星泽气球派对", platform="alibaba1688", period="2026-05",
@@ -236,7 +284,8 @@ CASES = {
             "销售收入": "n_receipt",
             "销售支出": "n_expense",
             "小额打款": "n_small_payment",
-            **_COST_COLUMNS,
+            # 人工表没有补发成本列：补发含在它的聚水潭成本里，b5e41de 起引擎才单列补发。
+            **{k: v for k, v in _COST_COLUMNS.items() if k != "补发成本"},
         },
         explained={
             "发货运费": (-72.48,
@@ -249,8 +298,23 @@ CASES = {
                      "5118532524280005716 上，交上来的文件里这笔的订单号是 ...001243，"
                      "是另一个订单。数据源版本不一致，不是算法差异。"),
             "销售支出": (375.43, _1688_SPLIT),
-            "利润": (-69.48, "上面两项之和：发货运费多认 -72.48、小额打款少认 3.00。"),
         },
+        # 原登记 利润 -69.48（发货运费 -72.48 与小额打款 3.00 之和）在现行规则下不再可比。
+        expected_unavailable={
+            "聚水潭成本": _SUPERSEDED_PARENT,
+            "毛利": _SUPERSEDED_PARENT,
+            "利润": _SUPERSEDED_PARENT,
+        },
+        expected_blockers={
+            "chk_goods_coverage": ({"spine_keys": 1260, "uncovered": 237},
+                                   f"{_GOODS_COVERAGE} {_SUPERSEDED_PARENT}"),
+            "shared_store_identity": ({"count": 16}, _SHARED_STORE),
+            "required_cost_unresolved": ({
+                "unresolved_targets_count": {"goods": 237, "dropship": 0, "reshipment": 0},
+                "unresolved_price_count": {"goods": 0, "dropship": 0, "reshipment": 0},
+            }, _REQUIRED_COST),
+        },
+        expected_goods_coverage=(1023, 1260, f"{_GOODS_COVERAGE} {_SUPERSEDED_PARENT}"),
     ),
     "抖音浅花涧节日装饰": Case(
         store="抖音浅花涧节日装饰", platform="douyin", period="2026-05",
@@ -262,9 +326,25 @@ CASES = {
         },
         explained={
             "销售收入": (43.30, _DOUYIN_REKEYED),
-            "毛利": (43.30, _DOUYIN_REKEYED),
-            "利润": (41.74, _DOUYIN_REKEYED),
+            "推广费用": (-41.30, f"{_STORE_WIDE_PROMOTION}本店 12 个未匹配键。"),
         },
+        # 原登记 毛利 43.30、利润 41.74 在现行规则下不再可比。
+        expected_unavailable={
+            "聚水潭成本": _HISTORICAL_PRICE,
+            "补发成本": _HISTORICAL_PRICE,
+            "毛利": _HISTORICAL_PRICE,
+            "利润": _HISTORICAL_PRICE,
+        },
+        expected_blockers={
+            "chk_goods_coverage": ({"spine_keys": 201, "uncovered": 201},
+                                   f"{_GOODS_COVERAGE} {_HISTORICAL_PRICE}"),
+            "shared_store_identity": ({"count": 16}, _SHARED_STORE),
+            "required_cost_unresolved": ({
+                "unresolved_targets_count": {"goods": 201, "dropship": 0, "reshipment": 0},
+                "unresolved_price_count": {"goods": 340, "dropship": 0, "reshipment": 3},
+            }, _REQUIRED_COST),
+        },
+        expected_goods_coverage=(0, 201, f"{_GOODS_COVERAGE} {_HISTORICAL_PRICE}"),
     ),
 }
 
@@ -322,11 +402,24 @@ def main() -> int:
 
 def compare_case(case: Case, target, human: dict[str, float], model) -> float:
     """Shared fail-closed verdict for CLI and pytest; derived totals are assertions too."""
+    unavailable = case.expected_unavailable
+    if (set(unavailable) - set(case.columns) or set(unavailable) & set(case.explained)
+            or not all(isinstance(why, str) and why.strip() for why in unavailable.values())):
+        print("  验收失败：预期不出数的登记无效（须是本案例的列、写明原因、不与已解释差异重复）")
+        return float("inf")
     gaps = []
     for name, node_id in case.columns.items():
         nv = target.nodes.get(node_id)
-        if name not in human or nv is None or not nv.available:
-            print(f"  验收失败：必需指标 {name} 缺失或未出数")
+        if name not in human or nv is None:
+            print(f"  验收失败：必需指标 {name} 缺失")
+            return float("inf")
+        if name in unavailable:
+            if nv.available is not False or nv.value is not None:
+                print(f"  验收失败：{name} 按现行规则应不出数，实际出了数或记成了零")
+                return float("inf")
+            continue
+        if not nv.available:
+            print(f"  验收失败：必需指标 {name} 未出数")
             return float("inf")
         h, actual = human[name], nv.value
         explanation = case.explained.get(name, (0, ""))[0]
@@ -345,6 +438,8 @@ def compare_case(case: Case, target, human: dict[str, float], model) -> float:
     for node in model.statement:
         expr = getattr(node, "formula", None)
         if expr is None or node.id not in ("gross_profit", "net_profit"):
+            continue
+        if any(nid == node.id and name in unavailable for name, nid in case.columns.items()):
             continue
         actual = target.nodes.get(node.id)
         parts = [target.nodes.get(key) for key in expr.of]
@@ -466,7 +561,8 @@ def run_case(case: Case) -> float:
             print(f"  {name:<16}{h:>16,.2f}{'本模型不出这一项':>16}")
             continue
         if not nv.available:
-            print(f"  {name:<16}{h:>16,.2f}{'未出数（缺数据源）':>16}")
+            mark = "  ← 预期不出数" if name in case.expected_unavailable else ""
+            print(f"  {name:<16}{h:>16,.2f}{'未出数（缺数据源）':>16}{mark}")
             continue
         e = nv.value
         gap = e - h
@@ -490,6 +586,12 @@ def run_case(case: Case) -> float:
         groups.setdefault(why, []).append(f"{name} {amount:+,.2f}")
     for why, items in groups.items():
         print(f"\n  已解释：{'、'.join(items)}")
+        print(f"    {why}")
+    absent: dict[str, list[str]] = {}
+    for name, why in case.expected_unavailable.items():
+        absent.setdefault(why, []).append(name)
+    for why, names in absent.items():
+        print(f"\n  预期不出数（未知，不是零）：{'、'.join(names)}")
         print(f"    {why}")
     return verdict
 

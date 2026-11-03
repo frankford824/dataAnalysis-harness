@@ -6,6 +6,10 @@
 
 输入可能产生其它月份的尾片；只有显式 Case.period 属于该案例的目标。
 任何已声明目标缺失都失败。缺少本机原件默认失败，显式禁用语料才跳过。
+
+旧语料 2026-05 按已发布规则登记了预期（docs/legacy-corpus-20261103.md）：
+expected_unavailable 的列必须确实不出数，expected_blockers 的拦截集合与计数、
+expected_goods_coverage 的覆盖计数必须逐项一致，任何变化都失败。
 """
 
 from __future__ import annotations
@@ -57,6 +61,13 @@ def _declared_slices(model, store, result):
     return {(store.name, case.period): select_case_slice(model, result, case) for case in cases}
 
 
+def _case_of(store, period):
+    matches = [case for case in CASES.values()
+               if case.store in (store.id, store.name, *store.aliases) and case.period == period]
+    assert len(matches) == 1, f'{store.name} {period} 没有唯一的验收案例'
+    return matches[0]
+
+
 def _run_store(store_id: str):
     from conftest import MODELS, PLATFORM_DATA
 
@@ -78,15 +89,32 @@ def _run_store(store_id: str):
 @pytest.mark.slow
 @pytest.mark.parametrize("store_id", ALL_STORES)
 def test_store_can_close(store_id: str) -> None:
-    """每个已声明店月均须满足原有结账门禁；有阻塞就保持失败。"""
+    """每个已声明店月均须满足原有结账门禁；有阻塞就保持失败。
+
+    案例登记了 expected_blockers 时，拦截集合与逐项计数必须和登记完全一致：
+    多一项、少一项、计数变了都失败，店期也必须仍然不能结账。
+    """
     _, store, selected = _run_store(store_id)
     for (_, period), sl in selected.items():
-        blockers = [f for f in sl.audit.findings if f.blocking]
-        assert not blockers, (
-            f"{store.name} {period} 结不出账，拦截项："
-            + "；".join(f"{f.name}（{f.message}）" for f in blockers)
+        case = _case_of(store, period)
+        blockers = {f.check_id: f for f in sl.audit.findings if f.blocking}
+        if not case.expected_blockers:
+            assert not blockers, (
+                f"{store.name} {period} 结不出账，拦截项："
+                + "；".join(f"{f.name}（{f.message}）" for f in blockers.values())
+            )
+            assert sl.can_close
+            continue
+        assert all(why.strip() for _, why in case.expected_blockers.values())
+        expected = {cid: want for cid, (want, _) in case.expected_blockers.items()}
+        observed = {cid: ({k: (f.detail or {}).get(k) for k in expected[cid]}
+                          if cid in expected else f"{f.name}（{f.message}）")
+                    for cid, f in blockers.items()}
+        assert observed == expected, (
+            f"{store.name} {period} 的结账拦截与现行规则下的登记不符：\n"
+            f"  登记 {expected}\n  实际 {observed}"
         )
-        assert sl.can_close
+        assert not sl.can_close
 
 
 @needs_real_data
@@ -100,13 +128,23 @@ def test_coverage_denominator_is_scoped(store_id: str) -> None:
     这件事本身。
     """
     _, store, selected = _run_store(store_id)
-    for sl in selected.values():
+    for (_, period), sl in selected.items():
+        case = _case_of(store, period)
         report = sl.link_reports.get("goods_cost")
         if report is None or not report.spine_keys:
+            assert case.expected_goods_coverage is None, f"{store.name} {period} 登记了覆盖计数却没有可比对的订单"
             continue
         assert report.expect_label in ("已发货", "已发货且未全额退款", "已出库")
         assert report.spine_keys < report.spine_keys_total
-        assert report.coverage >= 0.98
+        if case.expected_goods_coverage is None:
+            assert report.coverage >= 0.98
+            continue
+        covered, expected, why = case.expected_goods_coverage
+        assert why.strip()
+        assert (report.spine_keys_covered, report.spine_keys) == (covered, expected), (
+            f"{store.name} {period} 商品成本覆盖 {report.spine_keys_covered}/{report.spine_keys}，"
+            f"登记的是 {covered}/{expected}（{why}）"
+        )
 
 
 @needs_real_data

@@ -166,3 +166,94 @@ def test_cli_uses_the_same_half_cent_verdict_as_the_declared_pytest_gate(monkeyp
     monkeypatch.setattr('sys.argv',['accept.py'])
     monkeypatch.setattr(accept,'run_case',lambda _:gap)
     assert accept.main()==1
+
+
+def absent():
+    return node(None, available=False)
+
+
+def unavailable_case(**changes):
+    return case(expected_unavailable={'profit': 'synthetic rule withholds profit'}, **changes)
+
+
+def test_expected_unavailable_must_actually_be_unavailable():
+    checked = unavailable_case()
+    assert accept.compare_case(checked, N(nodes={'sales': node(), 'net_profit': absent()}),
+                               {'sales': 100, 'profit': 100}, N(statement=[])) == 0
+    for wrong in (node(), node(0), node(0, available=False), node(None)):
+        assert not math.isfinite(accept.compare_case(checked, N(nodes={'sales': node(), 'net_profit': wrong}),
+                                                     {'sales': 100, 'profit': 100}, N(statement=[])))
+
+
+def test_expected_unavailable_does_not_hide_other_differences_or_missing_columns():
+    checked = unavailable_case()
+    assert accept.compare_case(checked, N(nodes={'sales': node(101), 'net_profit': absent()}),
+                               {'sales': 100, 'profit': 100}, N(statement=[])) > 0
+    assert not math.isfinite(accept.compare_case(checked, N(nodes={'sales': node()}),
+                                                 {'sales': 100, 'profit': 100}, N(statement=[])))
+    assert not math.isfinite(accept.compare_case(checked, N(nodes={'sales': node(), 'net_profit': absent()}),
+                                                 {'sales': 100}, N(statement=[])))
+
+
+@pytest.mark.parametrize('changes', [
+    {'expected_unavailable': {'unknown-column': 'reason'}},
+    {'expected_unavailable': {'profit': ' '}},
+    {'expected_unavailable': {'profit': 'reason'}, 'explained': {'profit': (1.0, 'reason')}},
+])
+def test_expected_unavailable_registration_is_validated(changes):
+    assert not math.isfinite(accept.compare_case(case(**changes), N(nodes={'sales': node(), 'net_profit': absent()}),
+                                                 {'sales': 100, 'profit': 100}, N(statement=[])))
+
+
+def test_expected_unavailable_skips_only_its_own_formula():
+    model = N(statement=[N(id='net_profit', formula=N(op='add', of=('sales', 'cost')))])
+    result = N(nodes={'sales': node(), 'cost': absent(), 'net_profit': absent()})
+    assert accept.compare_case(unavailable_case(), result, {'sales': 100, 'profit': 100}, model) == 0
+    assert not math.isfinite(accept.compare_case(case(), result, {'sales': 100, 'profit': 100}, model))
+
+
+def legacy_scope(monkeypatch, **changes):
+    import test_acceptance as acceptance
+    store = N(id='audit-id', name='audit', aliases=[])
+    model = N(stores=[store], sources=[])
+    monkeypatch.setattr(acceptance, 'CASES', {'2026-05': case(period='2026-05', **changes)})
+    return acceptance, model, store
+
+
+def blocker(check_id, **detail):
+    return N(check_id=check_id, name=check_id, message='synthetic', blocking=True, detail=detail)
+
+
+@pytest.mark.parametrize('findings,closes,ok', [
+    ([blocker('coverage', uncovered=3), blocker('shared', count=2)], False, True),
+    ([blocker('coverage', uncovered=3)], False, False),
+    ([blocker('coverage', uncovered=3), blocker('shared', count=2), blocker('new')], False, False),
+    ([blocker('coverage', uncovered=4), blocker('shared', count=2)], False, False),
+    ([blocker('coverage', uncovered=3), blocker('shared', count=2)], True, False),
+])
+def test_registered_blockers_must_match_exactly(monkeypatch, findings, closes, ok):
+    expected = {'coverage': ({'uncovered': 3}, 'synthetic coverage rule'),
+                'shared': ({'count': 2}, 'synthetic shared rule')}
+    acceptance, model, store = legacy_scope(monkeypatch, expected_blockers=expected)
+    selected = {('audit', '2026-05'): N(can_close=closes, audit=N(findings=findings))}
+    monkeypatch.setattr(acceptance, '_run_store', lambda _: (model, store, selected))
+    if ok:
+        acceptance.test_store_can_close.__wrapped__(store.id)
+    else:
+        with pytest.raises(AssertionError):
+            acceptance.test_store_can_close.__wrapped__(store.id)
+
+
+@pytest.mark.parametrize('covered,denominator,total,ok', [
+    (5, 10, 20, True), (6, 10, 20, False), (5, 11, 20, False), (5, 10, 10, False)])
+def test_registered_coverage_counts_must_match_exactly(monkeypatch, covered, denominator, total, ok):
+    acceptance, model, store = legacy_scope(monkeypatch, expected_goods_coverage=(5, 10, 'synthetic rule'))
+    report = N(spine_keys=denominator, spine_keys_total=total, expect_label='已发货',
+               spine_keys_covered=covered, coverage=covered / denominator)
+    selected = {('audit', '2026-05'): N(link_reports={'goods_cost': report})}
+    monkeypatch.setattr(acceptance, '_run_store', lambda _: (model, store, selected))
+    if ok:
+        acceptance.test_coverage_denominator_is_scoped.__wrapped__(store.id)
+    else:
+        with pytest.raises(AssertionError):
+            acceptance.test_coverage_denominator_is_scoped.__wrapped__(store.id)
