@@ -128,3 +128,15 @@ def test_extra_backup_artifact_cannot_replace_a_core_restore_proof(backup):
     assert actual['extra_roles_hash_checked']==['source_snapshot']
     (root/'source-snapshot.evidence').write_text('changed after recorded backup')
     with pytest.raises(ValueError,match='artifact changed'):tool.verify(root/'manifest.json',CODE,allow_extra_roles=True)
+
+
+def test_windows_share_keeps_its_acl_but_local_folders_are_made_private(tmp_path,monkeypatch):
+    tool=module();calls=[];share=tool.network_share
+    assert share(r'\\192.168.0.125\dataAnalysis\backups') and not share(r'D:\ledger\qa')
+    monkeypatch.setattr(tool.os,'name','nt')
+    monkeypatch.setattr(tool.subprocess,'check_output',lambda *a,**k:'"host\\\\user","S-1-5-21-1"\n')
+    monkeypatch.setattr(tool.subprocess,'run',lambda argv,**k:calls.append(argv))
+    monkeypatch.setattr(tool,'network_share',lambda path:path.name=='share')
+    tool.private_directory(tmp_path/'share');assert calls==[]
+    tool.private_directory(tmp_path/'local')
+    assert calls and calls[0][0]=='icacls' and '/inheritance:r' in calls[0]

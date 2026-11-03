@@ -89,8 +89,16 @@ def sqlite_copy(source,target):
             raise ValueError('Restored financial database failed integrity check')
 
 
+def network_share(path):
+    return str(path).startswith('\\\\')
+
+
 def private_directory(target):
     target.mkdir(mode=0o700)
+    if os.name=='nt' and network_share(target):
+        # A NAS does not map the local account SID: replacing the ACL there
+        # locks everyone out. The share's own permissions govern the folder.
+        return
     if os.name=='nt':
         # Backups include financial records. Do not inherit a shared Windows ACL.
         import csv,io

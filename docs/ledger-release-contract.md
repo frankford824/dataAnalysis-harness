@@ -35,6 +35,8 @@ ledger/.venv/bin/python tools/verify-ledger-acceptance.py \
 
 ## 独立备份及恢复检查
 
+生产 `D:\ledger\backups` 是指向 NAS 共享的链接。Windows 本地目录在创建时收紧为仅当前用户可访问；目标解析为网络共享（`\\…`）时不改 ACL、沿用共享自身权限，因为 NAS 不识别本机账户 SID，改写 ACL 会使目录无人可访问。
+
 `tools/ledger-backup.py create` 在新的隔离目录中，使用 SQLite backup API 生成 Workspace 与 Registry 副本，包含已提交的 WAL 内容；不能只复制主 `.db` 文件。随后对副本做 `quick_check`，比对受保护财务记录及结账结果的逻辑摘要，并逐文件校验代码、模型归档。源头核定记录在备份期间变化则失败，不产生成功 manifest。
 
 ```text
