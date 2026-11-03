@@ -47,6 +47,9 @@ def test_baseline_exists_and_is_readable() -> None:
     payload = json.loads(BASELINE.read_text(encoding="utf-8"))
     assert payload.get("stores"), "基线里一家店都没有"
     assert payload.get("engine_version"), "基线没记引擎版本，将来说不清是哪一版录的"
+    assert re.fullmatch(r"[0-9a-f]{7,40}", payload["engine_version"]), (
+        f"基线录于 {payload['engine_version']}，不是干净的提交，无从复现"
+    )
 
 
 def test_baseline_covers_the_commission() -> None:
