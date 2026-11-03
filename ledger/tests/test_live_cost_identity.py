@@ -21,3 +21,18 @@ def test_retired_costs_never_post_under_any_platform_price_policy(tmp_path,mode)
     assert result['sku'].to_list()==['SKU1']
     assert feed._retired_cost_rows==2
     assert source.height==3
+
+
+@pytest.mark.parametrize('mode',['provided','required','historical'])
+def test_item_original_day_is_the_reviewed_source_pricing_day(tmp_path,mode):
+    root=tmp_path/'feed';manifest=_fixture(root)
+    table=lambda n:pl.read_parquet(root/manifest['objects'][n]['path'])
+    items=table('order_items.parquet').with_columns(pl.lit('2026-05-28').alias('original_order_date'))
+    feed=OrderFeed(tmp_path/'ws',feed_root=root)
+    result=feed._cost_frame(table('orders.parquet'),items,table('order_costs.parquet'),
+        table('order_relations.parquet'),Store(id='s',name='测试店',platform='taobao'),'proof',
+        require_pricing=mode=='required',require_history=mode=='historical')
+    if mode=='provided':
+        assert 'source_pricing_day' not in result.columns
+    else:
+        assert result['source_pricing_day'].to_list()==['2026-05-28']
