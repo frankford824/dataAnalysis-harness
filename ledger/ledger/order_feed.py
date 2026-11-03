@@ -1508,12 +1508,18 @@ class OrderFeed:
                 f"（合计 {amount:,.2f} 元），多半是商品数量写错，按存疑不计；"
                 "等订单台修正数量后重算即恢复"
             )
+        after_item = self._item("after_sales", "order_console_after_sale_v1", "订单台实时售后", after_frame,
+                                self._after_template(), fingerprint)
+        if self._whole_order_after_sales:
+            after_item.notes.append(
+                f"{self._whole_order_after_sales:,} 张订单台售后的数量与所属平台订单的全部商品件数一致，"
+                "按该平台订单的每个商品行判定，不只看售后上挂的那一个商品"
+            )
         return [
             self._item("order_detail", "order_console_order_v1", "订单台实时订单", order_frame,
                        self._order_template(), fingerprint),
             cost_item,
-            self._item("after_sales", "order_console_after_sale_v1", "订单台实时售后", after_frame,
-                       self._after_template(), fingerprint),
+            after_item,
         ]
 
     @staticmethod
@@ -2060,6 +2066,7 @@ class OrderFeed:
         self, after: pl.DataFrame, items: pl.DataFrame, order_items: pl.DataFrame,
         store: Store, fingerprint: str,
     ) -> pl.DataFrame:
+        items, self._whole_order_after_sales = self._whole_platform_order_items(after, items, order_items)
         # 成本帧的 sub_order_id 是平台子订单号（outer_sku），售后行要走同一把钥匙，
         # 否则「内部单号 + 子订单号 + 商品编码」三键永远对不上，规则形同虚设。
         keyed = items.select("after_sale_id", "order_id", "sub_order_id", "sku_id", "quantity").with_columns(
@@ -2086,6 +2093,64 @@ class OrderFeed:
             pl.lit(store.name).alias("store_name"),
         )
         return self._anchors(frame, fingerprint, "订单台实时售后")
+
+    @staticmethod
+    def _whole_platform_order_items(
+        after: pl.DataFrame, items: pl.DataFrame, order_items: pl.DataFrame,
+    ) -> tuple[pl.DataFrame, int]:
+        """Attribute a whole-platform-order after-sale to every line of that order.
+
+        The console keeps one representative item per after-sale, in a merged ERP
+        order possibly a line of a sibling platform order, while its quantity is
+        the whole platform order's. Only an exact unit match against that platform
+        order's lines in the same internal order, with every line's platform order
+        known, replaces the representative; anything else keeps the named item.
+        """
+        columns = ["after_sale_id", "order_id", "sub_order_id", "sku_id", "quantity"]
+        if (after.is_empty() or items.is_empty() or not set(columns) <= set(items.columns)
+                or not {"after_sale_id", "order_id", "online_order_no"} <= set(after.columns)
+                or not {"order_id", "sub_order_id", "sku_id", "quantity", "online_order_no"} <= set(order_items.columns)):
+            return items, 0
+
+        def platform(frame: pl.DataFrame) -> pl.Expr:
+            raw = pl.col("online_order_no").cast(pl.Utf8).str.strip_chars()
+            prefix = raw.str.extract(r"^([^:]+):", 1)
+            shop = (pl.col("order_store_id").cast(pl.Utf8) if "order_store_id" in frame.columns
+                    else pl.lit(None, dtype=pl.Utf8))
+            single = raw.str.contains(r"^(?:[^:,，;；\s]+:)?[^:,，;；\s]+$").fill_null(False)
+            return (pl.when(single & (prefix.is_null() | (prefix == shop)).fill_null(False))
+                    .then(raw.str.replace(r"^[^:]+:", "")).otherwise(None).alias("__platform"))
+
+        quantity = pl.col("quantity").cast(pl.Float64, strict=False)
+        lines = order_items.select(
+            pl.col("order_id", "sub_order_id", "sku_id", "quantity").cast(pl.Utf8),
+            platform(order_items), quantity.alias("__units"))
+        complete = lines.group_by("order_id").agg(
+            (pl.col("__platform").is_not_null() & (pl.col("__units") > 0).fill_null(False)
+             & pl.col("sku_id").is_not_null()).all().alias("__complete"))
+        lines = lines.join(complete.filter("__complete").select("order_id"), on="order_id", how="semi")
+        units = lines.group_by("order_id", "__platform").agg(
+            pl.col("__units").sum(),
+            pl.concat_str([pl.col("order_id"), pl.col("sub_order_id")], separator="|")
+            .sort().str.join(",").alias("__lines"))
+        claimed = items.select(pl.col("after_sale_id", "order_id", "sub_order_id").cast(pl.Utf8),
+                               quantity.alias("__claimed")).group_by("after_sale_id").agg(
+            pl.col("__claimed").sum(),
+            (pl.col("__claimed") > 0).fill_null(False).all().alias("__valid"),
+            pl.concat_str([pl.col("order_id"), pl.col("sub_order_id")], separator="|")
+            .fill_null("").unique().sort().str.join(",").alias("__named"))
+        heads = after.select(pl.col("after_sale_id", "order_id").cast(pl.Utf8), platform(after)) \
+            .filter(pl.col("__platform").is_not_null()).unique("after_sale_id", keep="none")
+        whole = heads.join(claimed, on="after_sale_id").join(units, on=["order_id", "__platform"]).filter(
+            pl.col("__valid") & ((pl.col("__claimed") - pl.col("__units")).abs() < 1e-9)
+            & (pl.col("__named") != pl.col("__lines")))
+        if whole.is_empty():
+            return items, 0
+        expanded = whole.select("after_sale_id", "order_id", "__platform").join(
+            lines, on=["order_id", "__platform"]).select(columns)
+        kept = items.select(pl.col(columns).cast(pl.Utf8)).filter(
+            ~pl.col("after_sale_id").is_in(whole["after_sale_id"].implode()))
+        return pl.concat([kept, expanded], how="vertical_relaxed"), whole.height
 
     @staticmethod
     def _template(template_id: str, source: str, roles: list[tuple[str, str]]) -> Template:
