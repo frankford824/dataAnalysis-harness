@@ -94,11 +94,11 @@ def network_share(path):
 
 
 def private_directory(target):
-    target.mkdir(mode=0o700)
     if os.name=='nt' and network_share(target):
-        # A NAS does not map the local account SID: replacing the ACL there
-        # locks everyone out. The share's own permissions govern the folder.
-        return
+        # A NAS maps neither the local account SID nor a 0700 mode to this
+        # account: either locks everyone out. The share's permissions govern.
+        target.mkdir();return
+    target.mkdir(mode=0o700)
     if os.name=='nt':
         # Backups include financial records. Do not inherit a shared Windows ACL.
         import csv,io

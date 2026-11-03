@@ -137,6 +137,9 @@ def test_windows_share_keeps_its_acl_but_local_folders_are_made_private(tmp_path
     monkeypatch.setattr(tool.subprocess,'check_output',lambda *a,**k:'"host\\\\user","S-1-5-21-1"\n')
     monkeypatch.setattr(tool.subprocess,'run',lambda argv,**k:calls.append(argv))
     monkeypatch.setattr(tool,'network_share',lambda path:path.name=='share')
-    tool.private_directory(tmp_path/'share');assert calls==[]
+    made=[]
+    original=Path.mkdir
+    monkeypatch.setattr(Path,'mkdir',lambda self,*a,**k:(made.append((self.name,k.get('mode',a[0] if a else None))),original(self,*a,**k)))
+    tool.private_directory(tmp_path/'share');assert calls==[] and made[-1]==('share',None)
     tool.private_directory(tmp_path/'local')
     assert calls and calls[0][0]=='icacls' and '/inheritance:r' in calls[0]
