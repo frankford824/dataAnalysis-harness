@@ -19,32 +19,33 @@ from pathlib import Path
 
 import polars as pl
 
-VERSION = 'operations-20261027.v3'
+VERSION = 'operations-20261027.v4'
 _cache = OrderedDict()
 _cache_lock = threading.Lock()
-# Board bucket for 本金佣金（补单）. Moving it into promotion is a pending business decision;
-# either bucket keeps 利润 unchanged.
-AFTERSALES = ('small_payment_cost', 'brushing_cost')
-PRIMITIVES = ('receipts', 'refunds', 'net_income', 'goods_cost', 'promotion_cost', 'platform_cost', 'freight_cost', *AFTERSALES, 'labor_cost')
-MONEY = (*PRIMITIVES, 'aftersales_cost', 'gross_profit', 'profit', 'profit_after_labor', 'commission')
+# 推广费用 = 平台推广 + 补单成本（本金佣金）；客服售后费用只含客服打款。
+PROMOTION = ('ad_cost', 'brushing_cost')
+AFTERSALES = ('small_payment_cost',)
+PRIMITIVES = ('receipts', 'refunds', 'net_income', 'goods_cost', *PROMOTION, 'platform_cost', 'freight_cost', *AFTERSALES, 'labor_cost')
+MONEY = (*PRIMITIVES, 'promotion_cost', 'aftersales_cost', 'gross_profit', 'profit', 'profit_after_labor', 'commission')
 RATES = {'refund_rate': ('refunds', 'receipts'), 'goods_rate': ('goods_cost', 'net_income'),
          'gross_margin': ('gross_profit', 'net_income'), 'promotion_rate': ('promotion_cost', 'net_income'),
          'freight_rate': ('freight_cost', 'net_income'), 'profit_margin': ('profit', 'net_income'),
          'labor_rate': ('labor_cost', 'net_income'), 'after_labor_margin': ('profit_after_labor', 'net_income')}
 LABELS = {'receipts':'对账销售收入（未扣退款）','refunds':'销售退款','net_income':'销售收入（到账）',
           'refund_rate':'退款率','goods_cost':'商品成本','goods_rate':'货本率','gross_profit':'商品毛利',
-          'gross_margin':'毛利率','promotion_cost':'推广费用','promotion_rate':'推广费用占比',
+          'gross_margin':'毛利率','promotion_cost':'推广费用','ad_cost':'其中：平台推广','brushing_cost':'其中：补单成本',
+          'promotion_rate':'推广费用占比',
           'platform_cost':'平台费用','freight_cost':'发货运费','freight_rate':'发货运费占比',
-          'aftersales_cost':'客服售后费用','small_payment_cost':'其中：客服打款','brushing_cost':'其中：本金佣金（补单）',
+          'aftersales_cost':'客服售后费用','small_payment_cost':'客服打款',
           'profit':'利润（扣兼职前）','profit_margin':'利润率',
           'labor_cost':'兼职人工费用','labor_rate':'兼职人工费用占比','profit_after_labor':'利润额（扣兼职后）',
           'after_labor_margin':'利润额率','commission':'已保存提成','order_count':'订单数'}
 DISPLAY = ('net_income','refund_rate','goods_cost','goods_rate','gross_profit','gross_margin',
-           'promotion_cost','promotion_rate','platform_cost','freight_cost','freight_rate',
-           'aftersales_cost',*AFTERSALES,'profit','profit_margin','labor_cost','labor_rate','profit_after_labor','after_labor_margin')
-COMPONENTS = {name:'aftersales_cost' for name in AFTERSALES}
+           'promotion_cost',*PROMOTION,'promotion_rate','platform_cost','freight_cost','freight_rate',
+           'aftersales_cost','profit','profit_margin','labor_cost','labor_rate','profit_after_labor','after_labor_margin')
+COMPONENTS = {name:'promotion_cost' for name in PROMOTION}
 NODES = {'receipts': ('n_receipt',), 'refunds': ('n_refund',),
-         'goods_cost': ('n_goods','n_dropship','n_reshipment'), 'promotion_cost': ('n_ad',),
+         'goods_cost': ('n_goods','n_dropship','n_reshipment'), 'ad_cost': ('n_ad',),
          'platform_cost': ('g_platform',), 'freight_cost': ('n_freight',),
          'small_payment_cost': ('n_small_payment',), 'brushing_cost': ('n_brushing',)}
 
@@ -95,6 +96,7 @@ def derive(values, *, net_income=_UNSET):
     result = dict(values)
     result['net_income'] = (_difference(result.get('receipts'), result.get('refunds')) if net_income is _UNSET else net_income)
     result['gross_profit'] = _difference(result['net_income'], result.get('goods_cost'))
+    result['promotion_cost'] = _sum(result.get(key) for key in PROMOTION)
     result['aftersales_cost'] = _sum(result.get(key) for key in AFTERSALES)
     result['profit'] = _difference(result['gross_profit'], *[result.get(k) for k in ('promotion_cost','platform_cost','freight_cost','aftersales_cost')])
     result['profit_after_labor'] = _difference(result['profit'], result.get('labor_cost'))

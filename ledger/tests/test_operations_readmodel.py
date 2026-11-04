@@ -46,8 +46,8 @@ def test_management_definition_is_independent_and_no_double_count(model):
     assert report['summary']['net_income']=='80.00'
     assert report['summary']['goods_cost']=='40.00'
     assert report['summary']['gross_profit']=='40.00'
-    assert report['summary']['promotion_cost']=='10.00'
-    assert report['summary']['aftersales_cost']=='6.00'
+    assert report['summary']['promotion_cost']=='12.00'
+    assert report['summary']['aftersales_cost']=='4.00'
     assert report['summary']['profit']=='16.00'
     assert report['summary']['profit_after_labor']=='6.00'
     assert report['summary']['gross_margin']=='0.50000000'
@@ -69,17 +69,17 @@ def test_doers_own_all_business_and_cut_is_non_additive_reference(model):
     assert select_report(month,level='person',managed='managed')['summary']['net_income']=='80.00'
 
 
-def test_aftersales_components_are_visible_without_changing_profit(model):
+def test_brushing_cost_counts_as_promotion_without_changing_profit(model):
     report=select_report(build_month([sample()],model,'2030-01','10'),level='person')
     summary=report['summary']
-    assert summary['small_payment_cost']=='4.00' and summary['brushing_cost']=='2.00'
-    assert summary['aftersales_cost']=='6.00' and summary['promotion_cost']=='10.00'
+    assert summary['ad_cost']=='10.00' and summary['brushing_cost']=='2.00'
+    assert summary['promotion_cost']=='12.00' and summary['aftersales_cost']=='4.00'
     assert summary['profit']=='16.00'
-    assert [item.get('component_of') for item in report['metrics'] if item['key'] in ('small_payment_cost','brushing_cost')]==['aftersales_cost']*2
+    assert [item.get('component_of') for item in report['metrics'] if item['key'] in ('ad_cost','brushing_cost')]==['promotion_cost']*2
     unknown=sample();unknown.statement[-1]['available']=False
     store=select_report(build_month([unknown],model,'2030-01','10'))['summary']
     assert store['small_payment_cost'] is None and store['brushing_cost']=='2.00'
-    assert store['aftersales_cost'] is None and store['profit'] is None
+    assert store['aftersales_cost'] is None and store['promotion_cost']=='12.00' and store['profit'] is None
 
 
 def test_cut_identity_groups_show_complete_order_basis_per_person_and_stay_non_additive(model):

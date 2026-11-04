@@ -1,10 +1,10 @@
 import {test} from 'node:test'
 import assert from 'node:assert/strict'
 import {boardColumns,comparisonCopy,identityColumns,managedPart,sortedOperations,workflowLabels} from '../src/operationsView.js'
-test('core board columns keep the summary set and expand to every metric and component',()=>{
-  const metrics=[{key:'net_income'},{key:'refund_rate'},{key:'aftersales_cost'},{key:'brushing_cost',component_of:'aftersales_cost'},{key:'profit_after_labor'}]
-  assert.deepEqual(boardColumns(metrics).map(item=>item.key),['net_income','aftersales_cost','profit_after_labor'])
-  assert.equal(boardColumns(metrics,true).length,5)
+test('board columns list every metric except components, or exactly the board keys in order',()=>{
+  const metrics=[{key:'net_income'},{key:'refund_rate'},{key:'promotion_cost'},{key:'brushing_cost',component_of:'promotion_cost'},{key:'profit_after_labor'}]
+  assert.deepEqual(boardColumns(metrics).map(item=>item.key),['net_income','refund_rate','promotion_cost','profit_after_labor'])
+  assert.deepEqual(boardColumns(metrics,['profit_after_labor','net_income','missing']).map(item=>item.key),['profit_after_labor','net_income'])
 })
 test('identity columns follow the workbook dimensions',()=>{
   assert.deepEqual(identityColumns('store'),{platform:true,team:false,commission:false})

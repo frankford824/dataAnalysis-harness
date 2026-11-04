@@ -18,8 +18,8 @@ def test_saved_report_export_and_drill_share_input_identity(tmp_path):
     result=client.get('/api/operations/month?period=2030-01').json()
     assert result['summary']['net_income']=='320.00'
     assert result['summary']['profit_after_labor']=='182.00'
-    assert result['summary']['promotion_cost']=='20.00'
-    assert result['summary']['aftersales_cost']=='12.00'
+    assert result['summary']['promotion_cost']=='24.00'
+    assert result['summary']['aftersales_cost']=='8.00'
     assert result['is_final'] is False
     assert result['mom']['profit_after_labor']['direction']=='up'
     people=client.get('/api/operations/month?period=2030-01&level=person').json()
