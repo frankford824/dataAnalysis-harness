@@ -91,7 +91,7 @@ def thread(thread_id):
 def threads(limit=50):
     rows = conn().execute('SELECT id,title,user,updated_at FROM thread ORDER BY updated_at DESC LIMIT ?', (limit,)).fetchall()
     return [{'id': r['id'], 'title': r['title'], 'user': r['user'],
-             'updated_at': datetime.fromtimestamp(r['updated_at']).isoformat(timespec='seconds')} for r in rows]
+             'updated_at': datetime.fromtimestamp(r['updated_at']).astimezone().isoformat(timespec='seconds')} for r in rows]
 
 
 def add_message(thread_id, role, text, *, images=(), steps=(), cards=(), receipt=None, page=None, user=''):
@@ -112,7 +112,7 @@ def messages(thread_id, after=0):
         out.append({'id': r['id'], 'role': r['role'], 'text': r['text'], 'images': json.loads(r['images']),
                     'steps': json.loads(r['steps']), 'cards': [c for c in cards if c],
                     'receipt': json.loads(r['receipt']) if r['receipt'] else None,
-                    'at': datetime.fromtimestamp(r['at']).isoformat(timespec='seconds'), 'user': r['user']})
+                    'at': datetime.fromtimestamp(r['at']).astimezone().isoformat(timespec='seconds'), 'user': r['user']})
     return out
 
 

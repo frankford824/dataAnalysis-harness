@@ -44,6 +44,9 @@ def _sse(kind, value):
 
 @app.post('/api/agent/chat')
 def chat(body: Chat):
+    previous = _runs.get(body.thread_id or '')
+    if previous:
+        previous.set()
     events = queue.Queue()
     stop = threading.Event()
     holder = {'thread': body.thread_id}
@@ -61,7 +64,8 @@ def chat(body: Chat):
             store.log_event('turn_error', {'error': str(exc)[:2000]})
             events.put(_sse('error', {'message': '这次处理遇到了问题，请稍后再试。'}))
         finally:
-            _runs.pop(holder['thread'], None)
+            if _runs.get(holder['thread']) is stop:
+                _runs.pop(holder['thread'], None)
             events.put(None)
             if tools._pending_self_restart:
                 threading.Timer(2, lambda: os._exit(0)).start()

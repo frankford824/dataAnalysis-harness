@@ -9,7 +9,7 @@ from datetime import datetime
 
 from . import config, llm, store, tools
 
-MAX_STEPS = 30
+MAX_STEPS = 16
 RECENT = 10
 
 SYSTEM = '''你是「台账助手」，运行在公司台账系统的生产机（Windows）上，拥有这台机器的完整权限。
@@ -20,6 +20,8 @@ SYSTEM = '''你是「台账助手」，运行在公司台账系统的生产机�
 - 绝对不要向用户展示代码、SQL、文件路径、命令、日志、接口名或技术实现细节；不要说“我修改了某某文件/重启了服务”。程序问题修好后只说“已修复，刷新页面即可”这类结果。
 - 每次调用工具都要填写 purpose：用用户能懂的话说明这一步在做什么（例如“查看 8 月这家店的退款明细”）。
 - 金额以台账引擎的计算结果为准，引用工具返回的数字，不要自己估算最终金额。
+- 不要自己编算式。列出构成时只列工具返回的项目；需要加减核对时用 python 工具算，算不平就如实说明还有哪些项目没列出。
+- purpose 只写业务动作（如“查看 9 月各店毛利”），不要出现“接口”“文件”“字段”“编码”“数据库”等技术词。
 
 做事规则：
 - 只读查询、排查原因、修复程序故障、运维处理：直接做。
@@ -28,6 +30,8 @@ SYSTEM = '''你是「台账助手」，运行在公司台账系统的生产机�
 - 修改程序后调用 restart_ledger 使修改生效（会自动检查，异常自动恢复）。
 - 开始排查前先用 search_memory 查以往类似问题；查清并处理一个问题后用 record_correction 记录；学到稳定的业务口径或用户偏好时用 remember 记一句。
 - 用户只是闲聊或问简单问题时不必调用工具。
+- 先弄清用户要什么：问题不明确时先问一句，不要猜着深挖。工具调用超过 8 次仍没有结论，先把阶段性发现告诉用户，问是否继续。
+- 用户反馈的多是数据问题；只有用户明确说页面报错、功能坏了，才去查程序实现。
 
 环境：
 - 台账服务：本机 8000 端口，ledger_get 调只读接口，api_index 可查全部接口。按问题选最直接的接口：
@@ -151,6 +155,8 @@ def run_turn(thread_id, text, images, page, user, emit, stop):
         tokens += t
         cost += c
         user_text += '\n\n【截图内容（已识别）】\n' + transcript
+    if saved and not text.strip():
+        user_text += '\n\n（用户只发了截图，没有写问题。先用一两句话说清截图里是什么、可能值得注意的地方，然后问用户想查哪一点；不要直接深入排查。）'
     user_text = (_page_text(page) + '\n\n' + user_text).strip()
 
     role = route(text, bool(saved))
@@ -223,6 +229,8 @@ def run_turn(thread_id, text, images, page, user, emit, stop):
     if error:
         emit('error', {'message': error})
         answer.append(('\n\n' if answer else '') + error)
+    elif stop.is_set():
+        answer.append(('\n\n' if answer else '') + '（已停止）')
     receipt = {'model': ' → '.join(dict.fromkeys(used)), 'tokens': tokens, 'cost_cny': round(cost, 4),
                'ms': int((time.time() - started) * 1000)}
     store.add_message(thread_id, 'assistant', ''.join(answer), steps=steps, cards=cards, receipt=receipt)
