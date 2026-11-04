@@ -130,6 +130,44 @@ def test_extra_backup_artifact_cannot_replace_a_core_restore_proof(backup):
     with pytest.raises(ValueError,match='artifact changed'):tool.verify(root/'manifest.json',CODE,allow_extra_roles=True)
 
 
+def test_stamped_recheck_skips_rereading_but_still_guards_history_and_artifacts(backup,tmp_path):
+    case=backup;tool=case['tool'];root=case['target'];ws=case['ws'];stamp=tmp_path/'backup-verified.json'
+    tool.verify(root/'manifest.json',CODE,compare_root=ws.root,stamp_out=stamp)
+    assert tool.verify_stamped(root/'manifest.json',CODE,stamp,ws.root)['mode']=='stamped'
+    with pytest.raises(ValueError,match='does not match'):tool.verify_stamped(root/'manifest.json','b'*40,stamp,ws.root)
+    with ws.conn:ws.conn.execute('UPDATE run SET result=? WHERE id=?',
+        ('{"later_financial_record":true}',case['runs']['2030-01','s1']))
+    with pytest.raises(ValueError,match='Frozen financial history changed'):
+        tool.verify_stamped(root/'manifest.json',CODE,stamp,ws.root)
+
+
+def test_stamped_recheck_rejects_a_touched_artifact_or_forged_history(backup,tmp_path):
+    case=backup;tool=case['tool'];root=case['target'];ws=case['ws'];stamp=tmp_path/'backup-verified.json'
+    tool.verify(root/'manifest.json',CODE,stamp_out=stamp)
+    forged=json.loads(stamp.read_text());forged['restored']['closed']={}
+    (tmp_path/'forged.json').write_text(json.dumps(forged))
+    with pytest.raises(ValueError,match='differs from backup proof'):
+        tool.verify_stamped(root/'manifest.json',CODE,tmp_path/'forged.json',ws.root)
+    with (root/'workspace.db').open('ab') as stream:stream.write(b'\0')
+    with pytest.raises(ValueError,match='changed after full verification'):
+        tool.verify_stamped(root/'manifest.json',CODE,stamp,ws.root)
+
+
+def test_prune_keeps_the_newest_complete_backups_including_this_release(tmp_path):
+    tool=module();share=tmp_path/'share';share.mkdir()
+    def made(name,day):
+        folder=share/name;folder.mkdir();(folder/'restore-check.json').write_text('{}')
+        (folder/'manifest.json').write_text(json.dumps({'schema':1,'completed_at':f'2030-01-{day:02d}T00:00:00+00:00',
+            'restore_check':{'path':'restore-check.json'}}))
+        return folder
+    old,middle,new=made('old',1),made('middle',2),made('new',3)
+    (share/'partial').mkdir();(share/'loose.db').write_bytes(b'')
+    with pytest.raises(ValueError,match='newest kept'):tool.prune(share,2,old/'manifest.json')
+    assert tool.prune(share,2,new/'manifest.json')=={'kept':['new','middle'],'removed':['old']}
+    assert not old.exists() and middle.exists() and (share/'partial').is_dir() and (share/'loose.db').exists()
+    with pytest.raises(ValueError,match='At least one'):tool.prune(share,0,new/'manifest.json')
+
+
 def test_windows_share_keeps_its_acl_but_local_folders_are_made_private(tmp_path,monkeypatch):
     tool=module();calls=[];share=tool.network_share
     assert share(r'\\192.168.0.125\dataAnalysis\backups') and not share(r'D:\ledger\qa')

@@ -94,7 +94,8 @@ foreach ($File in $Manifest.files) {
 }
 & 'D:\ledger\venv\Scripts\python.exe' (Join-Path $Stage 'ledger\ledger\release_gate.py') --receipt $ReceiptPath --version $Manifest.version --model-sha $Manifest.model_sha
 if ($LASTEXITCODE -ne 0) { throw 'Business acceptance receipt rejected' }
-& 'D:\ledger\venv\Scripts\python.exe' (Join-Path $Stage 'tools\ledger-backup.py') verify --manifest $BackupManifest --version $ExpectedVersion --compare-root 'D:\ledger\home'
+$BackupStamp = Join-Path $ReleaseRoot 'backup-verified.json'
+& 'D:\ledger\venv\Scripts\python.exe' (Join-Path $Stage 'tools\ledger-backup.py') verify --manifest $BackupManifest --version $ExpectedVersion --compare-root 'D:\ledger\home' --stamp $BackupStamp
 if ($LASTEXITCODE -ne 0) { throw 'Financial backup/restore verification failed' }
 $ReleaseMarker = Join-Path $AppRoot '.release-in-progress.json'
 $MarkerStream = [IO.File]::Open($ReleaseMarker,[IO.FileMode]::CreateNew,[IO.FileAccess]::Write,[IO.FileShare]::None)
@@ -235,7 +236,7 @@ Get-ChildItem -LiteralPath (Join-Path $AppRoot 'models\cn-ecommerce') -File | Fo
 }
 try {
   # Stop-LedgerOnly completed above. Recheck all code/model preconditions now.
-  & 'D:\ledger\venv\Scripts\python.exe' (Join-Path $Stage 'tools\ledger-backup.py') verify --manifest $BackupManifest --version $ExpectedVersion --compare-root 'D:\ledger\home'
+  & 'D:\ledger\venv\Scripts\python.exe' (Join-Path $Stage 'tools\ledger-backup.py') verify --manifest $BackupManifest --version $ExpectedVersion --compare-root 'D:\ledger\home' --from-stamp $BackupStamp
   if ($LASTEXITCODE -ne 0) { throw 'Stopped financial history is newer than, or differs from, the verified backup' }
   Assert-ProductionCodeBaseline
   foreach ($File in $Manifest.files) {
@@ -314,4 +315,10 @@ try {
     $HeldMarker = Get-Content -LiteralPath $ReleaseMarker -Raw | ConvertFrom-Json
     if ($HeldMarker.version -eq $Version) { Remove-Item -LiteralPath $ReleaseMarker -Force }
   }
+}
+# Full database copies live on the NAS share; keep only the newest two there.
+$BackupShare = [IO.Path]::GetFullPath('D:\ledger\backups')
+if ([IO.Path]::GetFullPath($BackupManifest).StartsWith($BackupShare + '\',[StringComparison]::OrdinalIgnoreCase)) {
+  & 'D:\ledger\venv\Scripts\python.exe' (Join-Path $Stage 'tools\ledger-backup.py') prune --version $Version --root $BackupShare --manifest $BackupManifest --keep 2
+  if ($LASTEXITCODE -ne 0) { Write-Warning 'Old NAS backups were not pruned; release itself succeeded' }
 }

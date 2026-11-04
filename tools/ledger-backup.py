@@ -1,4 +1,8 @@
-"""Create/verify a local recoverable release backup; never restore over live data."""
+"""Create/verify a recoverable release backup; never restore over live data.
+
+Backups belong on the NAS backup share (D:\\ledger\\backups), not the live disk:
+each one is a full copy of both financial databases.
+"""
 from __future__ import annotations
 import argparse
 from contextlib import closing
@@ -161,7 +165,62 @@ def create(root,application,model,target,version):
     return verify(target/'manifest.json',version)
 
 
-def verify(path,version,max_age=86400,compare_root=None,allow_extra_roles=False):
+def _stats(path,body):
+    out=[]
+    for row in [*body['files'],body['restore_check']]:
+        stat=(path.parent/row['path']).stat()
+        out.append({'path':row['path'],'size':stat.st_size,'mtime_ns':stat.st_mtime_ns})
+    return out
+
+
+def verify_stamped(path,version,stamp,compare_root,max_age=86400):
+    """Recheck a backup fully verified earlier in this release without rereading it.
+
+    The stamp lives in the local release directory. Artifacts must be byte-size
+    and mtime identical to the full verification; the frozen history recorded
+    from the restored backup must still equal the stopped live history.
+    """
+    path=Path(path).resolve();body=json.loads(path.read_text());recorded=json.loads(Path(stamp).read_text())
+    if (recorded.get('schema')!=1 or recorded.get('manifest_sha256')!=sha(path) or recorded.get('code_sha')!=version
+            or body.get('code_sha')!=version):
+        raise ValueError('Backup verification stamp does not match this backup')
+    stamp_at=datetime.fromisoformat(recorded['verified_at']);now=datetime.now(timezone.utc)
+    completed=datetime.fromisoformat(body['completed_at'])
+    if not -30<=(now-stamp_at).total_seconds()<=max_age or not -30<=(now-completed).total_seconds()<=max_age:
+        raise ValueError('Backup or its verification stamp is stale')
+    if _stats(path,body)!=recorded.get('artifacts'):
+        raise ValueError('Backup artifact changed after full verification')
+    proof=json.loads((path.parent/body['restore_check']['path']).read_text())
+    if identity(recorded['restored'])!=proof.get('restored_frozen_history_sha'):
+        raise ValueError('Verification stamp history differs from backup proof')
+    tool=readback()
+    current=tool.snapshot(Path(compare_root).resolve(),reader=lambda _:{'version':version,'source':'backup_source'})
+    tool.compare_history(recorded['restored'],current,version)
+    return {'passed':True,'manifest_sha256':recorded['manifest_sha256'],'code_sha':version,'mode':'stamped'}
+
+
+def prune(root,keep,protect):
+    """Keep the newest verified-complete backups under root; remove older ones."""
+    root=Path(root).resolve();protect=Path(protect).resolve().parent
+    if keep<1:raise ValueError('At least one backup must be kept')
+    complete=[]
+    for folder in root.iterdir():
+        manifest=folder/'manifest.json'
+        try:
+            body=json.loads(manifest.read_text())
+            if body.get('schema')!=1 or not (folder/body['restore_check']['path']).is_file():continue
+            complete.append((datetime.fromisoformat(body['completed_at']),folder))
+        except (OSError,ValueError,KeyError,TypeError):continue
+    complete.sort(reverse=True)
+    if protect not in [folder.resolve() for _,folder in complete[:keep]]:
+        raise ValueError('The release backup must be among the newest kept backups')
+    removed=[]
+    for _,folder in complete[keep:]:
+        shutil.rmtree(folder);removed.append(folder.name)
+    return {'kept':[folder.name for _,folder in complete[:keep]],'removed':removed}
+
+
+def verify(path,version,max_age=86400,compare_root=None,allow_extra_roles=False,stamp_out=None):
     path=Path(path).resolve();body=json.loads(path.read_text())
     if body.get('schema')!=1 or body.get('code_sha')!=version:raise ValueError('Backup version/schema mismatch')
     stamp=datetime.fromisoformat(body['completed_at']);now=datetime.now(timezone.utc)
@@ -199,13 +258,20 @@ def verify(path,version,max_age=86400,compare_root=None,allow_extra_roles=False)
     for role in ('workspace','registry'):
         with closing(sqlite3.connect(readonly_uri(by_role[role]),uri=True)) as db:
             if db.execute('PRAGMA quick_check').fetchall()!=[('ok',)]:raise ValueError('Restored database is not readable')
+    if stamp_out is not None:
+        record={'schema':1,'manifest_sha256':sha(path),'code_sha':version,
+                'verified_at':datetime.now(timezone.utc).isoformat(),'artifacts':_stats(path,body),'restored':restored}
+        temporary=Path(stamp_out).with_suffix('.pending');temporary.write_text(json.dumps(record,ensure_ascii=False));temporary.replace(stamp_out)
     return {'passed':True,'manifest_sha256':sha(path),'code_sha':version,'roles':sorted(ROLES|extra),
         'restore_verified_roles':sorted(ROLES),'extra_roles_hash_checked':sorted(extra),'live_restore_performed':False}
 
 
 def main():
     parser=argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('mode',choices=['create','verify']);parser.add_argument('--version',required=True)
+    parser.add_argument('mode',choices=['create','verify','prune']);parser.add_argument('--version',required=True)
+    parser.add_argument('--stamp',type=Path,help='Write a local stamp after full verification')
+    parser.add_argument('--from-stamp',type=Path,help='Recheck against a stamp from this release instead of rereading the backup')
+    parser.add_argument('--keep',type=int,default=2)
     parser.add_argument('--manifest',type=Path);parser.add_argument('--root',type=Path)
     parser.add_argument('--application',type=Path);parser.add_argument('--model',type=Path);parser.add_argument('--output',type=Path)
     parser.add_argument('--max-age-seconds',type=int,default=86400)
@@ -215,9 +281,16 @@ def main():
     if args.mode=='create':
         if any(value is None for value in (args.root,args.application,args.model,args.output)):parser.error('create requires explicit root/application/model/output')
         result=create(args.root,args.application,args.model,args.output,args.version)
+    elif args.mode=='prune':
+        if not args.root or not args.manifest:parser.error('prune requires root and the release backup manifest')
+        result=prune(args.root,args.keep,args.manifest)
     else:
         if not args.manifest:parser.error('verify requires manifest')
-        result=verify(args.manifest,args.version,args.max_age_seconds,args.compare_root,args.allow_extra_roles)
+        if args.from_stamp:
+            if not args.compare_root:parser.error('--from-stamp requires --compare-root')
+            result=verify_stamped(args.manifest,args.version,args.from_stamp,args.compare_root,args.max_age_seconds)
+        else:
+            result=verify(args.manifest,args.version,args.max_age_seconds,args.compare_root,args.allow_extra_roles,args.stamp)
     print(json.dumps(result,ensure_ascii=False))
 
 
