@@ -72,14 +72,16 @@ ENGINEER_WORDS = re.compile(r'报错|错误提示|打不开|白屏|卡死|很卡
 INVESTIGATE_WORDS = re.compile(r'不对|不一致|错|为什么|怎么回事|核对|差|少了|多了|异常|查一下|排查|对不上|偏高|偏低|原因|改|调整|修正')
 
 
-BUSINESS_WORDS = re.compile(r'店|月|账|利润|毛利|收入|成本|费|运费|结|订单|退款|推广|提成|兼职|数据|报表|核算|金额|多少|哪|为什么|查|看|改|错|对|页面|文件|系统|服务|\d')
+# 只有明确的寒暄走闲聊；“是”“好的”“手动补录”这类短句多半是在接着办上一件事，必须走完整流程。
+SMALL_TALK = re.compile(r'^(你好|您好|在吗|在不在|hi|hello|嗨|早|早上好|中午好|下午好|晚上好|谢谢|多谢|谢啦|感谢|辛苦了?|'
+                        r'哈+|你是谁|你能做什么|你会什么|你会干什么)[\s！!。.~～？?呀啊呢哦]*$', re.I)
 CHAT_SYSTEM = ('你是「台账助手」，公司台账系统里的 AI 同事。对方只是打个招呼或随口一问：像真人一样一两句话回，口语、自然、'
                '不客套、不列清单。对方问你能做什么时，用一句话举一两个例子：比如帮忙查某店某月利润为什么低、找某个文件、'
-               '核对一笔退款、改一下页面。')
+               '核对一笔退款、改一下页面。这里你查不了数据也改不了任何东西，绝对不要说已经查到、已经修改或已生成卡片。')
 
 
 def route(text, has_images):
-    if not has_images and len(text.strip()) <= 12 and not BUSINESS_WORDS.search(text):
+    if not has_images and SMALL_TALK.match(text.strip()):
         return 'chat'
     if ENGINEER_WORDS.search(text):
         return 'engineer'
