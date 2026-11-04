@@ -14,8 +14,10 @@ import os
 import re
 import sqlite3
 import time
+import urllib.parse
 from collections import OrderedDict
 from contextlib import asynccontextmanager
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 from starlette.applications import Starlette
@@ -29,7 +31,7 @@ DB = Path(os.environ.get('LEDGER_HOME', r'D:\ledger\home')) / 'front-cache.db'
 HOP = {'connection', 'keep-alive', 'transfer-encoding', 'content-length', 'host', 'te', 'upgrade',
        'proxy-connection', 'if-none-match', 'if-modified-since', 'expect'}
 FRESH = 'x-ledger-fresh'
-LIMIT = 600
+LIMIT = 1000
 WRITER_WAIT = 120
 
 CACHED = [(re.compile(pattern), ttl) for pattern, ttl in (
@@ -44,6 +46,11 @@ CACHED = [(re.compile(pattern), ttl) for pattern, ttl in (
     (r'/api/stores/[^/]+', 90),
     (r'/api/stores/[^/]+/(pricing-status|periods/[^/]+)', 90),
 )]
+
+# 店铺账期页台账本身就不分人缓存，这里也只存一份；每天凌晨把所有店最近几个月的提前算好。
+SHARED = re.compile(r'/api/stores/[^/]+/periods/[^/]+')
+PREWARM_HOUR = 4
+PREWARM_MONTHS = 5
 
 NOT_WRITES = re.compile(r'/api/(automation/telemetry|.*preview.*|search.*)')
 
@@ -191,6 +198,8 @@ def _client(request):
 
 
 def _cache_key(target, cookie):
+    if SHARED.fullmatch(target.split('?', 1)[0]):
+        return target
     return target + ('|' + hashlib.sha1(cookie.encode()).hexdigest()[:12] if cookie else '')
 
 
@@ -273,12 +282,54 @@ async def _warm():
         await asyncio.sleep(0.5)
 
 
+def _recent_periods():
+    month, out = date.today().replace(day=1), []
+    for _ in range(PREWARM_MONTHS):
+        out.append(f'{month:%Y-%m}')
+        month = (month - timedelta(days=1)).replace(day=1)
+    return out
+
+
+async def _prewarm(only_missing):
+    try:
+        status, _, reader, writer = await _open(LEDGER_PORT, 'GET', '/api/stores', [], None)
+        try:
+            body = b''.join([chunk async for chunk in reader])
+        finally:
+            writer.close()
+        stores = [s['id'] for s in json.loads(body).get('stores', []) if not s.get('archived')] if status == 200 else []
+    except Exception:
+        return
+    for period in _recent_periods():
+        for store_id in stores:
+            target = f'/api/stores/{urllib.parse.quote(store_id)}/periods/{period}'
+            if only_missing and target in _entries:
+                continue
+            try:
+                await _fetch(target, target, '', False)
+            except Exception:
+                pass
+
+
+async def _prewarm_loop():
+    await asyncio.sleep(120)
+    await _prewarm(only_missing=True)
+    while True:
+        now = datetime.now()
+        start = now.replace(hour=PREWARM_HOUR, minute=0, second=0, microsecond=0)
+        if start <= now:
+            start += timedelta(days=1)
+        await asyncio.sleep((start - now).total_seconds())
+        await _prewarm(only_missing=False)
+
+
 @asynccontextmanager
 async def lifespan(_app):
     _load()
-    warm = asyncio.ensure_future(_warm())
+    tasks = [asyncio.ensure_future(_warm()), asyncio.ensure_future(_prewarm_loop())]
     yield
-    warm.cancel()
+    for task in tasks:
+        task.cancel()
 
 
 METHODS = ['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS']
