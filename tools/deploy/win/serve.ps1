@@ -35,6 +35,10 @@ if (Test-Path -LiteralPath (Join-Path $Root 'nas.enabled')) {
   $env:LEDGER_INGEST_MODE = 'api'
 }
 
+# 局域网内 2-3 人使用：不要求登录；没有门禁收据也照常写入。
+if (-not $env:LEDGER_LAN_OPEN) { $env:LEDGER_LAN_OPEN = '1' }
+if (-not $env:LEDGER_CODE_INTEGRITY) { $env:LEDGER_CODE_INTEGRITY = 'off' }
+
 # Windows 的默认编码是 cp936。模型是 UTF-8 的 YAML 和 CSV，店名科目名全是中文，
 # 一旦按 cp936 读进来就是乱码，而且不会报错——它会算出一份"看着对"的账。
 $env:PYTHONUTF8       = '1'

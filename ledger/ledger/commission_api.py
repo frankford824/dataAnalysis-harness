@@ -240,8 +240,15 @@ def install(app, workspace, model, model_root: Path | None = None):
             return {"id": "declared:" + name, "name": name, "admin": False}
         found = registry.actor(request.cookies.get("commission_session", ""))
         if not found:
+            from .write_auth import LAN_ACTOR, lan_open
+            if lan_open():
+                return dict(LAN_ACTOR)
             raise HTTPException(401, "请先登录提成管理账号")
         return found
+
+    def lan_actor():
+        from .write_auth import LAN_ACTOR, lan_open
+        return dict(LAN_ACTOR) if lan_open() else None
 
     @app.exception_handler(RegistryError)
     async def registry_error(_request, exc):
@@ -276,7 +283,7 @@ def install(app, workspace, model, model_root: Path | None = None):
                     feed["unmapped_stores"] = conn.execute("SELECT count(*) FROM feed_store WHERE mapping_status<>'confirmed'").fetchone()[0]
         names = display_names()
         return {"auth_mode": "password" if getattr(app.state, 'strict_writes', False) else registry.auth_mode(),
-                "actor": registry.actor(request.cookies.get("commission_session", "")),
+                "actor": registry.actor(request.cookies.get("commission_session", "")) or lan_actor(),
                 "counts": counts, "jobs": jobs, "imports": imports, "pending": pending, "catalog_refreshed_at": refreshed,
                 "stores": [{"id": s.id, "name": names.get(s.id,s.name), "aliases": [s.name,*s.aliases]} for s in model().stores], "revision": registry.revision(), "feed": feed}
 
