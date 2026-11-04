@@ -38,6 +38,9 @@ def _open(model_id, messages, tools, max_tokens, stream, timeout, extra=None):
         body['stream_options'] = {'include_usage': True}
     if tools:
         body['tools'] = tools
+    if model_id.startswith('qwen'):
+        # 百炼默认开深度思考：每步多等 5-20 秒，还按输出计费。
+        body['enable_thinking'] = False
     body.update(extra or {})
     request = urllib.request.Request(base + '/chat/completions', json.dumps(body, ensure_ascii=False).encode('utf-8'),
                                      headers={'Authorization': 'Bearer ' + key, 'Content-Type': 'application/json'})
