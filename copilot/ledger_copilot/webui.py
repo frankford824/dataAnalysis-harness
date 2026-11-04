@@ -29,10 +29,9 @@ def _save(entries):
 def build(summary, batch=None):
     stamp = datetime.now().strftime('%Y%m%d-%H%M%S')
     out = HISTORY / 'builds' / stamp
-    command = f'pnpm exec vite build --outDir "{out}" --emptyOutDir'
     started = time.time()
-    result = subprocess.run(['powershell', '-NoProfile', '-NonInteractive', '-Command', command],
-                            cwd=WEB, capture_output=True, timeout=600)
+    result = subprocess.run(['node', str(WEB / 'node_modules' / 'vite' / 'bin' / 'vite.js'), 'build', '--outDir', str(out),
+                             '--emptyOutDir'], cwd=WEB, capture_output=True, timeout=600)
     if result.returncode != 0 or not (out / 'index.html').exists():
         log = (result.stdout + result.stderr).decode('utf-8', 'replace')
         return {'ok': False, 'message': '界面构建失败，线上界面没有变化。构建输出：\n' + log[-3000:]}
