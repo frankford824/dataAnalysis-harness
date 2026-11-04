@@ -3,14 +3,21 @@ import {computed,ref,watch} from 'vue'
 import {useMessage} from 'naive-ui'
 import {api} from '../api'
 import {stamp} from '../format'
+import {useApp} from '../store'
 import {clientRequestId} from '../telemetry'
 
 const props=defineProps({period:{type:String,required:true}})
 const emit=defineEmits(['changed'])
-const message=useMessage()
-const inbox=ref(null),error=ref(''),busy=ref(false)
+const message=useMessage(),app=useApp()
+const inbox=ref(null),error=ref(''),busy=ref(false),showPending=ref(false)
 const upgrade=computed(()=>inbox.value?.upgrade)
 const changed=computed(()=>(upgrade.value?.items||[]).filter(item=>item.status!=='same'&&!item.confirmed))
+const scoped=computed(()=>app.storeId?changed.value.filter(item=>item.store_id===app.storeId):changed.value)
+const elsewhere=computed(()=>changed.value.length-scoped.value.length)
+const isPending=item=>item.status==='pending_recompute'&&!item.differences.length
+const detailed=computed(()=>scoped.value.filter(item=>!isPending(item)))
+const pending=computed(()=>scoped.value.filter(isPending))
+const pendingPreview=computed(()=>pending.value.slice(0,3).map(item=>item.store_name).join('、'))
 const disputes=computed(()=>inbox.value?.disputes||[])
 const count=computed(()=>(upgrade.value?.needs_confirmation?1:0)+disputes.value.length)
 
@@ -38,8 +45,8 @@ defineExpose({load,count})
     <article v-if="upgrade?.needs_confirmation" class="card" data-inbox-card="upgrade">
       <header><strong>新版本核对</strong><span>{{upgrade.same}} 家店结果与旧版本一致，{{upgrade.changed}} 家有变化<template v-if="upgrade.pending_recompute">，{{upgrade.pending_recompute}} 家待重算</template></span></header>
       <p class="advice">Agent 建议：逐家看下面的变化，确认无误后点“确认新版本结果”。确认前 Agent 不会自动改这个月的账。</p>
-      <ul>
-        <li v-for="item in changed" :key="item.store_id">
+      <ul v-if="detailed.length">
+        <li v-for="item in detailed" :key="item.store_id">
           <strong>{{item.store_name}}</strong>
           <span v-if="item.status==='pending_recompute'" class="muted"> · 待新版本重算</span>
           <span v-else-if="item.same_input===false" class="muted"> · 期间资料也有更新</span>
@@ -47,6 +54,15 @@ defineExpose({load,count})
           <p v-if="item.differences.length>12" class="muted">另有 {{item.differences.length-12}} 项变化，请到店铺页查看</p>
         </li>
       </ul>
+      <p v-if="pending.length" class="pending">
+        <template v-if="pending.length===1&&!detailed.length"><strong>{{pending[0].store_name}}</strong><span class="muted"> · 待新版本重算</span></template>
+        <template v-else>
+          {{detailed.length?'另有 ':''}}{{pending.length}} 家待新版本重算<template v-if="!showPending">（{{pendingPreview}}{{pending.length>3?'…':''}}）</template>
+          <n-button text size="tiny" type="primary" @click="showPending=!showPending">{{showPending?'收起名单':'展开名单'}}</n-button>
+          <span v-if="showPending" class="names">{{pending.map(item=>item.store_name).join('、')}}</span>
+        </template>
+      </p>
+      <p v-if="elsewhere" class="muted other">另有 {{elsewhere}} 家店也在这次核对里，店铺选「全部店铺」可看全部</p>
       <footer>
         <n-button v-if="upgrade.pending_recompute" :loading="busy" @click="recompute">先重算这些店铺</n-button>
         <n-button v-else type="primary" :loading="busy" @click="confirmUpgrade">确认新版本结果</n-button>
@@ -66,5 +82,5 @@ defineExpose({load,count})
 </template>
 
 <style scoped>
-.agent-inbox{border:1px solid #f0d9a8;background:#fffaf0;border-radius:8px;padding:18px;margin:16px 0;display:flex;flex-direction:column;gap:12px}.agent-inbox h3{font-size:15px}.card{background:white;border:1px solid #eadfca;border-radius:8px;padding:14px 16px}.card header{display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap;font-size:13px}.card header span{color:#657184;font-size:12px}.advice,.question{font-size:13px;line-height:1.7;margin-top:8px;white-space:pre-wrap;overflow-wrap:anywhere}.advice{color:#35506e}.card ul{padding-left:18px;font-size:12px;margin-top:8px}.card li{margin:8px 0}.card table{border-collapse:collapse;margin-top:4px}.card td{padding:2px 10px 2px 0;font-variant-numeric:tabular-nums}.muted{color:#8a94a6}.card footer{display:flex;gap:10px;margin-top:12px;flex-wrap:wrap}
+.agent-inbox{border:1px solid #f0d9a8;background:#fffaf0;border-radius:8px;padding:18px;margin:16px 0;display:flex;flex-direction:column;gap:12px}.agent-inbox h3{font-size:15px}.card{background:white;border:1px solid #eadfca;border-radius:8px;padding:14px 16px}.card header{display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap;font-size:13px}.card header span{color:#657184;font-size:12px}.advice,.question{font-size:13px;line-height:1.7;margin-top:8px;white-space:pre-wrap;overflow-wrap:anywhere}.advice{color:#35506e}.card ul{padding-left:18px;font-size:12px;margin-top:8px}.card li{margin:8px 0}.card table{border-collapse:collapse;margin-top:4px}.card td{padding:2px 10px 2px 0;font-variant-numeric:tabular-nums}.muted{color:#8a94a6}.pending{font-size:12px;margin-top:8px;line-height:1.8}.pending .names{display:block;color:#4b5565;overflow-wrap:anywhere}.other{font-size:12px;margin-top:6px}.card footer{display:flex;gap:10px;margin-top:12px;flex-wrap:wrap}
 </style>
