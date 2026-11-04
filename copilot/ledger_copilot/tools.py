@@ -24,15 +24,21 @@ def _cut(text, limit=LIMIT):
     return text if len(text) <= limit else text[:limit] + f'\n…（已截断，共 {len(text)} 字符）'
 
 
-def _http(method, path, body=None, timeout=180):
-    url = config.LEDGER_URL + (path if path.startswith('/') else '/' + path)
+def _http(method, path, body=None, timeout=180, base=None):
+    url = (base or config.LEDGER_URL) + (path if path.startswith('/') else '/' + path)
     data = None if body is None else json.dumps(body, ensure_ascii=False).encode('utf-8')
     request = urllib.request.Request(url, data, method=method, headers={'Content-Type': 'application/json'})
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:
             return response.status, response.read().decode('utf-8', 'replace')
     except urllib.error.HTTPError as exc:
+        if exc.code == 503 and base is None and config.LEDGER_URL != config.LEDGER_DIRECT:
+            return _http(method, path, body, timeout, config.LEDGER_DIRECT)
         return exc.code, exc.read().decode('utf-8', 'replace')
+    except urllib.error.URLError as exc:
+        if base is None and config.LEDGER_URL != config.LEDGER_DIRECT and isinstance(exc.reason, ConnectionError):
+            return _http(method, path, body, timeout, config.LEDGER_DIRECT)
+        raise
 
 
 def ledger_get(path, query=None, **_):
