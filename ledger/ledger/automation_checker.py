@@ -279,7 +279,8 @@ def source_fact_dependencies_current(ws,store_id,recorded):
     return True
 
 def check(ws,store_id,period,*,model=None,expected_run_id=None,ignored_blockers=(),
-          manual_result=None,check_company=True,check_pending=True,company_context=None,verify_artifacts=False):
+          manual_result=None,check_company=True,check_pending=True,company_context=None,verify_artifacts=False,
+          reuse_refund_validation=False):
     model=resolve_model(ws,model)
     row=current_run(ws,store_id,period)
     state=period_header(ws,store_id,period,row['id'] if row else None)
@@ -416,7 +417,7 @@ def check(ws,store_id,period,*,model=None,expected_run_id=None,ignored_blockers=
             '原订单日期依据已有变化，系统须按本期已封存依赖重新核算或验证等价后再月结'))
     if row is not None and model is not None and not (state and state.closed):
         from .frozen_refund_guard import validate_run as validate_frozen_refunds
-        refund_state=validate_frozen_refunds(ws,model,model.store(store_id),period,row['id'])
+        refund_state=validate_frozen_refunds(ws,model,model.store(store_id),period,row['id'],reuse=reuse_refund_validation)
         scope['frozen_refund_binding_sha']=refund_state['sha']
         if refund_state['recompute_required']:
             problems.append(issue('frozen_refund_recheck_required','已结退款归属依据已变化或未完整核实，请等待当前结果重新核算，不能确认旧金额'))
@@ -434,7 +435,7 @@ def close_view(ws,model,store_id,period,payload,*,company_context=None):
     """
     value=dict(payload)
     checked=check(ws,store_id,period,model=model,company_context=company_context,
-        expected_run_id=payload.get('run_id'))
+        expected_run_id=payload.get('run_id'),reuse_refund_validation=True)
     state=period_header(ws,store_id,period,checked['run_id'])
     closed=bool(state and state.closed)
     issues=([issue('already_closed','本月已结账，展示冻结结果')] if closed else checked['issues'])

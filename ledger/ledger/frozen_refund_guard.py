@@ -7,7 +7,7 @@ calculator or a historical correction. No database migration is required.
 from __future__ import annotations
 from collections import defaultdict
 from decimal import Decimal,InvalidOperation
-import hashlib,json
+import hashlib,json,threading,time
 from pathlib import Path
 import polars as pl
 from . import automation_store as journal
@@ -402,10 +402,41 @@ def finish_slice(sliced,model):
         detail={'responsible':'finance','metric_ids':sorted(pending)}))
 
 
-def validate_run(ws,model,store,period,run_id):
-    """A later close must not validate a cached result against an old world."""
-    from types import SimpleNamespace
+_validations={};_validation_locks={};_validation_guard=threading.Lock()
+VALIDATION_TTL=900
+
+
+def _stamp(path):
+    try:
+        stat=path.stat();return (stat.st_size,stat.st_mtime_ns)
+    except OSError:return None
+
+
+def validate_run(ws,model,store,period,run_id,*,reuse=False):
+    """A later close must not validate a cached result against an old world.
+
+    Read-only views may reuse a recent result for the identical frozen world;
+    close and write paths always validate afresh.
+    """
     context=Context(ws,model,store)
+    if not reuse:return _validate_run(ws,model,store,period,run_id,context)
+    runs=[run_id,*(r[1] for r in context.snapshot if r[1])]
+    key=(str(ws.root),store.id,period,run_id,id(model),tuple(context.snapshot),
+         tuple(_stamp(ws.facts_path(r)) for r in runs))
+    with _validation_guard:lock=_validation_locks.setdefault(key,threading.Lock())
+    with lock:
+        cached=_validations.get(key)
+        if cached and cached['model'] is model and time.monotonic()-cached['at']<VALIDATION_TTL:
+            return dict(cached['value'])
+        value=_validate_run(ws,model,store,period,run_id,context)
+        with _validation_guard:
+            if len(_validations)>4000:_validations.clear();_validation_locks.clear()
+            _validations[key]={'model':model,'at':time.monotonic(),'value':value}
+        return dict(value)
+
+
+def _validate_run(ws,model,store,period,run_id,context):
+    from types import SimpleNamespace
     empty={'schema':SCHEMA,'store_id':store.id,'period':period,'bindings':[]}
     if not context.snapshot or not any(m.id in REFUNDS and m.posting_basis=='order_number' for m in model.metrics):
         return {'sha':journal.digest(empty),'recompute_required':False}

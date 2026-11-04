@@ -169,7 +169,7 @@ def install(app,workspace,model,actor,*,lease_seconds=180,clock=time.time):
             for _ in range(32):
                 row=conn.execute("SELECT * FROM automation_case c WHERE status='processing' AND stage IN ('gathering','queued','retry_wait') AND lease_until<=? AND (? OR NOT EXISTS(SELECT 1 FROM automation_attempt a WHERE a.case_id=c.id AND a.input_sha=c.input_sha AND a.state='source_queued')) AND NOT EXISTS(SELECT 1 FROM period p WHERE p.store_id=c.store_id AND p.period=c.period AND p.state='closed') ORDER BY updated_at,id LIMIT 1",(int(clock()),int(source_capable))).fetchone()
                 if not row:return Response(status_code=204)
-                from .automation_actions import month,_case
+                from .automation_actions import _month as month,_case
                 current=next(r for r in month(ws,model(),row['period'])['stores'] if r['store_id']==row['store_id'])
                 _case(conn,current)
                 row=conn.execute('SELECT * FROM automation_case WHERE id=?',(row['id'],)).fetchone()

@@ -1,7 +1,9 @@
 """Human-confirmed business actions over existing ledger primitives."""
 from __future__ import annotations
 
+import copy
 import json
+import threading
 import time
 from decimal import Decimal, InvalidOperation
 
@@ -165,7 +167,30 @@ def _company_labor_source(ws,model,period,company):
         'since':None,'count':1,'financial_applied':False},None
 
 
+_month_flights={};_month_guard=threading.Lock()
+
+
 def month(ws,model,period):
+    """Concurrent readers of one month share a single in-flight evaluation."""
+    key=(str(ws.root),period)
+    with _month_guard:
+        flight=_month_flights.get(key);owner=flight is None
+        if owner:flight=_month_flights[key]={'done':threading.Event(),'value':None,'error':None}
+    if not owner:
+        flight['done'].wait()
+        if flight['error'] is not None:raise flight['error']
+        return copy.deepcopy(flight['value'])
+    try:
+        flight['value']=_month(ws,model,period)
+        return copy.deepcopy(flight['value'])
+    except BaseException as exc:
+        flight['error']=exc;raise
+    finally:
+        with _month_guard:_month_flights.pop(key,None)
+        flight['done'].set()
+
+
+def _month(ws,model,period):
     journal.period(period)
     decisions=journal.active_decisions(ws.conn,period)
     company=checker.company_basis(ws,model,period)
@@ -176,7 +201,7 @@ def month(ws,model,period):
     for store in checker.operating_stores(ws,model,period,include_excluded=True):
         case_id=journal.digest([store.id,period])[:32]
         excluded=decisions.get((store.id,'store_scope'),{}).get('values',{}).get('included') is False
-        checked=checker.check(ws,store.id,period,model=model,company_context=company)
+        checked=checker.check(ws,store.id,period,model=model,company_context=company,reuse_refund_validation=True)
         code_maintenance=code_maintenance or any(p['code']=='code_source_drift' for p in checked['issues'])
         from . import automation_handoff as handoff
         waiting_items=handoff.active(ws,model,store.id,period,checked['input_sha'])
@@ -313,7 +338,7 @@ def _case(conn,row):
 
 def _audit_cases(ws,model,period,request_id,action,result):
     """Called inside the same transaction as the decision and its receipt."""
-    for row in month(ws,model,period)['stores']:
+    for row in _month(ws,model,period)['stores']:
         _case(ws.conn,row)
         ws.conn.execute('INSERT INTO automation_attempt VALUES(?,?,?,?,?,?,?)',
             (journal.ident(),row['case_id'],request_id,row['input_sha'],action,
@@ -322,7 +347,7 @@ def _audit_cases(ws,model,period,request_id,action,result):
 
 def sync_month(ws,model,period,*,worker='native:commission-manager'):
     """Journal all expected stores after source arrival, never approve or close."""
-    value=month(ws,model,period)
+    value=_month(ws,model,period)
     from . import publication_scope
     publication=publication_scope.resolve(ws.root,model)
     observed=value['stores']
@@ -393,7 +418,7 @@ def advance(ws,model,period,request_id,actor):
     with ws.transaction() as conn:
         old=journal.receipt(conn,key,signature)
         if old:return old
-        current=month(ws,model,period)
+        current=_month(ws,model,period)
         aid=journal.authorize(conn,key,actor,'advance',current['input_sha'],'',
             {'period':period,'store_ids':[r['store_id'] for r in current['stores'] if r['status']!='completed'],
              'business_rules_require_grant':True})
