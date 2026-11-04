@@ -43,7 +43,8 @@ def main():
     budget(raw.get('monthly_budget'))
     config = Config(base_url=base,
                     api_key=key,models=tuple(ModelSpec(**row) for row in raw.get('models',[])),
-                    monthly_budget=raw.get('monthly_budget'))
+                    monthly_budget=raw.get('monthly_budget'),
+                    evaluation=raw.get('skip_model_qualification') is True)
     if raw.get('model_enabled',True) is False or os.environ.get('LEDGER_AGENT_MODEL_ENABLED')=='0':
         config=Config(base_url='',api_key='',models=config.models,monthly_budget=config.monthly_budget)
     if args.repair_event:
@@ -73,7 +74,8 @@ def main():
     host_state = AgentState(state.root/'protocol')
     host_state.set_secret('access_token',token)
     host_state.set_secret('agent_id',raw['worker_id'])
-    control = Control(AgentConfig(control_plane_url=raw['control_plane_url'],state_dir=state.root),host_state)
+    control = Control(AgentConfig(control_plane_url=raw['control_plane_url'],state_dir=state.root,
+        request_timeout_seconds=float(raw.get('request_timeout_seconds',30))),host_state)
     from .upstream import Collector,Config as UpstreamConfig
     source_executor=None
     if raw.get('source_recovery'):
