@@ -167,7 +167,8 @@ def edit_file(path, old, new, **_):
     return '已修改。程序文件改动需要 restart_ledger 才生效。'
 
 
-def powershell(command, timeout=300, **_):
+def powershell(command, timeout=60, **_):
+    timeout = min(int(timeout or 60), 120)
     script = '[Console]::OutputEncoding=[Text.Encoding]::UTF8;$ProgressPreference="SilentlyContinue";' + command
     try:
         result = subprocess.run(['powershell', '-NoProfile', '-NonInteractive', '-Command', script],
@@ -183,7 +184,7 @@ LEDGER = {ledger!r}
 DATABASES = {databases!r}
 def get(path, **query):
     if query: path += ('&' if '?' in path else '?') + urllib.parse.urlencode(query, doseq=True)
-    with urllib.request.urlopen(LEDGER + path, timeout=300) as r: return json.loads(r.read().decode('utf-8'))
+    with urllib.request.urlopen(LEDGER + path, timeout=60) as r: return json.loads(r.read().decode('utf-8'))
 def sql(query, db='workspace', params=()):
     c = sqlite3.connect('file:' + DATABASES[db] + '?mode=ro', uri=True, timeout=10); c.row_factory = sqlite3.Row
     try: return [dict(r) for r in c.execute(query, params).fetchall()]
@@ -191,7 +192,8 @@ def sql(query, db='workspace', params=()):
 '''
 
 
-def python(code, timeout=300, **_):
+def python(code, timeout=60, **_):
+    timeout = min(int(timeout or 60), 60)
     import sys
     import tempfile
     prelude = PRELUDE.format(ledger=config.LEDGER_URL, databases={k: str(v) for k, v in config.DATABASES.items()})
@@ -201,7 +203,7 @@ def python(code, timeout=300, **_):
     try:
         result = subprocess.run([sys.executable, handle.name], capture_output=True, timeout=int(timeout), env=env)
     except subprocess.TimeoutExpired:
-        return f'运行超过 {timeout} 秒，已中止。'
+        return f'运行超过 {timeout} 秒，已中止。这个取法太慢，换更直接的接口或表，或者缩小范围（一家店、一个月）再算。'
     finally:
         os.unlink(handle.name)
     out = result.stdout.decode('utf-8', 'replace') + result.stderr.decode('utf-8', 'replace')[-3000:]

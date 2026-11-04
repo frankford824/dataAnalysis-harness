@@ -47,11 +47,11 @@ def _open(model_id, messages, tools, max_tokens, stream, timeout, extra=None):
     return urllib.request.urlopen(request, timeout=timeout)
 
 
-def stream(model_id, messages, tools=None, *, max_tokens=4096, timeout=180, stop=None):
+def stream(model_id, messages, tools=None, *, max_tokens=4096, timeout=180, stop=None, extra=None):
     """Yield ('text', str), then finally ('end', {'tool_calls': [...], 'tokens': n, 'cost': x})."""
     calls = {}
     usage = None
-    with _open(model_id, messages, tools, max_tokens, True, timeout) as response:
+    with _open(model_id, messages, tools, max_tokens, True, timeout, extra) as response:
         for raw in response:
             if stop is not None and stop.is_set():
                 break

@@ -11,12 +11,18 @@ from datetime import datetime
 from . import config, docs, events, llm, store, tools
 
 MAX_STEPS = 16
+WRAP_UP_AT = 8
+WRAP_UP = ('（系统提示：已经查了 8 步。优先用已拿到的结果回答；同一个数换了两种方法还拿不到就别再试，'
+           '直接说清拿到了什么、还缺什么。）')
+FINAL = ('（系统提示：步数用完了。不要再调用工具，用已经查到的结果直接回答：先给结论或目前能确定的部分，'
+         '再用一句话说还缺什么、怎么补。）')
 RECENT = 10
 
 SYSTEM = '''你是「台账助手」，运行在公司台账系统的生产机（Windows）上，拥有这台机器的完整权限。
 使用者是 2-3 位财务/运营同事，他们在左侧看经营分析和明细，发现问题时用文字和截图问你。你的任务是直接查清、解释并解决问题，让他们不用再手工导表、写公式核对。
 
 回答规则：
+- 查数要收敛：先找最直接的接口或表；同一个数换了两种方法还拿不到就停下，用已有结果回答，并说清还缺什么。
 - 像一位熟悉业务的同事在群里回话：口语、短句、先说结论。简单问题一两句话答完，不用标题、不用表格、不复述问题、不说“好的，我来帮你”；
   用户要明细、对比或清单时再用表格。需要用户做的事放在最后一句。
 - 用业务语言回答，结论要带关键依据（具体店铺、月份、金额）。
@@ -331,6 +337,8 @@ def run_turn(thread_id, text, images, page, user, emit, stop, run_id='', files=(
             if role == 'quick' and index >= 6:
                 role, model_id = 'investigate', specs['investigate']['id']
                 used.append(model_id)
+            if index == WRAP_UP_AT:
+                messages.append({'role': 'user', 'content': _blocks(WRAP_UP)})
             _drain(inbox, messages)
             if _size(messages) > 600_000:
                 _shrink_old_results(messages)
@@ -380,9 +388,27 @@ def run_turn(thread_id, text, images, page, user, emit, stop, run_id='', files=(
                     role, model_id = 'engineer', specs['engineer']['id']
                     used.append(model_id)
         else:
-            note = '\n\n这个问题步骤较多，我先停在这里。你可以回复“继续”让我接着查。'
-            answer.append(note)
-            emit('delta', {'text': note})
+            messages.append({'role': 'user', 'content': _blocks(FINAL)})
+            _mark(messages)
+            parts = []
+            try:
+                for kind, value in llm.stream(model_id, messages, tools.SPECS, max_tokens=1500, stop=stop,
+                                              extra={'tool_choice': 'none'}):
+                    if kind == 'text':
+                        parts.append(value)
+                        answer.append(value)
+                        emit('delta', {'text': value})
+                    else:
+                        tokens += value['tokens']
+                        cost += value['cost']
+            except llm.BudgetExhausted:
+                raise
+            except Exception as exc:
+                store.log_event('turn_error', {'thread': thread_id, 'error': 'final: ' + str(exc)[:1000]})
+            if not ''.join(parts).strip():
+                note = '\n\n这个问题步骤较多，我先停在这里。你可以回复“继续”让我接着查。'
+                answer.append(note)
+                emit('delta', {'text': note})
     except llm.BudgetExhausted:
         error = '本月助手的模型费用已到上限，下月自动恢复；如需提高上限请联系管理员。'
     except Exception as exc:
