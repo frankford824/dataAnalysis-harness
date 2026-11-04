@@ -122,6 +122,7 @@ def _page_text(page):
 
 
 EPHEMERAL = {'type': 'ephemeral'}
+TECH_WORDS = re.compile(r'端口|目录|接口|路径|进程|脚本|日志|代码|数据库|表结构|字段|SQL|API|python|json|http|\.py|\.db', re.I)
 DATED = re.compile(r'\d{4}-\d{2}|\d{1,2}月|[a-z0-9]+_[a-z0-9]+')
 GROUP_NOTE = ('\n\n【公共群聊】这是 2-3 位同事共用的群聊，消息前的【名字】是发言人。回答时可以称呼对方；'
               '别人刚才说过的事实和结论直接沿用，不要重复查。')
@@ -275,9 +276,12 @@ def _attachments(files, text, step_emit):
     return out, tokens, cost
 
 
-def run_turn(thread_id, text, images, page, user, emit, stop, run_id='', files=(), inbox=None):
+def run_turn(thread_id, text, images, page, user, emit, stop, run_id='', files=(), inbox=None, resume=None):
     files = docs.resolve(files)
-    thread_id, message_id, saved = post_message(thread_id, text, images, page, user, files)
+    if resume:
+        message_id, saved = resume, []
+    else:
+        thread_id, message_id, saved = post_message(thread_id, text, images, page, user, files)
     emit('thread', {'thread_id': thread_id, 'title': store.thread(thread_id)['title'], 'run_id': run_id,
                     'message_id': message_id})
     started = time.time()
@@ -442,7 +446,10 @@ def _call(call, thread_id, step_emit, cards, emit, role):
         args = json.loads(call['function']['arguments'] or '{}')
     except ValueError:
         args = {}
-    step = {'id': uuid.uuid4().hex[:8], 'label': (args.get('purpose') or tools.DEFAULT_LABEL.get(name, '处理中'))[:60],
+    purpose = args.get('purpose') or ''
+    if not purpose or TECH_WORDS.search(purpose):
+        purpose = tools.DEFAULT_LABEL.get(name, '处理中')
+    step = {'id': uuid.uuid4().hex[:8], 'label': purpose[:60],
             'status': 'running'}
     step_emit('step', step)
     started = time.time()

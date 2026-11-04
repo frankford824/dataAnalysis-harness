@@ -32,6 +32,7 @@ async def lifespan(_app):
     store.conn()
     stop = autoclose.start() if os.environ.get('COPILOT_AUTO_CLOSE', '1') == '1' else None
     machine.start()
+    threading.Timer(5, _resume_unanswered).start()
     yield
     if stop:
         stop.set()
@@ -121,6 +122,34 @@ def chat(body: Chat):
                                              'message_id': message_id}),
                        events.sse('merged', {'run_id': same['run_id'], 'asker': same['user']}),
                        events.sse('done', None))
+    outbox = _launch(body)
+
+    def stream():
+        while True:
+            try:
+                item = outbox.get(timeout=15)
+            except queue.Empty:
+                yield ': keepalive\n\n'
+                continue
+            if item is None:
+                return
+            yield item
+
+    return StreamingResponse(stream(), media_type='text/event-stream', headers=SSE_HEADERS)
+
+
+def _resume_unanswered():
+    for message in store.unanswered(time.time() - 3600):
+        if message['thread_id'] == store.GROUP and COLLEAGUE.match(message['text']):
+            continue
+        body = Chat(thread_id=message['thread_id'], text=message['text'], page=message['page'], user=message['user'],
+                    files=message['files'])
+        store.log_event('turn_resumed', {'message_id': message['id']})
+        _launch(body, resume=message['id'])
+
+
+def _launch(body, resume=None):
+    group = body.thread_id == store.GROUP
     if not group:
         previous = _runs.get(body.thread_id or '')
         if previous:
@@ -166,7 +195,7 @@ def chat(body: Chat):
                     return
                 _update_task(run_id, status='running', line='在看', _started=time.time())
                 agent.run_turn(body.thread_id, body.text, body.images, body.page, body.user, emit, stop, run_id,
-                               body.files, inbox)
+                               body.files, inbox, resume)
             if stop.is_set():
                 status = 'stopped'
         except Exception as exc:
@@ -193,19 +222,7 @@ def chat(body: Chat):
                 threading.Timer(2, lambda: os._exit(0)).start()
 
     threading.Thread(target=work, name='agent-turn', daemon=True).start()
-
-    def stream():
-        while True:
-            try:
-                item = outbox.get(timeout=15)
-            except queue.Empty:
-                yield ': keepalive\n\n'
-                continue
-            if item is None:
-                return
-            yield item
-
-    return StreamingResponse(stream(), media_type='text/event-stream', headers=SSE_HEADERS)
+    return outbox
 
 
 @app.get('/api/agent/events')
