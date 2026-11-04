@@ -5,12 +5,12 @@
  * 解释「我说的是哪家店哪个月」。步骤只显示服务端给的那句人话，不出现代码、SQL、
  * 路径这类东西——看的人是财务和店长。
  */
-import { ArrowUp, ArrowUpRight, AtSign, Camera, Check, ChevronRight, CircleAlert, CircleX, Ellipsis, History, LoaderCircle, MessageSquare, PanelRightClose, Paperclip, RotateCw, Square, SquarePen, Undo2, X } from '@lucide/vue'
+import { ArrowUp, ArrowUpRight, AtSign, Camera, Check, ChevronRight, CircleAlert, CircleX, CornerDownRight, Ellipsis, File, FileArchive, FileSpreadsheet, FileText, History, LoaderCircle, MessageSquare, PanelRightClose, Paperclip, Presentation, Reply, RotateCw, Square, SquarePen, Undo2, X } from '@lucide/vue'
 import { useDialog, useMessage } from 'naive-ui'
-import { computed, nextTick, onMounted, onUnmounted, ref, watch, watchEffect } from 'vue'
-import { useRoute } from 'vue-router'
+import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch, watchEffect } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
 
-import { agentApi, errorText, onAgentFailure, openEvents, streamChat } from '../agentClient'
+import { agentApi, errorText, onAgentFailure, openEvents, streamChat, uploadFile } from '../agentClient'
 import { setCosts, setCostsLive, yuan } from '../agentCosts'
 import { renderMarkdown } from '../agentMarkdown'
 import { useApp } from '../store'
@@ -23,7 +23,10 @@ const MIN_W = 320
 const MAX_W = 720
 const DEFAULT_W = 400
 const TAB_W = 36
-const MAX_IMAGES = 8
+const MAX_FILES = 10
+const MAX_FILE_BYTES = 50 * 1024 * 1024
+const FILE_HINT = '可以发截图、Excel（xlsx/xls/csv/WPS表格）、Word（docx/doc/rtf/WPS文字）、PDF、PPT'
+const ACCEPT = 'image/*,.xlsx,.xlsm,.xls,.xlsb,.csv,.tsv,.et,.ett,.ods,.docx,.doc,.rtf,.wps,.wpt,.odt,.pdf,.pptx,.ppt,.pps,.ppsx,.dps,.odp,.txt,.zip'
 const SUGGESTIONS = ['这家店本月利润为什么偏低？', '这笔退款金额不对，帮我查一下', '本月还有哪些店没结账？']
 const isMac = typeof navigator !== 'undefined' && /Mac/i.test(navigator.platform || '')
 
@@ -32,6 +35,7 @@ const write = (key, value) => { try { value == null ? localStorage.removeItem(ke
 
 const app = useApp()
 const route = useRoute()
+const router = useRouter()
 const toast = useMessage()
 const dialog = useDialog()
 const root = ref(null)
@@ -147,6 +151,7 @@ function normalize(m) {
     user: m.user || '',
     text: m.text || '',
     images: Array.isArray(m.images) ? m.images : [],
+    files: Array.isArray(m.files) ? m.files : [],
     steps: (m.steps || []).map(s => ({ ...s })),
     cards: (m.cards || []).map(c => ({ ...c })),
     receipt: m.receipt || null,
@@ -220,6 +225,7 @@ function toggleHistory() {
 }
 function onPointerDown(e) {
   if (historyOpen.value && historyBox.value && !historyBox.value.contains(e.target)) historyOpen.value = false
+  if (tasksOpen.value && taskBox.value && !taskBox.value.contains(e.target)) tasksOpen.value = false
   if (menuOpen.value && menuBox.value && !menuBox.value.contains(e.target)) menuOpen.value = false
   if (mentionOpen.value && mentionBox.value && !mentionBox.value.contains(e.target)) mentionOpen.value = false
 }
@@ -292,76 +298,83 @@ function pageContext() {
   }
 }
 
-// ---------------------------------------------------------------- 附图
+// ---------------------------------------------------------------- 附件
 
+// 选中、粘贴、拖进来的文件马上开始传，传完拿到 file_id，发送时只带 id。
 const attachments = ref([])
 const fileInput = ref(null)
 const notice = ref('')
 const dragDepth = ref(0)
 const preview = ref('')
 
-function loadImage(src) {
-  return new Promise((resolve, reject) => {
-    const img = new Image()
-    img.onload = () => resolve(img)
-    img.onerror = reject
-    img.src = src
-  })
+const extOf = name => (/\.([a-z0-9]{1,8})$/i.exec(name || '')?.[1] || '').toLowerCase()
+const IMAGE_EXT = /^(png|jpe?g|gif|webp|bmp)$/
+const DOC_TYPES = [
+  { key: 'sheet', label: '表格', icon: FileSpreadsheet, ext: /^(xlsx|xlsm|xltx|xls|xlsb|csv|tsv|et|ett|ods|numbers)$/ },
+  { key: 'word', label: '文档', icon: FileText, ext: /^(docx|docm|doc|dot|rtf|wps|wpt|odt|pages|txt|md)$/ },
+  { key: 'pdf', label: 'PDF', icon: FileText, ext: /^pdf$/ },
+  { key: 'slides', label: '演示', icon: Presentation, ext: /^(pptx|pptm|ppsx|ppt|pps|pot|dps|dpt|odp|key)$/ },
+  { key: 'zip', label: '压缩包', icon: FileArchive, ext: /^(zip|rar|7z)$/ },
+]
+const OTHER_DOC = { key: 'other', label: '文件', icon: File }
+const docType = name => DOC_TYPES.find(t => t.ext.test(extOf(name))) || OTHER_DOC
+function fileSize(n) {
+  const v = Number(n) || 0
+  if (v < 1024) return `${v} B`
+  if (v < 1024 * 1024) return `${Math.round(v / 1024)} KB`
+  return `${(v / 1024 / 1024).toFixed(v < 10 * 1024 * 1024 ? 1 : 0)} MB`
 }
-// 长边压到 1600，统一转 JPEG。截图原图动辄几 MB，看清数字用不着那么大。
-async function downscale(file) {
-  const url = URL.createObjectURL(file)
-  try {
-    const img = await loadImage(url)
-    const scale = Math.min(1, 1600 / Math.max(img.naturalWidth || 1, img.naturalHeight || 1))
-    const w = Math.max(1, Math.round((img.naturalWidth || 1) * scale))
-    const h = Math.max(1, Math.round((img.naturalHeight || 1) * scale))
-    const canvas = document.createElement('canvas')
-    canvas.width = w
-    canvas.height = h
-    const ctx = canvas.getContext('2d')
-    // 透明底的 PNG 直接转 JPEG 会变成黑底。
-    ctx.fillStyle = '#fff'
-    ctx.fillRect(0, 0, w, h)
-    ctx.drawImage(img, 0, 0, w, h)
-    return canvas.toDataURL('image/jpeg', 0.85)
-  } finally {
-    URL.revokeObjectURL(url)
-  }
+// 粘贴的截图名字都叫 image.png，换成带时间的，聊天里好认。
+function fileName(file) {
+  const name = file.name || ''
+  if (name && !/^image\.\w+$/i.test(name)) return name
+  const d = new Date()
+  const pad = n => String(n).padStart(2, '0')
+  return `截图-${pad(d.getHours())}${pad(d.getMinutes())}${pad(d.getSeconds())}.${extOf(name) || (file.type || '').split('/')[1] || 'png'}`
 }
-function imageName(file) {
-  const base = (file.name || '').replace(/\.[^.]+$/, '')
-  if (!base || base === 'image') {
-    const d = new Date()
-    const pad = n => String(n).padStart(2, '0')
-    return `截图-${pad(d.getHours())}${pad(d.getMinutes())}${pad(d.getSeconds())}.jpg`
-  }
-  return `${base}.jpg`
-}
-async function addFiles(list) {
-  const files = [...(list || [])]
-  const images = files.filter(f => f.type?.startsWith('image/'))
-  if (images.length < files.length) notice.value = '这里只能附图片。要交的表格请用左边的「上传表格」。'
-  for (const file of images) {
-    if (attachments.value.length >= MAX_IMAGES) {
-      notice.value = `一次最多附 ${MAX_IMAGES} 张图`
+function addFiles(list) {
+  for (const file of [...(list || [])]) {
+    if (attachments.value.length >= MAX_FILES) {
+      notice.value = `一条消息最多带 ${MAX_FILES} 个附件`
       break
     }
-    const id = ++seq
-    attachments.value.push({ id, name: imageName(file), data_url: '', loading: true })
-    try {
-      const dataUrl = await downscale(file)
-      const item = attachments.value.find(a => a.id === id)
-      if (item) Object.assign(item, { data_url: dataUrl, loading: false })
-    } catch {
-      attachments.value = attachments.value.filter(a => a.id !== id)
-      notice.value = `「${file.name || '这张图'}」打不开，换一张试试`
+    if (file.size > MAX_FILE_BYTES) {
+      notice.value = `「${file.name || '这个文件'}」超过 50MB，发不了`
+      continue
     }
+    if (!file.size) {
+      notice.value = `「${file.name || '这个文件'}」是空的`
+      continue
+    }
+    const name = fileName(file)
+    const image = file.type?.startsWith('image/') || IMAGE_EXT.test(extOf(name))
+    attachments.value.push({ id: ++seq, file, name, size: file.size, kind: image ? 'image' : 'file', thumb: image ? URL.createObjectURL(file) : '', state: 'uploading', progress: 0, fileId: '', url: '', error: '' })
+    upload(attachments.value[attachments.value.length - 1])
   }
 }
+function upload(item) {
+  Object.assign(item, { state: 'uploading', progress: 0, error: '' })
+  const job = uploadFile(item.file, item.name, p => { item.progress = p })
+  item.abort = job.abort
+  job.promise
+    .then(r => Object.assign(item, { state: 'done', fileId: r.file_id, url: r.url || '', kind: r.kind || item.kind, size: r.size ?? item.size }))
+    .catch(e => {
+      if (e?.name !== 'AbortError') Object.assign(item, { state: 'error', error: errorText(e, '没传上') })
+    })
+}
 function removeAttachment(item) {
+  if (item.state === 'uploading') item.abort?.()
+  if (item.thumb) URL.revokeObjectURL(item.thumb)
   attachments.value = attachments.value.filter(a => a.id !== item.id)
 }
+// 发出去之后输入框上方清空；缩略图换成服务端地址，本地的预览可以放掉了。
+function takeAttachments() {
+  const ready = attachments.value.filter(a => a.state === 'done')
+  for (const a of attachments.value) if (a.thumb) URL.revokeObjectURL(a.thumb)
+  attachments.value = []
+  return ready.map(a => ({ file_id: a.fileId, name: a.name, size: a.size, kind: a.kind, url: a.url }))
+}
+const fileRefs = files => files.map(({ file_id, name }) => ({ file_id, name }))
 function onPick(e) {
   addFiles(e.target.files)
   e.target.value = ''
@@ -369,22 +382,22 @@ function onPick(e) {
 function onPaste(e) {
   const data = e.clipboardData
   if (!data) return
-  let files = [...(data.files || [])].filter(f => f.type?.startsWith('image/'))
+  let files = [...(data.files || [])]
   if (!files.length) {
     files = [...(data.items || [])]
-      .filter(item => item.kind === 'file' && item.type.startsWith('image/'))
+      .filter(item => item.kind === 'file')
       .map(item => item.getAsFile())
       .filter(Boolean)
   }
   if (!files.length) return
   // 从 Excel 复制单元格时剪贴板里同时有文字和一张图，这时候人要的是文字。
-  if (data.getData('text/plain').trim()) return
+  if (data.getData('text/plain').trim() && files.every(f => f.type?.startsWith('image/'))) return
   e.preventDefault()
   addFiles(files)
 }
 
 // App.vue 在 window 上接管了拖放（拖进来的文件当台账上传）。落在面板上的文件是
-// 附图，所以这里一律截住，不让它冒泡上去。拖的是文字时不拦默认行为，方便把左边
+// 发给助手的附件，所以这里一律截住，不让它冒泡上去。拖的是文字时不拦默认行为，方便把左边
 // 选中的字直接拖进输入框。
 const hasFiles = e => [...(e.dataTransfer?.types || [])].includes('Files')
 function onDragEnter(e) {
@@ -476,26 +489,30 @@ function follow(force = false) {
 
 const streaming = ref(false)
 let controller = null
-let currentRun = ''
+let running = null
+const liveRun = ref('')
 // 自己这个页面发起的轮次和消息。广播回来时据此去重，不在列表里再出现一遍。
-const ownRuns = new Set()
+const ownRuns = reactive(new Set())
 const ownMessages = new Set()
-const preparing = computed(() => attachments.value.some(a => a.loading))
-const canSend = computed(() => !streaming.value && !preparing.value && !!(draft.value.trim() || attachments.value.length))
+const preparing = computed(() => attachments.value.some(a => a.state === 'uploading'))
+const uploadFailed = computed(() => attachments.value.some(a => a.state === 'error'))
+const hasContent = computed(() => !!draft.value.trim() || attachments.value.some(a => a.state === 'done'))
+const canSend = computed(() => !streaming.value && !preparing.value && !uploadFailed.value && hasContent.value)
 const lastReply = computed(() => [...messages.value].reverse().find(m => m.role === 'assistant' && !m.remote))
 
 function send(preset) {
-  if (streaming.value || preparing.value) return
+  if (preparing.value || uploadFailed.value) return
   const fromDraft = typeof preset !== 'string'
   const text = (fromDraft ? draft.value : preset).trim()
-  const images = attachments.value.filter(a => a.data_url).map(({ name, data_url }) => ({ name, data_url }))
-  if (!text && !images.length) return
+  if (fromDraft && steerRun.value && !(inGroup.value && toColleague(text))) return steer()
+  if (streaming.value) return
+  if (!text && !(fromDraft && hasContent.value)) return
   if (userName.value === null) return askName({ preset })
   if (fromDraft) draft.value = ''
-  attachments.value = []
+  const files = fromDraft ? takeAttachments() : []
   shotTip.value = false
   primeAlerts()
-  run({ text, images, page: pageContext(), thread: threadId.value })
+  running = run({ text, files, page: pageContext(), thread: threadId.value })
 }
 
 function setReceipt(reply, data) {
@@ -535,7 +552,7 @@ async function run(payload) {
   const group = payload.thread === GROUP
   // 群里 @同事 的话助手不接，服务端只回 thread 和 done；这时不摆「正在看」的占位。
   const expectReply = !group || !toColleague(payload.text)
-  messages.value.push({ key: ++seq, id: '', role: 'user', user: userName.value || '', mine: true, text: payload.text, images: payload.images.map(i => i.data_url), at })
+  messages.value.push({ key: ++seq, id: '', role: 'user', user: userName.value || '', mine: true, text: payload.text, images: [], files: payload.files, at })
   const ask = messages.value[messages.value.length - 1]
   let reply = { key: ++seq, id: '', role: 'assistant', text: '', steps: [], cards: [], receipt: null, at, streaming: true, error: '', stopped: false, recovering: false, retry: payload, ask }
   if (expectReply) {
@@ -559,7 +576,7 @@ async function run(payload) {
   let finished = false
   try {
     await streamChat(
-      { thread_id: payload.thread, text: payload.text, images: payload.images, page: payload.page, user: userName.value || '' },
+      { thread_id: payload.thread, text: payload.text, files: fileRefs(payload.files), page: payload.page, user: userName.value || '' },
       {
         signal: controller.signal,
         onEvent: (event, raw) => {
@@ -568,14 +585,24 @@ async function run(payload) {
             turnThread = data.thread_id || payload.thread
             reply.retry = null
             if (data.run_id) {
-              currentRun = data.run_id
+              liveRun.value = data.run_id
               ownRuns.add(data.run_id)
               reply.runId = data.run_id
+              // 公共事件流比这条流先到时，自己这一轮已经被当成别人的挂了一条，去掉它。
+              const early = messages.value.find(x => x.remote && x.runId === data.run_id)
+              if (early) dropMessage(early)
             }
             if (data.message_id) {
-              ownMessages.add(data.message_id)
+              ownMessages.add(String(data.message_id))
               ask.id = data.message_id
             }
+          }
+          // 别人已经在查差不多的问题，这句并进那一轮：那一轮的过程和回答照常看别人的。
+          if (event === 'merged') {
+            ownRuns.delete(data.run_id)
+            liveRun.value = ''
+            reply.runId = ''
+            ask.merged = { runId: data.run_id || '', asker: data.asker || '同事' }
           }
           if (event === 'done' || event === 'error') finished = true
           if (event === 'card' && group && data.status === 'pending') alertHidden('群里有一张确认卡等人处理', data.title || '助手提出了一处修改，需要有人确认。', `card-${data.card_id}`)
@@ -600,10 +627,62 @@ async function run(payload) {
     reply.streaming = false
     streaming.value = false
     controller = null
-    currentRun = ''
+    liveRun.value = ''
     follow()
     if (historyOpen.value) loadThreads()
   }
+}
+
+// ---------------------------------------------------------------- 补充：不打断正在查的那一轮
+
+// 私聊：这个话题正在跑；群聊：自己提的问题还在排队或在查。这时发送键变成「补充」。
+const steerTarget = ref('')
+const myTask = computed(() => {
+  const mine = Object.values(tasks.value).filter(t => RUNNING.has(t.status) && isMineTask(t) && (inGroup.value ? t.thread_id === GROUP : t.thread_id && t.thread_id === threadId.value))
+  return mine.find(t => t.run_id === steerTarget.value) || mine.sort((a, b) => String(b.started_at).localeCompare(String(a.started_at)))[0] || null
+})
+const steerRun = computed(() => myTask.value?.run_id || liveRun.value)
+const steering = ref(false)
+const canSteer = computed(() => !steering.value && !preparing.value && !uploadFailed.value && hasContent.value)
+
+async function steer() {
+  if (!canSteer.value) return
+  if (userName.value === null) return askName({})
+  const text = draft.value.trim()
+  const runId = steerRun.value
+  const thread = threadId.value
+  const files = takeAttachments()
+  draft.value = ''
+  // 补充的话放在那一轮回答的前面：回答是对两句话一起的。
+  const note = { key: ++seq, id: '', role: 'user', user: userName.value || '', mine: true, text, images: [], files, at: Date.now() }
+  const live = messages.value.findIndex(m => m.role === 'assistant' && m.runId === runId && m.streaming)
+  if (live >= 0) messages.value.splice(live, 0, note)
+  else messages.value.push(note)
+  follow(true)
+  steering.value = true
+  try {
+    const result = await agentApi.steer({ run_id: runId, thread_id: thread, text, files: fileRefs(files), user: userName.value || '' })
+    if (result?.status === 'queued') return
+    if (result?.stored) {
+      notice.value = '刚才那一轮已经结束，这句补充记在对话里了；还要接着查的话再问一次。'
+      return
+    }
+    dropMessage(note)
+    await running
+    running = run({ text, files, page: pageContext(), thread })
+  } catch (e) {
+    dropMessage(note)
+    if (!draft.value) draft.value = text
+    if (!attachments.value.length) attachments.value = files.map(f => ({ id: ++seq, file: null, name: f.name, size: f.size, kind: f.kind, thumb: '', state: 'done', progress: 1, fileId: f.file_id, url: f.url, error: '' }))
+    notice.value = errorText(e, '补充没发出去，请再试一次')
+  } finally {
+    steering.value = false
+    steerTarget.value = ''
+  }
+}
+function startSteer(task) {
+  steerTarget.value = task.run_id
+  nextTick(() => textarea.value?.focus())
 }
 
 // ---------------------------------------------------------------- 断线后取回结果
@@ -678,8 +757,9 @@ function cancelRecovery() {
 }
 
 function stop() {
+  if (!streaming.value && !recovery && myTask.value) return stopTask(myTask.value)
   const id = recovery?.id || threadId.value
-  if (id) agentApi.stop(id, currentRun || recovery?.runId).catch(() => {})
+  if (id) agentApi.stop(id, liveRun.value || recovery?.runId, displayName.value).catch(() => {})
   cancelRecovery()
   controller?.abort()
 }
@@ -688,7 +768,7 @@ function retry(reply) {
   if (streaming.value || !reply.retry) return
   if (reply.ask) dropMessage(reply.ask)
   dropMessage(reply)
-  run(reply.retry)
+  running = run(reply.retry)
 }
 
 // ---------------------------------------------------------------- 步骤与确认卡
@@ -704,6 +784,22 @@ function toggleStep(m, s) {
 }
 // 回答已经结束而步骤还停在 running，说明是被停掉或断开了，不再转圈。
 const stepState = (m, s) => (s.status === 'running' && !m.streaming ? 'halted' : s.status)
+// 查的过程只露一行：正在做的那一步。查完收成一行摘要，点开才看每一步。没有步骤的闲聊什么都不显示。
+const openTraces = ref(new Set())
+const traceOpen = m => openTraces.value.has(m.key)
+function toggleTrace(m) {
+  if (openTraces.value.has(m.key)) openTraces.value.delete(m.key)
+  else openTraces.value.add(m.key)
+}
+function nowStep(m) {
+  if (!m.streaming || !m.steps.length) return null
+  return [...m.steps].reverse().find(s => s.status === 'running') || (m.text ? null : m.steps[m.steps.length - 1])
+}
+function traceSummary(m) {
+  const r = m.receipt || {}
+  return [`查了 ${m.steps.length} 步`, r.ms ? `用时 ${seconds(r.ms)}` : '', r.cost_cny != null ? yuan(r.cost_cny) : '', m.stopped ? '已停止' : '']
+    .filter(Boolean).join(' · ')
+}
 
 const CARD_STATUS = { applied: ['ok', '已修改'], rejected: ['', '没有改'], failed: ['bad', '没改成'] }
 async function decide(card, action) {
@@ -724,7 +820,109 @@ async function decide(card, action) {
 }
 const cardBy = c => (c.by && c.status && c.status !== 'pending' ? `由 ${c.by} ${c.status === 'rejected' ? '拒绝' : '确认'}` : '')
 
-// ---------------------------------------------------------------- 实时事件（群聊、别人的轮次、卡片、界面和数据变化）
+// ---------------------------------------------------------------- 任务：群里每个问题是一个任务
+
+// 任务池是服务端给的，所有人的都在里面；群里的大家都看，私聊话题只看自己的。
+const tasks = ref({})
+const ACTIVE = new Set(['queued', 'running', 'waiting'])
+const RUNNING = new Set(['queued', 'running'])
+const TASK_STATUS = { queued: '排队中', running: '在查', waiting: '等确认', done: '已完成', stopped: '已停止', failed: '没查完' }
+const isMineTask = t => ownRuns.has(t.run_id) || isSelf(t.user)
+const visibleTasks = computed(() => Object.values(tasks.value).filter(t => t.thread_id === GROUP || isMineTask(t)))
+const activeTasks = computed(() => visibleTasks.value.filter(t => ACTIVE.has(t.status)).sort((a, b) => String(a.started_at).localeCompare(String(b.started_at))))
+const taskOf = runId => (runId && tasks.value[runId]) || null
+const taskByMessage = computed(() => new Map(visibleTasks.value.filter(t => t.message_id != null).map(t => [String(t.message_id), t])))
+const tasksOpen = ref(false)
+const taskBox = ref(null)
+watch(() => activeTasks.value.length, n => { if (!n) tasksOpen.value = false })
+
+function setTasks(list) {
+  if (!Array.isArray(list)) return
+  tasks.value = Object.fromEntries(list.filter(t => t?.run_id).map(t => [t.run_id, t]))
+}
+function putTask(t) {
+  if (!t?.run_id) return
+  tasks.value = { ...tasks.value, [t.run_id]: { ...(tasks.value[t.run_id] || {}), ...t } }
+}
+// 在跑的任务用时每秒走一次；没有在跑的就不开计时器。
+const now = ref(Date.now())
+let tick = null
+watch(() => activeTasks.value.some(t => RUNNING.has(t.status)), on => {
+  clearInterval(tick)
+  tick = on ? setInterval(() => { now.value = Date.now() }, 1000) : null
+}, { immediate: true })
+function taskTime(t) {
+  if (!ACTIVE.has(t.status)) return t.ms ? seconds(t.ms) : ''
+  const started = toDate(t.started_at)
+  return started ? seconds(Math.max(0, now.value - started.getTime())) : ''
+}
+const taskWho = t => (isMineTask(t) ? '你' : t.user || '同事')
+async function stopTask(t) {
+  if (t.stopping) return
+  if (t.run_id === liveRun.value && streaming.value) return stop()
+  putTask({ run_id: t.run_id, stopping: true })
+  try {
+    await agentApi.stop(t.thread_id, t.run_id, displayName.value)
+  } catch (e) {
+    toast.warning(errorText(e, '没有停下来，请稍后再试'))
+  } finally {
+    putTask({ run_id: t.run_id, stopping: false })
+  }
+}
+// 群里提问消息底下挂的小卡片：还在查、停了或没查完时才挂；查完了看回答本身就够了。
+function taskCard(m) {
+  if (!inGroup.value || m.role !== 'user' || m.id === '' || m.id == null) return null
+  const t = taskByMessage.value.get(String(m.id))
+  return t && t.status !== 'done' ? t : null
+}
+// 回答本身已经在一行一行显示进度时，卡片上不再重复那一行。
+const liveReplyOf = runId => messages.value.some(x => x.role === 'assistant' && x.runId === runId && x.streaming && x.steps.length)
+const followersText = t => (t.followers || []).filter(Boolean).map(name => (isSelf(name) ? '你' : name)).join('、')
+
+// ---------------------------------------------------------------- 群里的回答引用原问题
+
+const indexById = computed(() => new Map(messages.value.map((m, i) => [m.id === '' || m.id == null ? '' : `${m.role}:${m.id}`, i])))
+const cut = (text, n) => { const chars = [...String(text || '').replace(/\s+/g, ' ').trim()]; return chars.length > n ? `${chars.slice(0, n).join('')}…` : chars.join('') }
+function quoteOf(m, i) {
+  if (!inGroup.value || m.role !== 'assistant') return null
+  const task = taskOf(m.runId)
+  const id = m.receipt?.reply_to ?? task?.message_id ?? m.ask?.id
+  if (id == null || id === '') return null
+  const at = indexById.value.get(`user:${id}`)
+  // 紧跟在问题后面的回答不用再引用一遍。
+  if (at != null && at === i - 1) return null
+  const ask = at != null ? messages.value[at] : null
+  const who = m.receipt?.asker || task?.user || ask?.user || ''
+  const text = ask?.text || task?.question || ''
+  return { id, who: isSelf(who) ? '你' : who || '同事', text: cut(text, 20) || '附件', found: !!ask }
+}
+function jumpTo(id) {
+  const el = list.value?.querySelector(`[data-mid="${CSS.escape(String(id))}"]`)
+  if (!el) return
+  el.scrollIntoView({ block: 'center', behavior: 'smooth' })
+  el.classList.remove('agent-flash')
+  void el.offsetWidth
+  el.classList.add('agent-flash')
+}
+
+// ---------------------------------------------------------------- 回答里的「在左侧打开」
+
+const jumpFlash = ref('')
+let jumpTimer = null
+async function onListClick(e) {
+  const link = e.target.closest?.('a.md-jump')
+  if (!link) return
+  e.preventDefault()
+  const path = (link.dataset.route || '').replace(/^#/, '')
+  if (!path.startsWith('/')) return
+  if (overlay.value) collapsed.value = true
+  await router.push(path).catch(() => {})
+  jumpFlash.value = link.textContent.replace(/^\s*在左侧打开\s*[·・:：]?\s*/, '').trim() || '对应页面'
+  clearTimeout(jumpTimer)
+  jumpTimer = setTimeout(() => { jumpFlash.value = '' }, 1000)
+}
+
+// ---------------------------------------------------------------- 实时事件（群聊、别人的轮次、任务、卡片、界面和数据变化）
 
 let closeEvents = () => {}
 function connectEvents() {
@@ -735,8 +933,10 @@ function onLive(name, data) {
   if (name === 'hello') {
     if (Array.isArray(data.users)) online.value = data.users.filter(Boolean)
     setCosts(data.costs)
+    setTasks(data.tasks)
   } else if (name === 'costs') setCosts(data)
-  else if (name === 'presence') online.value = (data.users || []).filter(Boolean)
+  else if (name === 'presence' || name === 'users') online.value = (Array.isArray(data) ? data : data.users || []).filter(Boolean)
+  else if (name === 'task') putTask(data)
   else if (name === 'message') onRemoteMessage(data)
   else if (name === 'turn') onRemoteTurn(data)
   else if (name === 'card_update') onCardUpdate(data)
@@ -748,10 +948,10 @@ function onRemoteMessage(data) {
   const m = data.message
   if (!m) return
   const runId = data.run_id || m.run_id || ''
-  if ((runId && ownRuns.has(runId)) || (m.id && ownMessages.has(m.id))) return
+  if ((runId && ownRuns.has(runId)) || (m.id && ownMessages.has(String(m.id)))) return
   const fromColleague = m.role === 'user' && !isSelf(m.user)
   if (data.thread_id === GROUP && fromColleague && userName.value && (m.text || '').includes(`@${userName.value}`)) {
-    alertHidden(`${m.user || '同事'} 在群里提到了你`, m.text || '[图片]', `mention-${m.id || Date.now()}`)
+    alertHidden(`${m.user || '同事'} 在群里提到了你`, m.text || '[附件]', `mention-${m.id || Date.now()}`)
   }
   if (data.thread_id !== threadId.value) {
     if (data.thread_id === GROUP && fromColleague) groupUnread.value += 1
@@ -764,7 +964,8 @@ function onRemoteMessage(data) {
     // 别人那一轮一直在跟着 turn 显示，最终的回答落库后把它收成正式消息，不再另加一条。
     const live = messages.value.find(x => x.remote && !x.id && (runId ? x.runId === runId : true))
     if (live) {
-      Object.assign(live, { id: m.id || '', text: m.text || live.text, streaming: false, at: m.at || live.at })
+      Object.assign(live, { id: m.id || '', text: m.text || live.text, streaming: false, at: m.at || live.at, receipt: m.receipt || live.receipt })
+      if (m.steps?.length) live.steps = m.steps.map(s => ({ ...s }))
       if (m.cards?.length) live.cards = m.cards.map(c => ({ ...c }))
       follow()
       return
@@ -954,6 +1155,11 @@ function clock(value) {
   const hm = timeFormat.format(d)
   return dayFormat.format(d) === dayFormat.format(Date.now()) ? hm : `${dateFormat.format(d)} ${hm}`
 }
+// 任务和一轮回答的用时按整秒说：「8秒」「1分05秒」。
+function seconds(ms) {
+  const s = Math.max(1, Math.round(Number(ms) / 1000))
+  return s < 60 ? `${s}秒` : `${Math.floor(s / 60)}分${String(s % 60).padStart(2, '0')}秒`
+}
 function duration(ms) {
   if (ms == null || Number.isNaN(Number(ms))) return ''
   const n = Number(ms)
@@ -981,6 +1187,7 @@ function onEsc(e) {
   e.stopPropagation()
   if (preview.value) preview.value = ''
   else if (menuOpen.value) menuOpen.value = false
+  else if (tasksOpen.value) tasksOpen.value = false
   else if (mentionOpen.value) mentionOpen.value = false
   else if (historyOpen.value) historyOpen.value = false
   else if (askingName.value) { askingName.value = false; pendingSend = null }
@@ -1017,6 +1224,9 @@ onUnmounted(() => {
   listObserver?.disconnect()
   clearTimeout(statusTimer)
   clearTimeout(reloadTimer)
+  clearTimeout(jumpTimer)
+  clearInterval(tick)
+  for (const a of attachments.value) removeAttachment(a)
   window.removeEventListener('focus', guardFocus, true)
   window.removeEventListener('resize', onResize)
   document.removeEventListener('selectionchange', onSelection)
@@ -1138,9 +1348,30 @@ onUnmounted(() => {
         </div>
         <span v-else-if="threadTitle && messages.length" class="agent-topic-title truncate" :title="threadTitle">{{ threadTitle }}</span>
       </div>
+      <div v-if="activeTasks.length" ref="taskBox" class="agent-tasks">
+        <button type="button" class="agent-tasks-bar" :aria-expanded="tasksOpen" @click="tasksOpen = !tasksOpen">
+          <LoaderCircle class="agent-spinner" :size="12" aria-hidden="true" />
+          <b>{{ activeTasks.length }} 个任务进行中</b>
+          <span class="truncate">{{ activeTasks[activeTasks.length - 1].line }}</span>
+          <ChevronRight class="agent-caret" :class="{ open: tasksOpen }" :size="12" aria-hidden="true" />
+        </button>
+        <div v-if="tasksOpen" class="agent-tasks-list" role="list">
+          <article v-for="t in activeTasks" :key="t.run_id" class="agent-task-row" role="listitem" :data-status="t.status">
+            <header>
+              <span class="agent-avatar" :style="{ background: tint(t.user || '同事') }" aria-hidden="true">{{ initial(t.user || '同事') }}</span>
+              <b class="truncate">{{ taskWho(t) }}</b>
+              <span class="agent-task-state">{{ TASK_STATUS[t.status] || t.status }}</span>
+              <time class="num">{{ taskTime(t) }}</time>
+              <button v-if="RUNNING.has(t.status)" type="button" class="agent-task-stop" :disabled="t.stopping" :title="`停止${taskWho(t) === '你' ? '' : ` ${taskWho(t)} 的`}这个任务`" @click="stopTask(t)"><Square :size="8" fill="currentColor" aria-hidden="true" />停止</button>
+            </header>
+            <p class="agent-task-q" :title="t.question">{{ t.question }}</p>
+            <p v-if="t.line" class="agent-task-line">{{ t.line }}</p>
+          </article>
+        </div>
+      </div>
 
       <div class="agent-scroll">
-        <div ref="list" class="agent-list" @scroll="onScroll">
+        <div ref="list" class="agent-list" @scroll="onScroll" @click="onListClick">
           <div v-if="loadingThread" class="agent-loading"><span class="spin" /> 正在打开这段对话…</div>
 
           <section v-else-if="!messages.length && inGroup" class="agent-empty">
@@ -1174,8 +1405,8 @@ onUnmounted(() => {
           </section>
 
           <template v-else>
-            <template v-for="m in messages" :key="m.key">
-              <article v-if="m.role === 'user'" class="agent-user" :class="{ chat: inGroup, mine: inGroup && isMine(m) }">
+            <template v-for="(m, i) in messages" :key="m.key">
+              <article v-if="m.role === 'user'" class="agent-user" :class="{ chat: inGroup, mine: inGroup && isMine(m) }" :data-mid="m.id">
                 <header class="agent-meta">
                   <span class="agent-who" :style="inGroup && !isMine(m) ? { background: tint(m.user || '同事') } : null">{{ !inGroup || isMine(m) ? '你' : m.user || '同事' }}</span>
                   <time class="num">{{ clock(m.at) }}</time>
@@ -1185,15 +1416,45 @@ onUnmounted(() => {
                     <button type="button" title="查看大图" @click="preview = src"><img :src="src" alt="附图" @load="follow()"></button>
                   </li>
                 </ul>
+                <ul v-if="m.files.some(f => f.kind === 'image')" class="agent-thumbs">
+                  <li v-for="f in m.files.filter(f => f.kind === 'image')" :key="f.file_id">
+                    <button type="button" title="查看大图" @click="preview = f.url"><img :src="f.url" :alt="f.name" @load="follow()"></button>
+                  </li>
+                </ul>
+                <ul v-if="m.files.some(f => f.kind !== 'image')" class="agent-files">
+                  <li v-for="f in m.files.filter(f => f.kind !== 'image')" :key="f.file_id">
+                    <a class="agent-file" :data-type="docType(f.name).key" :href="f.url" :download="f.name" :title="`下载 ${f.name}`">
+                      <component :is="docType(f.name).icon" :size="16" aria-hidden="true" />
+                      <span class="agent-file-name truncate">{{ f.name }}</span>
+                      <small class="num">{{ docType(f.name).label }}{{ f.size ? ` · ${fileSize(f.size)}` : '' }}</small>
+                    </a>
+                  </li>
+                </ul>
                 <p v-if="m.text" class="agent-user-text">{{ m.text }}</p>
+                <p v-if="m.merged" class="agent-merged">{{ m.merged.asker }} 正在查同样的问题，结果出来一起看</p>
+                <div v-for="t in [taskCard(m)].filter(Boolean)" :key="t.run_id" class="agent-task-card" :data-status="t.status">
+                  <span class="agent-task-state">{{ TASK_STATUS[t.status] || t.status }}</span>
+                  <span v-if="t.line && RUNNING.has(t.status) && !liveReplyOf(t.run_id)" class="agent-task-line truncate">{{ t.line }}</span>
+                  <span v-if="taskTime(t)" class="num">{{ taskTime(t) }}</span>
+                  <span v-if="Number(t.cost_cny) > 0" class="num">{{ yuan(t.cost_cny) }}</span>
+                  <span v-if="followersText(t)" class="agent-task-followers">{{ followersText(t) }} 也在等</span>
+                  <button v-if="isMineTask(t) && RUNNING.has(t.status)" type="button" class="link" @click="startSteer(t)">补充</button>
+                </div>
               </article>
 
               <article v-else class="agent-reply" :class="{ live: m.streaming }">
                 <header class="agent-meta">
                   <span class="agent-who ai"><i />台账助手</span>
                 </header>
+                <button v-for="q in [quoteOf(m, i)].filter(Boolean)" :key="q.id" type="button" class="agent-quote" :disabled="!q.found" :title="q.found ? '看原问题' : ''" @click="jumpTo(q.id)">
+                  <Reply :size="12" aria-hidden="true" /><span class="truncate">回复 {{ q.who }}：{{ q.text }}</span>
+                </button>
 
-                <div v-if="m.steps.length" class="agent-steps">
+                <p v-if="nowStep(m)" class="agent-now"><LoaderCircle class="agent-spinner" :size="11" aria-hidden="true" /><span class="truncate">{{ nowStep(m).label }}</span></p>
+                <button v-else-if="!m.streaming && m.steps.length" type="button" class="agent-trace" :aria-expanded="traceOpen(m)" @click="toggleTrace(m)">
+                  <span>{{ traceSummary(m) }}</span><ChevronRight class="agent-caret" :class="{ open: traceOpen(m) }" :size="11" aria-hidden="true" />
+                </button>
+                <div v-if="!m.streaming && m.steps.length && traceOpen(m)" class="agent-steps">
                   <div v-for="s in m.steps" :key="s.id" class="agent-step" :data-status="stepState(m, s)">
                     <component
                       :is="s.detail ? 'button' : 'div'"
@@ -1215,12 +1476,12 @@ onUnmounted(() => {
                   </div>
                 </div>
 
-                <div v-if="m.streaming && !m.text && !m.steps.length" class="agent-thinking">
+                <div v-if="m.streaming && !m.text && !m.steps.length && !m.cards.length" class="agent-thinking">
                   <span class="agent-dots"><i /><i /><i /></span>{{ m.remote ? '助手正在回答…' : '正在看你说的情况…' }}
                 </div>
 
                 <!-- renderMarkdown 先整体转义 HTML 再排版，v-html 里不会有回答自带的标签 -->
-                <div v-if="m.text || (m.streaming && m.steps.length)" class="agent-md" v-html="renderMarkdown(m.text, { caret: m.streaming })" />
+                <div v-if="m.text" class="agent-md" v-html="renderMarkdown(m.text, { caret: m.streaming })" />
 
                 <section v-for="c in m.cards" :key="c.card_id" class="agent-card" :data-status="c.status">
                   <header>
@@ -1256,7 +1517,7 @@ onUnmounted(() => {
                   <button v-if="m.retry && m === lastReply && !streaming" type="button" class="link" @click="retry(m)">重试</button>
                 </p>
                 <p v-if="m.stopped" class="agent-stopped">已停止。查到的内容都留着，可以接着说。</p>
-                <p v-if="m.receipt && receipt(m.receipt)" class="agent-receipt num" :title="receiptTitle(m.receipt)">{{ receipt(m.receipt) }}</p>
+                <p v-if="m.receipt && !m.steps.length && receipt(m.receipt)" class="agent-receipt num" :title="receiptTitle(m.receipt)">{{ receipt(m.receipt) }}</p>
               </article>
             </template>
           </template>
@@ -1283,10 +1544,15 @@ onUnmounted(() => {
           <span class="truncate">附上左边选中的：「{{ picked }}」</span>
           <button type="button" class="agent-x" aria-label="不附选中的内容" @click="picked = ''"><X :size="12" /></button>
         </div>
-        <ul v-if="attachments.length" class="agent-thumbs drafts">
-          <li v-for="a in attachments" :key="a.id">
-            <span v-if="a.loading" class="agent-thumb-wait"><span class="spin" /></span>
-            <button v-else type="button" title="查看大图" @click="preview = a.data_url"><img :src="a.data_url" :alt="a.name"></button>
+        <ul v-if="attachments.length" class="agent-drafts" aria-label="待发的附件">
+          <li v-for="a in attachments" :key="a.id" class="agent-draft" :class="[a.kind, a.state]" :data-type="a.kind === 'image' ? 'image' : docType(a.name).key" :title="a.error ? `${a.name}：${a.error}` : a.name">
+            <button v-if="a.kind === 'image'" type="button" class="agent-draft-thumb" title="查看大图" @click="preview = a.thumb || a.url"><img :src="a.thumb || a.url" :alt="a.name"></button>
+            <template v-else>
+              <component :is="docType(a.name).icon" :size="16" class="agent-draft-icon" aria-hidden="true" />
+              <span class="agent-draft-text"><span class="truncate">{{ a.name }}</span><small class="num">{{ fileSize(a.size) }}</small></span>
+            </template>
+            <span v-if="a.state === 'uploading'" class="agent-draft-wait" :aria-label="`正在上传 ${Math.round(a.progress * 100)}%`"><span class="spin" /><small v-if="a.progress > 0 && a.progress < 1" class="num">{{ Math.round(a.progress * 100) }}%</small></span>
+            <button v-else-if="a.state === 'error'" type="button" class="agent-draft-retry" :disabled="!a.file" @click="upload(a)"><RotateCw :size="11" aria-hidden="true" />重试</button>
             <button type="button" class="agent-thumb-x" :aria-label="`移除 ${a.name}`" @click="removeAttachment(a)"><X :size="10" /></button>
           </li>
         </ul>
@@ -1295,14 +1561,14 @@ onUnmounted(() => {
             ref="textarea"
             v-model="draft"
             rows="1"
-            :placeholder="inGroup ? '直接提问助手会回答；以 @同事 开头只发给同事' : '描述你发现的问题，可粘贴截图…'"
+            :placeholder="steerRun ? '补充说明，助手接着查，不用从头再来' : inGroup ? '直接提问助手会回答；以 @同事 开头只发给同事' : '描述你发现的问题，可粘贴截图或文件…'"
             :aria-label="inGroup ? '发到公共群聊的消息' : '给台账助手的消息'"
             @keydown="onKeydown"
             @paste="onPaste"
           />
         </div>
         <div class="agent-toolbar">
-          <button type="button" class="agent-tool" title="附上图片" @click="fileInput?.click()"><Paperclip :size="13" aria-hidden="true" />附件</button>
+          <button type="button" class="agent-tool" :title="`附上文件（每个不超过 50MB，一次最多 ${MAX_FILES} 个）。${FILE_HINT}`" @click="fileInput?.click()"><Paperclip :size="13" aria-hidden="true" />附件</button>
           <button type="button" class="agent-tool" :class="{ on: shotTip }" title="怎么截图" @click="shotTip = !shotTip"><Camera :size="13" aria-hidden="true" />截图</button>
           <div v-if="inGroup" ref="mentionBox" class="agent-mention">
             <button type="button" class="agent-tool" :class="{ on: mentionOpen || toColleague(draft) }" title="@一位在线同事，这条只发给同事" :aria-expanded="mentionOpen" @click="mentionOpen = !mentionOpen"><AtSign :size="13" aria-hidden="true" />同事</button>
@@ -1318,19 +1584,26 @@ onUnmounted(() => {
             </div>
           </div>
           <span class="agent-hint">{{ inGroup ? '' : 'Enter 发送 · Shift+Enter 换行' }}</span>
-          <button v-if="streaming" type="button" class="agent-send stop" @click="stop"><Square :size="9" fill="currentColor" aria-hidden="true" />停止</button>
+          <template v-if="steerRun || streaming">
+            <button v-if="steerRun" type="button" class="agent-send" :class="{ ready: canSteer }" :disabled="!canSteer" title="追加到正在查的这一轮，不用从头再来" @click="send()">补充<CornerDownRight :size="13" aria-hidden="true" /></button>
+            <button type="button" class="agent-send stop" @click="stop"><Square :size="9" fill="currentColor" aria-hidden="true" />停止</button>
+          </template>
           <button v-else type="button" class="agent-send" :class="{ ready: canSend }" :disabled="!canSend" @click="send()">发送<ArrowUp :size="13" aria-hidden="true" /></button>
         </div>
         <p v-if="shotTip" class="agent-shot-tip">
           <template v-if="isMac">按 <kbd>⌘</kbd><kbd>⇧</kbd><kbd>4</kbd> 截取屏幕，</template>
           <template v-else>按 <kbd>Win</kbd>+<kbd>Shift</kbd>+<kbd>S</kbd> 截取屏幕，</template>
-          回到这里按 <kbd>{{ isMac ? '⌘' : 'Ctrl' }}</kbd>+<kbd>V</kbd> 粘贴。图片也可以直接拖进来。
+          回到这里按 <kbd>{{ isMac ? '⌘' : 'Ctrl' }}</kbd>+<kbd>V</kbd> 粘贴。图片和文件也可以直接拖进来。<br>{{ FILE_HINT }}。
         </p>
-        <input ref="fileInput" type="file" accept="image/*" multiple hidden @change="onPick">
+        <input ref="fileInput" type="file" :accept="ACCEPT" multiple hidden @change="onPick">
       </footer>
 
-      <div v-if="dragDepth > 0" class="agent-drop">松开，作为附图发给助手</div>
+      <div v-if="dragDepth > 0" class="agent-drop"><b>松开，作为附件发给助手</b><small>{{ FILE_HINT }}</small></div>
     </div>
+
+    <Teleport to="body">
+      <div v-if="jumpFlash" :key="jumpFlash" class="agent-jump-flash" role="status"><span>已在左侧打开：{{ jumpFlash }}</span></div>
+    </Teleport>
 
     <div v-if="preview" class="agent-lightbox" role="dialog" aria-label="查看大图" @click="preview = ''">
       <img :src="preview" alt="附图原图" @click.stop>
@@ -1674,10 +1947,6 @@ onUnmounted(() => {
   border: 1px solid var(--n3);
   border-radius: var(--r-sm);
 }
-.agent-thumbs.drafts { margin: 8px 0 0; }
-.agent-thumbs.drafts img,
-.agent-thumb-wait { height: 52px; max-width: 96px; }
-.agent-thumb-wait { display: flex; align-items: center; justify-content: center; width: 64px; border: 1px dashed var(--n4); border-radius: var(--r-sm); }
 .agent-thumb-x,
 .agent-thumb-x:hover:not(:disabled) {
   position: absolute;
@@ -1959,6 +2228,230 @@ onUnmounted(() => {
   color: #fff;
 }
 
+/* 任务条：有任务在跑时才出现，一行高；展开的列表浮在消息上面，不把对话往下挤。 */
+.agent-tasks { position: relative; border-bottom: 1px solid var(--n2); }
+.agent-tasks-bar,
+.agent-tasks-bar:hover:not(:disabled) {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  height: 28px;
+  padding: 0 var(--s5);
+  border: 0;
+  border-radius: 0;
+  background: linear-gradient(90deg, var(--accent-bg), transparent 70%);
+  color: var(--n6);
+  font: 400 11.5px/1 var(--sans);
+  text-align: left;
+}
+.agent-tasks-bar b { flex: none; font-weight: 560; color: var(--n8); }
+.agent-tasks-bar .truncate { flex: 1; min-width: 0; }
+.agent-tasks-bar:hover:not(:disabled) b { color: var(--accent); }
+.agent-tasks-list {
+  position: absolute;
+  top: 100%;
+  left: 8px;
+  right: 8px;
+  z-index: 25;
+  max-height: min(360px, 55vh);
+  overflow-y: auto;
+  padding: 4px;
+  border: 1px solid var(--n3);
+  border-radius: var(--r-md);
+  background: var(--n0);
+  box-shadow: var(--shadow);
+}
+.agent-task-row { padding: 8px 8px 7px; border-radius: var(--r-sm); }
+.agent-task-row + .agent-task-row { border-top: 1px solid var(--n2); }
+.agent-task-row header { display: flex; align-items: center; gap: 6px; font-size: 12px; }
+.agent-task-row header b { min-width: 0; font-weight: 560; color: var(--n8); }
+.agent-task-row header time { margin-left: auto; font-size: 11px; color: var(--n5); }
+.agent-task-row .agent-avatar { width: 18px; height: 18px; margin: 0; border: 0; font-size: 9.5px; }
+.agent-task-q { margin: 3px 0 0 24px; font-size: 12.5px; color: var(--n9); line-height: 1.5; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.agent-task-line { margin: 1px 0 0 24px; font-size: 11.5px; color: var(--n5); }
+.agent-task-state { flex: none; padding: 0 6px; border-radius: 3px; background: var(--n2); color: var(--n7); font-size: 10.5px; line-height: 17px; }
+[data-status='running'] > .agent-task-state,
+[data-status='running'] > header > .agent-task-state { background: var(--accent-bg); color: var(--accent); }
+[data-status='waiting'] > .agent-task-state,
+[data-status='waiting'] > header > .agent-task-state { background: var(--warn-bg); color: var(--warn); }
+[data-status='failed'] > .agent-task-state { background: var(--bad-bg); color: var(--bad); }
+.agent-task-stop,
+.agent-task-stop:hover:not(:disabled) {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex: none;
+  height: 20px;
+  padding: 0 7px;
+  border: 1px solid var(--n3);
+  border-radius: 999px;
+  background: var(--n0);
+  color: var(--n7);
+  font: 500 11px/1 var(--sans);
+}
+.agent-task-stop:hover:not(:disabled) { border-color: var(--n8); color: var(--n9); }
+
+/* 群里提问底下的任务小卡片 */
+.agent-task-card {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 8px;
+  max-width: 100%;
+  margin-top: 6px;
+  padding: 3px 8px;
+  border-radius: var(--r-sm);
+  background: var(--n1);
+  color: var(--n6);
+  font-size: 11.5px;
+  line-height: 1.5;
+}
+.agent-task-card .agent-task-line { margin: 0; max-width: 220px; }
+.agent-task-card .link { font-size: 11.5px; }
+.agent-task-followers { color: var(--n7); }
+.agent-merged { margin-top: 6px; font-size: 12px; color: var(--n6); }
+.agent-user.agent-flash { animation: agent-flash 1.2s ease; }
+@keyframes agent-flash { 0%, 40% { background: var(--accent-bg); } 100% { background: transparent; } }
+
+/* 回答上方：引用原问题、正在做的那一步、查完后的一行摘要 */
+.agent-quote,
+.agent-quote:hover:not(:disabled) {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  max-width: 100%;
+  margin: -2px 0 8px;
+  padding: 3px 8px;
+  border: 0;
+  border-left: 2px solid var(--n4);
+  border-radius: 0 var(--r-sm) var(--r-sm) 0;
+  background: var(--n1);
+  color: var(--n6);
+  font: 400 12px/1.5 var(--sans);
+  text-align: left;
+}
+.agent-quote:hover:not(:disabled) { border-left-color: var(--accent); color: var(--n8); }
+.agent-quote:disabled { opacity: 1; cursor: default; }
+.agent-quote svg { flex: none; }
+.agent-now { display: flex; align-items: center; gap: 6px; margin: 0 0 8px; font-size: 12.5px; color: var(--n5); }
+.agent-now .agent-spinner { color: var(--n5); }
+.agent-trace,
+.agent-trace:hover:not(:disabled) {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin: 0 0 8px;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--n5);
+  font: 400 11.5px/1.6 var(--sans);
+}
+.agent-trace:hover:not(:disabled) { color: var(--n8); }
+.agent-trace + .agent-steps { margin-top: -2px; }
+/* 秒回的闲聊用不着「正在看」，等一会儿还没有字再出来。 */
+.agent-thinking { animation: agent-late .2s ease .8s both; }
+@keyframes agent-late { from { opacity: 0; } to { opacity: 1; } }
+
+/* 回答里「在左侧打开」的链接 */
+.agent-md :deep(a.md-jump) {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin: 2px 2px;
+  padding: 1px 10px;
+  border: 1px solid #c9d6fb;
+  border-radius: 999px;
+  background: var(--accent-bg);
+  color: var(--accent);
+  font-size: 12.5px;
+  font-weight: 560;
+  line-height: 1.7;
+  text-decoration: none;
+  vertical-align: baseline;
+}
+.agent-md :deep(a.md-jump)::before { content: '←'; font-weight: 400; }
+.agent-md :deep(a.md-jump:hover) { border-color: var(--accent); background: var(--accent); color: #fff; }
+
+/* 附件：消息里的文件卡片和输入框上方待发的 */
+.agent-files { list-style: none; display: flex; flex-direction: column; gap: 6px; margin: 0 0 8px; padding: 0; }
+.agent-user.mine .agent-files { align-items: flex-end; }
+.agent-file {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  column-gap: 8px;
+  align-items: center;
+  width: 240px;
+  max-width: 100%;
+  padding: 7px 10px;
+  border: 1px solid var(--n3);
+  border-radius: var(--r-sm);
+  background: var(--n0);
+  color: var(--n8);
+  text-align: left;
+  text-decoration: none;
+}
+.agent-file svg { grid-row: span 2; }
+.agent-file-name { font-size: 12.5px; font-weight: 500; line-height: 1.4; }
+.agent-file small { font-size: 11px; color: var(--n5); line-height: 1.4; }
+.agent-file:hover { border-color: var(--n4); background: var(--n1); }
+[data-type='sheet'] > svg { color: #1d7a46; }
+[data-type='word'] > svg { color: #2b5fd9; }
+[data-type='pdf'] > svg { color: #c8372d; }
+[data-type='slides'] > svg { color: #d0661a; }
+[data-type='zip'] > svg,
+[data-type='other'] > svg { color: var(--n6); }
+.agent-drafts { list-style: none; display: flex; flex-wrap: wrap; gap: 8px; margin: 8px 0 0; padding: 0; }
+.agent-draft { position: relative; display: flex; align-items: center; gap: 6px; height: 52px; border-radius: var(--r-sm); }
+.agent-draft.file { width: 180px; padding: 0 10px; border: 1px solid var(--n3); background: var(--n0); }
+.agent-draft.error { border-color: #f2b8b5; }
+.agent-draft-thumb,
+.agent-draft-thumb:hover:not(:disabled) { display: block; height: 100%; padding: 0; border: 0; background: none; cursor: zoom-in; }
+.agent-draft-thumb img { display: block; height: 52px; max-width: 96px; object-fit: cover; border: 1px solid var(--n3); border-radius: var(--r-sm); }
+.agent-draft-icon { flex: none; }
+.agent-draft-text { display: flex; flex-direction: column; min-width: 0; flex: 1; font-size: 12px; line-height: 1.4; color: var(--n8); }
+.agent-draft-text small { font-size: 10.5px; color: var(--n5); }
+.agent-draft-wait { display: inline-flex; align-items: center; gap: 4px; flex: none; font-size: 10.5px; color: var(--n6); }
+.agent-draft.image .agent-draft-wait { position: absolute; inset: 0; justify-content: center; flex-direction: column; border-radius: var(--r-sm); background: rgba(255, 255, 255, .78); }
+.agent-draft-wait .spin { width: 12px; height: 12px; }
+.agent-draft-retry,
+.agent-draft-retry:hover:not(:disabled) {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  flex: none;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--bad);
+  font: 500 11px/1 var(--sans);
+}
+.agent-draft.image .agent-draft-retry { position: absolute; inset: auto 0 0; justify-content: center; padding: 3px 0; border-radius: 0 0 var(--r-sm) var(--r-sm); background: rgba(255, 255, 255, .9); }
+.agent-drop { flex-direction: column; gap: 6px; padding: 0 24px; text-align: center; }
+.agent-drop small { font-size: 11.5px; font-weight: 400; color: var(--n6); line-height: 1.6; }
+
+/* 点了「在左侧打开」之后，左栏顶上亮一下，告诉人那边换了页。 */
+.agent-jump-flash {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: var(--agent-dock, 0px);
+  z-index: 4100;
+  display: flex;
+  justify-content: center;
+  padding-top: 10px;
+  pointer-events: none;
+  animation: agent-jump 1s ease forwards;
+}
+.agent-jump-flash::before { content: ''; position: absolute; top: 0; left: 0; right: 0; height: 3px; background: var(--accent); }
+.agent-jump-flash span { padding: 4px 14px; border-radius: 999px; background: var(--accent); color: #fff; font: 560 12px/1.6 var(--sans); box-shadow: 0 6px 20px rgba(37, 79, 196, .28); }
+@keyframes agent-jump {
+  0% { opacity: 0; transform: translateY(-4px); }
+  15%, 75% { opacity: 1; transform: none; }
+  100% { opacity: 0; }
+}
+
 @container (max-width: 330px) {
   .agent-hint { display: none; }
 }
@@ -1966,7 +2459,8 @@ onUnmounted(() => {
   .agent-md :deep(.md-caret),
   .agent-field.live::after,
   .agent-dots i,
-  .agent-spinner { animation: none; }
+  .agent-spinner,
+  .agent-user.agent-flash { animation: none; }
 }
 </style>
 

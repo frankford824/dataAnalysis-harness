@@ -17,6 +17,11 @@ const label = computed(() => {
 const models = computed(() => [...(summary.value?.models || [])].sort((a, b) => (Number(b.cost) || 0) - (Number(a.cost) || 0)))
 
 const count = n => (n == null ? '—' : Number(n).toLocaleString('zh-CN'))
+// 缓存命中率 0~1；没有数据时是 null。
+const hasRate = v => v != null && v !== '' && !Number.isNaN(Number(v))
+const rate = v => (hasRate(v) ? `${Math.round(Number(v) * 100)}%` : '—')
+const showCache = computed(() => hasRate(summary.value?.cache_rate))
+const sourceCache = computed(() => (summary.value?.sources || []).some(s => hasRate(s.cache_rate)))
 // token 数以「万」为单位，不到 0.1 万的写成 <0.1。
 function wan(n) {
   const v = Number(n) || 0
@@ -59,18 +64,22 @@ const updated = computed(() => {
           <span>今日 <b class="num">{{ yuan(summary.today_cny) }}</b></span>
           <span>最近一小时 <b class="num">{{ yuan(summary.last_hour_cny) }}</b></span>
         </div>
+        <p v-if="showCache" class="cost-cache" title="重复用到的内容按缓存价计费，命中越高越省">
+          缓存命中 <b class="num">{{ rate(summary.cache_rate) }}</b><template v-if="Number(summary.cache_saved_cny) > 0"> · 本月省 <b class="num">{{ yuan(summary.cache_saved_cny) }}</b></template>
+        </p>
       </div>
 
       <section v-if="summary.sources?.length">
         <h4>按来源</h4>
         <table class="cost-table">
-          <thead><tr><th>来源</th><th>本月</th><th>今日</th><th>调用次数</th></tr></thead>
+          <thead><tr><th>来源</th><th>本月</th><th>今日</th><th>调用次数</th><th v-if="sourceCache">缓存命中</th></tr></thead>
           <tbody>
             <tr v-for="s in summary.sources" :key="s.key">
               <td>{{ s.label }}</td>
               <td class="num">{{ yuan(s.month_cny) }}</td>
               <td class="num">{{ yuan(s.today_cny) }}</td>
               <td class="num">{{ count(s.calls) }}</td>
+              <td v-if="sourceCache" class="num">{{ rate(s.cache_rate) }}</td>
             </tr>
           </tbody>
         </table>
@@ -136,6 +145,8 @@ b.bad { color: var(--bad); }
 .cost-bar.bad span { background: var(--bad); }
 .cost-stats { display: flex; gap: 20px; color: var(--n6); }
 .cost-stats b { color: var(--n8); font-weight: 600; margin-left: 4px; }
+.cost-cache { margin: 8px 0 0; color: var(--n6); }
+.cost-cache b { color: var(--ok, var(--n8)); font-weight: 600; }
 section h4 { margin: 12px 0 6px; font-size: 11.5px; font-weight: 560; letter-spacing: .06em; color: var(--n5); }
 .cost-table { width: 100%; border-collapse: collapse; }
 .cost-table th, .cost-table td { padding: 5px 4px; border-bottom: 1px solid var(--n2); text-align: right; white-space: nowrap; }

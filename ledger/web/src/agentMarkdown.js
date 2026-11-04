@@ -1,6 +1,6 @@
 /* 助手回答用的极简 markdown。
  *
- * 先整体转义 HTML，再只认少数几种写法：段落、标题、粗体、斜体、行内代码、链接、
+ * 先整体转义 HTML，再只认少数几种写法：段落、标题、粗体、斜体、行内代码、链接（外链和左栏页面）、
  * 列表、引用、表格、分隔线。转义在最前面，所以回答里无论夹带什么标签都只会原样
  * 显示成文字，v-html 不会执行任何东西。
  */
@@ -12,6 +12,8 @@ function inline(text) {
   const codes = []
   let s = text.replace(/`([^`\n]+)`/g, (_, code) => `\u0000${codes.push(code) - 1}\u0000`)
   s = s
+    // 「#/路由」的链接是让左边打开某一页，面板拦下点击交给路由，不整页跳转。
+    .replace(/\[([^\]\n]+)\]\((#\/[^)\s]*)\)/g, '<a href="$2" class="md-jump" data-route="$2">$1</a>')
     .replace(/\[([^\]\n]+)\]\((https?:\/\/[^)\s]+)\)/g, '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>')
     .replace(/\*\*([^*\n]+?)\*\*/g, '<strong>$1</strong>')
     .replace(/(^|[^*\w])\*([^*\s][^*\n]*?)\*(?![*\w])/g, '$1<em>$2</em>')

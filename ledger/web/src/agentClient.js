@@ -67,16 +67,44 @@ export const agentApi = {
   status: () => call('/api/agent/status'),
   threads: () => call('/api/agent/threads'),
   thread: id => call(`/api/agent/threads/${encodeURIComponent(id)}`),
-  stop: (threadId, runId) => call('/api/agent/stop', post({ thread_id: threadId, ...(runId ? { run_id: runId } : {}) })),
+  stop: (threadId, runId, user = '') => call('/api/agent/stop', post({ thread_id: threadId, ...(runId ? { run_id: runId } : {}), user })),
+  // 正在查的这一轮里追加一句：{status:'queued'} 是接上了；{status:'finished'} 是那一轮已经结束。
+  steer: body => call('/api/agent/steer', post(body)),
   confirmCard: (id, user) => call(`/api/agent/cards/${encodeURIComponent(id)}/confirm`, post({ user })),
   rejectCard: (id, user) => call(`/api/agent/cards/${encodeURIComponent(id)}/reject`, post({ user })),
   uiHistory: () => call('/api/agent/ui/history'),
   uiUndo: user => call('/api/agent/ui/undo', post({ user })),
 }
 
-const LIVE_EVENTS = ['hello', 'presence', 'message', 'turn', 'card_update', 'ui_updated', 'data_updated', 'costs']
+/** 传一个附件。请求体就是文件本身，不是表单；onProgress 收到 0~1。
+ *  返回 { promise, abort }，promise 落到 { file_id, name, size, kind, url }。 */
+export function uploadFile(file, name, onProgress) {
+  const xhr = new XMLHttpRequest()
+  const promise = new Promise((resolve, reject) => {
+    xhr.open('POST', `/api/agent/files?name=${encodeURIComponent(name)}`)
+    xhr.setRequestHeader('content-type', file.type || 'application/octet-stream')
+    xhr.upload.onprogress = e => { if (e.lengthComputable) onProgress?.(e.loaded / e.total) }
+    xhr.onload = () => {
+      let body = null
+      try {
+        body = xhr.responseText ? JSON.parse(xhr.responseText) : null
+      } catch {
+        body = null
+      }
+      if (xhr.status >= 200 && xhr.status < 300 && body?.file_id) return resolve(body)
+      const detail = typeof body?.detail === 'string' && CJK.test(body.detail) ? body.detail : ''
+      reject(fail(Object.assign(new Error(detail || (xhr.status === 413 ? '文件太大了' : '没传上，可以再试一次')), { status: xhr.status })))
+    }
+    xhr.onerror = () => reject(fail(networkError()))
+    xhr.onabort = () => reject(Object.assign(new Error('已取消'), { name: 'AbortError' }))
+    xhr.send(file)
+  })
+  return { promise, abort: () => xhr.abort() }
+}
 
-/** 订阅大家共用的实时事件：谁在线、群里新消息、任何一轮的进度、确认卡被谁处理、
+const LIVE_EVENTS = ['hello', 'presence', 'users', 'message', 'turn', 'task', 'card_update', 'ui_updated', 'data_updated', 'costs']
+
+/** 订阅大家共用的实时事件：谁在线、群里新消息、任何一轮的进度、任务池、确认卡被谁处理、
  *  界面和数据变了、模型费用。断了 EventSource 自己会重连，这里不另做；连上、断开
  *  通过 onState(true/false) 告诉调用方。返回关闭函数。 */
 export function openEvents(user, onEvent, onState = () => {}) {
