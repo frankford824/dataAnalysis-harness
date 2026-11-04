@@ -326,7 +326,14 @@ class Context:
         targets={m.id for m in metrics if m.id in REFUNDS and m.posting_basis=='order_number'}
         if not targets or facts.is_empty():return facts
         if facts.filter(pl.col('metric_id').is_in(targets)&(pl.col('store')==self.store.name)).is_empty():return facts
-        self.history();rows=facts.to_dicts();identities={};native_groups=defaultdict(list)
+        self.history();rows=facts.to_dicts();identities={};native_groups=defaultdict(list);archives={}
+        def required_archive(entry):
+            key=id(entry)
+            if key not in archives:
+                relative=self.ws.facts_path(entry['owner']['run_id']).relative_to(self.ws.root).as_posix()
+                artifact=next((a for a in (entry.get('manifest') or {}).get('artifacts',[]) if a.get('path')==relative),None)
+                archives[key]=(relative,artifact.get('sha') if artifact else None)
+            return archives[key]
         for index,row in enumerate(rows):
             if row['metric_id'] not in targets or row['store']!=self.store.name:continue
             identity=self.current_identity(row,ingestion);identities[index]=identity
@@ -359,10 +366,9 @@ class Context:
             except (ValueError,TypeError,InvalidOperation,KeyError):status,reason,owner='pending','refund_amount_or_identity_unverified',None
             missing=[]
             for entry in uncertain:
-                run_id=entry['owner']['run_id'];relative=self.ws.facts_path(run_id).relative_to(self.ws.root).as_posix()
-                artifact=next((a for a in (entry.get('manifest') or {}).get('artifacts',[]) if a.get('path')==relative),None)
+                relative,expected_sha=required_archive(entry)
                 missing.append({'owner':entry['owner'],'reason':entry['reason'],'required_archive':relative,
-                                'expected_sha':artifact.get('sha') if artifact else None})
+                                'expected_sha':expected_sha})
             metadata={'schema':SCHEMA,**identity,'status':status,'reason':reason,'owner':owner,
                 'uncertain_sources':missing,
                 'current_period':row['period'],'original_amount':str(row['amount']),
