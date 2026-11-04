@@ -6,17 +6,18 @@ import {api} from '../api'
 import {stamp} from '../format'
 import {amountText as expenseText,basisSourceLabel,canStart,identityLabel,memberRows,percentage,quantityLabel,trialState} from '../freightShipment'
 import {useLatest} from './ui/useLatest'
+import {useLivePoll,useRefresh} from '../refresh'
 import {readStoreGroups,writeStoreGroups} from '../freightStoreGroups'
 import LedgerTable from './ui/LedgerTable.vue'
 import FilePreviewPanel from './FilePreviewPanel.vue'
 
-const props=defineProps({period:String,storeId:{type:String,default:''},platform:{type:String,default:''},refreshToken:Number})
+const props=defineProps({period:String,storeId:{type:String,default:''},platform:{type:String,default:''}})
 const route=useRoute(),router=useRouter()
 const job=ref(null),data=ref(null),selectedJob=ref(''),availableJob=ref(''),reason=ref(''),term=ref(''),applied=ref(''),page=ref(1)
 const loading=ref(false),starting=ref(false),exporting=ref(false),unmatchedExporting=ref(false),error=ref(''),pollError=ref(false)
 const detail=ref(null),detailLoading=ref(false),detailError=ref(''),showDetail=ref(false),preview=ref(null)
 const stateRequest=useLatest(),resultRequest=useLatest(),detailRequest=useLatest()
-let serial=0,detailSerial=0,timer,alive=true
+let serial=0,detailSerial=0,alive=true
 const valid=computed(()=>/^\d{4}-(0[1-9]|1[0-2])$/.test(props.period || ''))
 const scope=computed(()=>({store_id:props.storeId,platform:props.platform,exclude_store_ids:excluded.value.join(','),only_category:onlyCategory.value,exclude_categories:excludedCategories.value.join(','),classification_view:classificationView.value}))
 const excluded=ref(typeof route.query.exclude_store_ids==='string'?route.query.exclude_store_ids.split(',').filter(Boolean):[])
@@ -152,16 +153,16 @@ function original(member){
 }
 function viewSource(source){if(source?.file_sha)preview.value={sha256:source.file_sha,file:source.file || '金额依据原表',sheet:source.sheet,row_no:source.row_no}}
 function showNew(){const id=availableJob.value;availableJob.value='';reason.value='';page.value=1;readResult(id,true)}
-onMounted(async()=>{await latest(true);if(alive)timer=setInterval(()=>{if(!document.hidden)latest()},4000)})
-onUnmounted(()=>{alive=false;clearInterval(timer);stateRequest.cancel();resultRequest.cancel();detailRequest.cancel()})
+onMounted(()=>latest(true))
+useLivePoll(active,()=>latest(),4000)
+useRefresh(()=>latest())
+onUnmounted(()=>{alive=false;stateRequest.cancel();resultRequest.cancel();detailRequest.cancel()})
 watch(()=>props.period,()=>{
   ++serial;stateRequest.cancel();resultRequest.cancel();detailRequest.cancel()
   data.value=null;job.value=null;detail.value=null;showDetail.value=false;selectedJob.value='';availableJob.value='';reason.value='';term.value='';applied.value='';page.value=1;loading.value=false
   if(valid.value)latest(true,true)
 })
 watch(()=>JSON.stringify(scope.value),()=>{detailRequest.cancel();showDetail.value=false;reason.value='';page.value=1;if(selectedJob.value)readResult(selectedJob.value,true)})
-watch(()=>props.refreshToken,()=>latest())
-
 const columns=[
   {title:'运单及店铺候选',key:'tracking_no',minWidth:220,mobileWidth:170,render:r=>h('div',{class:'shipment-id'},[
     h('strong',r.tracking_no),h('small',r.stores.length?r.stores.join('；'):'店铺未定')])},

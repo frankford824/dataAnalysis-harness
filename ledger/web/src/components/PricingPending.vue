@@ -3,6 +3,7 @@ import { computed, h, onMounted, onUnmounted, ref, watch } from 'vue'
 import { NDrawer, NDrawerContent, NInput, NButton, NDataTable, NPagination, NAlert } from 'naive-ui'
 import { api } from '../api'
 import { useLatest } from './ui/useLatest'
+import { useLivePoll, useRefresh } from '../refresh'
 import { costCoverageView } from '../costCoverageView'
 import { sourceCostText } from '../costReviewInputs'
 
@@ -32,7 +33,6 @@ const reasonName = value => ({
 const progress = ref(null), progressError = ref(''), progressRequest = useLatest()
 const calculatedAt = computed(() => progress.value?.calculated_at
   ? new Date(progress.value.calculated_at).toLocaleString('zh-CN', {timeZone: 'Asia/Shanghai', hour12: false}) : '')
-let progressTimer
 async function loadProgress() {
   if (!props.storeId || !props.period) return
   try {
@@ -40,8 +40,10 @@ async function loadProgress() {
     if (result) { progress.value = result.value; progressError.value = '' }
   } catch (error) { progressError.value = '暂时无法读取后台进度，请稍后刷新。' }
 }
-onMounted(() => { loadProgress(); progressTimer = setInterval(() => { if(document.visibilityState === 'visible')loadProgress() }, 20000) })
-onUnmounted(() => { clearInterval(progressTimer); progressRequest.cancel() })
+onMounted(loadProgress)
+useLivePoll(() => ['running', 'queued'].includes(progress.value?.state), loadProgress, 20000)
+useRefresh(loadProgress)
+onUnmounted(() => progressRequest.cancel())
 watch(() => props.runId, loadProgress)
 const show = ref(false), query = ref(''), search = ref(''), page = ref(1), category = ref('')
 const data = ref({ total: 0, reference_count: 0, reason_counts: [], items: [] }), busy = ref(false), error = ref('')

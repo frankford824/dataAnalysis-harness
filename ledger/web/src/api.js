@@ -8,10 +8,21 @@
 import {notifyAuthentication} from './telemetry.js'
 export {startTelemetry as startClientTelemetry,recordTelemetry} from './telemetry.js'
 
+// 手动刷新期间发出的读请求带 X-Ledger-Fresh，让后端跳过缓存；平时的加载和后台自动刷新不带。
+let freshDepth = 0
+export async function withFresh(work) {
+  freshDepth++
+  try { return await work() } finally { freshDepth-- }
+}
+export function freshInit(init = {}) {
+  if (!freshDepth || (init.method && init.method.toUpperCase() !== 'GET')) return init
+  return { ...init, headers: { ...(init.headers || {}), 'X-Ledger-Fresh': '1' } }
+}
+
 async function call(path, init) {
   let res
   try {
-    res = await fetch(path, init)
+    res = await fetch(path, freshInit(init))
   } catch (error) {
     if (error?.name === 'AbortError') throw error
     // 网络层失败没有 detail 可取。这套系统跑在内网，多半是服务没起来。

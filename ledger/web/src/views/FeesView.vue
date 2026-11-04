@@ -12,6 +12,7 @@ import { useDialog, useMessage } from 'naive-ui'
 import { computed, ref, watch, onMounted, onUnmounted } from 'vue'
 import { onBeforeRouteLeave, useRoute } from 'vue-router'
 import { useLatest } from '../components/ui/useLatest'
+import { useLivePoll, useRefresh } from '../refresh'
 import { mergeRuleResponse, feePreviewKey } from '../components/ui/editableRules'
 import { feeRequestId } from '../feeJobState'
 
@@ -44,7 +45,7 @@ const retrying = ref(false)
 const submitAttempt = ref(null)
 const jobActive = computed(() => ['preparing','queued','running'].includes(feeJob.value?.status))
 const jobLabel = computed(() => feeJob.value?.status==='failed' && feeJob.value.saved===false ? '规则未保存，请核对错误后重新试算' : ({preparing:'正在确认规则保存',queued:'规则已保存，等待后台重算',running:'规则已保存，后台重算中',done:'本批核算已完成',failed:'本批存在失败项，请查看原因'})[feeJob.value?.status] || '')
-let jobTimer, jobPolling=false, disposed=false, jobAbort, jobEpoch=0
+let jobPolling=false, disposed=false, jobAbort, jobEpoch=0
 async function pollJob() {
   if (jobPolling || disposed || document.hidden) return
   jobPolling=true
@@ -65,8 +66,9 @@ async function retryJob() {
   try{const result=await api.feeJobRetry(feeJob.value.id);jobEpoch++;feeJob.value=result.job;jobError.value=''}
   catch(e){message.error(e.message)}finally{retrying.value=false}
 }
-onMounted(()=>{pollJob();jobTimer=setInterval(pollJob,3000)})
-onUnmounted(()=>{disposed=true;clearInterval(jobTimer);jobAbort?.abort()})
+onMounted(pollJob)
+useLivePoll(jobActive,pollJob,3000)
+onUnmounted(()=>{disposed=true;jobAbort?.abort()})
 
 const dirty = computed(() => JSON.stringify(draft.value) !== JSON.stringify(data.value?.rules || []))
 
@@ -244,7 +246,7 @@ watch(
 )
 
 watch(() => [route.query.label, tab.value], () => load(), { immediate: true })
-watch(()=>app.uiRefresh,()=>load())
+useRefresh(()=>Promise.all([load(),pollJob()]))
 
 function blank() {
   return {

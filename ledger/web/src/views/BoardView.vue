@@ -6,6 +6,7 @@ import {api} from '../api'
 import {useApp} from '../store'
 import {money,percent,prettyPeriod,stamp} from '../format'
 import {useLatest} from '../components/ui/useLatest'
+import {useLivePoll,useRefresh} from '../refresh'
 import PageHead from '../components/PageHead.vue'
 import CompanyFinanceCard from '../components/CompanyFinanceCard.vue'
 import AgentAuthorityPanel from '../components/AgentAuthorityPanel.vue'
@@ -44,7 +45,7 @@ const storeOptions=computed(()=>(workflow.value?.stores||[]).map(row=>({label:ro
 const revocation=ref(null),revocationReason=ref(''),revocationSnapshot=ref(null),revocationError=ref('')
 const actionId=clientRequestId
 const closeRefresh=ref(null),closeRequest=ref(null)
-let timer,closeRefreshTimer,reportSerial=0
+let closeRefreshTimer,reportSerial=0
 async function loadReport(quiet=false){
   if(!period.value)return
   const serial=++reportSerial
@@ -59,17 +60,18 @@ async function loadWorkflow(){
   catch(reason){workflowError.value=reason.message}
 }
 async function loadRules(){try{ruleContracts.value=await api.automationRuleContracts();ruleError.value=''}catch(reason){ruleError.value=reason.message}}
-async function reload(){await Promise.all([loadReport(),loadWorkflow(),authorityPanel.value?.load(),inboxPanel.value?.load()])}
+async function reload(quiet=false){await Promise.all([loadReport(quiet),loadWorkflow(),authorityPanel.value?.load(),inboxPanel.value?.load()])}
 onMounted(async()=>{
   await app.loadNavigation().catch(()=>{});await Promise.all([reload(),loadRules()])
-  timer=setInterval(()=>{if(!document.hidden&&!busy.value&&!modal.value&&!revocation.value){loadWorkflow();if(workflow.value?.status==='processing')loadReport(true)}},15000)
 })
-onUnmounted(()=>{clearInterval(timer);clearTimeout(closeRefreshTimer);request.cancel();workflowRequest.cancel()})
+// 只有本月还在后台处理时才跟进度；处理完就停，页面上的数不再自己变。
+useLivePoll(()=>workflow.value?.status==='processing',()=>{if(!busy.value&&!modal.value&&!revocation.value){loadWorkflow();loadReport(true)}},15000)
+useRefresh(()=>reload(true))
+onUnmounted(()=>{clearTimeout(closeRefreshTimer);request.cancel();workflowRequest.cancel()})
 watch(modal,value=>{if(!value)clearTimeout(closeRefreshTimer)})
 watch(params,()=>loadReport(),{deep:true})
 watch(period,()=>{clearTimeout(closeRefreshTimer);closeRefresh.value=null;closeRequest.value=null;workflow.value=null;report.value=null;modal.value=false;revocation.value=null;scope.value={};trail.value=[];page.value=1;loadWorkflow()})
 watch([level,managed,scope,()=>app.storeId,()=>app.platform,sortKey,sortDirection,compare,managedSplit],()=>{page.value=1},{deep:true})
-watch(()=>app.uiRefresh,reload)
 function changeLevel(value){level.value=value;scope.value={};trail.value=[]}
 function sort(key){if(sortKey.value===key)sortDirection.value=sortDirection.value==='desc'?'asc':'desc';else{sortKey.value=key;sortDirection.value='desc'}}
 function reset(){app.pick({store:'',platform:''});scope.value={};trail.value=[];level.value='store'}
@@ -197,7 +199,7 @@ const metricChange=(key,item)=>comparisonCopy(item,(report.value?.metrics||[]).f
 
 <template>
   <PageHead title="月度工作台" :scope="[prettyPeriod(period),app.currentStore?.name||app.platformName].filter(Boolean)" hint="资料到齐后自动核算，只处理需要你决定的事项。">
-    <template #actions><n-button :loading="loading" @click="reload">刷新</n-button><n-button type="primary" :loading="busy" :disabled="!period||monthAdvanceBlocked" @click="advance">继续处理本月</n-button></template>
+    <template #actions><n-button :loading="app.refreshing" :disabled="app.refreshing" @click="app.refresh('page')">刷新</n-button><n-button type="primary" :loading="busy" :disabled="!period||monthAdvanceBlocked" @click="advance">继续处理本月</n-button></template>
   </PageHead>
   <p v-if="monthAdvanceBlocked" class="small muted month-alert" aria-label="本月处理入口说明">重算不能解除历史冻结差异，请公司财务核对已保存依据。</p>
   <n-alert v-if="error||workflowError" type="warning" class="month-alert">{{error||workflowError}}<n-button text @click="reload">重试</n-button></n-alert>

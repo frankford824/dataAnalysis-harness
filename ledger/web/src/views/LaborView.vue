@@ -4,6 +4,7 @@ import { onBeforeRouteLeave } from 'vue-router'
 import { useMessage } from 'naive-ui'
 import { commissionRequest, latestRequest } from '../components/commissionRequest'
 import { money } from '../format'
+import { useRefresh } from '../refresh'
 const message=useMessage(), request=latestRequest()
 const period=ref(new Date().toLocaleDateString('sv-SE',{timeZone:'Asia/Shanghai'}).slice(0,7))
 const data=ref(null), name=ref('兼职人工费用'), amount=ref(null), loading=ref(false), saving=ref(false), error=ref('')
@@ -13,6 +14,7 @@ function reset(){name.value=data.value?.name||'兼职人工费用';amount.value=
 async function load(){loading.value=true;error.value='';try{const result=await request.run(signal=>commissionRequest(`/labor?period=${period.value}`,{signal}));if(result){data.value=result.value;reset()}}catch(e){error.value=e.message}finally{loading.value=false}}
 async function save(){if(saving.value)return;if(Math.abs(amount.value*100-Math.round(amount.value*100))>0.00001){message.error('金额最多保留两位小数');return}saving.value=true;error.value='';try{data.value=await commissionRequest('/labor',{body:{period:period.value,name:name.value,amount:amount.value,revision:data.value.revision}});reset();message.success('已保存')}catch(e){error.value=e.message}finally{saving.value=false}}
 watch(period,load,{immediate:true})
+useRefresh(()=>{if(!dirty.value&&!saving.value)return load()})
 onUnmounted(()=>request.cancel())
 onBeforeRouteLeave(()=>!dirty.value||window.confirm('修改尚未保存，确定离开吗？'))
 </script>

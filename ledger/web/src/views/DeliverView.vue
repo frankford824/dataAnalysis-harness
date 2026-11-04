@@ -9,6 +9,7 @@ import PageHead from '../components/PageHead.vue'
 import SystemStatusLine from '../components/SystemStatusLine.vue'
 import { ago, bytes, count } from '../format'
 import { useApp } from '../store'
+import { useRefresh } from '../refresh'
 
 const UploadPanel = defineAsyncComponent(() => import('../components/UploadPanel.vue'))
 const FilePreviewPanel = defineAsyncComponent(() => import('../components/FilePreviewPanel.vue'))
@@ -177,12 +178,12 @@ async function loadDetail(id, force = false) {
   }
 }
 
-async function loadPeriodSnap(storeId, period) {
+async function loadPeriodSnap(storeId, period, quiet = false) {
   const request = ++periodRequest
-  periodSnap.value = null
+  if (!quiet) periodSnap.value = null
   periodError.value = ''
   if (!storeId || !period) { periodLoading.value=false;return }
-  periodLoading.value = true
+  if (!quiet) periodLoading.value = true
   try {
     const detail = await app.loadStoreDetail(storeId)
     if (request !== periodRequest) return
@@ -381,10 +382,10 @@ onMounted(() => {
   app.loadOverview().catch(() => {})
   loadSystemState()
 })
-watch(()=>app.uiRefresh,()=>{
-  app.loadOverview(true).catch(()=>{});loadSystemState()
-  if(app.storeId){loadDetail(app.storeId,true).catch(()=>{});loadPeriodSnap(app.storeId,app.period)}
-})
+useRefresh(()=>Promise.allSettled([
+  app.loadOverview(true),loadSystemState(),
+  ...(app.storeId?[loadDetail(app.storeId,true).then(()=>loadPeriodSnap(app.storeId,app.period,true))]:[]),
+]))
 </script>
 
 <template>

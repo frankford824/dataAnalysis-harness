@@ -2,10 +2,12 @@
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useCommission } from '../commissionStore'
+import { useApp } from '../store'
+import { useRefresh } from '../refresh'
 import '../commission.css'
 import LedgerMultiSelect from '../components/ui/LedgerMultiSelect.vue'
 import { Search, RefreshCw, X } from '@lucide/vue'
-const state = useCommission(), route = useRoute(), router = useRouter()
+const state = useCommission(), app = useApp(), route = useRoute(), router = useRouter()
 const page=ref(null),allFilters=ref(false)
 const applied=computed(()=>[...state.storeIds.map(id=>({type:'store',id,name:state.storeOptions.find(o=>o.value===id)?.label||'未找到的店铺'})),...state.personIds.map(id=>({type:'person',id,name:state.personOptions.find(o=>o.value===id)?.label||'未找到的人员'}))])
 const visibleFilters=computed(()=>allFilters.value?applied.value:applied.value.slice(0,6))
@@ -16,17 +18,19 @@ const stamp = computed(() => state.updated[section.value] ? new Date(state.updat
 let alive=true
 const localQueries=new Set()
 const queryKey=query=>JSON.stringify(['shops','people','from','to','view'].map(key=>String(query[key]||'')))
-function onFocusRefresh() { if (document.visibilityState === 'visible') state.refresh() }
-function refreshPage() {
+const pause = ms => new Promise(resolve => setTimeout(resolve, ms))
+// 提成各页的查询有去抖，发出去要等一小会儿；等到本区不再加载再算刷新完。
+async function refreshPage() {
   state.refresh({ force: true })
   page.value?.reload?.()
+  await pause(300)
+  for (const until = Date.now() + 30000; state.loading[section.value] && Date.now() < until;) await pause(200)
 }
+useRefresh(() => { if (state.ready) return refreshPage() })
 onMounted(() => {
   state.init(route.query).then(()=>{if(alive){applyQuery(route.query);syncQuery()}})
-  window.addEventListener('focus', onFocusRefresh)
-  document.addEventListener('visibilitychange', onFocusRefresh)
 })
-onUnmounted(() => { alive=false; window.removeEventListener('focus', onFocusRefresh); document.removeEventListener('visibilitychange', onFocusRefresh) })
+onUnmounted(() => { alive=false })
 function applyQuery(query) {
   if (!state.ready || !route.meta.commission) return
   for (const [param,field] of [['shops','storeIds'],['people','personIds']]) {
@@ -59,7 +63,7 @@ watch(() => [state.storeIds, state.personIds, state.start, state.end, state.repo
         <n-input v-if="section==='settings'" v-model:value="state.settingsSearch" class="workflow-product-search" placeholder="搜索商品或宝贝ID，多个用逗号、顿号分隔" aria-label="搜索商品" clearable><template #prefix><Search :size="15"/></template></n-input>
         <LedgerMultiSelect v-model="state.storeIds" :options="state.storeOptions" label="家店铺" aria-label="筛选店铺" :disabled="!state.ready" :show-chips="false"/>
         <LedgerMultiSelect v-model="state.personIds" :options="state.personOptions" label="位人员" aria-label="筛选人员" :disabled="!state.ready" :show-chips="false"/>
-        <n-button text class="workflow-refresh" :disabled="state.loading[section]||!state.ready" @click="refreshPage"><RefreshCw :size="14" style="margin-right:6px"/>刷新</n-button>
+        <n-button text class="workflow-refresh" :disabled="state.loading[section]||!state.ready||app.refreshing" @click="app.refresh('page')"><RefreshCw :size="14" style="margin-right:6px"/>刷新</n-button>
       </div>
       <div v-if="applied.length" class="workflow-applied" aria-label="当前筛选条件"><button v-for="filter in visibleFilters" :key="filter.type+filter.id" class="workflow-active-chip" :title="filter.name" :aria-label="`移除${filter.type==='store'?'店铺':'人员'}${filter.name}`" @click="removeFilter(filter)"><span>{{filter.name}}</span><X :size="12"/></button><button v-if="applied.length>6" class="text-button" @click="allFilters=!allFilters">{{allFilters?'收起':`展开其余 ${applied.length-6} 项`}}</button><button class="text-button" @click="state.clear">清空筛选</button></div>
     </div>

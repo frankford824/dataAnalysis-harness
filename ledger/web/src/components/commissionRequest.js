@@ -1,3 +1,5 @@
+import { freshInit } from '../api'
+
 // A superseded response never owns the visible result, even if abort is ignored.
 export function latestRequest() {
   let sequence = 0, controller
@@ -18,9 +20,9 @@ export function latestRequest() {
 }
 
 export async function commissionRequest(path, { signal, body } = {}) {
-  const response = await fetch('/api/commission-v2' + path, {
+  const response = await fetch('/api/commission-v2' + path, freshInit({
     signal, ...(body ? { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) } : {}),
-  })
+  }))
   if (!response.ok) {
     const result = await response.json().catch(() => ({}))
     throw new Error(typeof result.detail === 'string' ? result.detail : '加载失败，请重试')

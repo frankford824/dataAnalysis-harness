@@ -12,6 +12,7 @@ import {
   ArrowRight,
 } from '@lucide/vue'
 import { useCommission } from '../commissionStore'
+import { freshInit } from '../api'
 import OrgColumnView from '../components/OrgColumnView.vue'
 
 const shared = useCommission()
@@ -35,9 +36,9 @@ const smartSuggestions = ref([])
 const selectedSmartIds = ref([])
 
 async function call(path, options = {}) {
-  const response = await fetch('/api/commission-v2' + path, {
+  const response = await fetch('/api/commission-v2' + path, freshInit({
     ...options, headers: { 'Content-Type': 'application/json', ...(options.headers || {}) },
-  })
+  }))
   const body = await response.json().catch(() => ({}))
   if (!response.ok) throw new Error(typeof body.detail === 'string' ? body.detail : '未能保存，请检查填写内容')
   return body

@@ -12,10 +12,11 @@ import AgentQuestions from '../components/AgentQuestions.vue'
  * 要看，竖着铺开就把页面拉到三四屏长，人滚到底就忘了上面的数是多少。
  */
 import { useDialog, useMessage } from 'naive-ui'
-import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
+import { computed, nextTick, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 
 import { useLatest } from '../components/ui/useLatest'
+import { useRefresh } from '../refresh'
 import { api } from '../api'
 import DrillDrawer from '../components/DrillDrawer.vue'
 import StatementReview from '../components/StatementReview.vue'
@@ -112,25 +113,8 @@ async function load(force=false, quiet=false) {
   finally{if(serial===loadSerial&&!quiet)loading.value=false}
 }
 watch(()=>[props.id,period.value],()=>{reviewingPeriod.value=false;drill.value=null;orderIssue.value=null;load()}, {immediate:true})
-watch(()=>app.uiRefresh,()=>load(true))
+useRefresh(()=>load(true,true))
 watch(questioning,value=>{if(!value)disputeSubject.value=null})
-
-let refreshTimer, refreshing=false
-async function refreshVisiblePeriod() {
-  if(document.hidden||loading.value||refreshing||app.busy)return
-  refreshing=true
-  try{await load(true,true)}finally{refreshing=false}
-}
-onMounted(()=>{
-  refreshTimer=setInterval(refreshVisiblePeriod,15000)
-  document.addEventListener('visibilitychange',refreshVisiblePeriod)
-  window.addEventListener('focus',refreshVisiblePeriod)
-})
-onUnmounted(()=>{
-  clearInterval(refreshTimer)
-  document.removeEventListener('visibilitychange',refreshVisiblePeriod)
-  window.removeEventListener('focus',refreshVisiblePeriod)
-})
 
 function go(p) {
   app.pick({ period: p })

@@ -67,9 +67,41 @@ export const agentApi = {
   status: () => call('/api/agent/status'),
   threads: () => call('/api/agent/threads'),
   thread: id => call(`/api/agent/threads/${encodeURIComponent(id)}`),
-  stop: threadId => call('/api/agent/stop', post({ thread_id: threadId })),
-  confirmCard: id => call(`/api/agent/cards/${encodeURIComponent(id)}/confirm`, post({})),
-  rejectCard: id => call(`/api/agent/cards/${encodeURIComponent(id)}/reject`, post({})),
+  stop: (threadId, runId) => call('/api/agent/stop', post({ thread_id: threadId, ...(runId ? { run_id: runId } : {}) })),
+  confirmCard: (id, user) => call(`/api/agent/cards/${encodeURIComponent(id)}/confirm`, post({ user })),
+  rejectCard: (id, user) => call(`/api/agent/cards/${encodeURIComponent(id)}/reject`, post({ user })),
+  uiHistory: () => call('/api/agent/ui/history'),
+  uiUndo: user => call('/api/agent/ui/undo', post({ user })),
+}
+
+const LIVE_EVENTS = ['hello', 'presence', 'message', 'turn', 'card_update', 'ui_updated', 'data_updated', 'costs']
+
+/** 订阅大家共用的实时事件：谁在线、群里新消息、任何一轮的进度、确认卡被谁处理、
+ *  界面和数据变了、模型费用。断了 EventSource 自己会重连，这里不另做；连上、断开
+ *  通过 onState(true/false) 告诉调用方。返回关闭函数。 */
+export function openEvents(user, onEvent, onState = () => {}) {
+  if (typeof EventSource === 'undefined') {
+    onState(false)
+    return () => {}
+  }
+  const source = new EventSource(`/api/agent/events?user=${encodeURIComponent(user)}`)
+  source.onopen = () => onState(true)
+  source.onerror = () => onState(false)
+  for (const name of LIVE_EVENTS) {
+    source.addEventListener(name, e => {
+      let data = null
+      try {
+        data = JSON.parse(e.data)
+      } catch {
+        return
+      }
+      if (data !== null) onEvent(name, data)
+    })
+  }
+  return () => {
+    source.close()
+    onState(false)
+  }
 }
 
 /** 发一句话，边收边回调 onEvent(event, data)。流结束时 resolve——注意流可能在没收到
@@ -97,14 +129,16 @@ export async function streamChat(body, { signal, onEvent, idleMs = 120000 }) {
   let data = []
 
   const dispatch = () => {
+    // done 的 data 可能就是 null（群里 @同事 时没有回执），照样要派发出去。
     if (data.length) {
-      let payload = null
+      let payload
+      let ok = true
       try {
         payload = JSON.parse(data.join('\n'))
       } catch {
-        payload = null
+        ok = false
       }
-      if (payload !== null) onEvent(event || 'message', payload)
+      if (ok) onEvent(event || 'message', payload)
     }
     event = ''
     data = []

@@ -5,6 +5,7 @@ import { useRoute, useRouter } from 'vue-router'
 import { api } from '../api'
 import { useApp } from '../store'
 import { useLatest } from '../components/ui/useLatest'
+import { useRefresh } from '../refresh'
 import PageHead from '../components/PageHead.vue'
 import LedgerTable from '../components/ui/LedgerTable.vue'
 import DrillDrawer from '../components/DrillDrawer.vue'
@@ -77,16 +78,15 @@ function syncRoute(){
     router.replace({query:{...route.query,...params.value}})
   }
 }
-let timer
 onMounted(async()=>{
   try{await app.loadNavigation();routeScope();ready.value=true;syncRoute();if(view.value==='records')await load(true)}catch(e){error.value=e.message}
-  timer=setInterval(()=>{if(view.value==='records')checkUpdates()},30000)
 })
-onUnmounted(()=>{clearInterval(timer);request.cancel();pollRequest.cancel()})
+onUnmounted(()=>{request.cancel();pollRequest.cancel()})
 watch(()=>scopeKey(params.value),()=>{if(ready.value){newResult.value=false;syncRoute();if(view.value==='records')load(true);else{request.cancel();pollRequest.cancel();data.value=null;evidence.value=null}}})
 watch(view,value=>{if(ready.value && value==='records')load(true)})
 watch(()=>route.query,()=>{if(ready.value)routeScope()})
-watch(()=>app.uiRefresh,()=>{if(ready.value && view.value==='records')load()})
+// 静默刷新只检查有没有新结果、给出提示，不替换人正在翻看的记录。
+useRefresh((scope,{silent})=>{if(ready.value && view.value==='records')return silent?checkUpdates():load()})
 
 const columns=computed(()=>[
   {title:'店铺',key:'store',minWidth:190,mobileWidth:150,render:r=>h('div',{class:'freight-store'},[
@@ -139,7 +139,7 @@ const columns=computed(()=>[
       </section>
       <section v-else-if="!loading" class="freight-empty"><p>该范围内暂无运费核算记录。</p><n-button @click="router.push({name:'deliver'})">查看数据与店铺</n-button></section>
     </n-spin>
-    <FreightShipmentTrial v-if="ready && view==='shipments'" :period="app.period" :store-id="app.storeId" :platform="app.platform" :refresh-token="app.uiRefresh"/>
+    <FreightShipmentTrial v-if="ready && view==='shipments'" :period="app.period" :store-id="app.storeId" :platform="app.platform"/>
     <DrillDrawer v-if="view==='records' && evidence && selectedRun" :run-id="selectedRun" node="n_freight" title="运费依据" :store-id="evidence.store_id" :period="evidence.period" :platform="evidence.platform" :review-context="evidence" :live-index="true" @select-record="selectedRun=$event" @close="evidence=null"/>
   </main>
 </template>

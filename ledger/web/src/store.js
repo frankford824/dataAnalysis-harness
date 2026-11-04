@@ -11,7 +11,7 @@
 import { defineStore } from 'pinia'
 import { computed, ref, watch } from 'vue'
 
-import { api } from './api.js'
+import { api, withFresh } from './api.js'
 import { prettyPeriod } from './format.js'
 
 //: 刷新之后还该记得的东西存这儿。只存「人选到哪儿了」，不存数据本身——数据要
@@ -34,7 +34,6 @@ export const useApp = defineStore('app', () => {
   const loadingJobs = ref(0)
   const loading = computed(() => loadingJobs.value > 0)
   const error = ref('')
-  const uiRefresh = ref(0)
   let navigationPromise = null
   let modelPromise = null
   let overviewPromise = null
@@ -257,6 +256,47 @@ export const useApp = defineStore('app', () => {
     return res
   }
 
+  /** 刷新总线。
+   *
+   * 页面只在打开时取一次数，之后不再自己定时重取——数在人眼前跳来跳去比旧几分钟
+   * 更让人不安。要新数就走这里：顶上的「刷新本页 / 全部刷新」、助手说账变了、
+   * 或者人走开十分钟后的静默刷新。各页用 useRefresh 登记重取函数，重取时旧内容
+   * 留着，只有按钮上转圈。
+   */
+  const refreshSeq = ref(0)
+  const refreshScope = ref('page')
+  const lastUpdated = ref(Date.now())
+  const refreshing = ref(false)
+  const refreshers = new Set()
+  let refreshPromise = null
+
+  function onRefresh(handler) {
+    refreshers.add(handler)
+    return () => refreshers.delete(handler)
+  }
+
+  function refresh(scope = 'page', { silent = false } = {}) {
+    // 静默刷新还没跑完时人点了刷新：等它结束再来一轮带 fresh 的，别吞掉这次点击。
+    if (refreshPromise) return silent ? refreshPromise : refreshPromise.then(() => refresh(scope))
+    refreshScope.value = scope
+    refreshSeq.value += 1
+    if (!silent) refreshing.value = true
+    const work = async () => {
+      const jobs = [...refreshers].map((handler) => Promise.resolve().then(() => handler(scope, { silent })))
+      if (scope === 'all') {
+        jobs.push(loadNavigation(true))
+        if (overview.value) jobs.push(loadOverview(true))
+      }
+      await Promise.allSettled(jobs)
+    }
+    refreshPromise = (silent ? work() : withFresh(work)).finally(() => {
+      lastUpdated.value = Date.now()
+      refreshing.value = false
+      refreshPromise = null
+    })
+    return refreshPromise
+  }
+
   /** 选中的这家店。筛选条上没选店时是 null。 */
   const currentStore = computed(
     () => stores.value.find((s) => s.id === storeId.value) || null,
@@ -304,11 +344,12 @@ export const useApp = defineStore('app', () => {
   }
 
   return {
-    navigation, boot, overview, storeDetails, loading, error, uiRefresh,
+    navigation, boot, overview, storeDetails, loading, error,
     platform, storeId, period, busy, intake, memo, showIntake,
     stores, platforms, visibleStores, periods, currentStore,
     platformName, periodLabel, scopeParts, ingestMode, nasUploadPath,
+    refreshSeq, refreshScope, lastUpdated, refreshing,
     load, loadNavigation, loadModel, loadOverview, loadStoreDetail,
-    invalidate, run, upload, submit, pick, noted,
+    invalidate, run, upload, submit, pick, noted, onRefresh, refresh,
   }
 })

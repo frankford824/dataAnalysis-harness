@@ -1,6 +1,7 @@
 import { computed, ref } from 'vue'
 import { defineStore } from 'pinia'
 import { useApp } from './store'
+import { freshInit } from './api'
 import { initialStoreIds } from './commissionScope'
 
 export const useCommission = defineStore('commission', () => {
@@ -21,7 +22,7 @@ export const useCommission = defineStore('commission', () => {
   async function loadPeople() {
     if(rosterLoad)return rosterLoad
     rosterLoad=(async()=>{
-      const response = await fetch('/api/commission-v2/people')
+      const response = await fetch('/api/commission-v2/people', freshInit())
       if (!response.ok) throw new Error('人员名单加载失败，请重试')
       people.value = (await response.json()).people
     })()

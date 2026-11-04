@@ -1,13 +1,13 @@
 <script setup>
-import { computed, onMounted, onUnmounted, ref } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import { api } from '../api'
+import { useRefresh } from '../refresh'
 import { ago, stamp } from '../format'
 import PageHead from '../components/PageHead.vue'
 import { executionRows, health, notificationRows, probeRows } from '../opsView'
 
 const status = ref(null), notifications = ref(null), events = ref(null)
 const loading = ref(false), error = ref(''), checkedAt = ref('')
-let timer = null
 
 async function load() {
   if (loading.value) return
@@ -28,8 +28,8 @@ const probes = computed(() => probeRows(status.value))
 const executions = computed(() => executionRows(events.value))
 const notices = computed(() => notificationRows(notifications.value))
 
-onMounted(() => { load(); timer = setInterval(load, 30000) })
-onUnmounted(() => clearInterval(timer))
+onMounted(load)
+useRefresh(load)
 </script>
 
 <template>

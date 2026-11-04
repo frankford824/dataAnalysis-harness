@@ -88,6 +88,19 @@ html body .n-message-container.n-message-container--top { right: var(--agent-doc
 /* 筛选条占满，上传按钮永远贴在最右边——每一页的同一个位置。 */
 .topbar > :first-child { flex: 1; min-width: 0; }
 
+/* 刷新、模型费用在左，操作账号在右，挤在最上面一条细栏里。 */
+.shell-strip {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-height: 44px;
+  padding: 6px 28px;
+  border-bottom: 1px solid #e2e5eb;
+  background: #fff;
+}
+@media (max-width: 760px) { .shell-strip { padding: 6px 16px; gap: 8px; } }
+
 /* 平台 › 店铺 › 账期。标签在上，值在下，扫一眼就知道自己在哪一层。 */
 .locator {
   display: flex;

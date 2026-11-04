@@ -1,14 +1,17 @@
 <script setup>
 import { useMessage } from 'naive-ui'
-import { LayoutDashboard, Store, Coins, Tags, RefreshCw, Truck, Activity } from '@lucide/vue'
+import { LayoutDashboard, Store, Coins, Tags, Truck, Activity } from '@lucide/vue'
 import { computed, defineAsyncComponent, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 
 import { useApp } from '../store'
 import { useCommission } from '../commissionStore'
 import { api,startClientTelemetry,recordTelemetry } from '../api'
+import { startAutoRefresh, useRefresh } from '../refresh'
 import FilterBar from './FilterBar.vue'
 import OperatorSession from './OperatorSession.vue'
+import RefreshControl from './RefreshControl.vue'
+import CostChip from './CostChip.vue'
 
 const IntakeResult = defineAsyncComponent(() => import('./IntakeResult.vue'))
 const UploadPanel = defineAsyncComponent(() => import('./UploadPanel.vue'))
@@ -23,8 +26,6 @@ const router = useRouter()
 let stopTelemetry=()=>{},stopPageMeasure=()=>{}
 const telemetryContext=()=>({view:telemetryView(router.currentRoute.value.name),store_id:app.storeId,period:app.period})
 function telemetryView(name){if(String(name).startsWith('commission'))return 'commission';return name==='freight-review'?'freight':name==='onboard'?'deliver':name||'board'}
-function refreshCurrent(){app.uiRefresh++;app.loadNavigation(true).catch(e=>message.error(e.message))}
-
 // 懒加载页面时给导航一个明确反馈。保留很短的最小展示时间，避免快请求只闪一下；
 // 真正的数据加载由页面自己的骨架屏接手，两层各自说明自己在等什么。
 const routeLoading = ref(false)
@@ -55,10 +56,23 @@ function toggleProgress() {
   progressMinimized.value = !progressMinimized.value
   try { localStorage.setItem('ledger-progress-minimized',String(progressMinimized.value)) } catch {}
 }
+// 有店在核算时 15 秒问一次进度；没有就两分钟看一眼有没有新活。
+const WORK_LIVE = 15000, WORK_IDLE = 120000
 const completedJobs = new Map()
-let workTimer = null, workInFlight = false
+let workTimer = null, pruneTimer = null, workInFlight = false
+function scheduleWorkJobs() {
+  clearTimeout(workTimer)
+  const live = workJobs.value.some(job => job.state === 'running' || job.state === 'queued')
+  workTimer = setTimeout(loadWorkJobs, live ? WORK_LIVE : WORK_IDLE)
+}
+function pruneCompleted() {
+  const now = Date.now()
+  for (const [id, job] of completedJobs) if (job.until <= now) completedJobs.delete(id)
+  workJobs.value = workJobs.value.filter(job => job.state !== 'done' || completedJobs.has(job.store_id))
+}
 async function loadWorkJobs() {
-  if (document.hidden || workInFlight) return
+  if (workInFlight) return
+  if (document.hidden) { scheduleWorkJobs(); return }
   workInFlight = true
   try {
     const current = (await api.recomputeProgress()).items || []
@@ -71,13 +85,25 @@ async function loadWorkJobs() {
         finished = true
       }
     }
-    if (finished) commission.refresh({ force: true })
+    if (finished) {
+      commission.refresh({ force: true })
+      app.refresh('page', { silent: true })
+      clearTimeout(pruneTimer)
+      pruneTimer = setTimeout(pruneCompleted, 3600)
+    }
     for (const [id, job] of completedJobs) if (job.until <= now || active.has(id)) completedJobs.delete(id)
     workJobs.value = [...current,...completedJobs.values()]
   }
   catch { workJobs.value = [] }
-  finally { workInFlight = false }
+  finally { workInFlight = false; scheduleWorkJobs() }
 }
+// 上传、重算这类前台操作结束时，后台多半刚排上活，马上看一眼。
+watch(() => app.busy, (busy, before) => { if (before && !busy) loadWorkJobs() })
+useRefresh(scope => { if (scope === 'all') return loadWorkJobs() })
+const stopRouteStamp = router.afterEach((to, from, failure) => {
+  if (!failure && to.fullPath !== from.fullPath) app.lastUpdated = Date.now()
+})
+let stopAutoRefresh = () => {}
 const busyPercent = computed(() => app.busy?.percent ??
   (app.busy?.label?.includes('重算')
     ? workJobs.value.find(job => job.store_id === app.storeId)?.percent ?? 0
@@ -98,8 +124,11 @@ watch(
 onUnmounted(() => {
   stopTelemetry();stopPageMeasure()
   clearInterval(tick)
-  clearInterval(workTimer)
+  clearTimeout(workTimer)
+  clearTimeout(pruneTimer)
   clearTimeout(routeTimer)
+  stopAutoRefresh()
+  stopRouteStamp()
   stopBefore()
   stopAfter()
   stopError()
@@ -141,7 +170,7 @@ onMounted(() => {
   window.addEventListener('ledger:page-load-error',pageFailed)
   app.loadNavigation().catch((e) => message.error(e.message, { duration: 6000 }))
   loadWorkJobs()
-  workTimer = setInterval(loadWorkJobs, 5000)
+  stopAutoRefresh = startAutoRefresh(app, document.querySelector('.dock-main') || document)
   if ('requestIdleCallback' in window) window.requestIdleCallback(preloadDeliver, { timeout: 1500 })
   else setTimeout(preloadDeliver, 500)
 })
@@ -195,10 +224,13 @@ defineExpose({ take })
     </nav>
 
     <div class="body">
-      <OperatorSession />
+      <div class="shell-strip">
+        <RefreshControl />
+        <CostChip />
+        <OperatorSession />
+      </div>
       <header v-if="!['commission', 'commission-reports', 'commission-org', 'labor', 'ops'].includes($route.name)" class="topbar">
         <FilterBar />
-        <n-button quaternary size="small" :disabled="app.loading || !!app.busy" aria-label="刷新当前页面" title="刷新当前页面" @click="refreshCurrent"><RefreshCw :size="16"/></n-button>
         <!-- 上传只有这一个固定入口，每一页都在同一个地方。上一版侧栏最下角那个
              「交表」，位置和用词都在让人猜：交给谁、是不是报送、和结账什么关系。
 

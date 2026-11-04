@@ -14,6 +14,7 @@ import PageHead from '../components/PageHead.vue'
 import { api } from '../api'
 import { count } from '../format'
 import { useApp } from '../store'
+import { useRefresh } from '../refresh'
 
 const props = defineProps({ sha: { type: String, required: true } })
 
@@ -85,7 +86,8 @@ function mergeAssist(cols) {
 }
 
 watch(()=>[props.sha,route.query.sheet],()=>{picked.value={};templateId.value='';source.value='';headerRow.value=null;load()},{immediate:true})
-watch(()=>app.uiRefresh,()=>load())
+// 人正在对列，静默刷新不去动；手动点刷新才重读。
+useRefresh((scope,{silent})=>{if(!silent)return load()})
 
 function commit() {
   const roles = {}
