@@ -152,7 +152,7 @@ const coverageColumns=[
   {title:'问题类型',key:'category_label',width:155},
   {title:'核对说明',key:'brushing_review',minWidth:280,render:row=>row.coverage_reason||row.brushing_review||'商品成本未覆盖，需核对来源成本'},
   {title:'人工补录总成本',key:'manual_amount',width:140,render:row=>row.manual_amount==null?'—':`${Number(row.manual_amount).toFixed(2)} 元`},
-  {title:'操作',key:'action',width:140,render:row=>row.partial_cost?h(NButton,{size:'small',text:true,onClick:()=>inspectMissingItems(row)},()=> '查看缺失商品'):props.closed?'已结账 · 只读':row.editable?h(NButton,{size:'small',type:'primary',text:true,onClick:()=>editLine(row)},()=>row.manual_amount==null?'添加金额':'修改金额'):'订单归属不唯一'},
+  {title:'操作',key:'action',width:140,render:row=>{const edit=props.closed?'已结账 · 只读':row.editable?h(NButton,{size:'small',type:'primary',text:true,onClick:()=>editLine(row)},()=>row.manual_amount==null?(row.partial_cost?'补缺的成本':'添加金额'):'修改金额'):'订单归属不唯一';return row.partial_cost?h('div',{style:'display:flex;gap:10px;flex-wrap:wrap'},[h(NButton,{size:'small',text:true,onClick:()=>inspectMissingItems(row)},()=> '查看缺失商品'),edit]):edit}},
 ]
 </script>
 
@@ -240,7 +240,7 @@ const coverageColumns=[
           <p>{{ row.category_label }}</p>
           <p v-if="row.coverage_reason" class="pricing-reason">{{ row.coverage_reason }}</p>
           <p v-if="row.brushing_review" class="pricing-reason">{{ row.brushing_review }}</p>
-          <n-button v-if="row.partial_cost" size="small" @click="inspectMissingItems(row)">查看缺失商品</n-button><span v-else-if="closed" class="pricing-reason">已结账 · 只读</span><n-button v-else-if="row.editable" size="small" @click="editLine(row)">{{ row.manual_amount == null ? '添加金额' : '修改金额' }}</n-button><span v-else class="pricing-reason">此键对应多个订单，需先确认归属</span>
+          <n-button v-if="row.partial_cost" size="small" @click="inspectMissingItems(row)">查看缺失商品</n-button> <span v-if="closed" class="pricing-reason">已结账 · 只读</span><n-button v-else-if="row.editable" size="small" @click="editLine(row)">{{ row.manual_amount == null ? (row.partial_cost ? '补缺的成本' : '添加金额') : '修改金额' }}</n-button><span v-else class="pricing-reason">此键对应多个订单，需先确认归属</span>
         </article>
       </div>
       <div class="pricing-pages"><span>{{ coverageBusy ? '正在加载订单记录…' : `共 ${coverageData.matching ?? coverageData.total ?? summary.gaps} 笔` }}</span><n-pagination v-model:page="coveragePage" :item-count="coverageData.matching || 0" :page-size="50" :disabled="coverageBusy" simple /></div>
@@ -267,8 +267,8 @@ const coverageColumns=[
     </n-drawer-content>
   </n-drawer>
   <n-modal :show="!!editor" :z-index="3960" preset="dialog" title="人工补录订单总成本" positive-text="保存金额" negative-text="取消" :positive-button-props="{disabled: !editorReason.trim() || (editorAction==='save' && !validCents(editorAmount))}" @update:show="!$event && (editor=null)" @positive-click="saveLine">
-    <p class="small muted">平台订单 {{ editor?.order_id }} · 子订单 {{ editor?.sub_order_id }} · {{ editor?.order_date || `本店${period}账期，原下单日未提供` }}。金额按本子订单所有商品合计填写；没有原下单日时请在依据中说明月份归属。</p>
-    <n-input v-if="editorAction==='save'" v-model:value="editorAmount" inputmode="decimal" aria-label="人工总成本金额" placeholder="输入本子订单总成本" />
+    <p class="small muted">平台订单 {{ editor?.order_id }} · 子订单 {{ editor?.sub_order_id }} · {{ editor?.order_date || `本店${period}账期，原下单日未提供` }}。<template v-if="editor?.partial_cost">已计入 {{ Number(editor?.posted_goods_cost || 0).toFixed(2) }} 元，这里只填还缺的那部分商品成本；</template><template v-else>金额按本子订单所有商品合计填写；</template>没有原下单日时请在依据中说明月份归属。</p>
+    <n-input v-if="editorAction==='save'" v-model:value="editorAmount" inputmode="decimal" aria-label="人工总成本金额" :placeholder="editor?.partial_cost ? '输入还缺的成本' : '输入本子订单总成本'" />
     <n-alert v-else type="warning" :bordered="false">将撤销此前的人工补录金额。旧记录仍保留。</n-alert>
     <n-input v-model:value="editorReason" type="textarea" :rows="3" maxlength="500" show-count placeholder="填写来源和确认依据" style="margin-top:12px" />
     <n-button v-if="editor?.manual_amount != null" size="small" text style="margin-top:10px" @click="editorAction=editorAction==='remove'?'save':'remove'">{{ editorAction==='remove'?'继续修改金额':'撤销此前补录' }}</n-button>

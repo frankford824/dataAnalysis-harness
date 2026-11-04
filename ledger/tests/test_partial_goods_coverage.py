@@ -89,25 +89,18 @@ def test_reported_seven_component_bundle_is_not_complete_when_only_four_are_pric
     assert set(gap['pending_cost_skus'].split('、')) == {'CGK001033','CGK001035','CGK001858'}
 
 
-def test_partial_orders_reject_whole_order_manual_and_batch_supplements(tmp_path):
+def test_partial_orders_accept_supplement_for_missing_part(tmp_path):
     result = scenario(); sl = result.slices[(STORE.name, '2026-07')]
     ws = Workspace(tmp_path); store = result.model.store('s')
     rid = ws.record('s', '2026-07', view.slice_dict(sl, store, result.model), [])
     service._keep_facts(ws, rid, sl)
     gap = next(r for r in cost_lines.current(ws, rid, 's', '2026-07')['items'] if r['coverage_key'] == 'A1')
-    assert not gap['editable']
-    with pytest.raises(WorkspaceError, match='部分商品成本'):
-        cost_lines.save(ws, 's', '2026-07', rid, coverage_key='A1', context_sha=gap['context_sha'],
-                        amount='17.58', reason='would double count the already posted part')
-    exported = list(csv.DictReader(io.StringIO(cost_lines.export_csv(ws, rid, 's', '2026-07'))))
-    for row in exported:
-        row['人工补录总成本'] = '17.58' if row['清单键'] == 'A1' else ''
-    buf = io.StringIO(); writer = csv.DictWriter(buf, fieldnames=exported[0].keys())
-    writer.writeheader(); writer.writerows(exported)
-    preview = cost_lines.batch_preview(ws, 's', '2026-07', rid, buf.getvalue().encode(), 'QA')
-    assert preview['valid'] == 0 and preview['issue_count'] == 1
-    assert '部分商品成本' in preview['issues'][0]
-    assert ws.conn.execute('SELECT count(*) FROM cost_line_log').fetchone()[0] == 0
+    assert gap['editable'] and gap['partial_cost']
+    cost_lines.save(ws, 's', '2026-07', rid, coverage_key='A1', context_sha=gap['context_sha'],
+                    amount='12.58', reason='only the missing item')
+    cost_line_posting.apply(ws, result, store)
+    assert sl.cost_line_posting['count'] == 1
+    assert sl.facts.filter(pl.col('link_key') == 'A1')['contribution'].sum() == pytest.approx(-17.58)
 
 
 def test_old_whole_order_supplement_cannot_repost_on_partial_source_cost(tmp_path):

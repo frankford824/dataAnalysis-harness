@@ -75,15 +75,14 @@ def current(ws, run_id: int, store_id: str, period: str) -> dict:
     total = Decimal(0)
     reviewed = []
     for item in items:
-        item['editable'] = (item['order_count'] == 1 and item.get('goods_scope_version') == 1
-                            and not item.get('partial_cost', False))
+        item['editable'] = item['order_count'] == 1 and item.get('goods_scope_version') == 1
         saved = latest.get(item['coverage_key'])
         item['line_revision'] = saved['id'] if saved else 0
         item['manual_amount'] = None
         item['manual_reason'] = ''
         item['stale_decision'] = bool(saved and saved['context_sha'] != item['context_sha'])
         if (saved and not item['stale_decision'] and item['order_count'] == 1
-                and saved['action'] == 'save' and not item.get('partial_cost', False)):
+                and saved['action'] == 'save'):
             amount = _cents(saved['amount'])
             item['manual_amount'] = float(amount)
             item['manual_reason'] = saved['reason']
@@ -290,9 +289,6 @@ def _batch_rows(ws, store_id: str, period: str, run_id: int,
             issues.append(f'第{line}行订单键不存在或重复')
             continue
         used.add(canonical)
-        if source.get('partial_cost', False):
-            issues.append(f'第{line}行已有部分商品成本计入，请先核对缺失商品明细，不能重复补录整单成本')
-            continue
         # Excel/WPS can rewrite 18+ digit order numbers even when the export uses
         # formula text.  Those columns are for people to read, not row identity.
         # The opaque key plus the hash of its exact order context are the stable,
@@ -397,8 +393,6 @@ def save(ws, store_id: str, period: str, run_id: int, *, coverage_key: str,
                    if row['coverage_key'] == coverage_key), None)
     if source is None or source['order_count'] != 1 or source['context_sha'] != context_sha:
         raise WorkspaceError("订单对应关系已变化或存在歧义，请刷新明细后再修改")
-    if action == 'save' and source.get('partial_cost', False):
-        raise WorkspaceError('已有部分商品成本计入，请先核对缺失商品明细，不能重复补录整单成本')
     conn = ws.conn
     with ws.transaction():
         active = conn.execute('SELECT id FROM run WHERE store_id=? AND period=? ORDER BY id DESC LIMIT 1',

@@ -1348,29 +1348,28 @@ onUnmounted(() => {
         </div>
         <span v-else-if="threadTitle && messages.length" class="agent-topic-title truncate" :title="threadTitle">{{ threadTitle }}</span>
       </div>
-      <div v-if="activeTasks.length" ref="taskBox" class="agent-tasks">
-        <button type="button" class="agent-tasks-bar" :aria-expanded="tasksOpen" @click="tasksOpen = !tasksOpen">
-          <LoaderCircle class="agent-spinner" :size="12" aria-hidden="true" />
-          <b>{{ activeTasks.length }} 个任务进行中</b>
-          <span class="truncate">{{ activeTasks[activeTasks.length - 1].line }}</span>
-          <ChevronRight class="agent-caret" :class="{ open: tasksOpen }" :size="12" aria-hidden="true" />
-        </button>
-        <div v-if="tasksOpen" class="agent-tasks-list" role="list">
-          <article v-for="t in activeTasks" :key="t.run_id" class="agent-task-row" role="listitem" :data-status="t.status">
-            <header>
-              <span class="agent-avatar" :style="{ background: tint(t.user || '同事') }" aria-hidden="true">{{ initial(t.user || '同事') }}</span>
-              <b class="truncate">{{ taskWho(t) }}</b>
-              <span class="agent-task-state">{{ TASK_STATUS[t.status] || t.status }}</span>
-              <time class="num">{{ taskTime(t) }}</time>
-              <button v-if="RUNNING.has(t.status)" type="button" class="agent-task-stop" :disabled="t.stopping" :title="`停止${taskWho(t) === '你' ? '' : ` ${taskWho(t)} 的`}这个任务`" @click="stopTask(t)"><Square :size="8" fill="currentColor" aria-hidden="true" />停止</button>
-            </header>
-            <p class="agent-task-q" :title="t.question">{{ t.question }}</p>
-            <p v-if="t.line" class="agent-task-line">{{ t.line }}</p>
-          </article>
-        </div>
-      </div>
-
       <div class="agent-scroll">
+        <div v-if="activeTasks.length" ref="taskBox" class="agent-tasks">
+          <button type="button" class="agent-tasks-bar" :aria-expanded="tasksOpen" @click="tasksOpen = !tasksOpen">
+            <LoaderCircle class="agent-spinner" :size="12" aria-hidden="true" />
+            <b>{{ activeTasks.length }} 个任务进行中</b>
+            <span class="truncate">{{ activeTasks[activeTasks.length - 1].line }}</span>
+            <ChevronRight class="agent-caret" :class="{ open: tasksOpen }" :size="12" aria-hidden="true" />
+          </button>
+          <div v-if="tasksOpen" class="agent-tasks-list" role="list">
+            <article v-for="t in activeTasks" :key="t.run_id" class="agent-task-row" role="listitem" :data-status="t.status">
+              <header>
+                <span class="agent-avatar" :style="{ background: tint(t.user || '同事') }" aria-hidden="true">{{ initial(t.user || '同事') }}</span>
+                <b class="truncate">{{ taskWho(t) }}</b>
+                <span class="agent-task-state">{{ TASK_STATUS[t.status] || t.status }}</span>
+                <time class="num">{{ taskTime(t) }}</time>
+                <button v-if="RUNNING.has(t.status)" type="button" class="agent-task-stop" :disabled="t.stopping" :title="`停止${taskWho(t) === '你' ? '' : ` ${taskWho(t)} 的`}这个任务`" @click="stopTask(t)"><Square :size="8" fill="currentColor" aria-hidden="true" />停止</button>
+              </header>
+              <p class="agent-task-q" :title="t.question">{{ t.question }}</p>
+              <p v-if="t.line" class="agent-task-line">{{ t.line }}</p>
+            </article>
+          </div>
+        </div>
         <div ref="list" class="agent-list" @scroll="onScroll" @click="onListClick">
           <div v-if="loadingThread" class="agent-loading"><span class="spin" /> 正在打开这段对话…</div>
 
@@ -1832,6 +1831,7 @@ onUnmounted(() => {
 .agent-list {
   height: 100%;
   overflow-y: auto;
+  scrollbar-gutter: stable;
   overscroll-behavior: contain;
   padding: var(--s2) var(--s5) var(--s5);
 }
@@ -2143,6 +2143,7 @@ onUnmounted(() => {
 .agent-toolbar { display: flex; align-items: center; gap: 14px; padding-top: 10px; }
 .agent-tool,
 .agent-tool:hover:not(:disabled) {
+  flex: none;
   display: inline-flex;
   align-items: center;
   gap: 5px;
@@ -2154,9 +2155,11 @@ onUnmounted(() => {
 }
 .agent-tool:hover:not(:disabled),
 .agent-tool.on { color: var(--accent); }
-.agent-hint { margin-left: auto; font-size: 11px; color: var(--n5); white-space: nowrap; }
+.agent-hint { flex: 0 1 auto; min-width: 0; margin-left: auto; overflow: hidden; text-overflow: ellipsis; font-size: 11px; color: var(--n5); white-space: nowrap; }
 .agent-send,
 .agent-send:hover:not(:disabled) {
+  flex: none;
+  white-space: nowrap;
   display: inline-flex;
   align-items: center;
   gap: 5px;
@@ -2228,8 +2231,8 @@ onUnmounted(() => {
   color: #fff;
 }
 
-/* 任务条：有任务在跑时才出现，一行高；展开的列表浮在消息上面，不把对话往下挤。 */
-.agent-tasks { position: relative; border-bottom: 1px solid var(--n2); }
+/* 任务条：有任务在跑时才出现，浮在消息列表顶上，出现、消失都不挪动对话。 */
+.agent-tasks { position: absolute; top: 0; left: 0; right: 0; z-index: 24; border-bottom: 1px solid var(--n2); background: var(--n0); }
 .agent-tasks-bar,
 .agent-tasks-bar:hover:not(:disabled) {
   display: flex;
