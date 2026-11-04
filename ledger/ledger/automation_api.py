@@ -130,7 +130,7 @@ def install(app,workspace,model,actor=None,model_root=None):
         except ValueError as exc:raise HTTPException(400,str(exc)) from exc
 
     @router.get('/months/{period}')
-    def read_month(period:str):return call(lambda:actions.month(workspace(),model(),period),write=False)
+    def read_month(period:str):return call(lambda:actions.month_view(workspace,model,period),write=False)
 
     @router.get('/rules')
     @router.get('/rule-contracts')

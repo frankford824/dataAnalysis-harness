@@ -117,7 +117,11 @@ def install(app, workspace):
             request.state.ledger_identity = actor
             token = _identity.set(actor)
             try:
-                return await call_next(request)
+                response = await call_next(request)
+                if response.status_code < 400:
+                    from .automation_actions import note_write
+                    note_write()
+                return response
             finally:
                 _identity.reset(token)
         except HTTPException as exc:

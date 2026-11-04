@@ -190,6 +190,41 @@ def month(ws,model,period):
         flight['done'].set()
 
 
+_month_views={};_writes=[0];MONTH_VIEW_TTL=300
+
+
+def note_write():_writes[0]+=1
+
+
+def month_view(workspace,model,period):
+    """Board status: answer from the last evaluation; refresh it in the background.
+
+    Business actions re-check their own input_sha, so an older status can delay
+    a display update but cannot authorize a stale change.
+    """
+    journal.period(period)
+    ws=workspace();key=(str(ws.root),period);cached=_month_views.get(key)
+    if cached is None:
+        writes=_writes[0];value=month(ws,model(),period)
+        _month_views[key]={'value':value,'at':time.monotonic(),'writes':writes}
+        return copy.deepcopy(value)
+    if time.monotonic()-cached['at']>MONTH_VIEW_TTL or cached['writes']!=_writes[0]:
+        _refresh_view(workspace,model,period,key)
+    return copy.deepcopy(cached['value'])
+
+
+def _refresh_view(workspace,model,period,key):
+    with _month_guard:
+        if key in _month_flights:return
+    writes=_writes[0]
+    def run():
+        try:_month_views[key]={'value':month(workspace(),model(),period),'at':time.monotonic(),'writes':writes}
+        except Exception:
+            import logging
+            logging.getLogger(__name__).exception('month view refresh failed for %s',period)
+    threading.Thread(target=run,name='ledger-month-view',daemon=True).start()
+
+
 def _month(ws,model,period):
     journal.period(period)
     decisions=journal.active_decisions(ws.conn,period)

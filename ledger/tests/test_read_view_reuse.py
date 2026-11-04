@@ -53,6 +53,30 @@ def test_month_failure_reaches_every_waiter_and_clears(monkeypatch):
     assert not actions._month_flights
 
 
+def test_month_view_answers_from_last_evaluation_and_refreshes_after_writes(monkeypatch):
+    values = iter([{'n': 1}, {'n': 2}])
+    refreshed = threading.Event()
+
+    def evaluate(ws, model, period):
+        value = next(values)
+        if value['n'] == 2: refreshed.set()
+        return value
+
+    monkeypatch.setattr(actions, '_month', evaluate)
+    actions._month_views.clear()
+    ws = SimpleNamespace(root='/tmp/ws-view')
+    view = lambda: actions.month_view(lambda: ws, lambda: None, '2030-03')
+    assert view() == {'n': 1}
+    assert view() == {'n': 1}
+    actions.note_write()
+    assert view() == {'n': 1}
+    assert refreshed.wait(2)
+    for _ in range(50):
+        if view() == {'n': 2}: break
+        time.sleep(0.02)
+    assert view() == {'n': 2}
+
+
 def test_refund_validation_reuse_only_when_requested(monkeypatch, tmp_path):
     calls = []
 
