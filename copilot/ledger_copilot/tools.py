@@ -290,8 +290,8 @@ def build_web(summary, **_):
 
 def web_search(query, **_):
     answer, _, _ = llm.complete(config.models()['quick']['id'], [
-        {'role': 'system', 'content': '根据联网搜索结果回答，只写查到的事实，注明信息来自哪个网站和日期；查不到就直说。'},
-        {'role': 'user', 'content': query}], max_tokens=1500, timeout=90,
+        {'role': 'system', 'content': '根据联网搜索结果回答，300 字以内，只写查到的事实，注明信息来自哪个网站和日期；查不到就直说。'},
+        {'role': 'user', 'content': query}], max_tokens=600, timeout=90,
         extra={'enable_search': True, 'search_options': {'forced_search': True, 'search_strategy': 'turbo'}})
     return _cut(answer)
 

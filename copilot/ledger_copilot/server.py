@@ -9,15 +9,16 @@ import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel
 
-from . import agent, autoclose, config, costs, events, machine, store, tools, webui
+from . import agent, autoclose, config, costs, docs, events, machine, store, tools, webui
 
 _runs = {}
 _stops = {}
 _tasks = {}
+_inboxes = {}
 _tasks_lock = threading.Lock()
 # 同时最多几轮在查；多出来的排队，避免几个人同时提问把模型并发和台账都压满。
 _slots = threading.Semaphore(3)
@@ -44,6 +45,15 @@ class Chat(BaseModel):
     text: str = ''
     images: list[dict] = []
     page: dict | None = None
+    user: str = ''
+    files: list[dict] = []
+
+
+class Steer(BaseModel):
+    run_id: str | None = None
+    thread_id: str | None = None
+    text: str = ''
+    files: list[dict] = []
     user: str = ''
 
 
@@ -98,10 +108,11 @@ def _single(*items):
 def chat(body: Chat):
     group = body.thread_id == store.GROUP
     if group and COLLEAGUE.match(body.text):
-        thread_id, message_id, _ = agent.post_message(store.GROUP, body.text, body.images, body.page, body.user)
+        thread_id, message_id, _ = agent.post_message(store.GROUP, body.text, body.images, body.page, body.user,
+                                                      docs.resolve(body.files))
         return _single(events.sse('thread', {'thread_id': thread_id, 'title': '公共群聊', 'run_id': '', 'message_id': message_id}),
                        events.sse('done', None))
-    same = _duplicate(body.text) if group and not body.images else None
+    same = _duplicate(body.text) if group and not body.images and not body.files else None
     if same:
         thread_id, message_id, _ = agent.post_message(store.GROUP, body.text, body.images, body.page, body.user)
         followers = same['followers'] + [body.user or '同事']
@@ -120,10 +131,11 @@ def chat(body: Chat):
     run_id = uuid.uuid4().hex[:10]
     holder = {'thread': body.thread_id}
     _stops[run_id] = stop
+    inbox = _inboxes[run_id] = queue.Queue()
     now = time.time()
     with _tasks_lock:
         _tasks[run_id] = {'run_id': run_id, 'thread_id': body.thread_id or '', 'user': body.user,
-                          'question': (body.text.strip() or '（截图）')[:80], 'message_id': None, 'status': 'queued',
+                          'question': (body.text.strip() or ('（文件）' if body.files else '（截图）'))[:80], 'message_id': None, 'status': 'queued',
                           'line': '排队中', 'started_at': datetime.now().astimezone().isoformat(timespec='seconds'),
                           'ms': 0, 'cost_cny': 0.0, 'followers': [], 'cards': [], '_started': now, '_ended': 0}
     events.publish('task', _task_view(_tasks[run_id]))
@@ -153,7 +165,8 @@ def chat(body: Chat):
                     status = 'stopped'
                     return
                 _update_task(run_id, status='running', line='在看', _started=time.time())
-                agent.run_turn(body.thread_id, body.text, body.images, body.page, body.user, emit, stop, run_id)
+                agent.run_turn(body.thread_id, body.text, body.images, body.page, body.user, emit, stop, run_id,
+                               body.files, inbox)
             if stop.is_set():
                 status = 'stopped'
         except Exception as exc:
@@ -164,6 +177,8 @@ def chat(body: Chat):
             if _runs.get(holder['thread']) is stop:
                 _runs.pop(holder['thread'], None)
             _stops.pop(run_id, None)
+            with _tasks_lock:
+                _inboxes.pop(run_id, None)
             task = _tasks.get(run_id, {})
             pending = [c for c in task.get('cards', []) if (store.card(c) or {'status': ''})['status'] == 'pending']
             if status == 'done' and pending:
@@ -219,6 +234,42 @@ async def event_stream(user: str = ''):
             events.unsubscribe(sid)
 
     return StreamingResponse(stream(), media_type='text/event-stream', headers=SSE_HEADERS)
+
+
+def _running_for(body):
+    with _tasks_lock:
+        if body.run_id and body.run_id in _inboxes:
+            return _tasks.get(body.run_id)
+        mine = [t for t in _tasks.values() if t['run_id'] in _inboxes and t['thread_id'] == (body.thread_id or '')
+                and (body.thread_id != store.GROUP or t['user'] == body.user)]
+        return max(mine, key=lambda t: t['_started'], default=None)
+
+
+@app.post('/api/agent/steer')
+def steer(body: Steer):
+    task = _running_for(body)
+    if not task or task['status'] not in {'queued', 'running'}:
+        return {'status': 'finished'}
+    prompt = agent.steer(task['thread_id'], body.text, body.files, body.user)
+    with _tasks_lock:
+        inbox = _inboxes.get(task['run_id'])
+    if inbox is None:
+        return {'status': 'finished', 'stored': True}
+    inbox.put(prompt)
+    _update_task(task['run_id'], line='收到补充，接着查')
+    return {'status': 'queued', 'run_id': task['run_id']}
+
+
+@app.post('/api/agent/files')
+async def upload_file(request: Request, name: str = 'file'):
+    data = await request.body()
+    if not data:
+        raise HTTPException(400, '空文件')
+    try:
+        info = docs.save(name, data)
+    except ValueError as exc:
+        raise HTTPException(413, str(exc)) from exc
+    return {k: info[k] for k in ('file_id', 'name', 'size', 'kind', 'url')}
 
 
 @app.post('/api/agent/stop')

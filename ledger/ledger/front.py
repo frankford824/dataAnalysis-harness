@@ -34,7 +34,6 @@ WRITER_WAIT = 120
 
 CACHED = [(re.compile(pattern), ttl) for pattern, ttl in (
     (r'/api/recompute/progress', 3),
-    (r'/api/automation/telemetry', 15),
     (r'/api/automation/rule-contracts', 300),
     (r'/api/automation/months/[^/]+', 90),
     (r'/api/automation/inbox', 90),
@@ -45,6 +44,8 @@ CACHED = [(re.compile(pattern), ttl) for pattern, ttl in (
     (r'/api/stores/[^/]+', 90),
     (r'/api/stores/[^/]+/(pricing-status|periods/[^/]+)', 90),
 )]
+
+NOT_WRITES = re.compile(r'/api/(automation/telemetry|.*preview.*|search.*)')
 
 _entries = OrderedDict()
 _flights = {}
@@ -87,9 +88,10 @@ def _persist(key, entry):
         pass
 
 
-async def _open(port, method, target, headers, body_chunks):
+async def _open(port, method, target, headers, body_chunks, host=None):
     reader, writer = await asyncio.wait_for(asyncio.open_connection('127.0.0.1', port), 5)
-    head = [f'{method} {target} HTTP/1.0', f'Host: 127.0.0.1:{port}']
+    # 台账拒绝 Origin 与 Host 不一致的写入，所以转发时保留浏览器看到的 Host。
+    head = [f'{method} {target} HTTP/1.0', f'Host: {host or f"127.0.0.1:{port}"}']
     head += [f'{k}: {v}' for k, v in headers if k.lower() not in HOP]
     if body_chunks is None:
         head.append('Content-Length: 0')
@@ -227,10 +229,12 @@ def _note_write(request):
 async def _forward(request, port, target):
     body = request.stream() if request.method not in {'GET', 'HEAD'} else None
     try:
-        status, headers, reader, writer = await _open(port, request.method, target, request.headers.items(), body)
+        status, headers, reader, writer = await _open(port, request.method, target, request.headers.items(), body,
+                                                      request.headers.get('host'))
     except (OSError, asyncio.TimeoutError, IndexError, ValueError):
         return JSONResponse({'detail': '服务正在重启，请稍后再试'}, status_code=503)
-    if port == LEDGER_PORT and request.method not in {'GET', 'HEAD'} and status < 400:
+    if port == LEDGER_PORT and request.method not in {'GET', 'HEAD'} and status < 400 \
+            and not NOT_WRITES.fullmatch(request.url.path):
         _note_write(request)
 
     async def stream():

@@ -18,9 +18,9 @@ _lock = threading.Lock()
 
 
 def _assistant_calls(since):
-    rows = store.conn().execute('SELECT at, model, tokens_in, tokens_out, coalesce(cached,0) FROM usage WHERE at>=?',
-                                (since.timestamp(),)).fetchall()
-    return [(datetime.fromtimestamp(r[0]), r[1], r[2], r[3], r[4]) for r in rows]
+    rows = store.conn().execute('SELECT at, model, tokens_in, tokens_out, coalesce(cached,0), coalesce(written,0), '
+                                'coalesce(explicit,0) FROM usage WHERE at>=?', (since.timestamp(),)).fetchall()
+    return [(datetime.fromtimestamp(r[0]), r[1], r[2], r[3], r[4], r[5], bool(r[6])) for r in rows]
 
 
 def _worker_calls(since):
@@ -37,7 +37,7 @@ def _worker_calls(since):
     for at, model, tokens_in, tokens_out, cached in rows:
         when = datetime.fromisoformat(at).replace(tzinfo=timezone.utc).astimezone().replace(tzinfo=None)
         if when >= since:
-            calls.append((when, model, tokens_in or 0, tokens_out or 0, cached))
+            calls.append((when, model, tokens_in or 0, tokens_out or 0, cached, 0, False))
     return calls
 
 
@@ -57,7 +57,7 @@ def _ledger_calls(since):
         tokens_in = usage.get('prompt_tokens') or len(json.dumps(row.get('sent') or '', ensure_ascii=False)) // 2
         tokens_out = usage.get('completion_tokens') or len(json.dumps(row.get('got') or '', ensure_ascii=False)) // 2
         cached = (usage.get('prompt_tokens_details') or {}).get('cached_tokens') or 0
-        calls.append((when, row.get('model', ''), tokens_in, tokens_out, cached))
+        calls.append((when, row.get('model', ''), tokens_in, tokens_out, cached, 0, False))
     return calls
 
 
@@ -74,13 +74,17 @@ def summary(force=False):
     day_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
     hour_ago = now - timedelta(hours=1)
     sources, models = [], defaultdict(lambda: {'calls': 0, 'tokens_in': 0, 'tokens_out': 0, 'cached': 0, 'cost': 0.0})
-    total = today = last_hour = 0.0
-    tokens_month = 0
+    total = today = last_hour = saved = 0.0
+    tokens_month = prompt_month = cached_month = 0
     for key, (label, reader) in SOURCES.items():
         month_cost = day_cost = 0.0
-        calls = tokens = 0
-        for when, model, tokens_in, tokens_out, cached in reader(month_start):
-            charge = pricing.cost(model, tokens_in, tokens_out, cached, when)
+        calls = tokens = prompt = hits = 0
+        for when, model, tokens_in, tokens_out, cached, written, explicit in reader(month_start):
+            charge = pricing.cost(model, tokens_in, tokens_out, cached, when, written, explicit)
+            if model not in pricing.PER_CALL:
+                prompt += tokens_in or 0
+                hits += cached or 0
+                saved += pricing.saved(model, tokens_in, cached, explicit, when)
             month_cost += charge
             calls += 1
             tokens += (tokens_in or 0) + (tokens_out or 0)
@@ -95,13 +99,16 @@ def summary(force=False):
             row['cached'] += cached or 0
             row['cost'] += charge
         sources.append({'key': key, 'label': label, 'month_cny': round(month_cost, 4), 'today_cny': round(day_cost, 4),
-                        'calls': calls, 'tokens': tokens})
+                        'calls': calls, 'tokens': tokens, 'cache_rate': round(hits / prompt, 3) if prompt else None})
+        prompt_month += prompt
+        cached_month += hits
         total += month_cost
         today += day_cost
         tokens_month += tokens
     value = {
         'month': month_start.strftime('%Y-%m'), 'month_cny': round(total, 4), 'today_cny': round(today, 4),
         'last_hour_cny': round(last_hour, 4), 'month_tokens': tokens_month,
+        'cache_rate': round(cached_month / prompt_month, 3) if prompt_month else None, 'cache_saved_cny': round(saved, 4),
         'budget_cny': config.MONTH_BUDGET_CNY, 'sources': sources,
         'models': sorted(({'model': m, **{k: round(v, 4) if k == 'cost' else v for k, v in row.items()}}
                           for m, row in models.items()), key=lambda r: -r['cost']),

@@ -1,13 +1,14 @@
 """一轮问答：识别截图 → 选模型 → 工具循环 → 记录。"""
 import base64
 import json
+import queue
 import re
 import threading
 import time
 import uuid
 from datetime import datetime
 
-from . import config, events, llm, store, tools
+from . import config, docs, events, llm, store, tools
 
 MAX_STEPS = 16
 RECENT = 10
@@ -56,8 +57,10 @@ SYSTEM = '''你是「台账助手」，运行在公司台账系统的生产机�
 - 效率：接口很慢时改用 sql_query；每次只取需要的列和行；同一问题不要反复查同样的数据。
 - 外部信息（平台规则、费率政策、公告、软件报错含义）用 web_search；机器上有哪些服务、端口、日志在哪用 machine_map；
   NAS 共享盘上的源文件按名字/月份/店铺找用 find_files（比在共享盘上遍历快得多）。
-- 本机其他服务：8001 订单系统（D:\\order），8010 fin-gateway，8011 fin-indexer，8765 台账索引，两个 Postgres（5433/5434）；细节查 machine_map。
-今天是 {today}。'''
+- 用户发来的文件已保存在生产机上，消息里给了路径和内容摘要；要筛选、汇总、核对时用 python 工具读原文件（openpyxl/xlrd/docx/pypdf 可用），
+  不要凭摘要估算。文件看起来是台账资料（流水、运费表、推广费、成本表等）时，主动问要不要作为台账资料上传，
+  用户同意后用 propose_change 生成卡片，动作是把文件复制到 \\\\192.168.0.125\\dataAnalysis\\台账系统\\00_上传区。
+- 本机其他服务：8001 订单系统（D:\\order），8010 fin-gateway，8011 fin-indexer，8765 台账索引，两个 Postgres（5433/5434）；细节查 machine_map。'''
 
 ENGINEER_WORDS = re.compile(r'报错|错误提示|打不开|白屏|卡死|很卡|太慢|加载不出|500|bug|程序|页面.*(坏|错|空)|按钮.*(没反应|不能)|改代码|功能')
 INVESTIGATE_WORDS = re.compile(r'不对|不一致|错|为什么|怎么回事|核对|差|少了|多了|异常|查一下|排查|对不上|偏高|偏低|原因|改|调整|修正')
@@ -118,33 +121,107 @@ def _page_text(page):
     return '【用户当前在左侧看的页面】' + '；'.join(p for p in parts if p.split('：', 1)[1])
 
 
-def _context(thread_id, text, exclude):
-    memory = store.memory()
-    related = store.search_corrections(text, 5)
-    row = store.thread(thread_id)
-    history = [m for m in store.messages(thread_id) if m['id'] > (row['summarized_upto'] or 0) and m['id'] != exclude]
-    group = thread_id == store.GROUP
-    system = SYSTEM.replace('{today}', datetime.now().strftime('%Y-%m-%d'))
+EPHEMERAL = {'type': 'ephemeral'}
+DATED = re.compile(r'\d{4}-\d{2}|\d{1,2}月|[a-z0-9]+_[a-z0-9]+')
+GROUP_NOTE = ('\n\n【公共群聊】这是 2-3 位同事共用的群聊，消息前的【名字】是发言人。回答时可以称呼对方；'
+              '别人刚才说过的事实和结论直接沿用，不要重复查。')
+
+
+def _blocks(text, mark=False):
+    block = {'type': 'text', 'text': text}
+    if mark:
+        block['cache_control'] = EPHEMERAL
+    return [block]
+
+
+def _memory_split(query):
+    """长期记忆分两半：通用口径放进稳定前缀；带月份或店铺的条目只在相关时随问题带上。"""
+    general, specific = [], []
+    for line in store.memory().splitlines():
+        if line.strip():
+            (specific if DATED.search(line) else general).append(line)
+    terms = store._terms(query)
+    scored = sorted(((len(terms & store._terms(line)), line) for line in specific), key=lambda x: -x[0])
+    return '\n'.join(general), '\n'.join(line for score, line in scored[:15] if score >= 2)
+
+
+def _stable(thread_id):
+    """不随问题变化的部分。顺序固定：规则、系统地图、群聊说明；之后才是记忆和话题经过。"""
+    system = SYSTEM
     index = tools.knowledge_index()
     if index:
         system += '\n\n【系统地图目录】（详细内容用 read_knowledge 按章节读取；先查这里再动手，能少走很多步）\n' + index
-    if group:
-        system += ('\n\n【公共群聊】这是 2-3 位同事共用的群聊，消息前的【名字】是发言人。回答时可以称呼对方；'
-                   '别人刚才说过的事实和结论直接沿用，不要重复查。')
-    if memory:
-        system += '\n\n【长期记忆】\n' + memory
-    if related:
-        system += '\n\n【可能相关的以往纠错】\n' + json.dumps(related, ensure_ascii=False)
+    if thread_id == store.GROUP:
+        system += GROUP_NOTE
+    return system
+
+
+def _context(thread_id, query, exclude):
+    general, _ = _memory_split(query)
+    row = store.thread(thread_id)
+    background = ''
+    if general:
+        background += '【长期记忆】\n' + general
     if row['summary']:
-        system += '\n\n【本话题早前的经过】\n' + row['summary']
-    messages = [{'role': 'system', 'content': system}]
-    for m in history[-RECENT:]:
+        background += '\n\n【本话题早前的经过】\n' + row['summary']
+    content = _blocks(_stable(thread_id), mark=True) + (_blocks(background.strip()) if background else [])
+    messages = [{'role': 'system', 'content': content}]
+    group = thread_id == store.GROUP
+    for m in store.messages(thread_id, row['summarized_upto'] or 0, prompts=True):
+        if m['id'] == exclude:
+            continue
         if m['role'] == 'system':
-            messages.append({'role': 'user', 'content': '（系统通知）' + m['text']})
+            messages.append({'role': 'user', 'content': _blocks('（系统通知）' + m['text'])})
+        elif m['role'] == 'user':
+            prompt = m.get('prompt') or ((f"【{m['user'] or '同事'}】" if group else '') + m['text'])
+            if prompt:
+                messages.append({'role': 'user', 'content': _blocks(prompt)})
         elif m['text']:
-            prefix = f"【{m['user'] or '同事'}】" if group and m['role'] == 'user' else ''
-            messages.append({'role': m['role'], 'content': prefix + m['text']})
+            messages.append({'role': 'assistant', 'content': m['text']})
     return messages
+
+
+def _volatile(query, page):
+    """每次都会变的放在最后一条用户消息里，前面的前缀才能被缓存命中。"""
+    _, specific = _memory_split(query + ' ' + json.dumps(page or {}, ensure_ascii=False))
+    related = store.search_corrections(query, 3)
+    parts = [f"（今天 {datetime.now():%Y-%m-%d %H:%M}）"]
+    if page:
+        parts.append(_page_text(page))
+    if specific:
+        parts.append('【相关记忆】\n' + specific)
+    if related:
+        parts.append('【可能相关的以往纠错】\n' + json.dumps(related, ensure_ascii=False))
+    return '\n'.join(parts)
+
+
+def _mark(messages):
+    """缓存标记只留两处：固定规则末尾，和本次请求的最后一条消息（每一步都往后挪）。"""
+    for m in messages[1:]:
+        if isinstance(m.get('content'), list):
+            for block in m['content']:
+                block.pop('cache_control', None)
+    last = messages[-1]
+    if isinstance(last.get('content'), str) and last['content']:
+        last['content'] = _blocks(last['content'])
+    if isinstance(last.get('content'), list) and last['content']:
+        last['content'][-1]['cache_control'] = EPHEMERAL
+
+
+def _size(messages):
+    return sum(len(json.dumps(m, ensure_ascii=False)) for m in messages)
+
+
+def _drain(inbox, messages):
+    added = 0
+    while inbox is not None:
+        try:
+            prompt = inbox.get_nowait()
+        except queue.Empty:
+            break
+        messages.append({'role': 'user', 'content': _blocks(prompt)})
+        added += 1
+    return added
 
 
 def _merge_alternating(messages):
@@ -157,16 +234,50 @@ def _merge_alternating(messages):
     return merged
 
 
-def post_message(thread_id, text, images, page, user):
-    thread_id, _ = store.ensure_thread(thread_id, text.strip().splitlines()[0] if text.strip() else '截图问题', user)
+def post_message(thread_id, text, images, page, user, files=(), prompt=None):
+    title = text.strip().splitlines()[0] if text.strip() else (files[0]['name'] if files else '截图问题')
+    thread_id, _ = store.ensure_thread(thread_id, title, user)
     saved = _save_images(images or [])
-    message_id = store.add_message(thread_id, 'user', text, images=[u for u, _ in saved], page=page, user=user)
+    message_id = store.add_message(thread_id, 'user', text, images=[u for u, _ in saved], page=page, user=user,
+                                   files=[{k: f[k] for k in ('file_id', 'name', 'size', 'kind', 'url') if k in f} for f in files],
+                                   prompt=prompt)
     events.publish('message', {'thread_id': thread_id, 'message': store.messages(thread_id, message_id - 1)[0]})
     return thread_id, message_id, saved
 
 
-def run_turn(thread_id, text, images, page, user, emit, stop, run_id=''):
-    thread_id, message_id, saved = post_message(thread_id, text, images, page, user)
+def steer(thread_id, text, files, user):
+    """处理中途补充的话：存进对话、广播，返回要追加给正在进行的那一轮的内容。"""
+    group = thread_id == store.GROUP
+    resolved = docs.resolve(files)
+    attachments, _, _ = _attachments(resolved, text, None)
+    prompt = (f'【{user or "同事"}】' if group else '') + '【补充，不要从头再来，接着刚才的进度】' + text + attachments
+    post_message(thread_id, text, [], None, user, resolved, prompt)
+    return prompt
+
+
+def _attachments(files, text, step_emit):
+    """附件变成一段文字：图片走识别，文档抽取摘要。返回 (文字, tokens, cost)。"""
+    out, tokens, cost = '', 0, 0.0
+    images = [f for f in files if f['kind'] == 'image']
+    if images and step_emit:
+        transcript, t, c = _transcribe([(f['url'], docs.data_url(f)) for f in images], text, step_emit)
+        out += '\n\n【图片内容（已识别）】\n' + transcript
+        tokens, cost = tokens + t, cost + c
+    for f in files:
+        if f['kind'] == 'image':
+            continue
+        summary, page_images = docs.describe(f)
+        out += f"\n\n【附件：{f['name']}】原文件：{f['path']}\n{summary}"
+        if page_images and step_emit:
+            transcript, t, c = _transcribe([(None, url) for url in page_images], text, step_emit)
+            out += '\n【扫描页内容（已识别）】\n' + transcript
+            tokens, cost = tokens + t, cost + c
+    return out, tokens, cost
+
+
+def run_turn(thread_id, text, images, page, user, emit, stop, run_id='', files=(), inbox=None):
+    files = docs.resolve(files)
+    thread_id, message_id, saved = post_message(thread_id, text, images, page, user, files)
     emit('thread', {'thread_id': thread_id, 'title': store.thread(thread_id)['title'], 'run_id': run_id,
                     'message_id': message_id})
     started = time.time()
@@ -189,30 +300,37 @@ def run_turn(thread_id, text, images, page, user, emit, stop, run_id=''):
         tokens += t
         cost += c
         user_text += '\n\n【截图内容（已识别）】\n' + transcript
-    if saved and not text.strip():
-        user_text += '\n\n（用户只发了截图，没有写问题。先用一两句话说清截图里是什么、可能值得注意的地方，然后问用户想查哪一点；不要直接深入排查。）'
-    user_text = (_page_text(page) + '\n\n' + user_text).strip()
+    if files:
+        extra, t, c = _attachments(files, text, step_emit)
+        tokens += t
+        cost += c
+        user_text += extra
+    if (saved or files) and not text.strip():
+        user_text += '\n\n（用户只发了附件，没有写问题。先用一两句话说清这是什么、可能值得注意的地方，然后问用户想做什么；不要直接深入排查。）'
 
-    role = route(text, bool(saved))
+    role = route(text, bool(saved or files))
     specs = config.models()
     if role == 'chat':
         return _chat_turn(thread_id, text, user, emit, stop, run_id, message_id, started)
     model_id = specs[role]['id']
     messages = _context(thread_id, text, message_id)
-    if thread_id == store.GROUP:
-        user_text = f'【{user or "同事"}】' + user_text
-    messages.append({'role': 'user', 'content': user_text})
-    messages = _merge_alternating(messages)
+    prompt = (f'【{user or "同事"}】' if thread_id == store.GROUP else '') + user_text.strip()
+    prompt += '\n\n' + _volatile(text, page)
+    store.set_prompt(message_id, prompt)
+    messages.append({'role': 'user', 'content': _blocks(prompt)})
     used = [model_id]
     error = None
     try:
         for index in range(MAX_STEPS):
             if stop.is_set():
                 break
-            if role == 'quick' and index >= 4:
+            if role == 'quick' and index >= 6:
                 role, model_id = 'investigate', specs['investigate']['id']
                 used.append(model_id)
-            _shrink_old_results(messages)
+            _drain(inbox, messages)
+            if _size(messages) > 600_000:
+                _shrink_old_results(messages)
+            _mark(messages)
             text_parts, end = [], None
             try:
                 for kind, value in llm.stream(model_id, messages, tools.SPECS, stop=stop):
@@ -243,6 +361,10 @@ def run_turn(thread_id, text, images, page, user, emit, stop, run_id=''):
                                            for i, c in enumerate(calls)]
             messages.append(assistant)
             if not calls:
+                if _drain(inbox, messages):
+                    answer.append('\n\n')
+                    emit('delta', {'text': '\n\n'})
+                    continue
                 break
             if text_parts:
                 answer.append('\n\n')
@@ -309,8 +431,9 @@ def _chat_turn(thread_id, text, user, emit, stop, run_id, message_id, started):
 def _shrink_old_results(messages, keep=4, size=1500):
     results = [m for m in messages if m['role'] == 'tool']
     for m in results[:-keep]:
-        if len(m['content']) > size:
-            m['content'] = m['content'][:size] + '\n…（较早的结果已压缩）'
+        text = m['content'] if isinstance(m['content'], str) else m['content'][0]['text']
+        if len(text) > size:
+            m['content'] = text[:size] + '\n…（较早的结果已压缩）'
 
 
 def _call(call, thread_id, step_emit, cards, emit, role):
@@ -351,7 +474,7 @@ def _summarize(thread_id):
     try:
         row = store.thread(thread_id)
         pending = [m for m in store.messages(thread_id) if m['id'] > (row['summarized_upto'] or 0)]
-        if len(pending) <= RECENT + 4:
+        if len(pending) <= RECENT + 20:
             return
         old = pending[:-RECENT]
         transcript = '\n'.join(f"{m['role']}: {m['text'][:1500]}" for m in old)

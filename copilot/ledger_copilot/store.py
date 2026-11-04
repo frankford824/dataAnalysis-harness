@@ -37,8 +37,14 @@ def conn():
         db.row_factory = sqlite3.Row
         db.execute('PRAGMA journal_mode=WAL')
         db.executescript(SCHEMA)
-        if 'cached' not in {r[1] for r in db.execute('PRAGMA table_info(usage)')}:
-            db.execute('ALTER TABLE usage ADD COLUMN cached INTEGER DEFAULT 0')
+        message_columns = {r[1] for r in db.execute('PRAGMA table_info(message)')}
+        for column, kind in (('files', "TEXT DEFAULT '[]'"), ('prompt', 'TEXT')):
+            if column not in message_columns:
+                db.execute(f'ALTER TABLE message ADD COLUMN {column} {kind}')
+        columns = {r[1] for r in db.execute('PRAGMA table_info(usage)')}
+        for column in ('cached', 'written', 'explicit'):
+            if column not in columns:
+                db.execute(f'ALTER TABLE usage ADD COLUMN {column} INTEGER DEFAULT 0')
         _local.db = db
     return db
 
@@ -51,10 +57,11 @@ def month():
     return datetime.now().strftime('%Y-%m')
 
 
-def add_usage(model, tokens_in, tokens_out, cost, cached=0):
+def add_usage(model, tokens_in, tokens_out, cost, cached=0, written=0, explicit=False):
     with _lock:
-        conn().execute('INSERT INTO usage(at,month,model,tokens_in,tokens_out,cost,cached) VALUES(?,?,?,?,?,?,?)',
-                       (time.time(), month(), model, tokens_in, tokens_out, cost, cached))
+        conn().execute('INSERT INTO usage(at,month,model,tokens_in,tokens_out,cost,cached,written,explicit) '
+                       'VALUES(?,?,?,?,?,?,?,?,?)',
+                       (time.time(), month(), model, tokens_in, tokens_out, cost, cached, written, int(bool(explicit))))
         conn().commit()
 
 
@@ -101,17 +108,25 @@ def threads(limit=50):
              'updated_at': datetime.fromtimestamp(r['updated_at']).astimezone().isoformat(timespec='seconds')} for r in rows]
 
 
-def add_message(thread_id, role, text, *, images=(), steps=(), cards=(), receipt=None, page=None, user=''):
+def add_message(thread_id, role, text, *, images=(), steps=(), cards=(), receipt=None, page=None, user='', files=(),
+                prompt=None):
     with _lock:
         cur = conn().execute(
-            'INSERT INTO message(thread_id,role,text,images,steps,cards,receipt,page,user,at) VALUES(?,?,?,?,?,?,?,?,?,?)',
+            'INSERT INTO message(thread_id,role,text,images,steps,cards,receipt,page,user,at,files,prompt) '
+            'VALUES(?,?,?,?,?,?,?,?,?,?,?,?)',
             (thread_id, role, text, _j(list(images)), _j(list(steps)), _j(list(cards)),
-             _j(receipt) if receipt else None, _j(page) if page else None, user, time.time()))
+             _j(receipt) if receipt else None, _j(page) if page else None, user, time.time(), _j(list(files)), prompt))
         conn().commit()
         return cur.lastrowid
 
 
-def messages(thread_id, after=0, last=None):
+def set_prompt(message_id, prompt):
+    with _lock:
+        conn().execute('UPDATE message SET prompt=? WHERE id=?', (prompt, message_id))
+        conn().commit()
+
+
+def messages(thread_id, after=0, last=None, prompts=False):
     rows = conn().execute('SELECT * FROM message WHERE thread_id=? AND id>? ORDER BY id', (thread_id, after)).fetchall()
     if last:
         rows = rows[-last:]
@@ -121,7 +136,8 @@ def messages(thread_id, after=0, last=None):
         out.append({'id': r['id'], 'role': r['role'], 'text': r['text'], 'images': json.loads(r['images']),
                     'steps': json.loads(r['steps']), 'cards': [c for c in cards if c],
                     'receipt': json.loads(r['receipt']) if r['receipt'] else None,
-                    'at': datetime.fromtimestamp(r['at']).astimezone().isoformat(timespec='seconds'), 'user': r['user']})
+                    'at': datetime.fromtimestamp(r['at']).astimezone().isoformat(timespec='seconds'), 'user': r['user'],
+                    'files': json.loads(r['files'] or '[]'), **({'prompt': r['prompt']} if prompts else {})})
     return out
 
 

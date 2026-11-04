@@ -13,9 +13,12 @@ class BudgetExhausted(RuntimeError):
 def _record(model_id, usage):
     tokens_in = int(usage.get('prompt_tokens') or 0)
     tokens_out = int(usage.get('completion_tokens') or 0)
-    cached = int((usage.get('prompt_tokens_details') or {}).get('cached_tokens') or 0)
-    cost = pricing.cost(model_id, tokens_in, tokens_out, cached)
-    store.add_usage(model_id, tokens_in, tokens_out, cost, cached)
+    details = usage.get('prompt_tokens_details') or {}
+    cached = int(details.get('cached_tokens') or 0)
+    written = int(details.get('cache_creation_input_tokens') or 0)
+    explicit = details.get('cache_type') == 'ephemeral'
+    cost = pricing.cost(model_id, tokens_in, tokens_out, cached, written=written, explicit=explicit)
+    store.add_usage(model_id, tokens_in, tokens_out, cost, cached, written, explicit)
     searches = int(((usage.get('x_tools') or {}).get('search') or (usage.get('plugins') or {}).get('search') or {})
                    .get('count') or 0)
     if searches:
