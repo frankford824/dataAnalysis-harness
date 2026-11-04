@@ -9,7 +9,7 @@ import { ArrowUp, ArrowUpRight, Camera, Check, ChevronRight, CircleAlert, Circle
 import { computed, nextTick, onMounted, onUnmounted, ref, watch, watchEffect } from 'vue'
 import { useRoute } from 'vue-router'
 
-import { agentApi, streamChat } from '../agentClient'
+import { agentApi, errorText, onAgentFailure, streamChat } from '../agentClient'
 import { renderMarkdown } from '../agentMarkdown'
 import { useApp } from '../store'
 
@@ -91,14 +91,29 @@ const costTitle = computed(() => {
   return budget ? `本月已用 ¥${money(used)} / 预算 ¥${money(budget)}` : ''
 })
 let statusTimer = null
+// 在线时 30 秒问一次；离线时 10 秒，助手一回来就能看见。
+function scheduleStatus() {
+  clearTimeout(statusTimer)
+  statusTimer = setTimeout(async () => {
+    await loadStatus()
+    scheduleStatus()
+  }, status.value.online === true ? 30000 : 10000)
+}
 async function loadStatus() {
   if (document.hidden && status.value.online !== null) return
   try {
-    status.value = { ...status.value, ...(await agentApi.status()) }
+    const result = await agentApi.status()
+    status.value = { ...status.value, ...result, online: result?.online === true }
   } catch {
     status.value = { ...status.value, online: false }
   }
 }
+function markOffline() {
+  if (status.value.online === false) return
+  status.value = { ...status.value, online: false }
+  scheduleStatus()
+}
+onAgentFailure(markOffline)
 
 // ---------------------------------------------------------------- 话题
 
@@ -141,7 +156,7 @@ async function openThread(id) {
     messages.value = (thread?.messages || []).map(normalize)
   } catch (e) {
     if (e.status === 404) newThread()
-    else notice.value = e.message
+    else notice.value = errorText(e, '这段对话没打开，请稍后再试')
   } finally {
     loadingThread.value = false
     follow(true)
@@ -162,7 +177,7 @@ async function loadThreads() {
   try {
     threads.value = (await agentApi.threads())?.threads || []
   } catch (e) {
-    threadsError.value = e.message
+    threadsError.value = errorText(e, '话题列表没取到，请稍后再试')
   } finally {
     threadsLoading.value = false
   }
@@ -369,7 +384,14 @@ const list = ref(null)
 const stick = ref(true)
 function onScroll() {
   const el = list.value
-  if (el) stick.value = el.scrollHeight - el.scrollTop - el.clientHeight < 48
+  // 拖宽度时文字重新折行，滚动条会跟着跳，那不是人在往上翻。
+  if (el && !resizing.value) stick.value = el.scrollHeight - el.scrollTop - el.clientHeight < 48
+}
+// 面板变宽变窄、输入框长高都会改列表尺寸；原来贴着底的，改完还贴着底。
+let listObserver = null
+function pinOnResize() {
+  const el = list.value
+  if (el && stick.value) el.scrollTop = el.scrollHeight
 }
 function follow(force = false) {
   nextTick(() => {
@@ -418,33 +440,46 @@ function apply(reply, event, data) {
   } else if (event === 'done') {
     reply.receipt = data
   } else if (event === 'error') {
-    reply.error = data.message || '这一轮没有完成'
+    reply.error = errorText(data.message)
   }
 }
 
 async function run(payload) {
   notice.value = ''
-  const at = new Date().toISOString()
+  const at = Date.now()
   messages.value.push({ key: ++seq, role: 'user', text: payload.text, images: payload.images.map(i => i.data_url), at })
-  messages.value.push({ key: ++seq, role: 'assistant', text: '', steps: [], cards: [], receipt: null, at, streaming: true, error: '', stopped: false, retry: payload })
+  messages.value.push({ key: ++seq, role: 'assistant', text: '', steps: [], cards: [], receipt: null, at, streaming: true, error: '', stopped: false, recovering: false, retry: payload })
   const reply = messages.value[messages.value.length - 1]
   picked.value = ''
   streaming.value = true
   follow(true)
   controller = new AbortController()
+  // 收到 thread 之后，这句话已经在服务端落了库、助手在跑了。这之后断开不能再给
+  // 「重试」——重发一遍就是同一个问题问两次、钱花两份。
+  let turnThread = null
+  let finished = false
   try {
     await streamChat(
       { thread_id: threadId.value, text: payload.text, images: payload.images, page: payload.page, user: userName.value || '' },
-      { signal: controller.signal, onEvent: (event, data) => { apply(reply, event, data); follow() } },
+      {
+        signal: controller.signal,
+        onEvent: (event, data) => {
+          if (event === 'thread') {
+            turnThread = data.thread_id || threadId.value
+            reply.retry = null
+          }
+          if (event === 'done' || event === 'error') finished = true
+          apply(reply, event, data)
+          follow()
+        },
+      },
     )
+    if (!finished) throw Object.assign(new Error('网络中断'), { network: true })
   } catch (e) {
+    reply.streaming = false
     if (e?.name === 'AbortError') reply.stopped = true
-    else {
-      if (e?.offline) status.value = { ...status.value, online: false }
-      reply.error = e?.offline || status.value.online === false
-        ? '助手正在重启，这条没发出去。稍等一会儿再点「重试」。'
-        : e?.message || '这一轮没有完成'
-    }
+    else if (turnThread) await recover(reply, turnThread, payload, at)
+    else reply.error = e?.network ? '网络中断，这条没发出去。稍等一会儿再点「重试」。' : errorText(e)
   } finally {
     reply.streaming = false
     streaming.value = false
@@ -454,9 +489,77 @@ async function run(payload) {
   }
 }
 
+// ---------------------------------------------------------------- 断线后取回结果
+
+const RECOVER_EVERY = 5000
+const RECOVER_FOR = 15 * 60 * 1000
+let recovery = null
+
+function settled(list, payload, sentAt) {
+  const last = list[list.length - 1]
+  if (!last || last.role !== 'assistant') return false
+  const user = [...list].reverse().find(m => m.role === 'user')
+  if (!user || (user.text || '').trim() !== payload.text) return false
+  const answeredAt = toDate(last.at)
+  const askedAt = toDate(user.at)
+  if (answeredAt && askedAt && answeredAt < askedAt) return false
+  // 服务端没给提问时间时，退一步用本机发送时间比；留几分钟余量给两边时钟不准。
+  if (answeredAt && !askedAt && answeredAt.getTime() < sentAt - 5 * 60 * 1000) return false
+  return true
+}
+
+async function recover(reply, id, payload, sentAt) {
+  const job = { reply, id, cancelled: false, timer: null, wake: null }
+  recovery = job
+  reply.recovering = true
+  reply.error = ''
+  follow()
+  const deadline = Date.now() + RECOVER_FOR
+  try {
+    while (!job.cancelled && Date.now() < deadline) {
+      await new Promise(resolve => {
+        job.wake = resolve
+        job.timer = setTimeout(resolve, RECOVER_EVERY)
+      })
+      if (job.cancelled) return
+      let thread
+      try {
+        thread = await agentApi.thread(id)
+      } catch {
+        continue
+      }
+      if (job.cancelled) return
+      const list = thread?.messages || []
+      if (!settled(list, payload, sentAt)) continue
+      if (threadId.value === id) {
+        messages.value = list.map(normalize)
+        if (thread?.title) threadTitle.value = thread.title
+        follow(true)
+      }
+      return
+    }
+    if (!job.cancelled) {
+      reply.recovering = false
+      reply.error = '这次的结果还没取回来。过一会儿从「历史话题」重新打开这段对话看看。'
+    }
+  } finally {
+    if (recovery === job) recovery = null
+  }
+}
+function cancelRecovery() {
+  const job = recovery
+  if (!job) return
+  job.cancelled = true
+  clearTimeout(job.timer)
+  job.wake?.()
+  job.reply.recovering = false
+  job.reply.stopped = true
+}
+
 function stop() {
-  const id = threadId.value
+  const id = recovery?.id || threadId.value
   if (id) agentApi.stop(id).catch(() => {})
+  cancelRecovery()
   controller?.abort()
 }
 
@@ -492,7 +595,7 @@ async function decide(card, action) {
     card.message = result?.message || ''
     if (card.status === 'applied') app.uiRefresh++
   } catch (e) {
-    card.message = e.message
+    card.message = errorText(e, '没有处理成功，请稍后再试')
   } finally {
     card.busy = false
   }
@@ -500,16 +603,26 @@ async function decide(card, action) {
 
 // ---------------------------------------------------------------- 格式
 
+// 时间一律按北京时间显示。用的人在国内，浏览器的时区却可能被设成别处，
+// 同一段对话里历史和刚发的消息差出几个小时会让人以为记错了。
+const TZ = 'Asia/Shanghai'
+const dayFormat = new Intl.DateTimeFormat('zh-CN', { timeZone: TZ, year: 'numeric', month: '2-digit', day: '2-digit' })
+const dateFormat = new Intl.DateTimeFormat('zh-CN', { timeZone: TZ, month: 'numeric', day: 'numeric' })
+const timeFormat = new Intl.DateTimeFormat('zh-CN', { timeZone: TZ, hour: '2-digit', minute: '2-digit', hourCycle: 'h23' })
 function toDate(value) {
   if (value == null || value === '') return null
-  const d = typeof value === 'number' ? new Date(value < 1e12 ? value * 1000 : value) : new Date(value)
+  let d
+  if (typeof value === 'number') d = new Date(value < 1e12 ? value * 1000 : value)
+  // 不带时区的 ISO 串按北京时间理解，不交给浏览器按本地时区猜。
+  else if (/^\d{4}-\d\d-\d\d[T ]\d\d:\d\d(:\d\d(\.\d+)?)?$/.test(value)) d = new Date(`${value.replace(' ', 'T')}+08:00`)
+  else d = new Date(value)
   return Number.isNaN(d.getTime()) ? null : d
 }
 function clock(value) {
   const d = toDate(value)
   if (!d) return ''
-  const hm = d.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', hour12: false })
-  return d.toDateString() === new Date().toDateString() ? hm : `${d.getMonth() + 1}月${d.getDate()}日 ${hm}`
+  const hm = timeFormat.format(d)
+  return dayFormat.format(d) === dayFormat.format(Date.now()) ? hm : `${dateFormat.format(d)} ${hm}`
 }
 function duration(ms) {
   if (ms == null || Number.isNaN(Number(ms))) return ''
@@ -552,14 +665,20 @@ onMounted(() => {
   window.addEventListener('resize', onResize)
   document.addEventListener('selectionchange', onSelection)
   document.addEventListener('pointerdown', onPointerDown, true)
-  loadStatus()
-  statusTimer = setInterval(loadStatus, 30000)
+  loadStatus().then(scheduleStatus)
   if (threadId.value) openThread(threadId.value)
   nextTick(autosize)
+  if ('ResizeObserver' in window && list.value) {
+    listObserver = new ResizeObserver(pinOnResize)
+    listObserver.observe(list.value)
+  }
 })
 onUnmounted(() => {
+  cancelRecovery()
   controller?.abort()
-  clearInterval(statusTimer)
+  onAgentFailure(null)
+  listObserver?.disconnect()
+  clearTimeout(statusTimer)
   window.removeEventListener('focus', guardFocus, true)
   window.removeEventListener('resize', onResize)
   document.removeEventListener('selectionchange', onSelection)
@@ -693,14 +812,22 @@ onUnmounted(() => {
 
                 <div v-if="m.steps.length" class="agent-steps">
                   <div v-for="s in m.steps" :key="s.id" class="agent-step" :data-status="stepState(m, s)">
-                    <button type="button" class="agent-step-head" :class="{ expandable: !!s.detail }" :aria-expanded="s.detail ? isOpen(m, s) : undefined" @click="toggleStep(m, s)">
-                      <ChevronRight class="agent-caret" :class="{ open: isOpen(m, s) }" :size="12" aria-hidden="true" />
+                    <component
+                      :is="s.detail ? 'button' : 'div'"
+                      :type="s.detail ? 'button' : undefined"
+                      class="agent-step-head"
+                      :class="{ expandable: !!s.detail }"
+                      :aria-expanded="s.detail ? isOpen(m, s) : undefined"
+                      @click="s.detail && toggleStep(m, s)"
+                    >
+                      <ChevronRight v-if="s.detail" class="agent-caret" :class="{ open: isOpen(m, s) }" :size="12" aria-hidden="true" />
+                      <span v-else class="agent-caret-space" aria-hidden="true" />
                       <span class="agent-step-label">{{ s.label }}</span>
                       <LoaderCircle v-if="stepState(m, s) === 'running'" class="agent-spinner" :size="13" aria-label="进行中" />
                       <Check v-else-if="s.status === 'done'" class="agent-ok" :size="13" aria-label="完成" />
                       <CircleX v-else-if="s.status === 'error'" class="agent-err" :size="13" aria-label="没成功" />
                       <span class="agent-step-ms num">{{ duration(s.ms) }}</span>
-                    </button>
+                    </component>
                     <p v-if="s.detail && isOpen(m, s)" class="agent-step-detail">{{ s.detail }}</p>
                   </div>
                 </div>
@@ -738,6 +865,7 @@ onUnmounted(() => {
                   <p v-if="c.message" class="agent-card-message">{{ c.message }}</p>
                 </section>
 
+                <p v-if="m.recovering" class="agent-recovering"><span class="spin" /> 连接中断，正在取回结果…</p>
                 <p v-if="m.error" class="agent-error">
                   <CircleAlert :size="14" aria-hidden="true" />
                   <span>{{ m.error }}</span>
@@ -1110,8 +1238,8 @@ onUnmounted(() => {
 .agent-step-head.expandable { cursor: pointer; }
 .agent-step-head.expandable:hover { color: var(--n9); }
 .agent-caret { flex: none; color: var(--n4); transition: transform .15s ease; }
-.agent-step-head:not(.expandable) .agent-caret { opacity: .35; }
 .agent-caret.open { transform: rotate(90deg); }
+.agent-caret-space { flex: none; width: 12px; }
 .agent-step-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .agent-step[data-status='running'] .agent-step-label { color: var(--n9); }
 .agent-step[data-status='halted'] .agent-step-label { color: var(--n5); }
@@ -1152,10 +1280,11 @@ onUnmounted(() => {
 .agent-md :deep(blockquote) { margin: 0 0 .75em; padding-left: 12px; border-left: 2px solid var(--n3); color: var(--n6); }
 .agent-md :deep(hr) { margin: 1em 0; border: 0; border-top: 1px solid var(--n3); }
 .agent-md :deep(a) { color: var(--accent); }
-.agent-md :deep(.md-table) { margin: 0 0 .75em; overflow-x: auto; }
+/* 数字折成两行就没法对着看了：单元格不折行，表格放不下时在自己的框里横着滚。 */
+.agent-md :deep(.md-table) { max-width: 100%; margin: 0 0 .75em; overflow-x: auto; overscroll-behavior-x: contain; }
 .agent-md :deep(table) { width: auto; min-width: 60%; font-variant-numeric: tabular-nums; }
-.agent-md :deep(th) { padding: 4px 14px 6px 0; font-size: 11.5px; }
-.agent-md :deep(td) { padding: 6px 14px 6px 0; font-size: var(--t-sm); line-height: 1.5; }
+.agent-md :deep(th) { padding: 4px 14px 6px 0; font-size: 11.5px; white-space: nowrap; }
+.agent-md :deep(td) { padding: 6px 14px 6px 0; font-size: var(--t-sm); line-height: 1.5; white-space: nowrap; }
 .agent-md :deep(.md-caret) {
   display: inline-block;
   width: 2px;
@@ -1176,8 +1305,8 @@ onUnmounted(() => {
 .agent-card-table { margin-top: 10px; }
 .agent-card-table th { padding: 0 10px 5px 0; font-size: 11px; }
 .agent-card-table td { padding: 6px 10px 6px 0; font-size: var(--t-sm); vertical-align: top; }
-.agent-card-table .before { color: var(--n6); }
-.agent-card-table .after { color: var(--n9); font-weight: 600; }
+.agent-card-table .before { color: var(--n6); white-space: nowrap; }
+.agent-card-table .after { color: var(--n9); font-weight: 600; white-space: nowrap; }
 .agent-card-table .arrow { width: 14px; color: var(--n5); }
 .agent-card-actions { display: flex; align-items: center; gap: var(--s2); margin-top: 12px; }
 .agent-card-actions .spin { width: 10px; height: 10px; border-width: 1.5px; border-color: rgba(255,255,255,.4); border-top-color: #fff; }
@@ -1188,6 +1317,7 @@ onUnmounted(() => {
 .agent-error svg { flex: none; margin-top: 3px; }
 .agent-error .link { flex: none; font-size: var(--t-sm); }
 .agent-stopped { margin-top: 10px; font-size: var(--t-xs); color: var(--n6); }
+.agent-recovering { display: flex; align-items: center; gap: 8px; margin-top: 10px; font-size: var(--t-sm); color: var(--n6); }
 .agent-receipt { margin-top: 10px; font-size: 11px; color: var(--n5); letter-spacing: .01em; }
 
 /* 输入区：没有框，一条细底线；回复中一小段蓝线来回扫 */

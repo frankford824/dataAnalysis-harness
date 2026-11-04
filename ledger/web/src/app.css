@@ -1081,7 +1081,7 @@ html body .n-message-container.n-message-container--top { right: var(--agent-doc
 .busy-progress span, .work-jobs-bar span { display: block; height: 100%; border-radius: inherit; background: linear-gradient(90deg, #4877ee, #78a5ff); transition: width 240ms ease; }
 .work-jobs { position: fixed; right: calc(var(--agent-dock, 0px) + 24px); bottom: 24px; z-index: 3900; width: min(342px, calc(100vw - 32px)); max-height: min(65vh, 520px); overflow: auto; padding: 15px 17px; border: 1px solid #dce5f1; border-radius: 12px; background: rgba(255,255,255,.97); box-shadow: 0 12px 36px rgba(31,52,82,.16); color: #26364d; }
 .work-jobs.withBusy { bottom: 88px; }
-.work-jobs.isMinimized { left:13px; right:auto; width:158px; min-width:0; max-width:calc(100vw - 26px); padding:8px 9px; border-radius:999px; }
+.work-jobs.isMinimized { left:auto; right:calc(var(--agent-dock, 0px) + 24px); width:158px; min-width:0; max-width:calc(100vw - 26px); padding:8px 9px; border-radius:999px; }
 .work-jobs.isMinimized header { margin:0; gap:4px; font-size:11px; white-space:nowrap; }
 .work-jobs.isMinimized header small { margin-left:0; font-size:10px; }
 .work-jobs-toggle { border:0; background:#edf3ff; color:#3765c7; border-radius:5px; padding:4px 7px; cursor:pointer; font:inherit; font-size:11px; }
