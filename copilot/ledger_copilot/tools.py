@@ -233,7 +233,8 @@ def _money(value, prefix=''):
 
 
 def _restart_service():
-    powershell("Get-NetTCPConnection -LocalPort 8000 -State Listen | ForEach-Object { Stop-Process -Id $_.OwningProcess -Force }", 60)
+    powershell("Get-NetTCPConnection -LocalAddress 127.0.0.1,0.0.0.0 -LocalPort 8000 -State Listen -ErrorAction SilentlyContinue"
+               " | ForEach-Object { Stop-Process -Id $_.OwningProcess -Force }", 60)
     deadline = time.time() + 240
     time.sleep(5)
     while time.time() < deadline:

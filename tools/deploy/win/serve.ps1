@@ -1,4 +1,4 @@
-# 记账服务的守护启动器。由计划任务 LedgerHarness 在开机时以 SYSTEM 拉起。
+﻿# 记账服务的守护启动器。由计划任务 LedgerHarness 在开机时以 SYSTEM 拉起。
 #
 # 为什么是一个循环而不是让 Windows 重启任务：计划任务的失败重试最小粒度是 1 分钟，
 # 而且次数有上限；进程崩了要等一分钟才回来，崩够次数就彻底不回来了。这里自己带
@@ -80,7 +80,8 @@ while ($true) {
   # lifespan starts NAS/feed/recompute/storage workers in each process.
   # Keep one API worker until background ownership and failover are separated.
   # Report reads already run in the thread pool; workers=1 is not serial HTTP.
-  $cmd = '"' + $Python + '" -m uvicorn ledger.api:app --host 0.0.0.0 --port ' + $Port +
+  # 局域网访问走 LedgerFront（192.168.0.155:8000），台账只听本机。
+  $cmd = '"' + $Python + '" -m uvicorn ledger.api:app --host 127.0.0.1 --port ' + $Port +
          ' --workers 1 --timeout-keep-alive 75 >> "' + $log + '" 2>&1'
   & cmd.exe /c $cmd
   $code = $LASTEXITCODE
