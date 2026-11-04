@@ -185,6 +185,9 @@ DATABASES = {databases!r}
 def get(path, **query):
     if query: path += ('&' if '?' in path else '?') + urllib.parse.urlencode(query, doseq=True)
     with urllib.request.urlopen(LEDGER + path, timeout=60) as r: return json.loads(r.read().decode('utf-8'))
+def order_get(path, **query):
+    if query: path += ('&' if '?' in path else '?') + urllib.parse.urlencode(query, doseq=True)
+    with urllib.request.urlopen('http://127.0.0.1:8001' + path, timeout=30) as r: return json.loads(r.read().decode('utf-8'))
 def sql(query, db='workspace', params=()):
     c = sqlite3.connect('file:' + DATABASES[db] + '?mode=ro', uri=True, timeout=10); c.row_factory = sqlite3.Row
     try: return [dict(r) for r in c.execute(query, params).fetchall()]
