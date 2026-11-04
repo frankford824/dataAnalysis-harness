@@ -1,4 +1,4 @@
-import { freshInit } from '../api'
+import { expireReads, freshInit } from '../api'
 
 // A superseded response never owns the visible result, even if abort is ignored.
 export function latestRequest() {
@@ -27,5 +27,6 @@ export async function commissionRequest(path, { signal, body } = {}) {
     const result = await response.json().catch(() => ({}))
     throw new Error(typeof result.detail === 'string' ? result.detail : '加载失败，请重试')
   }
+  if (body) expireReads()
   return response.json()
 }

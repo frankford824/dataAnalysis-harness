@@ -16,7 +16,7 @@ import { computed, nextTick, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 
 import { useLatest } from '../components/ui/useLatest'
-import { useRefresh } from '../refresh'
+import { pauseWhileHidden, useRefresh } from '../refresh'
 import { api } from '../api'
 import DrillDrawer from '../components/DrillDrawer.vue'
 import StatementReview from '../components/StatementReview.vue'
@@ -112,7 +112,7 @@ async function load(force=false, quiet=false) {
   }catch(e){if(serial===loadSerial){if(quiet)refreshFailed.value=true;else failed.value=e.message}}
   finally{if(serial===loadSerial&&!quiet)loading.value=false}
 }
-watch(()=>[props.id,period.value],()=>{reviewingPeriod.value=false;drill.value=null;orderIssue.value=null;load()}, {immediate:true})
+pauseWhileHidden(watch(()=>[props.id,period.value],()=>{reviewingPeriod.value=false;drill.value=null;orderIssue.value=null;load()}, {immediate:true}))
 useRefresh(()=>load(true,true))
 watch(questioning,value=>{if(!value)disputeSubject.value=null})
 
@@ -404,7 +404,7 @@ watch(
 </script>
 
 <template>
-  <n-spin :show="loading && !info">
+  <n-spin :show="loading && !info" :delay="150">
     <n-alert v-if="failed" type="error" :bordered="false">{{ failed }}</n-alert>
 
     <template v-else-if="info">

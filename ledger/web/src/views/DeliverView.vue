@@ -9,7 +9,7 @@ import PageHead from '../components/PageHead.vue'
 import SystemStatusLine from '../components/SystemStatusLine.vue'
 import { ago, bytes, count } from '../format'
 import { useApp } from '../store'
-import { useRefresh } from '../refresh'
+import { pauseWhileHidden, useRefresh } from '../refresh'
 
 const UploadPanel = defineAsyncComponent(() => import('../components/UploadPanel.vue'))
 const FilePreviewPanel = defineAsyncComponent(() => import('../components/FilePreviewPanel.vue'))
@@ -201,14 +201,15 @@ async function loadPeriodSnap(storeId, period, quiet = false) {
   }
 }
 
-watch(() => app.storeId, (id) => {
-  if (id) loadDetail(id).catch(() => {})
-  else { periodSnap.value = null }
-}, { immediate: true })
-
-watch([() => app.storeId, () => app.period], ([storeId, period]) => {
-  loadPeriodSnap(storeId, period)
-}, { immediate: true })
+pauseWhileHidden(
+  watch(() => app.storeId, (id) => {
+    if (id) loadDetail(id).catch(() => {})
+    else { periodSnap.value = null }
+  }, { immediate: true }),
+  watch([() => app.storeId, () => app.period], ([storeId, period]) => {
+    loadPeriodSnap(storeId, period)
+  }, { immediate: true }),
+)
 
 const blockerRows = computed(() => {
   const snap = periodSnap.value
@@ -440,7 +441,7 @@ useRefresh(()=>Promise.allSettled([
     </header>
 
     <LedgerTabs v-model="storeSection" label="店铺资料" :options="[{key:'work',label:'待办事项'},{key:'files',label:'收到的表',count:files().length},{key:'months',label:'月份进度',count:periods().length}]" />
-    <section v-if="storeSection==='files'" class="store-resource-panel"><n-spin :show="!!loadingStore"><template v-if="files().length">          <div class="scroll store-files compact-files">
+    <section v-if="storeSection==='files'" class="store-resource-panel"><n-spin :show="!!loadingStore" :delay="150"><template v-if="files().length">          <div class="scroll store-files compact-files">
             <table class="files"><thead><tr><th>文件</th><th class="right">大小</th><th class="right">更新</th><th/></tr></thead>
               <tbody><tr v-for="file in files()" :key="`${file.store_id}:${file.name}`">
                 <td class="f-name">{{ file.name }}<span v-if="file.shared" class="pill">全公司共用</span></td>

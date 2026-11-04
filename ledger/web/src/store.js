@@ -11,7 +11,7 @@
 import { defineStore } from 'pinia'
 import { computed, ref, watch } from 'vue'
 
-import { api, withFresh } from './api.js'
+import { api, expireReads, newReadView, onDataChanged, onWrite, withFresh } from './api.js'
 import { prettyPeriod } from './format.js'
 
 //: 刷新之后还该记得的东西存这儿。只存「人选到哪儿了」，不存数据本身——数据要
@@ -262,6 +262,9 @@ export const useApp = defineStore('app', () => {
    * 更让人不安。要新数就走这里：顶上的「刷新本页 / 全部刷新」、助手说账变了、
    * 或者人走开十分钟后的静默刷新。各页用 useRefresh 登记重取函数，重取时旧内容
    * 留着，只有按钮上转圈。
+   *
+   * 读请求先给本地副本、再在后台核对（见 apiCache.js）。核对出变化时这里静默重跑
+   * 一遍当前页（replay），这一遍读的都是刚存好的副本，不会再去核对。
    */
   const refreshSeq = ref(0)
   const refreshScope = ref('page')
@@ -275,12 +278,14 @@ export const useApp = defineStore('app', () => {
     return () => refreshers.delete(handler)
   }
 
-  function refresh(scope = 'page', { silent = false } = {}) {
+  function refresh(scope = 'page', { silent = false, replay = false } = {}) {
     // 静默刷新还没跑完时人点了刷新：等它结束再来一轮带 fresh 的，别吞掉这次点击。
     if (refreshPromise) return silent ? refreshPromise : refreshPromise.then(() => refresh(scope))
     refreshScope.value = scope
     refreshSeq.value += 1
     if (!silent) refreshing.value = true
+    if (silent && !replay) expireReads()
+    newReadView()
     const work = async () => {
       const jobs = [...refreshers].map((handler) => Promise.resolve().then(() => handler(scope, { silent })))
       if (scope === 'all') {
@@ -290,12 +295,27 @@ export const useApp = defineStore('app', () => {
       await Promise.allSettled(jobs)
     }
     refreshPromise = (silent ? work() : withFresh(work)).finally(() => {
-      lastUpdated.value = Date.now()
+      if (!replay) lastUpdated.value = Date.now()
       refreshing.value = false
       refreshPromise = null
+      if (replayAgain) { replayAgain = false; replayTimer = setTimeout(replayPage, 0) }
     })
     return refreshPromise
   }
+
+  let replayTimer = null, replayAgain = false
+  function replayPage() {
+    if (refreshPromise) { replayAgain = true; return }
+    refresh('page', { silent: true, replay: true })
+  }
+  onDataChanged((url) => {
+    if (url === '/api/navigation') loadNavigation(true).catch(() => {})
+    else if (url.startsWith('/api/overview') && overview.value) loadOverview(true).catch(() => {})
+    clearTimeout(replayTimer)
+    replayTimer = setTimeout(replayPage, 150)
+  })
+  // 刚写完，当前页马上静默重读一次；读会先等服务端一会儿，见 api.js 的 WRITE_WAIT。
+  onWrite(() => refresh('page', { silent: true }))
 
   /** 选中的这家店。筛选条上没选店时是 null。 */
   const currentStore = computed(

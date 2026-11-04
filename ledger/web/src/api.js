@@ -6,6 +6,7 @@
  */
 
 import {notifyAuthentication} from './telemetry.js'
+import {asked, cacheState, cached, checked, dataChanged, isStale, markAllStale, needsCheck, served, store} from './apiCache.js'
 export {startTelemetry as startClientTelemetry,recordTelemetry} from './telemetry.js'
 
 // 手动刷新期间发出的读请求带 X-Ledger-Fresh，让后端跳过缓存；平时的加载和后台自动刷新不带。
@@ -19,27 +20,129 @@ export function freshInit(init = {}) {
   return { ...init, headers: { ...(init.headers || {}), 'X-Ledger-Fresh': '1' } }
 }
 
-async function call(path, init) {
+// 轮询进度要的是服务端此刻的数，不走本地副本。
+let liveDepth = 0
+export function withLive(work) {
+  liveDepth++
+  try { return work() } finally { liveDepth-- }
+}
+
+// 进度、任务、登录状态这类读要么在轮询，要么跟人有关，不留副本；导出和对话也不留。
+const UNCACHED = /^\/api\/(agent\/|upload\/|recompute\/|fees\/jobs|commission-v2\/|automation\/questions|freight-review\/shipments(\?|$))|\/pricing-status|\/export|\.csv(\?|$)/
+// 这些 POST 只是试算，不改数据，不该让副本过期。
+const PROBES = /[/-]preview(\?|$)|\/onboard\/try$|\/fees\/suggest$|\/commission\/plan$/
+// 写完的头几秒，读先等服务端一会儿，免得人刚改完看见的还是改之前的数。
+const WRITE_GRACE = 3000
+const WRITE_WAIT = 1500
+let writtenUntil = 0
+const writeListeners = new Set()
+const inflight = new Map()
+
+export { cacheState, onDataChanged, newView as newReadView } from './apiCache.js'
+
+export function onWrite(fn) {
+  writeListeners.add(fn)
+  return () => writeListeners.delete(fn)
+}
+
+/** 服务端的数可能变了：副本全部算过期，写完的头几秒读先等服务端。 */
+export function expireReads() {
+  markAllStale()
+  writtenUntil = Date.now() + WRITE_GRACE
+}
+
+function wrote() {
+  expireReads()
+  for (const fn of writeListeners) fn()
+}
+
+async function request(path, init, background = false) {
   let res
   try {
-    res = await fetch(path, freshInit(init))
+    res = await fetch(path, init)
   } catch (error) {
     if (error?.name === 'AbortError') throw error
     // 网络层失败没有 detail 可取。这套系统跑在内网，多半是服务没起来。
     throw new Error('连不上服务。它可能没在跑，或者这台机器不在内网里。')
   }
   const text = await res.text()
-  let body = null
+  let body = null, json = !!text
   try {
     body = text ? JSON.parse(text) : null
   } catch {
     body = null
+    json = false
   }
   if (!res.ok) {
     const detail=typeof body?.detail==='string'?body.detail:null
-    notifyAuthentication(res.status,detail)
+    if (!background) notifyAuthentication(res.status,detail)
     throw Object.assign(new Error(detail || (res.status>=500?'服务暂时未能完成请求，请稍后重试':res.status===404?'没有找到对应数据，请刷新后重试':res.status===422?'请检查填写内容':`请求失败（${res.status}）`)),{status:res.status})
   }
+  return { body, text, json }
+}
+
+function abortable(job, signal) {
+  if (!signal) return job
+  const aborted = () => new DOMException('请求已取消', 'AbortError')
+  if (signal.aborted) return Promise.reject(aborted())
+  return new Promise((resolve, reject) => {
+    const abort = () => reject(aborted())
+    signal.addEventListener('abort', abort, { once: true })
+    job.then(resolve, reject).finally(() => signal.removeEventListener('abort', abort))
+  })
+}
+
+// 同一个地址同时只发一次；先走的调用方取消了也让它跑完，结果留作副本。
+function fetchShared(path, headers, background = false) {
+  const key = headers?.['X-Ledger-Fresh'] ? `fresh ${path}` : path
+  const running = inflight.get(key)
+  if (running) return { job: running, joined: true }
+  const at = Date.now()
+  asked(path, at)
+  if (background) cacheState.revalidating++
+  const job = request(path, headers ? { headers } : {}, background)
+    .then((res) => ({ ...res, changed: res.json && store(path, res.text, at) }))
+    .finally(() => {
+      checked(path)
+      inflight.delete(key)
+      if (background) cacheState.revalidating--
+    })
+  inflight.set(key, job)
+  return { job, joined: false }
+}
+
+function revalidate(path) {
+  const { job } = fetchShared(path, null, true)
+  job.then((res) => { if (res.changed) dataChanged(path) }, () => {})
+  return job
+}
+
+async function read(path, init) {
+  const hit = freshDepth || liveDepth ? null : await cached(path)
+  if (hit) {
+    if (Date.now() < writtenUntil && isStale(path)) {
+      const latest = await Promise.race([
+        revalidate(path).catch(() => null),
+        new Promise((resolve) => setTimeout(resolve, WRITE_WAIT)),
+      ])
+      if (latest?.json) { served(path); return JSON.parse(latest.text) }
+    } else if (needsCheck(path)) {
+      revalidate(path).catch(() => {})
+    }
+    served(path)
+    return JSON.parse(hit.text)
+  }
+  const { job, joined } = fetchShared(path, freshInit(init).headers)
+  const res = await abortable(job, init.signal)
+  served(path)
+  return joined && res.json ? JSON.parse(res.text) : res.body
+}
+
+async function call(path, init = {}) {
+  const method = (init.method || 'GET').toUpperCase()
+  if (method === 'GET' && init.body == null && path.startsWith('/api/') && !UNCACHED.test(path)) return read(path, init)
+  const { body } = await request(path, freshInit(init))
+  if (method !== 'GET' && !PROBES.test(path)) wrote()
   return body
 }
 
@@ -175,7 +278,7 @@ export const api = {
         } catch {
           body = null
         }
-        if (xhr.status >= 200 && xhr.status < 300) resolve(body)
+        if (xhr.status >= 200 && xhr.status < 300) { wrote(); resolve(body) }
         else reject(new Error(body?.detail || xhr.responseText || `请求失败（${xhr.status}）`))
       }
       xhr.onerror = () =>

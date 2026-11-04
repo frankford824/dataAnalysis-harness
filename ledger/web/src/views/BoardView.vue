@@ -6,7 +6,7 @@ import {api} from '../api'
 import {useApp} from '../store'
 import {money,percent,prettyPeriod,stamp} from '../format'
 import {useLatest} from '../components/ui/useLatest'
-import {useLivePoll,useRefresh} from '../refresh'
+import {pauseWhileHidden,useLivePoll,useRefresh} from '../refresh'
 import PageHead from '../components/PageHead.vue'
 import CompanyFinanceCard from '../components/CompanyFinanceCard.vue'
 import AgentAuthorityPanel from '../components/AgentAuthorityPanel.vue'
@@ -69,8 +69,10 @@ useLivePoll(()=>workflow.value?.status==='processing',()=>{if(!busy.value&&!moda
 useRefresh(()=>reload(true))
 onUnmounted(()=>{clearTimeout(closeRefreshTimer);request.cancel();workflowRequest.cancel()})
 watch(modal,value=>{if(!value)clearTimeout(closeRefreshTimer)})
-watch(params,()=>loadReport(),{deep:true})
-watch(period,()=>{clearTimeout(closeRefreshTimer);closeRefresh.value=null;closeRequest.value=null;workflow.value=null;report.value=null;modal.value=false;revocation.value=null;scope.value={};trail.value=[];page.value=1;loadWorkflow()})
+pauseWhileHidden(
+  watch(params,()=>loadReport(),{deep:true}),
+  watch(period,()=>{clearTimeout(closeRefreshTimer);closeRefresh.value=null;closeRequest.value=null;workflow.value=null;report.value=null;modal.value=false;revocation.value=null;scope.value={};trail.value=[];page.value=1;loadWorkflow()}),
+)
 watch([level,managed,scope,()=>app.storeId,()=>app.platform,sortKey,sortDirection,compare,managedSplit],()=>{page.value=1},{deep:true})
 function changeLevel(value){level.value=value;scope.value={};trail.value=[]}
 function sort(key){if(sortKey.value===key)sortDirection.value=sortDirection.value==='desc'?'asc':'desc';else{sortKey.value=key;sortDirection.value='desc'}}
@@ -214,7 +216,7 @@ const metricChange=(key,item)=>comparisonCopy(item,(report.value?.metrics||[]).f
     <div class="kpi"><span class="label">利润额（扣兼职后）</span><b class="value" :class="{negative:Number(report.summary.profit_after_labor)<0}">{{money(report.summary.profit_after_labor)}}</b><span class="foot" :class="report.mom?.profit_after_labor?.direction">{{compareText(report.mom?.profit_after_labor)}}</span></div>
     <button class="kpi decision-kpi" @click="tab='decisions'"><span class="label">需要你的决定</span><b class="value">{{workflow?.decision_groups?.length??'—'}}</b><span class="foot">同类事项合并处理</span></button>
   </div>
-  <n-spin :show="loading"><div class="card month-card"><n-tabs v-ledger-tabs v-model:value="tab" type="line" @update:value="value=>{if(value==='decisions')noteWaitingSummary()}">
+  <n-spin :show="loading" :delay="150"><div class="card month-card"><n-tabs v-ledger-tabs v-model:value="tab" type="line" @update:value="value=>{if(value==='decisions')noteWaitingSummary()}">
     <n-tab-pane name="results" tab="经营分析">
       <div class="operations-controls">
         <label>查看维度<n-select :value="level" :options="operationLevels" @update:value="changeLevel" aria-label="经营分析维度"/></label>

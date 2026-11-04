@@ -1,12 +1,12 @@
 <script setup>
 import { useMessage } from 'naive-ui'
 import { LayoutDashboard, Store, Coins, Tags, Truck, Activity } from '@lucide/vue'
-import { computed, defineAsyncComponent, onMounted, onUnmounted, ref, watch } from 'vue'
+import { computed, defineAsyncComponent, defineComponent, h, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 
 import { useApp } from '../store'
 import { useCommission } from '../commissionStore'
-import { api,startClientTelemetry,recordTelemetry } from '../api'
+import { api,newReadView,startClientTelemetry,recordTelemetry } from '../api'
 import { startAutoRefresh, useRefresh } from '../refresh'
 import FilterBar from './FilterBar.vue'
 import OperatorSession from './OperatorSession.vue'
@@ -15,6 +15,13 @@ import CostChip from './CostChip.vue'
 
 const IntakeResult = defineAsyncComponent(() => import('./IntakeResult.vue'))
 const UploadPanel = defineAsyncComponent(() => import('./UploadPanel.vue'))
+
+// 这几页切走后保活，切回来立刻是上次的样子，再静默核对（见 refresh.js）。
+// 运费核对和费用设置会跟着路由参数改筛选，提成有自己的保活，都不放进来。
+const KEPT = new Set(['board', 'deliver', 'period', 'ops', 'labor'])
+const routePage = name => defineComponent({ name, setup: (_, { slots }) => () => h('div', { class: 'route-page' }, slots.default?.()) })
+const KeptPage = routePage('KeptPage')
+const RoutePage = routePage('RoutePage')
 
 const props = defineProps({ dropped: { type: Array, default: null } })
 const emit = defineEmits(['taken'])
@@ -47,6 +54,10 @@ const stopError=router.onError(pageFailed)
 // 鼠标经过或浏览器空闲时提前取页面代码；数据不会预取，仍以当前筛选为准。
 function preloadDeliver() {
   import('../views/DeliverView.vue').catch(() => {})
+}
+function preloadViews() {
+  preloadDeliver()
+  import('../views/PeriodView.vue').catch(() => {})
 }
 
 const workJobs = ref([])
@@ -101,7 +112,9 @@ async function loadWorkJobs() {
 watch(() => app.busy, (busy, before) => { if (before && !busy) loadWorkJobs() })
 useRefresh(scope => { if (scope === 'all') return loadWorkJobs() })
 const stopRouteStamp = router.afterEach((to, from, failure) => {
-  if (!failure && to.fullPath !== from.fullPath) app.lastUpdated = Date.now()
+  if (failure || to.fullPath === from.fullPath) return
+  app.lastUpdated = Date.now()
+  newReadView()
 })
 let stopAutoRefresh = () => {}
 const busyPercent = computed(() => app.busy?.percent ??
@@ -171,8 +184,8 @@ onMounted(() => {
   app.loadNavigation().catch((e) => message.error(e.message, { duration: 6000 }))
   loadWorkJobs()
   stopAutoRefresh = startAutoRefresh(app, document.querySelector('.dock-main') || document)
-  if ('requestIdleCallback' in window) window.requestIdleCallback(preloadDeliver, { timeout: 1500 })
-  else setTimeout(preloadDeliver, 500)
+  if ('requestIdleCallback' in window) window.requestIdleCallback(preloadViews, { timeout: 1500 })
+  else setTimeout(preloadViews, 500)
 })
 
 defineExpose({ take })
@@ -251,9 +264,11 @@ defineExpose({ take })
         <n-alert v-if="pageLoadError" type="error" class="ledger-page-error" :bordered="false">页面未能加载，请刷新后重试。 <n-button size="small" @click="reloadPage">刷新页面</n-button></n-alert>
         <router-view v-slot="{ Component, route }">
           <transition name="page-shift">
-            <div :key="route.meta.commission ? 'commission' : route.name" class="route-page">
-              <component :is="Component" />
-            </div>
+            <keep-alive :include="KeptPage.name" :max="8">
+              <component :is="KEPT.has(route.name) ? KeptPage : RoutePage" :key="route.meta.commission ? 'commission' : route.name">
+                <component :is="Component" />
+              </component>
+            </keep-alive>
           </transition>
         </router-view>
       </main>

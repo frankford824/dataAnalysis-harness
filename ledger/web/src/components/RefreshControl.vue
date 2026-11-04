@@ -1,17 +1,26 @@
 <script setup>
 import { computed } from 'vue'
 import { RefreshCw } from '@lucide/vue'
+import { cacheState } from '../api'
 import { useApp } from '../store'
 
 const app = useApp()
 const clock = new Intl.DateTimeFormat('zh-CN', { timeZone: 'Asia/Shanghai', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' })
-const stamp = computed(() => clock.format(new Date(app.lastUpdated)))
+const day = new Intl.DateTimeFormat('zh-CN', { timeZone: 'Asia/Shanghai', month: 'numeric', day: 'numeric' })
+// 先显示的是上次留下的副本时，这里写的是那份数取回的时间，不是打开页面的时间。
+const stamp = computed(() => {
+  const at = new Date(cacheState.shownAt)
+  return day.format(at) === day.format(new Date()) ? clock.format(at) : `${day.format(at)} ${clock.format(at)}`
+})
+const checking = computed(() => cacheState.revalidating > 0 && !app.refreshing)
 const spinning = scope => app.refreshing && app.refreshScope === scope
 </script>
 
 <template>
   <div class="refresh-control" role="group" aria-label="页面数据">
-    <span class="refresh-stamp" aria-live="polite">数据更新于 {{ stamp }}</span>
+    <span class="refresh-stamp" aria-live="polite" :title="checking ? '正在后台核对最新数据，有变化会自动换上' : '页面上的数是这个时间取到的'">
+      数据更新于 {{ stamp }}<i class="refresh-dot" :class="{ on: checking }" aria-hidden="true" />
+    </span>
     <button type="button" class="refresh-btn" :disabled="app.refreshing" @click="app.refresh('page')">
       <RefreshCw :size="13" :class="{ spinning: spinning('page') }" aria-hidden="true" />刷新本页
     </button>
@@ -23,7 +32,10 @@ const spinning = scope => app.refreshing && app.refreshScope === scope
 
 <style scoped>
 .refresh-control { display: flex; align-items: center; gap: 4px; min-width: 0; color: #8a94a6; font-size: 12px; }
-.refresh-stamp { margin-right: 6px; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.refresh-stamp { display: inline-flex; align-items: center; gap: 5px; margin-right: 6px; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.refresh-dot { width: 5px; height: 5px; border-radius: 50%; background: #4c7cf0; opacity: 0; transition: opacity .3s ease; }
+.refresh-dot.on { opacity: .8; animation: refresh-pulse 1.4s ease-in-out infinite; }
+@keyframes refresh-pulse { 50% { opacity: .3; } }
 .refresh-btn {
   display: inline-flex; align-items: center; gap: 4px; padding: 3px 8px; border: 0; border-radius: 6px;
   background: transparent; color: #4a5568; font: inherit; cursor: pointer; white-space: nowrap;
@@ -34,5 +46,5 @@ const spinning = scope => app.refreshing && app.refreshScope === scope
 .spinning { animation: refresh-spin .9s linear infinite; }
 @keyframes refresh-spin { to { transform: rotate(360deg); } }
 @media (max-width: 760px) { .refresh-stamp { display: none; } }
-@media (prefers-reduced-motion: reduce) { .spinning { animation-duration: 2.4s; } }
+@media (prefers-reduced-motion: reduce) { .spinning { animation-duration: 2.4s; } .refresh-dot.on { animation: none; } }
 </style>
