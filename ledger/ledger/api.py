@@ -261,6 +261,8 @@ freight_review_api.install(app, lambda: workspace(), lambda: _model(),
     lambda: {store.id: _display_store(store)['name'] for store in _model().stores})
 from . import labor_api
 labor_api.install(app, lambda: workspace(), lambda: _model(), DEFAULT_MODEL, lambda: _invalidate_model(), _commission_actor)
+from . import agent_proxy
+agent_proxy.install(app)
 
 
 @app.middleware("http")

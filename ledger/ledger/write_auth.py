@@ -118,7 +118,7 @@ def install(app, workspace):
             token = _identity.set(actor)
             try:
                 response = await call_next(request)
-                if response.status_code < 400:
+                if response.status_code < 400 and not request.url.path.startswith('/api/agent/'):
                     from .automation_actions import note_write
                     note_write()
                 return response

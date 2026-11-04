@@ -8,6 +8,18 @@
  * 外壳
  * -------------------------------------------------------------------------- */
 
+/* 两栏：左边是整个台账，右边常驻台账助手。窗口本身不滚，左栏在自己的框里滚，
+ * 内容有定宽放不下时在左栏里横向滚，不会钻到助手底下。
+ * --agent-dock 是右栏此刻占的宽度，由 AgentPanel 写到根元素上；贴着视口右边的
+ * 浮层（进度条、忙碌提示、抽屉、弹窗）都要让出这一截。 */
+html, body { overflow: hidden; }
+.dock { display: flex; height: 100vh; }
+.dock-main { flex: 1; min-width: 0; height: 100%; overflow: auto; }
+html > body > .n-drawer-container,
+html body .n-modal-mask,
+html body .n-modal-body-wrapper,
+html body .n-message-container.n-message-container--top { right: var(--agent-dock, 0px); }
+
 .shell {
   display: grid;
   grid-template-columns: 208px 1fr;
@@ -182,7 +194,7 @@
   position: fixed;
   top: 60px;
   left: 208px;
-  right: 0;
+  right: var(--agent-dock, 0px);
   height: 2px;
   z-index: 1200;
   opacity: 0;
@@ -1035,7 +1047,7 @@
 
 .veil {
   position: fixed;
-  inset: 0;
+  inset: 0 var(--agent-dock, 0px) 0 0;
   z-index: 4000;
   background: rgba(31, 94, 255, .08);
   border: 3px dashed var(--accent);
@@ -1050,7 +1062,7 @@
 
 .busy {
   position: fixed;
-  right: var(--s5);
+  right: calc(var(--agent-dock, 0px) + var(--s5));
   bottom: var(--s5);
   z-index: 4100;
   background: var(--n9);
@@ -1067,7 +1079,7 @@
 }
 .busy-progress { flex-basis: 100%; height: 4px; overflow: hidden; border-radius: 999px; background: rgba(255,255,255,.18); }
 .busy-progress span, .work-jobs-bar span { display: block; height: 100%; border-radius: inherit; background: linear-gradient(90deg, #4877ee, #78a5ff); transition: width 240ms ease; }
-.work-jobs { position: fixed; right: 24px; bottom: 24px; z-index: 3900; width: min(342px, calc(100vw - 32px)); max-height: min(65vh, 520px); overflow: auto; padding: 15px 17px; border: 1px solid #dce5f1; border-radius: 12px; background: rgba(255,255,255,.97); box-shadow: 0 12px 36px rgba(31,52,82,.16); color: #26364d; }
+.work-jobs { position: fixed; right: calc(var(--agent-dock, 0px) + 24px); bottom: 24px; z-index: 3900; width: min(342px, calc(100vw - 32px)); max-height: min(65vh, 520px); overflow: auto; padding: 15px 17px; border: 1px solid #dce5f1; border-radius: 12px; background: rgba(255,255,255,.97); box-shadow: 0 12px 36px rgba(31,52,82,.16); color: #26364d; }
 .work-jobs.withBusy { bottom: 88px; }
 .work-jobs.isMinimized { left:13px; right:auto; width:158px; min-width:0; max-width:calc(100vw - 26px); padding:8px 9px; border-radius:999px; }
 .work-jobs.isMinimized header { margin:0; gap:4px; font-size:11px; white-space:nowrap; }
@@ -1095,8 +1107,8 @@
 .manual-payout-list { display: grid; gap: 8px; }
 .manual-payout-list label { display: grid; grid-template-columns: minmax(0,1fr) 145px; align-items: center; gap: 12px; padding: 8px 10px; border: 1px solid #e8edf4; border-radius: 7px; font-size: 12px; }
 .manual-blocker { padding: 6px 0; font-size: 12px; line-height: 1.5; }
-@media(max-width:900px){.work-jobs.isMinimized{left:auto;right:12px;bottom:12px}}
-@media(max-width:600px){.manual-cost-grid{grid-template-columns:1fr}.manual-payout-list label{grid-template-columns:1fr}.work-jobs{right:16px;bottom:16px}.work-jobs.withBusy{bottom:95px}}
+@media(max-width:900px){.work-jobs.isMinimized{left:auto;right:calc(var(--agent-dock, 0px) + 12px);bottom:12px}}
+@media(max-width:600px){.manual-cost-grid{grid-template-columns:1fr}.manual-payout-list label{grid-template-columns:1fr}.work-jobs{right:calc(var(--agent-dock, 0px) + 16px);bottom:16px}.work-jobs.withBusy{bottom:95px}}
 
 /* 等宽数字。表格里凡是钱、行号、单号都挂这个。 */
 .num { font-family: var(--num); font-variant-numeric: tabular-nums; }
@@ -1155,7 +1167,7 @@
 @media (max-width: 640px) {
   .page { padding: var(--s3); }
   .topbar { padding: var(--s2) var(--s3); }
-  .busy { left: var(--s3); right: var(--s3); bottom: var(--s3); }
+  .busy { left: var(--s3); right: calc(var(--agent-dock, 0px) + var(--s3)); bottom: var(--s3); }
   .deliver-heading { display: block; }
   .deliver-heading > .n-button { margin-top: var(--s3); }
   .store-detail { padding: var(--s4); }

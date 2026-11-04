@@ -1,0 +1,412 @@
+"""助手可调用的工具。每个工具都带 purpose：给用户看的一句话进度。"""
+import json
+import os
+import re
+import shutil
+import sqlite3
+import subprocess
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+from datetime import datetime
+from pathlib import Path
+
+from . import config, store
+
+LIMIT = 6000
+SKIP_DIRS = {'node_modules', '.git', '__pycache__', 'venv', '.venv', 'static', 'dist'}
+_openapi = {}
+
+
+def _cut(text, limit=LIMIT):
+    text = text if isinstance(text, str) else json.dumps(text, ensure_ascii=False, default=str)
+    return text if len(text) <= limit else text[:limit] + f'\n…（已截断，共 {len(text)} 字符）'
+
+
+def _http(method, path, body=None, timeout=180):
+    url = config.LEDGER_URL + (path if path.startswith('/') else '/' + path)
+    data = None if body is None else json.dumps(body, ensure_ascii=False).encode('utf-8')
+    request = urllib.request.Request(url, data, method=method, headers={'Content-Type': 'application/json'})
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            return response.status, response.read().decode('utf-8', 'replace')
+    except urllib.error.HTTPError as exc:
+        return exc.code, exc.read().decode('utf-8', 'replace')
+
+
+def ledger_get(path, query=None, **_):
+    if query:
+        path += ('&' if '?' in path else '?') + urllib.parse.urlencode(query, doseq=True)
+    try:
+        status, text = _http('GET', path, timeout=90)
+    except (TimeoutError, OSError) as exc:
+        if 'timed out' not in str(exc):
+            raise
+        return '这个接口 90 秒内没有返回（数据量大）。改用 sql_query 直接查对应的表，或换更具体的接口。'
+    return _cut(f'HTTP {status}\n{text}')
+
+
+def ledger_preview(path, body, **_):
+    if 'preview' not in path:
+        return '只能直接调用预览接口；会改变数据的接口请用 propose_change 交给用户确认。'
+    status, text = _http('POST', path, body, timeout=1800)
+    return _cut(f'HTTP {status}\n{text}')
+
+
+def api_index(keyword='', **_):
+    if not _openapi:
+        _openapi.update(json.loads(_http('GET', '/openapi.json')[1]))
+    rows = []
+    for path, methods in _openapi.get('paths', {}).items():
+        for method, spec in methods.items():
+            line = f"{method.upper()} {path}  {spec.get('summary', '')}"
+            if not keyword or keyword.lower() in line.lower():
+                rows.append(line)
+    return _cut('\n'.join(rows[:150]) or '没有匹配的接口')
+
+
+def sql_query(sql, db='workspace', **_):
+    if not re.match(r'\s*(select|with|pragma|explain)\b', sql, re.I):
+        return '只允许只读查询（SELECT/WITH/PRAGMA/EXPLAIN）。'
+    path = config.DATABASES.get(db)
+    if not path:
+        return f'未知数据库 {db}，可选：{", ".join(config.DATABASES)}'
+    connection = sqlite3.connect(f'file:{path}?mode=ro', uri=True, timeout=10)
+    deadline = time.time() + 60
+    connection.set_progress_handler(lambda: 1 if time.time() > deadline else 0, 10000)
+    try:
+        cursor = connection.execute(sql)
+        columns = [c[0] for c in cursor.description or []]
+        rows = cursor.fetchmany(200)
+        return _cut({'columns': columns, 'rows': [list(r) for r in rows], 'truncated': len(rows) == 200})
+    except sqlite3.OperationalError as exc:
+        return f'查询失败：{exc}（超过 60 秒会被中止；大表必须按店铺/账期过滤并 LIMIT）'
+    finally:
+        connection.close()
+
+
+def read_file(path, offset=1, limit=300, **_):
+    file = Path(path)
+    if not file.is_file():
+        return f'文件不存在：{path}'
+    if file.stat().st_size > 20_000_000:
+        return '文件太大，请用 powershell 按需读取片段。'
+    lines = file.read_text(encoding='utf-8', errors='replace').splitlines()
+    start = max(1, int(offset))
+    chunk = lines[start - 1:start - 1 + int(limit)]
+    return _cut('\n'.join(f'{start + i:>6}|{line}' for i, line in enumerate(chunk)) + f'\n（共 {len(lines)} 行）')
+
+
+def search_files(pattern, path=None, glob='*', **_):
+    root = Path(path or config.APP_DIR)
+    regex = re.compile(pattern)
+    hits = []
+    for directory, dirs, files in os.walk(root):
+        dirs[:] = [d for d in dirs if d not in SKIP_DIRS]
+        for name in files:
+            file = Path(directory) / name
+            if not file.match(glob) or file.stat().st_size > 2_000_000:
+                continue
+            try:
+                for number, line in enumerate(file.read_text(encoding='utf-8', errors='ignore').splitlines(), 1):
+                    if regex.search(line):
+                        hits.append(f'{file}:{number}: {line.strip()[:200]}')
+                        if len(hits) >= 200:
+                            return _cut('\n'.join(hits))
+            except OSError:
+                continue
+    return _cut('\n'.join(hits) or '没有找到')
+
+
+def _backup(file):
+    batch = config.ROOT / 'code-history' / _batch()
+    target = batch / re.sub(r'[:\\/]+', '_', str(file.resolve()))
+    batch.mkdir(parents=True, exist_ok=True)
+    manifest = batch / 'manifest.json'
+    entries = json.loads(manifest.read_text(encoding='utf-8')) if manifest.exists() else []
+    if not any(e['path'] == str(file.resolve()) for e in entries):
+        existed = file.exists()
+        if existed:
+            shutil.copy2(file, target)
+        entries.append({'path': str(file.resolve()), 'backup': str(target) if existed else None})
+        manifest.write_text(json.dumps(entries, ensure_ascii=False, indent=1), encoding='utf-8')
+
+
+_current_batch = []
+
+
+def _batch():
+    if not _current_batch:
+        _current_batch.append(datetime.now().strftime('%Y%m%d-%H%M%S'))
+    return _current_batch[0]
+
+
+def write_file(path, content, **_):
+    file = Path(path)
+    _backup(file)
+    file.parent.mkdir(parents=True, exist_ok=True)
+    file.write_text(content, encoding='utf-8')
+    return f'已写入 {path}（{len(content)} 字符）。程序文件改动需要 restart_ledger 才生效。'
+
+
+def edit_file(path, old, new, **_):
+    file = Path(path)
+    text = file.read_text(encoding='utf-8')
+    count = text.count(old)
+    if count != 1:
+        return f'原文出现 {count} 次，必须恰好 1 次；请提供更长的上下文。'
+    _backup(file)
+    file.write_text(text.replace(old, new), encoding='utf-8')
+    return '已修改。程序文件改动需要 restart_ledger 才生效。'
+
+
+def powershell(command, timeout=300, **_):
+    script = '[Console]::OutputEncoding=[Text.Encoding]::UTF8;$ProgressPreference="SilentlyContinue";' + command
+    try:
+        result = subprocess.run(['powershell', '-NoProfile', '-NonInteractive', '-Command', script],
+                                capture_output=True, timeout=int(timeout))
+    except subprocess.TimeoutExpired:
+        return f'命令超过 {timeout} 秒未结束，已中止。'
+    out = result.stdout.decode('utf-8', 'replace') + result.stderr.decode('utf-8', 'replace')
+    return _cut(f'exit={result.returncode}\n{out}')
+
+
+PRELUDE = '''import json, sqlite3, urllib.request, urllib.parse
+LEDGER = {ledger!r}
+DATABASES = {databases!r}
+def get(path, **query):
+    if query: path += ('&' if '?' in path else '?') + urllib.parse.urlencode(query, doseq=True)
+    with urllib.request.urlopen(LEDGER + path, timeout=300) as r: return json.loads(r.read().decode('utf-8'))
+def sql(query, db='workspace', params=()):
+    c = sqlite3.connect('file:' + DATABASES[db] + '?mode=ro', uri=True, timeout=10); c.row_factory = sqlite3.Row
+    try: return [dict(r) for r in c.execute(query, params).fetchall()]
+    finally: c.close()
+'''
+
+
+def python(code, timeout=300, **_):
+    import sys
+    import tempfile
+    prelude = PRELUDE.format(ledger=config.LEDGER_URL, databases={k: str(v) for k, v in config.DATABASES.items()})
+    with tempfile.NamedTemporaryFile('w', suffix='.py', delete=False, encoding='utf-8') as handle:
+        handle.write(prelude + '\n' + code)
+    env = {**os.environ, 'PYTHONIOENCODING': 'utf-8', 'PYTHONUTF8': '1'}
+    try:
+        result = subprocess.run([sys.executable, handle.name], capture_output=True, timeout=int(timeout), env=env)
+    except subprocess.TimeoutExpired:
+        return f'运行超过 {timeout} 秒，已中止。'
+    finally:
+        os.unlink(handle.name)
+    out = result.stdout.decode('utf-8', 'replace') + result.stderr.decode('utf-8', 'replace')[-3000:]
+    return _cut(f'exit={result.returncode}\n{out}')
+
+
+def _closed_samples():
+    try:
+        connection = sqlite3.connect(f"file:{config.DATABASES['workspace']}?mode=ro", uri=True, timeout=10)
+        rows = connection.execute("SELECT store_id, period FROM period WHERE state='closed' ORDER BY changed_at DESC LIMIT 3").fetchall()
+        connection.close()
+    except sqlite3.Error:
+        return {}
+    samples = {}
+    for store_id, period in rows:
+        status, text = _http('GET', f'/api/stores/{urllib.parse.quote(store_id)}/periods/{period}', timeout=120)
+        if status == 200:
+            samples[(store_id, period)] = _money(json.loads(text))
+    return samples
+
+
+def _money(value, prefix=''):
+    out = {}
+    if isinstance(value, dict):
+        for key, item in value.items():
+            if key in {'stale', 'shown_at', 'changed_at', 'at', 'generated_at', 'elapsed_ms'}:
+                continue
+            out.update(_money(item, f'{prefix}.{key}'))
+    elif isinstance(value, list):
+        for index, item in enumerate(value[:200]):
+            out.update(_money(item, f'{prefix}[{index}]'))
+    elif isinstance(value, (int, float)) and not isinstance(value, bool):
+        out[prefix] = round(float(value), 2)
+    return out
+
+
+def _restart_service():
+    powershell("Get-NetTCPConnection -LocalPort 8000 -State Listen | ForEach-Object { Stop-Process -Id $_.OwningProcess -Force }", 60)
+    deadline = time.time() + 240
+    time.sleep(5)
+    while time.time() < deadline:
+        try:
+            status, text = _http('GET', '/api/version', timeout=10)
+            if status == 200:
+                return True
+        except OSError:
+            pass
+        time.sleep(3)
+    return False
+
+
+def _rollback(batch):
+    entries = json.loads((batch / 'manifest.json').read_text(encoding='utf-8'))
+    for entry in entries:
+        file = Path(entry['path'])
+        if entry['backup']:
+            shutil.copy2(entry['backup'], file)
+        elif file.exists():
+            file.unlink()
+
+
+def restart_ledger(**_):
+    batch = config.ROOT / 'code-history' / _current_batch[0] if _current_batch else None
+    before = _closed_samples()
+    healthy = _restart_service()
+    after = _closed_samples() if healthy else {}
+    changed = [f'{s} {p}' for (s, p), money in before.items() if (s, p) in after and after[(s, p)] != money]
+    if healthy and not changed:
+        _current_batch.clear()
+        store.log_event('code_change', {'batch': batch.name if batch else '', 'result': 'ok'})
+        return '台账服务已重启并恢复正常；已结账月份抽查结果一致。'
+    reason = '服务没有正常启动' if not healthy else '已结账结果出现变化：' + '、'.join(changed)
+    if batch and batch.exists():
+        _rollback(batch)
+        _current_batch.clear()
+        restored = _restart_service()
+        store.log_event('code_change', {'batch': batch.name, 'result': 'rolled_back', 'reason': reason})
+        return f'{reason}，已自动恢复到修改前的程序（恢复后{"正常" if restored else "仍异常，需要继续排查"}）。'
+    return reason
+
+
+def restart_assistant(**_):
+    _pending_self_restart.append(True)
+    return '助手会在本次回答结束后自动重启以加载新代码。'
+
+
+_pending_self_restart = []
+
+
+def remember(note, **_):
+    current = store.memory()
+    stamp = datetime.now().strftime('%Y-%m-%d')
+    store.write_memory((current.rstrip() + f'\n- [{stamp}] {note.strip()}\n').lstrip())
+    if len(store.memory()) > store.MEMORY_LIMIT:
+        from .agent import compact_memory
+        compact_memory()
+    return '已记住。'
+
+
+def record_correction(problem, cause, fix, scope='', thread_id='', **_):
+    store.add_correction(thread_id, problem, cause, fix, scope)
+    return '已记录本次纠错。'
+
+
+def search_memory(query, **_):
+    rows = store.search_corrections(query, 8)
+    return _cut(rows) if rows else '没有找到相关的历史纠错记录。'
+
+
+def auto_close_status(**_):
+    return _cut(store.events('auto_close', 30) or '自动结账还没有运行记录。')
+
+
+def run_auto_close(periods=None, **_):
+    from . import autoclose
+    return _cut(autoclose.run(periods or None))
+
+
+def schema(name, description, properties, required=()):
+    props = {'purpose': {'type': 'string', 'description': '用用户能看懂的业务语言，一句话说明这一步在做什么，例如“查看 8 月这家店的退款明细”。不要出现技术词。'},
+             **properties}
+    return {'type': 'function', 'function': {'name': name, 'description': description, 'parameters': {
+        'type': 'object', 'properties': props, 'required': ['purpose', *required]}}}
+
+
+S = {'type': 'string'}
+SPECS = [
+    schema('ledger_get', '调用台账服务的只读接口（GET），返回 JSON。', {'path': S, 'query': {'type': 'object'}}, ['path']),
+    schema('ledger_preview', '调用台账的预览接口（路径含 preview，POST），只生成预览、不改数据，返回 proposal_id/proposal_sha/input_sha 等。',
+           {'path': S, 'body': {'type': 'object'}}, ['path', 'body']),
+    schema('api_index', '按关键字列出台账服务的全部接口。', {'keyword': S}),
+    schema('sql_query', '只读 SQL 查询。db=workspace（台账主库，体积很大，必须带店铺/账期过滤和 LIMIT）或 commission（提成库）。',
+           {'sql': S, 'db': {'type': 'string', 'enum': list(config.DATABASES)}}, ['sql']),
+    schema('read_file', '读取文本文件（带行号）。', {'path': S, 'offset': {'type': 'integer'}, 'limit': {'type': 'integer'}}, ['path']),
+    schema('search_files', '在目录中按正则搜索文本，默认程序目录。', {'pattern': S, 'path': S, 'glob': S}, ['pattern']),
+    schema('write_file', '写入整个文件（会自动留存修改前版本）。', {'path': S, 'content': S}, ['path', 'content']),
+    schema('edit_file', '把文件中唯一出现的一段原文替换为新文本（会自动留存修改前版本）。', {'path': S, 'old': S, 'new': S}, ['path', 'old', 'new']),
+    schema('python', '运行一段 Python 处理数据（排序、汇总、对比、核对），print 输出结果。已内置 get(path, **query) 调台账只读接口返回 JSON，'
+           'sql(query, db="workspace", params=()) 只读查库返回字典列表。取数和计算优先用这个工具。',
+           {'code': S, 'timeout': {'type': 'integer'}}, ['code']),
+    schema('powershell', '在生产机上执行 PowerShell 命令（完整权限），用于系统运维；取数和计算请用 python。', {'command': S, 'timeout': {'type': 'integer'}}, ['command']),
+    schema('restart_ledger', '重启台账服务使程序修改生效；自动检查服务和已结账结果，异常时自动恢复修改前的程序。', {}),
+    schema('restart_assistant', '修改了助手自身代码后调用，回答结束后助手自动重启。', {}),
+    schema('propose_change', '提出一项会影响账务数据的修改，生成确认卡片给用户，用户点确认后才执行。'
+           'actions 为按顺序执行的步骤：{"type":"api","method":"POST","path":"...","body":{...}} 或 '
+           '{"type":"file","path":"...","old":"...","new":"..."} 或 {"type":"powershell","command":"..."}。',
+           {'title': S, 'summary': S,
+            'items': {'type': 'array', 'description': '给用户看的变化清单', 'items': {'type': 'object', 'properties': {
+                'label': S, 'before': S, 'after': S}}},
+            'actions': {'type': 'array', 'items': {'type': 'object'}}}, ['title', 'summary', 'items', 'actions']),
+    schema('remember', '把一条稳定的业务口径、偏好或结论写入长期记忆（简短一句）。', {'note': S}, ['note']),
+    schema('record_correction', '确认一个问题的原因并处理后，记录这次纠错。', {'problem': S, 'cause': S, 'fix': S, 'scope': S},
+           ['problem', 'cause', 'fix']),
+    schema('search_memory', '搜索以往的纠错记录。', {'query': S}, ['query']),
+    schema('auto_close_status', '查看最近的自动结账运行结果。', {}),
+    schema('run_auto_close', '立即对指定月份执行自动结账（检查全部通过的店铺直接结账，耗时可能几十分钟）。不填则为最近三个已过去的月份。',
+           {'periods': {'type': 'array', 'items': S}}),
+]
+
+HANDLERS = {
+    'ledger_get': ledger_get, 'ledger_preview': ledger_preview, 'api_index': api_index, 'sql_query': sql_query,
+    'read_file': read_file, 'search_files': search_files, 'write_file': write_file, 'edit_file': edit_file,
+    'powershell': powershell, 'python': python, 'restart_ledger': restart_ledger, 'restart_assistant': restart_assistant,
+    'remember': remember, 'record_correction': record_correction, 'search_memory': search_memory,
+    'auto_close_status': auto_close_status, 'run_auto_close': run_auto_close,
+}
+DEFAULT_LABEL = {
+    'ledger_get': '查看台账数据', 'ledger_preview': '生成预览', 'api_index': '查找可用功能', 'sql_query': '查询明细数据',
+    'read_file': '查看规则与配置', 'search_files': '查找相关规则', 'write_file': '修复程序', 'edit_file': '修复程序',
+    'powershell': '处理系统问题', 'python': '计算核对数据', 'restart_ledger': '让修复生效', 'restart_assistant': '更新助手',
+    'propose_change': '整理修改方案', 'remember': '记住这条信息', 'record_correction': '记录本次纠错',
+    'search_memory': '查找以往类似问题', 'auto_close_status': '查看自动结账情况', 'run_auto_close': '执行自动结账',
+}
+
+
+def execute_card(card_id, by):
+    row = store.card(card_id)
+    if not row or row['status'] != 'pending':
+        return {'status': row['status'] if row else 'missing', 'message': '这张卡片已经处理过了'}
+    results = []
+    try:
+        for action in json.loads(row['actions']):
+            kind = action.get('type', 'api')
+            if kind == 'api':
+                status, text = _http(action.get('method', 'POST').upper(), action['path'], action.get('body'), timeout=1800)
+                if status >= 400:
+                    raise RuntimeError(_friendly_error(text))
+                results.append(text[:2000])
+            elif kind == 'file':
+                outcome = edit_file(action['path'], action['old'], action['new'])
+                if not outcome.startswith('已修改'):
+                    raise RuntimeError(outcome)
+                results.append(outcome)
+            elif kind == 'powershell':
+                outcome = powershell(action['command'])
+                if not outcome.startswith('exit=0'):
+                    raise RuntimeError('执行没有成功')
+                results.append(outcome[:2000])
+        store.decide_card(card_id, 'applied', '已按确认完成修改', by)
+        store.add_message(row['thread_id'], 'system', f'用户已确认「{row["title"]}」，已执行。结果摘要：' + _cut(results, 3000))
+        return {'status': 'applied', 'message': '已按确认完成修改'}
+    except Exception as exc:
+        message = f'修改没有完成：{exc}'
+        store.decide_card(card_id, 'failed', message, by)
+        store.add_message(row['thread_id'], 'system', f'用户确认「{row["title"]}」后执行失败：{exc}；已完成步骤：' + _cut(results, 2000))
+        return {'status': 'failed', 'message': message}
+
+
+def _friendly_error(text):
+    try:
+        detail = json.loads(text).get('detail')
+        return detail if isinstance(detail, str) else json.dumps(detail, ensure_ascii=False)[:300]
+    except (ValueError, AttributeError):
+        return text[:300]

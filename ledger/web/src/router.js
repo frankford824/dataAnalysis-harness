@@ -1,6 +1,17 @@
 import { ref } from 'vue'
 import { createRouter, createWebHashHistory } from 'vue-router'
 
+/* 右边常驻台账助手，左边整个应用在 .dock-main 里自己滚，窗口不滚。浏览器替窗口
+ * 记的位置在这里永远是 0，所以左栏滚到哪儿按历史条目的序号自己记。换页期间旧页面
+ * 被拆掉时也会触发滚动，那一段不记，免得把要恢复的位置冲掉。 */
+const leftPane = () => document.querySelector('.dock-main')
+const historyKey = () => window.history.state?.position ?? 0
+const leftScroll = new Map()
+let settling = false
+document.addEventListener('scroll', (e) => {
+  if (!settling && e.target === leftPane()) leftScroll.set(historyKey(), { left: e.target.scrollLeft, top: e.target.scrollTop })
+}, true)
+
 /* 用 hash 路由：这套服务是内网里一个 uvicorn 进程直接把静态文件挂出去的，
  * 没有反向代理帮忙把任意路径回落到 index.html。history 模式下人刷新一次
  * 就是 404，而对账时刷新页面是很自然的动作。
@@ -60,17 +71,33 @@ export const router = createRouter({
    * 文档还是个骨架，这时候滚到第 580 像素只会停在顶上——位置记了等于没记。
    */
   scrollBehavior: (to, from, savedPosition) => {
-    if (to.meta.commission && from.meta.commission && !savedPosition) return false
-    if (!savedPosition) return { top: 0 }
+    const pane = leftPane()
+    if (to.meta.commission && from.meta.commission && !savedPosition) {
+      settling = false
+      return false
+    }
+    if (!pane) {
+      settling = false
+      return savedPosition || { top: 0 }
+    }
+    const target = savedPosition ? leftScroll.get(historyKey()) : null
+    if (!target) {
+      pane.scrollTop = 0
+      settling = false
+      return false
+    }
     return new Promise((resolve) => {
       let waited = 0
       const enough = () =>
-        document.body.scrollHeight >= savedPosition.top + window.innerHeight
+        pane.scrollHeight >= target.top + pane.clientHeight
       const tick = () => {
         // 两秒还没长回来就按当前高度滚——多半是这一页的数据变短了（表被撤下、
         // 筛选变了）。宁可停在底部，也不能一直吊着不还给用户。
-        if (enough() || waited > 2000) resolve(savedPosition)
-        else {
+        if (enough() || waited > 2000) {
+          pane.scrollTo(target.left, target.top)
+          settling = false
+          resolve(false)
+        } else {
           waited += 50
           setTimeout(tick, 50)
         }
@@ -78,6 +105,13 @@ export const router = createRouter({
       tick()
     })
   },
+})
+
+router.beforeEach(() => {
+  settling = true
+})
+router.afterEach((to, from, failure) => {
+  if (failure) settling = false
 })
 
 /** back 里有东西才显示返回按钮，不然点下去会跳出这个应用。

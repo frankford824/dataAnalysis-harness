@@ -1,12 +1,13 @@
 <script setup>
-/* 外壳：导航、筛选条、全局拖放、进度浮层。
+/* 外壳：导航、筛选条、全局拖放、进度浮层，右边常驻台账助手。
  *
  * 拖放挂在整个窗口上而不是某个方框里。交表是这套系统里最高频的动作，让人先找到
- * 一个方框再松手是多出来的一步。
+ * 一个方框再松手是多出来的一步。助手面板自己截住落在它上面的拖放，那是附图。
  */
 import { NConfigProvider, NDialogProvider, NMessageProvider, zhCN, dateZhCN } from 'naive-ui'
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 
+import AgentPanel from './components/AgentPanel.vue'
 import AppBody from './components/AppBody.vue'
 import { useRoute } from 'vue-router'
 import { useApp } from './store'
@@ -55,7 +56,12 @@ onUnmounted(() => {
   <NConfigProvider :theme="null" :theme-overrides="theme" :locale="zhCN" :date-locale="dateZhCN">
     <NMessageProvider>
       <NDialogProvider>
-        <AppBody :dropped="dropped" @taken="dropped = null" />
+        <div class="dock">
+          <div class="dock-main">
+            <AppBody :dropped="dropped" @taken="dropped = null" />
+          </div>
+          <AgentPanel />
+        </div>
         <div v-if="overlay && app.ingestMode !== 'nas'" class="veil">松开以上传文件</div>
       </NDialogProvider>
     </NMessageProvider>
