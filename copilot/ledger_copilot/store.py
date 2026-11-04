@@ -100,11 +100,11 @@ def thread(thread_id):
     return conn().execute('SELECT * FROM thread WHERE id=?', (thread_id,)).fetchone()
 
 
-def unanswered(since):
+def unanswered(since, until):
     """最后一条是用户提问、还没有回答的话题（服务重启打断的那一轮）。"""
     rows = conn().execute(
         'SELECT m.* FROM message m JOIN (SELECT thread_id, max(id) id FROM message GROUP BY thread_id) last '
-        "ON m.id = last.id WHERE m.role = 'user' AND m.at >= ?", (since,)).fetchall()
+        "ON m.id = last.id WHERE m.role = 'user' AND m.at >= ? AND m.at < ?", (since, until)).fetchall()
     return [{'id': r['id'], 'thread_id': r['thread_id'], 'text': r['text'], 'user': r['user'],
              'page': json.loads(r['page']) if r['page'] else None, 'files': json.loads(r['files'] or '[]')} for r in rows]
 

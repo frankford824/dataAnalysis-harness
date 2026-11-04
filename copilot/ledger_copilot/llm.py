@@ -78,6 +78,57 @@ def stream(model_id, messages, tools=None, *, max_tokens=4096, timeout=180, stop
     yield 'end', {'tool_calls': [calls[i] for i in sorted(calls)], 'tokens': tokens, 'cost': cost}
 
 
+def relay_open(body):
+    """Pi 的模型请求转给网关：关深度思考、要用量统计、超预算拒绝；主模型报错时换备用模型再试一次。"""
+    from . import costs
+    if costs.month_total() >= config.MONTH_BUDGET_CNY:
+        raise BudgetExhausted('本月模型费用已到上限')
+    for tool in body.get('tools') or []:
+        tool.pop('cache_control', None)
+        (tool.get('function') or {}).pop('cache_control', None)
+    if body.get('stream'):
+        body['stream_options'] = {'include_usage': True}
+    base, key = config.gateway()
+    model_id = body.get('model', '')
+    fallback = next((config.FALLBACK[role] for role, spec in config.models().items()
+                     if spec.get('id') == model_id and role in config.FALLBACK), None)
+    for candidate in [model_id, fallback] if fallback else [model_id]:
+        body['model'] = candidate
+        if candidate.startswith('qwen'):
+            body['enable_thinking'] = False
+        else:
+            body.pop('enable_thinking', None)
+        request = urllib.request.Request(base + '/chat/completions', json.dumps(body, ensure_ascii=False).encode('utf-8'),
+                                         headers={'Authorization': 'Bearer ' + key, 'Content-Type': 'application/json'})
+        try:
+            return urllib.request.urlopen(request, timeout=180), candidate
+        except urllib.error.HTTPError as exc:
+            if candidate == fallback or not fallback or exc.code == 429:
+                raise
+
+
+def relay_stream(response, model_id, on_usage):
+    usage = None
+    try:
+        for raw in response:
+            if raw.startswith(b'data:') and b'"usage"' in raw:
+                try:
+                    usage = json.loads(raw[5:].strip()).get('usage') or usage
+                except ValueError:
+                    pass
+            yield raw
+    finally:
+        response.close()
+        on_usage(model_id, *_record(model_id, usage or {}))
+
+
+def relay_complete(response, model_id, on_usage):
+    with response:
+        data = response.read()
+    on_usage(model_id, *_record(model_id, json.loads(data).get('usage') or {}))
+    return data
+
+
 def complete(model_id, messages, *, max_tokens=2048, timeout=120, extra=None):
     with _open(model_id, messages, None, max_tokens, False, timeout, extra) as response:
         data = json.loads(response.read())

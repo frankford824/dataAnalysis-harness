@@ -8,7 +8,7 @@ import time
 import uuid
 from datetime import datetime
 
-from . import config, docs, events, llm, store, tools
+from . import config, docs, events, llm, pi_engine, store, tools
 
 MAX_STEPS = 16
 WRAP_UP_AT = 8
@@ -327,11 +327,20 @@ def run_turn(thread_id, text, images, page, user, emit, stop, run_id='', files=(
     prompt = (f'【{user or "同事"}】' if thread_id == store.GROUP else '') + user_text.strip()
     prompt += '\n\n' + _volatile(text, page)
     store.set_prompt(message_id, prompt)
-    messages.append({'role': 'user', 'content': _blocks(prompt)})
     used = [model_id]
     error = None
+    piped = None
+    if pi_engine.available():
+        try:
+            piped = _pi_turn(thread_id, role, model_id, messages, prompt, inbox, stop, emit, step_emit, cards, answer, used)
+        except pi_engine.Unavailable as exc:
+            store.log_event('pi_unavailable', {'thread': thread_id, 'error': str(exc)[:1000]})
+            answer.clear()
+    if piped:
+        tokens, cost, error = tokens + piped[0], cost + piped[1], piped[2]
+    messages.append({'role': 'user', 'content': _blocks(prompt)})
     try:
-        for index in range(MAX_STEPS):
+        for index in range(0 if piped else MAX_STEPS):
             if stop.is_set():
                 break
             if role == 'quick' and index >= 6:
@@ -388,27 +397,9 @@ def run_turn(thread_id, text, images, page, user, emit, stop, run_id='', files=(
                     role, model_id = 'engineer', specs['engineer']['id']
                     used.append(model_id)
         else:
-            messages.append({'role': 'user', 'content': _blocks(FINAL)})
-            _mark(messages)
-            parts = []
-            try:
-                for kind, value in llm.stream(model_id, messages, tools.SPECS, max_tokens=1500, stop=stop,
-                                              extra={'tool_choice': 'none'}):
-                    if kind == 'text':
-                        parts.append(value)
-                        answer.append(value)
-                        emit('delta', {'text': value})
-                    else:
-                        tokens += value['tokens']
-                        cost += value['cost']
-            except llm.BudgetExhausted:
-                raise
-            except Exception as exc:
-                store.log_event('turn_error', {'thread': thread_id, 'error': 'final: ' + str(exc)[:1000]})
-            if not ''.join(parts).strip():
-                note = '\n\n这个问题步骤较多，我先停在这里。你可以回复“继续”让我接着查。'
-                answer.append(note)
-                emit('delta', {'text': note})
+            if not piped:
+                t, c = _final_answer(thread_id, model_id, messages, stop, emit, answer)
+                tokens, cost = tokens + t, cost + c
     except llm.BudgetExhausted:
         error = '本月助手的模型费用已到上限，下月自动恢复；如需提高上限请联系管理员。'
     except Exception as exc:
@@ -429,6 +420,72 @@ def run_turn(thread_id, text, images, page, user, emit, stop, run_id='', files=(
     events.publish('costs', costs.summary(force=True))
     threading.Thread(target=_summarize, args=(thread_id,), daemon=True).start()
     return thread_id
+
+
+def _final_answer(thread_id, model_id, messages, stop, emit, answer):
+    messages.append({'role': 'user', 'content': _blocks(FINAL)})
+    _mark(messages)
+    parts, tokens, cost = [], 0, 0.0
+    try:
+        for kind, value in llm.stream(model_id, messages, tools.SPECS, max_tokens=1500, stop=stop,
+                                      extra={'tool_choice': 'none'}):
+            if kind == 'text':
+                parts.append(value)
+                answer.append(value)
+                emit('delta', {'text': value})
+            else:
+                tokens, cost = value['tokens'], value['cost']
+    except llm.BudgetExhausted:
+        raise
+    except Exception as exc:
+        store.log_event('turn_error', {'thread': thread_id, 'error': 'final: ' + str(exc)[:1000]})
+    if not ''.join(parts).strip():
+        note = '\n\n这个问题步骤较多，我先停在这里。你可以回复“继续”让我接着查。'
+        answer.append(note)
+        emit('delta', {'text': note})
+    return tokens, cost
+
+
+def _transcript(messages, limit=60_000):
+    lines = []
+    for m in messages[1:]:
+        content = m['content'] if isinstance(m['content'], str) else ''.join(b.get('text', '') for b in m['content'])
+        if content:
+            lines.append(('用户：' if m['role'] == 'user' else '助手：') + content[:3000])
+    while lines and sum(map(len, lines)) > limit:
+        lines.pop(0)
+    return '\n\n'.join(lines)
+
+
+def _pi_turn(thread_id, role, model_id, messages, prompt, inbox, stop, emit, step_emit, cards, answer, used):
+    """交给 Pi 跑工具循环。返回 (tokens, cost, 错误说明)。"""
+    specs = config.models()
+    run = pi_engine.Run(thread_id, role, step_emit, cards, emit)
+    system = ''.join(block['text'] for block in messages[0]['content'])
+    history = _transcript(messages)
+    message = f'【前面的对话】\n{history}\n\n【现在的问题】\n{prompt}' if history else prompt
+
+    def on_text(text):
+        answer.append(text)
+        emit('delta', {'text': text})
+
+    def escalate(turns, current):
+        if current.wants_engineer and current.role != 'engineer':
+            current.role = 'engineer'
+        elif current.role == 'quick' and turns >= 6:
+            current.role = 'investigate'
+        else:
+            return None
+        target = specs[current.role]['id']
+        used.append(target)
+        return target
+
+    _, error = pi_engine.run(run, model_id=model_id, system=system, prompt=message, inbox=inbox, stop=stop,
+                             on_text=on_text, escalate=escalate)
+    for model in run.models:
+        if model not in used:
+            used.append(model)
+    return run.tokens, run.cost, error
 
 
 def _chat_turn(thread_id, text, user, emit, stop, run_id, message_id, started):

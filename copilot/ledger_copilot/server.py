@@ -1,19 +1,21 @@
 """助手服务：台账 8000 端口把 /api/agent/* 转发到这里。"""
 import asyncio
+import json
 import os
 import queue
 import re
 import threading
 import time
+import urllib.error
 import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime
 
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel
 
-from . import agent, autoclose, config, costs, docs, events, machine, store, tools, webui
+from . import agent, autoclose, config, costs, docs, events, llm, machine, pi_engine, store, tools, webui
 
 _runs = {}
 _stops = {}
@@ -32,7 +34,7 @@ async def lifespan(_app):
     store.conn()
     stop = autoclose.start() if os.environ.get('COPILOT_AUTO_CLOSE', '1') == '1' else None
     machine.start()
-    threading.Timer(5, _resume_unanswered).start()
+    threading.Timer(5, _resume_unanswered, args=(time.time(),)).start()
     yield
     if stop:
         stop.set()
@@ -138,8 +140,8 @@ def chat(body: Chat):
     return StreamingResponse(stream(), media_type='text/event-stream', headers=SSE_HEADERS)
 
 
-def _resume_unanswered():
-    for message in store.unanswered(time.time() - 3600):
+def _resume_unanswered(started):
+    for message in store.unanswered(started - 3600, started):
         if message['thread_id'] == store.GROUP and COLLEAGUE.match(message['text']):
             continue
         body = Chat(thread_id=message['thread_id'], text=message['text'], page=message['page'], user=message['user'],
@@ -349,6 +351,48 @@ def reject_card(card_id: str, body: dict | None = None):
     events.publish('card_update', {'card_id': card_id, 'status': 'rejected', 'message': message, 'by': by})
     _settle_card(card_id)
     return {'status': 'rejected', 'message': message}
+
+
+def _pi_run(request):
+    run = pi_engine.run_for(request.headers.get('authorization', '').removeprefix('Bearer ').strip())
+    if not run:
+        raise HTTPException(401)
+    return run
+
+
+@app.get('/internal/pi/setup')
+def pi_setup(request: Request):
+    _pi_run(request)
+    return {'tools': tools.SPECS, 'wrap_up_at': agent.WRAP_UP_AT, 'wrap_up': agent.WRAP_UP, 'final': agent.FINAL,
+            'max_turns': pi_engine.MAX_TURNS}
+
+
+@app.post('/internal/pi/call')
+def pi_call(request: Request, body: dict):
+    run = _pi_run(request)
+    name = body.get('name', '')
+    call = {'id': body.get('id', ''), 'function': {'name': name, 'arguments': json.dumps(body.get('args') or {}, ensure_ascii=False)}}
+    if name in {'edit_file', 'write_file'}:
+        run.wants_engineer = True
+    return {'text': agent._call(call, run.thread_id, run.step_emit, run.cards, run.emit, run.role)}
+
+
+@app.post('/internal/pi/v1/chat/completions')
+def pi_model(request: Request, body: dict):
+    run = _pi_run(request)
+    try:
+        response, model_id = llm.relay_open(body)
+    except llm.BudgetExhausted:
+        run.budget_hit = True
+        return JSONResponse({'error': {'message': '本月模型费用已到上限'}}, status_code=400)
+    except urllib.error.HTTPError as exc:
+        return JSONResponse({'error': {'message': llm.describe(exc)}}, status_code=exc.code)
+    except OSError as exc:
+        return JSONResponse({'error': {'message': llm.describe(exc)}}, status_code=502)
+    if not body.get('stream'):
+        return Response(llm.relay_complete(response, model_id, run.add_usage), media_type='application/json')
+    return StreamingResponse(llm.relay_stream(response, model_id, run.add_usage), media_type='text/event-stream',
+                             headers=SSE_HEADERS)
 
 
 @app.get('/api/agent/costs')
