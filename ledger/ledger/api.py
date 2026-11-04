@@ -263,6 +263,8 @@ from . import labor_api
 labor_api.install(app, lambda: workspace(), lambda: _model(), DEFAULT_MODEL, lambda: _invalidate_model(), _commission_actor)
 from . import agent_proxy
 agent_proxy.install(app)
+from . import stale_reads
+stale_reads.install(app)
 
 
 @app.middleware("http")
