@@ -7,7 +7,7 @@ import time
 import uuid
 from datetime import datetime
 
-from . import config, llm, store, tools
+from . import config, events, llm, store, tools
 
 MAX_STEPS = 16
 RECENT = 10
@@ -28,6 +28,9 @@ SYSTEM = '''你是「台账助手」，运行在公司台账系统的生产机�
 - 会影响账务数据或金额的修改（规则、映射、费用、确认决定、结账等）：必须用 propose_change 生成确认卡片，等用户点确认，不能直接改。需要预览凭据的，先用 ledger_preview 生成预览，再把确认步骤放进卡片。
 - 已结账的历史不能改。问题落在已结账月份时，说明情况和影响，建议在未结账月份处理。
 - 修改程序后调用 restart_ledger 使修改生效（会自动检查，异常自动恢复）。
+- 用户对左侧界面提出布局/文案/样式/交互修改时直接动手：改 D:\\ledger\\app\\ledger\\web\\src 下的 .vue/.js/.css，
+  再调用 build_web 推送给所有人（用户可一键撤销，不需要确认卡片）。改完用一句话告诉用户“已改好，页面会自动更新”。
+  只改界面不涉及数据计算；数据口径的修改仍走 propose_change。
 - 开始排查前先用 search_memory 查以往类似问题；查清并处理一个问题后用 record_correction 记录；学到稳定的业务口径或用户偏好时用 remember 记一句。
 - 用户只是闲聊或问简单问题时不必调用工具。
 - 先弄清用户要什么：问题不明确时先问一句，不要猜着深挖。工具调用超过 8 次仍没有结论，先把阶段性发现告诉用户，问是否继续。
@@ -99,12 +102,19 @@ def _page_text(page):
     return '【用户当前在左侧看的页面】' + '；'.join(p for p in parts if p.split('：', 1)[1])
 
 
-def _context(thread_id, text):
+def _context(thread_id, text, exclude):
     memory = store.memory()
     related = store.search_corrections(text, 5)
     row = store.thread(thread_id)
-    history = [m for m in store.messages(thread_id) if m['id'] > (row['summarized_upto'] or 0)]
+    history = [m for m in store.messages(thread_id) if m['id'] > (row['summarized_upto'] or 0) and m['id'] != exclude]
+    group = thread_id == store.GROUP
     system = SYSTEM.replace('{today}', datetime.now().strftime('%Y-%m-%d'))
+    index = tools.knowledge_index()
+    if index:
+        system += '\n\n【系统地图目录】（详细内容用 read_knowledge 按章节读取；先查这里再动手，能少走很多步）\n' + index
+    if group:
+        system += ('\n\n【公共群聊】这是 2-3 位同事共用的群聊，消息前的【名字】是发言人。回答时可以称呼对方；'
+                   '别人刚才说过的事实和结论直接沿用，不要重复查。')
     if memory:
         system += '\n\n【长期记忆】\n' + memory
     if related:
@@ -116,7 +126,8 @@ def _context(thread_id, text):
         if m['role'] == 'system':
             messages.append({'role': 'user', 'content': '（系统通知）' + m['text']})
         elif m['text']:
-            messages.append({'role': m['role'], 'content': m['text']})
+            prefix = f"【{m['user'] or '同事'}】" if group and m['role'] == 'user' else ''
+            messages.append({'role': m['role'], 'content': prefix + m['text']})
     return messages
 
 
@@ -130,11 +141,18 @@ def _merge_alternating(messages):
     return merged
 
 
-def run_turn(thread_id, text, images, page, user, emit, stop):
-    thread_id, created = store.ensure_thread(thread_id, text.strip().splitlines()[0] if text.strip() else '截图问题', user)
-    emit('thread', {'thread_id': thread_id, 'title': store.thread(thread_id)['title']})
+def post_message(thread_id, text, images, page, user):
+    thread_id, _ = store.ensure_thread(thread_id, text.strip().splitlines()[0] if text.strip() else '截图问题', user)
     saved = _save_images(images or [])
-    store.add_message(thread_id, 'user', text, images=[u for u, _ in saved], page=page, user=user)
+    message_id = store.add_message(thread_id, 'user', text, images=[u for u, _ in saved], page=page, user=user)
+    events.publish('message', {'thread_id': thread_id, 'message': store.messages(thread_id, message_id - 1)[0]})
+    return thread_id, message_id, saved
+
+
+def run_turn(thread_id, text, images, page, user, emit, stop, run_id=''):
+    thread_id, message_id, saved = post_message(thread_id, text, images, page, user)
+    emit('thread', {'thread_id': thread_id, 'title': store.thread(thread_id)['title'], 'run_id': run_id,
+                    'message_id': message_id})
     started = time.time()
     tokens = 0
     cost = 0.0
@@ -162,9 +180,9 @@ def run_turn(thread_id, text, images, page, user, emit, stop):
     role = route(text, bool(saved))
     specs = config.models()
     model_id = specs[role]['id']
-    messages = _context(thread_id, text)
-    if messages[-1]['role'] == 'user' and messages[-1]['content'] == text:
-        messages.pop()
+    messages = _context(thread_id, text, message_id)
+    if thread_id == store.GROUP:
+        user_text = f'【{user or "同事"}】' + user_text
     messages.append({'role': 'user', 'content': user_text})
     messages = _merge_alternating(messages)
     used = [model_id]
@@ -233,8 +251,12 @@ def run_turn(thread_id, text, images, page, user, emit, stop):
         answer.append(('\n\n' if answer else '') + '（已停止）')
     receipt = {'model': ' → '.join(dict.fromkeys(used)), 'tokens': tokens, 'cost_cny': round(cost, 4),
                'ms': int((time.time() - started) * 1000)}
-    store.add_message(thread_id, 'assistant', ''.join(answer), steps=steps, cards=cards, receipt=receipt)
+    reply_id = store.add_message(thread_id, 'assistant', ''.join(answer), steps=steps, cards=cards, receipt=receipt)
+    events.publish('message', {'thread_id': thread_id, 'run_id': run_id,
+                               'message': store.messages(thread_id, reply_id - 1)[0]})
     emit('done', receipt)
+    from . import costs
+    events.publish('costs', costs.summary(force=True))
     threading.Thread(target=_summarize, args=(thread_id,), daemon=True).start()
     return thread_id
 

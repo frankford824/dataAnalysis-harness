@@ -37,6 +37,8 @@ def conn():
         db.row_factory = sqlite3.Row
         db.execute('PRAGMA journal_mode=WAL')
         db.executescript(SCHEMA)
+        if 'cached' not in {r[1] for r in db.execute('PRAGMA table_info(usage)')}:
+            db.execute('ALTER TABLE usage ADD COLUMN cached INTEGER DEFAULT 0')
         _local.db = db
     return db
 
@@ -49,14 +51,11 @@ def month():
     return datetime.now().strftime('%Y-%m')
 
 
-def add_usage(model, tokens_in, tokens_out, cost):
+def add_usage(model, tokens_in, tokens_out, cost, cached=0):
     with _lock:
-        conn().execute('INSERT INTO usage VALUES(?,?,?,?,?,?)', (time.time(), month(), model, tokens_in, tokens_out, cost))
+        conn().execute('INSERT INTO usage(at,month,model,tokens_in,tokens_out,cost,cached) VALUES(?,?,?,?,?,?,?)',
+                       (time.time(), month(), model, tokens_in, tokens_out, cost, cached))
         conn().commit()
-
-
-def month_cost():
-    return float(conn().execute('SELECT coalesce(sum(cost),0) FROM usage WHERE month=?', (month(),)).fetchone()[0])
 
 
 def log_event(kind, body):
@@ -70,6 +69,9 @@ def events(kind, limit=20):
     return [{'at': datetime.fromtimestamp(r['at']).strftime('%Y-%m-%d %H:%M'), **json.loads(r['body'])} for r in rows]
 
 
+GROUP = 'group'
+
+
 def ensure_thread(thread_id, title, user):
     now = time.time()
     with _lock:
@@ -77,7 +79,10 @@ def ensure_thread(thread_id, title, user):
             conn().execute('UPDATE thread SET updated_at=? WHERE id=?', (now, thread_id))
             conn().commit()
             return thread_id, False
-        thread_id = uuid.uuid4().hex[:12]
+        if thread_id == GROUP:
+            title = '公共群聊'
+        else:
+            thread_id = uuid.uuid4().hex[:12]
         conn().execute('INSERT INTO thread(id,title,user,created_at,updated_at) VALUES(?,?,?,?,?)',
                        (thread_id, title[:40] or '新话题', user, now, now))
         conn().commit()
@@ -89,7 +94,9 @@ def thread(thread_id):
 
 
 def threads(limit=50):
-    rows = conn().execute('SELECT id,title,user,updated_at FROM thread ORDER BY updated_at DESC LIMIT ?', (limit,)).fetchall()
+    ensure_thread(GROUP, '', '') if not thread(GROUP) else None
+    rows = conn().execute('SELECT id,title,user,updated_at FROM thread ORDER BY id=? DESC, updated_at DESC LIMIT ?',
+                          (GROUP, limit)).fetchall()
     return [{'id': r['id'], 'title': r['title'], 'user': r['user'],
              'updated_at': datetime.fromtimestamp(r['updated_at']).astimezone().isoformat(timespec='seconds')} for r in rows]
 
@@ -104,8 +111,10 @@ def add_message(thread_id, role, text, *, images=(), steps=(), cards=(), receipt
         return cur.lastrowid
 
 
-def messages(thread_id, after=0):
+def messages(thread_id, after=0, last=None):
     rows = conn().execute('SELECT * FROM message WHERE thread_id=? AND id>? ORDER BY id', (thread_id, after)).fetchall()
+    if last:
+        rows = rows[-last:]
     out = []
     for r in rows:
         cards = [card_view(c) for c in json.loads(r['cards'])]

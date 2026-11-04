@@ -266,6 +266,8 @@ def restart_ledger(**_):
     if healthy and not changed:
         _current_batch.clear()
         store.log_event('code_change', {'batch': batch.name if batch else '', 'result': 'ok'})
+        from . import events
+        events.publish('data_updated', {})
         return '台账服务已重启并恢复正常；已结账月份抽查结果一致。'
     reason = '服务没有正常启动' if not healthy else '已结账结果出现变化：' + '、'.join(changed)
     if batch and batch.exists():
@@ -275,6 +277,29 @@ def restart_ledger(**_):
         store.log_event('code_change', {'batch': batch.name, 'result': 'rolled_back', 'reason': reason})
         return f'{reason}，已自动恢复到修改前的程序（恢复后{"正常" if restored else "仍异常，需要继续排查"}）。'
     return reason
+
+
+def build_web(summary, **_):
+    from . import webui
+    outcome = webui.build(summary, _current_batch[0] if _current_batch else None)
+    if outcome['ok']:
+        _current_batch.clear()
+    return outcome['message']
+
+
+KNOWLEDGE = config.SELF_DIR / 'knowledge'
+
+
+def knowledge_index():
+    index = KNOWLEDGE / '00-index.md'
+    return index.read_text(encoding='utf-8') if index.exists() else ''
+
+
+def read_knowledge(section, **_):
+    matches = sorted(KNOWLEDGE.glob(f'*{section}*.md')) if section else []
+    if not matches:
+        return '没有这个章节。可选：' + '、'.join(p.name for p in sorted(KNOWLEDGE.glob('*.md')))
+    return _cut(matches[0].read_text(encoding='utf-8'), 8000)
 
 
 def restart_assistant(**_):
@@ -339,6 +364,10 @@ SPECS = [
     schema('powershell', '在生产机上执行 PowerShell 命令（完整权限），用于系统运维；取数和计算请用 python。', {'command': S, 'timeout': {'type': 'integer'}}, ['command']),
     schema('restart_ledger', '重启台账服务使程序修改生效；自动检查服务和已结账结果，异常时自动恢复修改前的程序。', {}),
     schema('restart_assistant', '修改了助手自身代码后调用，回答结束后助手自动重启。', {}),
+    schema('build_web', '修改左侧界面源码（D:\\ledger\\app\\ledger\\web\\src）后调用：构建并立即推送给所有人，失败不影响线上；用户可一键撤销。'
+           'summary 用一句业务话描述改了什么。', {'summary': S}, ['summary']),
+    schema('read_knowledge', '读取系统地图的某个章节（文件名或关键字，如 api、pages、glossary、rules、known-issues、code、data-model）。',
+           {'section': S}, ['section']),
     schema('propose_change', '提出一项会影响账务数据的修改，生成确认卡片给用户，用户点确认后才执行。'
            'actions 为按顺序执行的步骤：{"type":"api","method":"POST","path":"...","body":{...}} 或 '
            '{"type":"file","path":"...","old":"...","new":"..."} 或 {"type":"powershell","command":"..."}。',
@@ -359,6 +388,7 @@ HANDLERS = {
     'ledger_get': ledger_get, 'ledger_preview': ledger_preview, 'api_index': api_index, 'sql_query': sql_query,
     'read_file': read_file, 'search_files': search_files, 'write_file': write_file, 'edit_file': edit_file,
     'powershell': powershell, 'python': python, 'restart_ledger': restart_ledger, 'restart_assistant': restart_assistant,
+    'build_web': build_web, 'read_knowledge': read_knowledge,
     'remember': remember, 'record_correction': record_correction, 'search_memory': search_memory,
     'auto_close_status': auto_close_status, 'run_auto_close': run_auto_close,
 }
@@ -366,6 +396,7 @@ DEFAULT_LABEL = {
     'ledger_get': '查看台账数据', 'ledger_preview': '生成预览', 'api_index': '查找可用功能', 'sql_query': '查询明细数据',
     'read_file': '查看规则与配置', 'search_files': '查找相关规则', 'write_file': '修复程序', 'edit_file': '修复程序',
     'powershell': '处理系统问题', 'python': '计算核对数据', 'restart_ledger': '让修复生效', 'restart_assistant': '更新助手',
+    'build_web': '更新界面', 'read_knowledge': '查阅系统说明',
     'propose_change': '整理修改方案', 'remember': '记住这条信息', 'record_correction': '记录本次纠错',
     'search_memory': '查找以往类似问题', 'auto_close_status': '查看自动结账情况', 'run_auto_close': '执行自动结账',
 }
@@ -394,12 +425,18 @@ def execute_card(card_id, by):
                 if not outcome.startswith('exit=0'):
                     raise RuntimeError('执行没有成功')
                 results.append(outcome[:2000])
-        store.decide_card(card_id, 'applied', '已按确认完成修改', by)
-        store.add_message(row['thread_id'], 'system', f'用户已确认「{row["title"]}」，已执行。结果摘要：' + _cut(results, 3000))
-        return {'status': 'applied', 'message': '已按确认完成修改'}
+        from . import events
+        message = '已按确认完成修改' + (f'（{by} 确认）' if by else '')
+        store.decide_card(card_id, 'applied', message, by)
+        store.add_message(row['thread_id'], 'system', f'{by or "用户"}已确认「{row["title"]}」，已执行。结果摘要：' + _cut(results, 3000))
+        events.publish('card_update', {'card_id': card_id, 'status': 'applied', 'message': message, 'by': by})
+        events.publish('data_updated', {})
+        return {'status': 'applied', 'message': message}
     except Exception as exc:
+        from . import events
         message = f'修改没有完成：{exc}'
         store.decide_card(card_id, 'failed', message, by)
+        events.publish('card_update', {'card_id': card_id, 'status': 'failed', 'message': message, 'by': by})
         store.add_message(row['thread_id'], 'system', f'用户确认「{row["title"]}」后执行失败：{exc}；已完成步骤：' + _cut(results, 2000))
         return {'status': 'failed', 'message': message}
 

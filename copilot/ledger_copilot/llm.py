@@ -3,31 +3,25 @@ import json
 import urllib.error
 import urllib.request
 
-from . import config, store
+from . import config, pricing, store
 
 
 class BudgetExhausted(RuntimeError):
     pass
 
 
-def _price(model_id):
-    for spec in config.models().values():
-        if spec['id'] == model_id:
-            return spec['in'], spec['out']
-    return 8.0, 32.0
-
-
 def _record(model_id, usage):
     tokens_in = int(usage.get('prompt_tokens') or 0)
     tokens_out = int(usage.get('completion_tokens') or 0)
-    price_in, price_out = _price(model_id)
-    cost = (tokens_in * price_in + tokens_out * price_out) / 1_000_000
-    store.add_usage(model_id, tokens_in, tokens_out, cost)
+    cached = int((usage.get('prompt_tokens_details') or {}).get('cached_tokens') or 0)
+    cost = pricing.cost(model_id, tokens_in, tokens_out, cached)
+    store.add_usage(model_id, tokens_in, tokens_out, cost, cached)
     return tokens_in + tokens_out, cost
 
 
 def _open(model_id, messages, tools, max_tokens, stream, timeout):
-    if store.month_cost() >= config.MONTH_BUDGET_CNY:
+    from . import costs
+    if costs.month_total() >= config.MONTH_BUDGET_CNY:
         raise BudgetExhausted('本月模型费用已到上限')
     base, key = config.gateway()
     body = {'model': model_id, 'messages': messages, 'max_tokens': max_tokens, 'stream': stream}
