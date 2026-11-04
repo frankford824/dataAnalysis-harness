@@ -16,10 +16,16 @@ def _record(model_id, usage):
     cached = int((usage.get('prompt_tokens_details') or {}).get('cached_tokens') or 0)
     cost = pricing.cost(model_id, tokens_in, tokens_out, cached)
     store.add_usage(model_id, tokens_in, tokens_out, cost, cached)
+    searches = int(((usage.get('x_tools') or {}).get('search') or (usage.get('plugins') or {}).get('search') or {})
+                   .get('count') or 0)
+    if searches:
+        search_cost = pricing.cost(pricing.WEB_SEARCH, searches, 0)
+        store.add_usage(pricing.WEB_SEARCH, searches, 0, search_cost)
+        cost += search_cost
     return tokens_in + tokens_out, cost
 
 
-def _open(model_id, messages, tools, max_tokens, stream, timeout):
+def _open(model_id, messages, tools, max_tokens, stream, timeout, extra=None):
     from . import costs
     if costs.month_total() >= config.MONTH_BUDGET_CNY:
         raise BudgetExhausted('本月模型费用已到上限')
@@ -29,6 +35,7 @@ def _open(model_id, messages, tools, max_tokens, stream, timeout):
         body['stream_options'] = {'include_usage': True}
     if tools:
         body['tools'] = tools
+    body.update(extra or {})
     request = urllib.request.Request(base + '/chat/completions', json.dumps(body, ensure_ascii=False).encode('utf-8'),
                                      headers={'Authorization': 'Bearer ' + key, 'Content-Type': 'application/json'})
     return urllib.request.urlopen(request, timeout=timeout)
@@ -65,8 +72,8 @@ def stream(model_id, messages, tools=None, *, max_tokens=4096, timeout=180, stop
     yield 'end', {'tool_calls': [calls[i] for i in sorted(calls)], 'tokens': tokens, 'cost': cost}
 
 
-def complete(model_id, messages, *, max_tokens=2048, timeout=120):
-    with _open(model_id, messages, None, max_tokens, False, timeout) as response:
+def complete(model_id, messages, *, max_tokens=2048, timeout=120, extra=None):
+    with _open(model_id, messages, None, max_tokens, False, timeout, extra) as response:
         data = json.loads(response.read())
     tokens, cost = _record(model_id, data.get('usage') or {})
     return data['choices'][0]['message'].get('content') or '', tokens, cost

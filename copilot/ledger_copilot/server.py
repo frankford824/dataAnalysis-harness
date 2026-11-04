@@ -4,16 +4,23 @@ import os
 import queue
 import re
 import threading
+import time
 import uuid
 from contextlib import asynccontextmanager
+from datetime import datetime
 
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel
 
-from . import agent, autoclose, config, costs, events, store, tools, webui
+from . import agent, autoclose, config, costs, events, machine, store, tools, webui
 
 _runs = {}
+_stops = {}
+_tasks = {}
+_tasks_lock = threading.Lock()
+# 同时最多几轮在查；多出来的排队，避免几个人同时提问把模型并发和台账都压满。
+_slots = threading.Semaphore(3)
 SSE_HEADERS = {'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no'}
 # 群聊里 @同事 的消息只转给人看；@助手 或不带 @ 的才由助手回答。
 COLLEAGUE = re.compile(r'^\s*[@＠](?!助手)\S')
@@ -23,6 +30,7 @@ COLLEAGUE = re.compile(r'^\s*[@＠](?!助手)\S')
 async def lifespan(_app):
     store.conn()
     stop = autoclose.start() if os.environ.get('COPILOT_AUTO_CLOSE', '1') == '1' else None
+    machine.start()
     yield
     if stop:
         stop.set()
@@ -41,6 +49,43 @@ class Chat(BaseModel):
 
 class Stop(BaseModel):
     thread_id: str | None = None
+    run_id: str | None = None
+    user: str = ''
+
+
+def _task_view(task):
+    return {k: v for k, v in task.items() if not k.startswith('_')}
+
+
+def _update_task(run_id, **changes):
+    with _tasks_lock:
+        task = _tasks.get(run_id)
+        if not task:
+            return
+        task.update(changes)
+        view = _task_view(task)
+    events.publish('task', view)
+
+
+def _similar(a, b):
+    first, second = store._terms(a), store._terms(b)
+    if len(first) < 3 or len(second) < 3:
+        return False
+    return len(first & second) / len(first | second) >= 0.5
+
+
+def _duplicate(text):
+    with _tasks_lock:
+        return next((t for t in _tasks.values() if t['status'] in {'queued', 'running'}
+                     and t['thread_id'] == store.GROUP and _similar(t['question'], text)), None)
+
+
+def _prune_tasks():
+    cutoff = time.time() - 2 * 3600
+    with _tasks_lock:
+        for run_id in [r for r, t in _tasks.items() if t['status'] not in {'queued', 'running', 'waiting'}
+                       and t['_ended'] < cutoff]:
+            _tasks.pop(run_id, None)
 
 
 def _single(*items):
@@ -51,36 +96,83 @@ def _single(*items):
 
 @app.post('/api/agent/chat')
 def chat(body: Chat):
-    if body.thread_id == store.GROUP and COLLEAGUE.match(body.text):
+    group = body.thread_id == store.GROUP
+    if group and COLLEAGUE.match(body.text):
         thread_id, message_id, _ = agent.post_message(store.GROUP, body.text, body.images, body.page, body.user)
         return _single(events.sse('thread', {'thread_id': thread_id, 'title': '公共群聊', 'run_id': '', 'message_id': message_id}),
                        events.sse('done', None))
-    previous = _runs.get(body.thread_id or '')
-    if previous:
-        previous.set()
+    same = _duplicate(body.text) if group and not body.images else None
+    if same:
+        thread_id, message_id, _ = agent.post_message(store.GROUP, body.text, body.images, body.page, body.user)
+        followers = same['followers'] + [body.user or '同事']
+        _update_task(same['run_id'], followers=followers)
+        return _single(events.sse('thread', {'thread_id': thread_id, 'title': '公共群聊', 'run_id': same['run_id'],
+                                             'message_id': message_id}),
+                       events.sse('merged', {'run_id': same['run_id'], 'asker': same['user']}),
+                       events.sse('done', None))
+    if not group:
+        previous = _runs.get(body.thread_id or '')
+        if previous:
+            previous.set()
+    _prune_tasks()
     outbox = queue.Queue()
     stop = threading.Event()
     run_id = uuid.uuid4().hex[:10]
     holder = {'thread': body.thread_id}
+    _stops[run_id] = stop
+    now = time.time()
+    with _tasks_lock:
+        _tasks[run_id] = {'run_id': run_id, 'thread_id': body.thread_id or '', 'user': body.user,
+                          'question': (body.text.strip() or '（截图）')[:80], 'message_id': None, 'status': 'queued',
+                          'line': '排队中', 'started_at': datetime.now().astimezone().isoformat(timespec='seconds'),
+                          'ms': 0, 'cost_cny': 0.0, 'followers': [], 'cards': [], '_started': now, '_ended': 0}
+    events.publish('task', _task_view(_tasks[run_id]))
 
     def emit(kind, value):
         if kind == 'thread':
             holder['thread'] = value['thread_id']
-            _runs[value['thread_id']] = stop
+            if not group:
+                _runs[value['thread_id']] = stop
+            _update_task(run_id, thread_id=value['thread_id'], message_id=value.get('message_id'))
         else:
             events.publish('turn', {'thread_id': holder['thread'], 'run_id': run_id, 'user': body.user,
                                     'kind': kind, 'data': value})
+            if kind == 'step' and value.get('status') == 'running':
+                _update_task(run_id, line=value.get('label') or '处理中')
+            elif kind == 'card':
+                _update_task(run_id, cards=_tasks[run_id]['cards'] + [value['card_id']])
+            elif kind == 'done':
+                holder['receipt'] = value
         outbox.put(events.sse(kind, value))
 
     def work():
+        status = 'done'
         try:
-            agent.run_turn(body.thread_id, body.text, body.images, body.page, body.user, emit, stop, run_id)
+            with _slots:
+                if stop.is_set():
+                    status = 'stopped'
+                    return
+                _update_task(run_id, status='running', line='在看', _started=time.time())
+                agent.run_turn(body.thread_id, body.text, body.images, body.page, body.user, emit, stop, run_id)
+            if stop.is_set():
+                status = 'stopped'
         except Exception as exc:
+            status = 'failed'
             store.log_event('turn_error', {'error': str(exc)[:2000]})
             outbox.put(events.sse('error', {'message': '这次处理遇到了问题，请稍后再试。'}))
         finally:
             if _runs.get(holder['thread']) is stop:
                 _runs.pop(holder['thread'], None)
+            _stops.pop(run_id, None)
+            task = _tasks.get(run_id, {})
+            pending = [c for c in task.get('cards', []) if (store.card(c) or {'status': ''})['status'] == 'pending']
+            if status == 'done' and pending:
+                status = 'waiting'
+            receipt = holder.get('receipt')
+            _update_task(run_id, status=status, line={'done': '已完成', 'waiting': '等确认', 'stopped': '已停止',
+                                                       'failed': '没查完'}[status],
+                         ms=int((time.time() - task.get('_started', now)) * 1000),
+                         cost_cny=(receipt or {}).get('cost_cny', 0.0), _ended=time.time())
             outbox.put(None)
             if tools._pending_self_restart:
                 threading.Timer(2, lambda: os._exit(0)).start()
@@ -107,7 +199,9 @@ async def event_stream(user: str = ''):
 
     async def stream():
         try:
-            yield events.sse('hello', {'users': events.presence(), 'costs': costs.summary()})
+            with _tasks_lock:
+                tasks = [_task_view(t) for t in _tasks.values()]
+            yield events.sse('hello', {'users': events.presence(), 'costs': costs.summary(), 'tasks': tasks})
             idle = 0.0
             while True:
                 try:
@@ -129,10 +223,27 @@ async def event_stream(user: str = ''):
 
 @app.post('/api/agent/stop')
 def stop_run(body: Stop):
-    flag = _runs.get(body.thread_id or '')
+    flag = _stops.get(body.run_id or '') or _runs.get(body.thread_id or '')
     if flag:
         flag.set()
+        if body.run_id:
+            _update_task(body.run_id, line=f'{body.user}停止了' if body.user else '正在停止')
     return {'stopped': bool(flag)}
+
+
+@app.get('/api/agent/tasks')
+def list_tasks():
+    _prune_tasks()
+    with _tasks_lock:
+        tasks = sorted((_task_view(t) for t in _tasks.values()), key=lambda t: t['started_at'], reverse=True)
+    return {'tasks': tasks[:30]}
+
+
+def _settle_card(card_id):
+    with _tasks_lock:
+        task = next((t for t in _tasks.values() if card_id in t['cards'] and t['status'] == 'waiting'), None)
+    if task and all((store.card(c) or {'status': ''})['status'] != 'pending' for c in task['cards']):
+        _update_task(task['run_id'], status='done', line='已完成')
 
 
 @app.get('/api/agent/threads')
@@ -153,7 +264,9 @@ def get_thread(thread_id: str):
 
 @app.post('/api/agent/cards/{card_id}/confirm')
 def confirm_card(card_id: str, body: dict | None = None):
-    return tools.execute_card(card_id, (body or {}).get('user', ''))
+    outcome = tools.execute_card(card_id, (body or {}).get('user', ''))
+    _settle_card(card_id)
+    return outcome
 
 
 @app.post('/api/agent/cards/{card_id}/reject')
@@ -166,6 +279,7 @@ def reject_card(card_id: str, body: dict | None = None):
     store.decide_card(card_id, 'rejected', message, by)
     store.add_message(row['thread_id'], 'system', f'{by or "用户"}没有采纳「{row["title"]}」，未做修改。')
     events.publish('card_update', {'card_id': card_id, 'status': 'rejected', 'message': message, 'by': by})
+    _settle_card(card_id)
     return {'status': 'rejected', 'message': message}
 
 

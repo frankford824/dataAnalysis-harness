@@ -16,7 +16,12 @@ SYSTEM = '''你是「台账助手」，运行在公司台账系统的生产机�
 使用者是 2-3 位财务/运营同事，他们在左侧看经营分析和明细，发现问题时用文字和截图问你。你的任务是直接查清、解释并解决问题，让他们不用再手工导表、写公式核对。
 
 回答规则：
-- 用业务语言回答，先给结论，再给关键依据（具体店铺、月份、金额），最后说下一步。简洁。
+- 像一位熟悉业务的同事在群里回话：口语、短句、先说结论。简单问题一两句话答完，不用标题、不用表格、不复述问题、不说“好的，我来帮你”；
+  用户要明细、对比或清单时再用表格。需要用户做的事放在最后一句。
+- 用业务语言回答，结论要带关键依据（具体店铺、月份、金额）。
+- 答案落在左侧某个页面时，附一个跳转链接让用户一点就到，格式 [在左侧打开·简短名称](#/路由)：
+  店月详情 #/store/{store_id}?period=YYYY-MM，月度工作台 #/，数据与店铺 #/deliver，运费复核 #/freight，费项 #/fees，
+  提成 #/commission、#/commission/reports、#/commission/org，兼职人工费用 #/labor，运维状态 #/ops。只用这些路由。
 - 绝对不要向用户展示代码、SQL、文件路径、命令、日志、接口名或技术实现细节；不要说“我修改了某某文件/重启了服务”。程序问题修好后只说“已修复，刷新页面即可”这类结果。
 - 每次调用工具都要填写 purpose：用用户能懂的话说明这一步在做什么（例如“查看 8 月这家店的退款明细”）。
 - 金额以台账引擎的计算结果为准，引用工具返回的数字，不要自己估算最终金额。
@@ -49,13 +54,24 @@ SYSTEM = '''你是「台账助手」，运行在公司台账系统的生产机�
 - 目录：D:\\ledger\\app（台账程序）、D:\\ledger\\home（台账数据）、D:\\ledger\\logs（服务日志）、D:\\ledger\\agent（助手自身程序）。
 - 自动结账：每天凌晨 2 点对最近三个已过去的月份自动发起结账，检查全部通过的店铺自动结账；auto_close_status 看结果，用户要求立即结账时用 run_auto_close。结账是确定的业务动作且用户已授权自动执行，不需要确认卡片。
 - 效率：接口很慢时改用 sql_query；每次只取需要的列和行；同一问题不要反复查同样的数据。
+- 外部信息（平台规则、费率政策、公告、软件报错含义）用 web_search；机器上有哪些服务、端口、日志在哪用 machine_map；
+  NAS 共享盘上的源文件按名字/月份/店铺找用 find_files（比在共享盘上遍历快得多）。
+- 本机其他服务：8001 订单系统（D:\\order），8010 fin-gateway，8011 fin-indexer，8765 台账索引，两个 Postgres（5433/5434）；细节查 machine_map。
 今天是 {today}。'''
 
 ENGINEER_WORDS = re.compile(r'报错|错误提示|打不开|白屏|卡死|很卡|太慢|加载不出|500|bug|程序|页面.*(坏|错|空)|按钮.*(没反应|不能)|改代码|功能')
 INVESTIGATE_WORDS = re.compile(r'不对|不一致|错|为什么|怎么回事|核对|差|少了|多了|异常|查一下|排查|对不上|偏高|偏低|原因|改|调整|修正')
 
 
+BUSINESS_WORDS = re.compile(r'店|月|账|利润|毛利|收入|成本|费|运费|结|订单|退款|推广|提成|兼职|数据|报表|核算|金额|多少|哪|为什么|查|看|改|错|对|页面|文件|系统|服务|\d')
+CHAT_SYSTEM = ('你是「台账助手」，公司台账系统里的 AI 同事。对方只是打个招呼或随口一问：像真人一样一两句话回，口语、自然、'
+               '不客套、不列清单。对方问你能做什么时，用一句话举一两个例子：比如帮忙查某店某月利润为什么低、找某个文件、'
+               '核对一笔退款、改一下页面。')
+
+
 def route(text, has_images):
+    if not has_images and len(text.strip()) <= 12 and not BUSINESS_WORDS.search(text):
+        return 'chat'
     if ENGINEER_WORDS.search(text):
         return 'engineer'
     if has_images or INVESTIGATE_WORDS.search(text) or len(text) > 120:
@@ -179,6 +195,8 @@ def run_turn(thread_id, text, images, page, user, emit, stop, run_id=''):
 
     role = route(text, bool(saved))
     specs = config.models()
+    if role == 'chat':
+        return _chat_turn(thread_id, text, user, emit, stop, run_id, message_id, started)
     model_id = specs[role]['id']
     messages = _context(thread_id, text, message_id)
     if thread_id == store.GROUP:
@@ -250,7 +268,7 @@ def run_turn(thread_id, text, images, page, user, emit, stop, run_id=''):
     elif stop.is_set():
         answer.append(('\n\n' if answer else '') + '（已停止）')
     receipt = {'model': ' → '.join(dict.fromkeys(used)), 'tokens': tokens, 'cost_cny': round(cost, 4),
-               'ms': int((time.time() - started) * 1000)}
+               'ms': int((time.time() - started) * 1000), 'reply_to': message_id, 'run_id': run_id, 'asker': user}
     reply_id = store.add_message(thread_id, 'assistant', ''.join(answer), steps=steps, cards=cards, receipt=receipt)
     events.publish('message', {'thread_id': thread_id, 'run_id': run_id,
                                'message': store.messages(thread_id, reply_id - 1)[0]})
@@ -258,6 +276,33 @@ def run_turn(thread_id, text, images, page, user, emit, stop, run_id=''):
     from . import costs
     events.publish('costs', costs.summary(force=True))
     threading.Thread(target=_summarize, args=(thread_id,), daemon=True).start()
+    return thread_id
+
+
+def _chat_turn(thread_id, text, user, emit, stop, run_id, message_id, started):
+    model_id = config.models()['quick']['id']
+    recent = [m for m in store.messages(thread_id, last=6) if m['role'] in {'user', 'assistant'} and m['id'] != message_id]
+    messages = [{'role': 'system', 'content': CHAT_SYSTEM}]
+    messages += [{'role': m['role'], 'content': m['text'][:500]} for m in recent if m['text']]
+    messages = _merge_alternating(messages + [{'role': 'user', 'content': text}])
+    answer, tokens, cost = [], 0, 0.0
+    try:
+        for kind, value in llm.stream(model_id, messages, None, max_tokens=300, timeout=60, stop=stop):
+            if kind == 'text':
+                answer.append(value)
+                emit('delta', {'text': value})
+            else:
+                tokens, cost = value['tokens'], value['cost']
+    except Exception as exc:
+        store.log_event('turn_error', {'thread': thread_id, 'error': str(exc)[:2000]})
+        answer.append('我这边刚才没接上，你再说一次？')
+        emit('delta', {'text': answer[-1]})
+    receipt = {'model': model_id, 'tokens': tokens, 'cost_cny': round(cost, 4), 'ms': int((time.time() - started) * 1000),
+               'reply_to': message_id, 'run_id': run_id, 'asker': user}
+    reply_id = store.add_message(thread_id, 'assistant', ''.join(answer), receipt=receipt)
+    events.publish('message', {'thread_id': thread_id, 'run_id': run_id,
+                               'message': store.messages(thread_id, reply_id - 1)[0]})
+    emit('done', receipt)
     return thread_id
 
 

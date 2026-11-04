@@ -12,7 +12,7 @@ import urllib.request
 from datetime import datetime
 from pathlib import Path
 
-from . import config, store
+from . import config, llm, store
 
 LIMIT = 6000
 SKIP_DIRS = {'node_modules', '.git', '__pycache__', 'venv', '.venv', 'static', 'dist'}
@@ -288,6 +288,24 @@ def build_web(summary, **_):
     return outcome['message']
 
 
+def web_search(query, **_):
+    answer, _, _ = llm.complete(config.models()['quick']['id'], [
+        {'role': 'system', 'content': '根据联网搜索结果回答，只写查到的事实，注明信息来自哪个网站和日期；查不到就直说。'},
+        {'role': 'user', 'content': query}], max_tokens=1500, timeout=90,
+        extra={'enable_search': True, 'search_options': {'forced_search': True, 'search_strategy': 'turbo'}})
+    return _cut(answer)
+
+
+def machine_map(section='', **_):
+    from . import machine
+    return machine.machine_map(section)
+
+
+def find_files(keywords, limit=30, **_):
+    from . import machine
+    return machine.find_files(keywords, limit)
+
+
 KNOWLEDGE = config.SELF_DIR / 'knowledge'
 
 
@@ -367,6 +385,12 @@ SPECS = [
     schema('restart_assistant', '修改了助手自身代码后调用，回答结束后助手自动重启。', {}),
     schema('build_web', '修改左侧界面源码（D:\\ledger\\app\\ledger\\web\\src）后调用：构建并立即推送给所有人，失败不影响线上；用户可一键撤销。'
            'summary 用一句业务话描述改了什么。', {'summary': S}, ['summary']),
+    schema('web_search', '联网搜索（平台规则、费率政策、物流/税务公告、软件报错等外部信息）。按次计费，台账内部数据不要用它查。',
+           {'query': S}, ['query']),
+    schema('machine_map', '生产机地图：各端口/服务/计划任务/共享盘/目录/日志位置。section 可填 监听端口、计划任务、服务、共享盘、磁盘、目录、日志。',
+           {'section': S}),
+    schema('find_files', '在 NAS 共享盘（\\\\192.168.0.125\\dataAnalysis）按文件名/路径关键字找文件，空格分隔多个关键字（都要匹配），按修改时间从新到旧。',
+           {'keywords': S, 'limit': {'type': 'integer'}}, ['keywords']),
     schema('read_knowledge', '读取系统地图的某个章节（文件名或关键字，如 api、pages、glossary、rules、known-issues、code、data-model）。',
            {'section': S}, ['section']),
     schema('propose_change', '提出一项会影响账务数据的修改，生成确认卡片给用户，用户点确认后才执行。'
@@ -389,7 +413,8 @@ HANDLERS = {
     'ledger_get': ledger_get, 'ledger_preview': ledger_preview, 'api_index': api_index, 'sql_query': sql_query,
     'read_file': read_file, 'search_files': search_files, 'write_file': write_file, 'edit_file': edit_file,
     'powershell': powershell, 'python': python, 'restart_ledger': restart_ledger, 'restart_assistant': restart_assistant,
-    'build_web': build_web, 'read_knowledge': read_knowledge,
+    'build_web': build_web, 'read_knowledge': read_knowledge, 'web_search': web_search, 'machine_map': machine_map,
+    'find_files': find_files,
     'remember': remember, 'record_correction': record_correction, 'search_memory': search_memory,
     'auto_close_status': auto_close_status, 'run_auto_close': run_auto_close,
 }
@@ -397,7 +422,8 @@ DEFAULT_LABEL = {
     'ledger_get': '查看台账数据', 'ledger_preview': '生成预览', 'api_index': '查找可用功能', 'sql_query': '查询明细数据',
     'read_file': '查看规则与配置', 'search_files': '查找相关规则', 'write_file': '修复程序', 'edit_file': '修复程序',
     'powershell': '处理系统问题', 'python': '计算核对数据', 'restart_ledger': '让修复生效', 'restart_assistant': '更新助手',
-    'build_web': '更新界面', 'read_knowledge': '查阅系统说明',
+    'build_web': '更新界面', 'read_knowledge': '查阅系统说明', 'web_search': '上网查一下', 'machine_map': '看一下机器上的服务',
+    'find_files': '在共享盘找文件',
     'propose_change': '整理修改方案', 'remember': '记住这条信息', 'record_correction': '记录本次纠错',
     'search_memory': '查找以往类似问题', 'auto_close_status': '查看自动结账情况', 'run_auto_close': '执行自动结账',
 }

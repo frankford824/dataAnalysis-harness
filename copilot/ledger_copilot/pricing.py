@@ -4,6 +4,8 @@
 - 阶梯计费按单次请求的输入 token 总量定档，整次请求都按该档单价。
 - deepseek 系列分忙时（北京时间 08:00-22:00）和闲时单价。
 - 隐式缓存命中的输入 token 通常按输入单价的 20% 计费。
+- 模型内置联网搜索按次计费（turbo 策略 3 元/千次，见 /zh/model-studio/web-search）；
+  用量表里这一行的 tokens_in 记的是搜索次数。
 可在 ROOT/prices.json 按同样结构覆盖或补充。
 """
 import json
@@ -14,6 +16,9 @@ from . import config
 CACHE_HIT = 0.2
 SOURCE = 'https://help.aliyun.com/zh/model-studio/model-pricing'
 VERSION = 'bailian-cn-beijing-2026-11-04'
+
+WEB_SEARCH = 'web-search'
+PER_CALL = {WEB_SEARCH: 0.003}
 
 # tiers: [(输入上限 token, 输入单价, 输出单价)]；peak: 闲时单价 (输入, 输出)
 PRICES = {
@@ -49,8 +54,14 @@ def rates(model, tokens_in, at=None):
     return price_in, price_out
 
 
+def _per_call(model, calls):
+    return (calls or 0) * PER_CALL[model]
+
+
 def cost(model, tokens_in, tokens_out, cached=0, at=None):
     """Unknown models are charged at the most expensive listed rate, never zero."""
+    if model in PER_CALL:
+        return _per_call(model, tokens_in)
     found = rates(model, tokens_in or 0, at)
     price_in, price_out = found or (20, 100)
     tokens_in, tokens_out, cached = tokens_in or 0, tokens_out or 0, min(cached or 0, tokens_in or 0)
