@@ -360,6 +360,40 @@ class OrderFeed:
             row = conn.execute("select * from feed_state where id=1").fetchone()
         return dict(row) if row else {}
 
+    AFTER_SALE_KEYS = ("after_sale_id", "internal_after_sale_id", "platform_after_sale_id", "order_id")
+
+    def lookup_after_sales(self, q: str, limit: int = 20) -> list[dict[str, Any]]:
+        """台账里不存售后单这种单据；按售后单号、平台售后单号或内部单号回订单台快照找。"""
+        key = normalize_key(q)
+        if not key or not key.isdigit() or len(key) < 6:
+            return []
+        state = self.state()
+        objects = json.loads(state.get("manifest_json") or "{}").get("objects") or {}
+        if "after_sales.parquet" not in objects:
+            return []
+        scan = pl.scan_parquet(self.feed_root / objects["after_sales.parquet"]["path"])
+        keys = [c for c in self.AFTER_SALE_KEYS if c in scan.collect_schema().names()]
+        hit = pl.any_horizontal([pl.col(c).cast(pl.Utf8) == key for c in keys])
+        rows = scan.filter(hit).head(limit).collect()
+        with self._connect() as conn:
+            deltas = [dict(r) for r in conn.execute(
+                "select * from feed_entity where entity_type='after_sale' and "
+                "(entity_id=? or order_id=? or payload_json like ?) limit ?",
+                (key, key, f"%{key}%", limit),
+            )]
+            stores = {str(r[0]): str(r[1] or "") for r in conn.execute(
+                "select order_store_id,ledger_store_id from feed_store where mapping_status='confirmed'")}
+        if deltas:
+            rows = self._overlay(rows, deltas, "after_sale", "after_sale_id",
+                                 lambda p: [p.get("after_sale") or {}])
+            rows = rows.filter(pl.any_horizontal([pl.col(c).cast(pl.Utf8) == key
+                                                  for c in keys if c in rows.columns]))
+        out = []
+        for row in rows.head(limit).iter_rows(named=True):
+            text = {k: ("" if v is None else str(v)) for k, v in row.items()}
+            out.append({**text, "ledger_store_id": stores.get(text.get("order_store_id", ""), "")})
+        return out
+
     def record_error(self, message: str) -> None:
         with self._connect() as conn:
             conn.execute("update feed_state set last_error=? where id=1", (message[:2000],))
@@ -2096,6 +2130,9 @@ class OrderFeed:
             pl.col("refund_status_raw").cast(pl.Utf8).alias("after_sale_status"),
             pl.col("quantity").cast(pl.Float64, strict=False),
             pl.lit(store.name).alias("store_name"),
+            *[(pl.col(column) if column in after.columns else pl.lit(None)).cast(pl.Utf8).alias(alias)
+              for column, alias in (("platform_after_sale_id", "platform_after_sale_id"),
+                                    ("refund_amount", "reference_refund_amount"))],
         )
         return self._anchors(frame, fingerprint, "订单台实时售后")
 
@@ -2200,7 +2237,7 @@ class OrderFeed:
             ("after_sale_id", "text"), ("internal_order_id", "text"), ("order_id", "text"),
             ("sub_order_id", "text"), ("sku", "text"), ("goods_status", "text"),
             ("refund_status", "text"), ("after_sale_status", "text"), ("quantity", "number"), ("refund_confirm_time", "time"),
-            ("store_name", "text"),
+            ("store_name", "text"), ("platform_after_sale_id", "text"), ("reference_refund_amount", "text"),
         ])
 
     @staticmethod

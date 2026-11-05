@@ -1554,6 +1554,48 @@ def search(q: str, store_id: str = "", period: str = "", platform: str = "",
     """
     if not q.strip():
         raise HTTPException(400, "要给一个订单号、金额或者科目名")
+    result = _search(q, store_id, period, platform, limit)
+    extra = _after_sale_hits(q.strip(), store_id)
+    if not extra:
+        return result
+    return {**result, "hits": [*extra, *result.get("hits", [])],
+            "total": int(result.get("total") or 0) + len(extra),
+            "notes": [*result.get("notes", []),
+                      "订单台售后单不是台账里的单据：台账按线上单号、平台子订单号挂账，售后单号写在商品成本备注里；"
+                      "订单台退款金额只作参考，退款以平台对账流水为准。"]}
+
+
+def _after_sale_hits(q: str, store_id: str) -> list[dict]:
+    if not order_feed.enabled():
+        return []
+    try:
+        rows = order_feed.OrderFeed(workspace().root).lookup_after_sales(q)
+    except Exception:
+        logging.getLogger(__name__).exception("订单台售后单查找失败")
+        return []
+    stores = {store.id: store for store in _model().stores}
+    labels = (("after_sale_id", "售后单号"), ("platform_after_sale_id", "平台售后单号"),
+              ("order_id", "内部单号"), ("online_order_no", "线上单号"),
+              ("goods_status_raw", "货物状态"), ("refund_status_raw", "退款状态"),
+              ("refund_amount", "订单台退款（仅供参考）"), ("created_at_source", "申请时间"))
+    hits = []
+    for row in rows:
+        if store_id and row["ledger_store_id"] != store_id:
+            continue
+        store = stores.get(row["ledger_store_id"])
+        hits.append({
+            "sha256": "", "subject": "订单台售后单", "metric": "", "amount": None,
+            "store": _display_store(store)["name"] if store else "未对上台账店铺",
+            "store_id": row["ledger_store_id"], "platform": row.get("platform_code", ""),
+            "period": (row.get("created_at_source") or "")[:7], "source": "订单台", "authority": "",
+            "file": "订单台", "path": "", "sheet": "", "row_no": 0,
+            "matches": [{"column_name": label, "value": row[key]} for key, label in labels if row.get(key)],
+            "snippet": "台账按线上单号挂账；这张售后若让商品成本不计，商品成本备注里会写着这张售后单号。",
+        })
+    return hits
+
+
+def _search(q: str, store_id: str, period: str, platform: str, limit: int) -> dict:
     if nas_status.ingest_mode() == "nas":
         return _index_search(q.strip(), store_id, period, platform, min(limit, 1000))
     snapshot = _snapshot()

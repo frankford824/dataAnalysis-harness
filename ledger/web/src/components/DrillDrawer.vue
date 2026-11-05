@@ -141,7 +141,7 @@ async function searchIndex() {
     const hits = new Map()
     for (const result of results) {
       for (const hit of result.hits || []) {
-        hits.set(`${hit.sha256}:${hit.sheet}:${hit.row_no}`, hit)
+        hits.set(hitKey(hit), hit)
       }
     }
     indexResult.value = {
@@ -154,6 +154,9 @@ async function searchIndex() {
   } finally {
     if(serial===indexSerial)indexLoading.value = false
   }
+}
+function hitKey(hit) {
+  return hit.sha256 ? `${hit.sha256}:${hit.sheet}:${hit.row_no}` : JSON.stringify(hit.matches)
 }
 function preview(hit) {
   previewTarget.value = hit
@@ -299,16 +302,16 @@ function close() {
             <p class="xs muted">原文件搜索保留原始副本，不代表每条命中记录都计入账目；请以核算状态和本行计入金额为准。</p>
             <n-table v-if="indexResult.hits.length" size="small" :bordered="false">
               <tbody>
-                <tr v-for="hit in indexResult.hits.slice(0, 30)" :key="`${hit.sha256}:${hit.sheet}:${hit.row_no}`">
+                <tr v-for="hit in indexResult.hits.slice(0, 30)" :key="hitKey(hit)">
                   <td class="xs">
                     <b>{{ hit.file }}</b><template v-if="hit.sheet"> · {{ hit.sheet }}</template>
-                    · 第 <span class="num">{{ hit.row_no }}</span> 行
+                    <template v-if="hit.row_no"> · 第 <span class="num">{{ hit.row_no }}</span> 行</template>
                     <div v-if="hit.matches?.length" class="muted">
                       {{ hit.matches.map((item) => `${item.column_name}：${item.value}`).join('；') }}
                     </div>
                   </td>
                   <td class="right nowrap">
-                    <n-button size="tiny" type="primary" @click="preview(hit)">预览附近行</n-button>
+                    <n-button v-if="hit.sha256" size="tiny" type="primary" @click="preview(hit)">预览附近行</n-button>
                   </td>
                 </tr>
               </tbody>

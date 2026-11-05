@@ -478,24 +478,90 @@ def sku_cost(sku, **_):
     return '\n'.join(lines)
 
 
+FEED_ROOT = Path(os.environ.get('LEDGER_ORDER_FEED_ROOT', r'D:\order\exchange\ledger-feed'))
+FEED_KEYS = {'orders': ('order_id', 'online_order_no'),
+             'order_items': ('order_id', 'sub_order_id', 'online_order_no', 'outer_sku'),
+             'after_sales': ('after_sale_id', 'internal_after_sale_id', 'platform_after_sale_id', 'order_id', 'online_order_no')}
+FEED_SHOW = {'orders': ('order_id', 'online_order_no', 'shop_name', 'order_status_text', 'order_time', 'pay_time', 'ship_time',
+                        'paid_amount', 'refund_amount', 'order_type', 'is_split', 'is_merge', 'order_remark'),
+             'order_items': ('order_id', 'outer_sku', 'sku_id', 'product_name', 'quantity', 'paid_amount', 'refund_amount', 'item_status_raw'),
+             'order_costs': ('order_id', 'sku_id', 'quantity', 'unit_cost', 'cost_amount', 'cost_status', 'cost_as_of'),
+             'after_sales': ('after_sale_id', 'platform_after_sale_id', 'order_id', 'online_order_no', 'after_sale_type_raw',
+                             'goods_status_raw', 'refund_status_raw', 'refund_amount', 'created_at_source', 'order_side_decision_reason')}
+
+
+def _feed(name, keys, values):
+    import polars as pl
+    manifest = json.loads((FEED_ROOT / 'current' / 'manifest.json').read_text(encoding='utf-8'))
+    scan = pl.scan_parquet(FEED_ROOT / manifest['objects'][f'{name}.parquet']['path'])
+    cols = scan.collect_schema().names()
+    keys = [c for c in keys if c in cols]
+    if not keys or not values:
+        return []
+    found = scan.filter(pl.any_horizontal([pl.col(c).cast(pl.Utf8).is_in(sorted(values)) for c in keys])).head(200).collect()
+    return [{k: v for k, v in row.items() if v not in (None, '')} for row in found.iter_rows(named=True)]
+
+
+def _rows(title, rows, name):
+    if not rows:
+        return [f'{title}：没有']
+    show = FEED_SHOW.get(name)
+    return [f'{title}（{len(rows)} 行）：'] + ['- ' + '，'.join(f'{k}={str(row[k])[:80]}' for k in (show or row) if k in row) for row in rows[:30]]
+
+
 def order_lookup(order_id, **_):
-    order_id = str(order_id).strip()
+    key = str(order_id).strip()
     lines = []
     try:
-        data = _json_get(config.LEDGER_URL + '/api/search?' + urllib.parse.urlencode({'q': order_id}), timeout=60)
-        hits = data.get('hits') or []
-        lines.append(f'台账原始资料里找到 {data.get("total", len(hits))} 处「{order_id}」：')
-        for hit in hits[:15]:
-            lines.append(f'- [{hit.get("subject")}] {hit.get("store")}（{hit.get("store_id")}） 文件 {hit.get("file")} 第 {hit.get("row_no")} 行：'
-                         + (hit.get('snippet') or '')[:400].replace('\t', ' | '))
-    except (OSError, ValueError) as exc:
-        lines.append(f'台账搜索没有响应：{exc}')
-    try:
-        costs = _json_get(ORDER_URL + f'/api/orders/{urllib.parse.quote(order_id)}/cost-history', timeout=30).get('costs') or []
-        lines.append('订单系统成本记录：' + (_cut(costs, 2000) if costs else '没有'))
-    except (OSError, ValueError) as exc:
-        lines.append(f'订单系统没有响应：{exc}')
-    lines.append('（售后/退款看上面 [售后]、[退款] 或资金流水里的退款行；没有这类行就是资料里没有售后记录。）')
+        after = _feed('after_sales', FEED_KEYS['after_sales'], {key})
+        items = _feed('order_items', FEED_KEYS['order_items'], {key})
+        orders = _feed('orders', FEED_KEYS['orders'], {key})
+        internal = {str(r['order_id']) for r in [*after, *items, *orders] if r.get('order_id')}
+        online = {str(r['online_order_no']).rpartition(':')[2] for r in [*after, *items, *orders] if r.get('online_order_no')}
+        orders = _feed('orders', ('order_id', 'online_order_no'), internal | online)
+        internal |= {str(r['order_id']) for r in orders}
+        online |= {str(r['online_order_no']) for r in orders if r.get('online_order_no')}
+        items = _feed('order_items', ('order_id',), internal)
+        costs = _feed('order_costs', ('order_id',), internal)
+        after = _feed('after_sales', ('order_id', 'online_order_no'), internal | online) or after
+        stores = {str(r['order_store_id']): r for r in _feed('stores', ('order_store_id',),
+                                                             {str(r.get('order_store_id')) for r in [*orders, *after]})}
+        if not (orders or after):
+            lines.append(f'订单台快照里没有找到「{key}」（可填线上单号、平台子订单号、内部单号、售后单号、平台售后单号）。')
+        else:
+            lines.append(f'订单台快照：线上单号 {"、".join(sorted(online)) or "—"}，拆成 {len(orders)} 张内部单 {"、".join(sorted(internal))}。')
+            for sid, st in stores.items():
+                lines.append(f'店铺：{st.get("shop_name")} → 台账店铺 {st.get("ledger_store_id") or "未对上"}（{st.get("mapping_status")}）')
+            lines += _rows('内部单', orders, 'orders')
+            lines += _rows('商品行（outer_sku 就是台账挂账用的平台子订单号）', items, 'order_items')
+            lines += _rows('订单台成本', costs, 'order_costs')
+            lines += _rows('售后单', after, 'after_sales')
+        live = []
+        for oid in sorted(internal)[:6]:
+            try:
+                got = _json_get(ORDER_URL + f'/api/orders/{urllib.parse.quote(oid)}/after-sales', timeout=10)
+                live += got.get('after_sales') or got.get('items') or (got if isinstance(got, list) else [])
+            except (OSError, ValueError):
+                pass
+        known = {str(r.get('after_sale_id')) for r in after}
+        fresh = [r for r in live if isinstance(r, dict) and str(r.get('after_sale_id')) not in known]
+        if fresh:
+            lines += _rows('快照之后订单台新增的售后单', fresh, 'after_sales')
+    except (OSError, ValueError, KeyError, ImportError) as exc:
+        lines.append(f'订单台快照读不到：{exc}')
+        online = set()
+    for q in sorted(online or {key})[:3]:
+        try:
+            data = _json_get(config.LEDGER_URL + '/api/search?' + urllib.parse.urlencode({'q': q}), timeout=60)
+            hits = [h for h in data.get('hits') or [] if h.get('subject') != '订单台售后单']
+            lines.append(f'台账原始资料里找到 {len(hits)} 处「{q}」：')
+            for hit in hits[:15]:
+                lines.append(f'- [{hit.get("subject")}] {hit.get("store")}（{hit.get("store_id")}） 文件 {hit.get("file")} 第 {hit.get("row_no")} 行：'
+                             + (hit.get('snippet') or '')[:200].replace('\t', ' | '))
+        except (OSError, ValueError) as exc:
+            lines.append(f'台账搜索没有响应：{exc}')
+    lines.append('（台账按线上单号、平台子订单号挂账，台账里没有售后单这种单据：售后让商品成本不计时，'
+                 '那条商品成本记 0、备注里写着售后单号。订单台的退款金额只作参考，台账的退款以平台对账流水为准。）')
     return _cut('\n'.join(lines), 12000)
 
 
@@ -514,8 +580,9 @@ SPECS = [
            'compare=true 时附环比/同比。', {'month': S, 'metric': S, 'store': S, 'top': {'type': 'integer'},
                                      'ascending': {'type': 'boolean'}, 'platform': S, 'compare': {'type': 'boolean'}}, ['month']),
     schema('sku_cost', '【查商品成本价首选】按 SKU 编码或商品名查订单系统（聚水潭同步）的当前成本价和调价历史，秒回。', {'sku': S}, ['sku']),
-    schema('order_lookup', '【查某个订单首选】按平台订单号在台账全部原始资料（订单明细、资金流水、售后、退款等）里找出所有相关行，'
-           '并附订单系统的成本记录；用来回答订单在哪个店、有没有售后/退款、金额多少。', {'order_id': S}, ['order_id']),
+    schema('order_lookup', '【查某个订单/售后单首选】填任意一个号：线上单号、平台子订单号、聚水潭内部单号、售后单号、平台售后单号。'
+           '秒回订单台里这笔的拆单、商品行、成本、售后单（含退款参考金额）和对应台账店铺，并附台账原始资料里按线上单号找到的行；'
+           '用来回答订单在哪个店、有没有售后/退款、成本怎么算。', {'order_id': S}, ['order_id']),
     schema('ledger_get', '调用台账服务的只读接口（GET），返回 JSON。', {'path': S, 'query': {'type': 'object'}}, ['path']),
     schema('ledger_preview', '调用台账的预览接口（路径含 preview，POST），只生成预览、不改数据，返回 proposal_id/proposal_sha/input_sha 等。',
            {'path': S, 'body': {'type': 'object'}}, ['path', 'body']),

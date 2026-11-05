@@ -1183,6 +1183,7 @@ def _exclude_linked(
             )
 
         parts: list[pl.DataFrame] = []
+        refs: list[pl.DataFrame] = []
         for other in others:
             assert other.frame is not None
             missing = [key.other for key in rule.keys if key.other not in other.frame.columns]
@@ -1206,6 +1207,10 @@ def _exclude_linked(
             ).filter(pl.all_horizontal([pl.col(alias) != "" for alias in aliases]))
             if not part.is_empty():
                 parts.append(part.unique(maintain_order=True))
+                if metric.id in {"goods_cost", "reshipment_cost"}:
+                    ref = _after_sale_ref(scoped, rule.keys, aliases)
+                    if ref is not None:
+                        refs.append(ref)
         if not parts:
             continue
 
@@ -1216,8 +1221,16 @@ def _exclude_linked(
             for key, alias in zip(rule.keys, aliases, strict=True)
         ])
         if metric.id in {"goods_cost", "reshipment_cost"}:
-            zero_costs.append(keyed.join(excluded, on=aliases, how="semi", maintain_order="left")
-                .drop(aliases).with_columns(pl.lit("售后已确认，按规则不计商品成本").alias("__cost_exempt_reason")))
+            zero = keyed.join(excluded, on=aliases, how="semi", maintain_order="left")
+            reason = pl.lit("售后已确认，按规则不计商品成本")
+            if refs:
+                labels = (pl.concat(refs, how="vertical_relaxed").unique(maintain_order=True)
+                          .group_by(aliases, maintain_order=True).agg(pl.col("__ref").str.join("；")))
+                zero = zero.join(labels, on=aliases, how="left", maintain_order="left")
+                reason = pl.concat_str([reason, pl.lit("（"), pl.col("__ref"), pl.lit("）")], ignore_nulls=False)
+                reason = pl.coalesce(reason, pl.lit("售后已确认，按规则不计商品成本"))
+            zero_costs.append(zero.with_columns(reason.alias("__cost_exempt_reason"))
+                              .drop([*aliases, *(["__ref"] if "__ref" in zero.columns else [])]))
         out = (
             keyed
             .join(excluded, on=aliases, how="anti", maintain_order="left")
@@ -1229,6 +1242,26 @@ def _exclude_linked(
             f"逐商品排除 {removed:,} 行" + (f"（{rule.note}）" if rule.note else "")
         )
     return pl.concat([out, deferred, *zero_costs], how="vertical_relaxed") if zero_costs or not deferred.is_empty() else out
+
+
+AFTER_SALE_REFS = (("after_sale_id", "售后单 "), ("platform_after_sale_id", "平台售后单 "),
+                   ("reference_refund_amount", "订单台退款 "))
+
+
+def _after_sale_ref(scoped: pl.DataFrame, keys, aliases: list[str]) -> pl.DataFrame | None:
+    """售后单号和订单台退款只写进备注供检索核对；退款金额不入账，台账退款以平台对账为准。"""
+    present = [(column, label) for column, label in AFTER_SALE_REFS if column in scoped.columns]
+    if not present:
+        return None
+    pieces = [pl.when(pl.col(column).cast(pl.Utf8).str.strip_chars().fill_null("") != "")
+              .then(pl.lit(label) + pl.col(column).cast(pl.Utf8).str.strip_chars()
+                    + (pl.lit("（仅供参考，不计退款）") if column == "reference_refund_amount" else pl.lit("")))
+              .otherwise(None) for column, label in present]
+    ref = scoped.select(
+        *[norm_expr(pl.col(key.other).cast(pl.Utf8)).alias(alias) for key, alias in zip(keys, aliases, strict=True)],
+        pl.concat_str(pieces, separator="，", ignore_nulls=True).alias("__ref"),
+    ).filter(pl.all_horizontal([pl.col(alias) != "" for alias in aliases]) & (pl.col("__ref") != ""))
+    return None if ref.is_empty() else ref
 
 
 def _mark_counted(facts: pl.DataFrame, spine_facts: pl.DataFrame,

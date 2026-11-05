@@ -127,7 +127,7 @@ watch(()=>[props.show,props.term,app.storeId,app.period,app.platform],async ([sh
                   <td class="xs num">
                     {{ h.file }}
                     <template v-if="h.sheet"> · {{ h.sheet }}</template>
-                    · 第 {{ h.row_no }} 行
+                    <template v-if="h.row_no"> · 第 {{ h.row_no }} 行</template>
                     <div v-if="h.snippet" class="muted search-snippet">{{ h.snippet }}</div>
                     <button v-if="h.sha256" class="link" @click="preview(h)">预览附近原始行</button>
                   </td>
