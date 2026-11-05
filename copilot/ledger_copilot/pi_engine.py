@@ -35,6 +35,7 @@ class Run:
         self.models = []
         self.budget_hit = False
         self.wants_engineer = False
+        self.results, self.used_tools, self.thinking = [], set(), 'off'
         self.lock = threading.Lock()
 
     def add_usage(self, model_id, tokens, cost):

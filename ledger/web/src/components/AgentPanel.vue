@@ -16,7 +16,7 @@ import { renderMarkdown } from '../agentMarkdown'
 import { useApp } from '../store'
 import CostChip from './CostChip.vue'
 
-const KEY = { width: 'ledger.agent.width', collapsed: 'ledger.agent.collapsed', user: 'ledger.agent.user', thread: 'ledger.agent.thread', mode: 'ledger.agent.mode', notify: 'ledger.agent.notifyAsked' }
+const KEY = { width: 'ledger.agent.width', collapsed: 'ledger.agent.collapsed', user: 'ledger.agent.user', thread: 'ledger.agent.thread', mode: 'ledger.agent.mode', thinking: 'ledger.agent.thinking', notify: 'ledger.agent.notifyAsked' }
 const GROUP = 'group'
 const GROUP_TITLE = '公共群聊'
 const MIN_W = 320
@@ -140,6 +140,9 @@ const threadsLoading = ref(false)
 const threadsError = ref('')
 const groupUnread = ref(0)
 watch(mode, value => write(KEY.mode, value))
+const THINKING = [['off', '思考：关'], ['low', '思考：低'], ['medium', '思考：中'], ['high', '思考：高']]
+const thinking = ref(THINKING.some(([v]) => v === read(KEY.thinking)) ? read(KEY.thinking) : 'off')
+watch(thinking, value => write(KEY.thinking, value))
 watch(threadId, value => { if (value !== GROUP) write(KEY.thread, value) })
 
 function normalize(m) {
@@ -535,6 +538,8 @@ function apply(reply, event, data) {
     else reply.steps.push({ ...data })
   } else if (event === 'delta') {
     reply.text += data.text || ''
+  } else if (event === 'replace') {
+    reply.text = data.text || ''
   } else if (event === 'card') {
     const card = reply.cards.find(c => c.card_id === data.card_id)
     if (card) Object.assign(card, data)
@@ -576,7 +581,7 @@ async function run(payload) {
   let finished = false
   try {
     await streamChat(
-      { thread_id: payload.thread, text: payload.text, files: fileRefs(payload.files), page: payload.page, user: userName.value || '' },
+      { thread_id: payload.thread, text: payload.text, files: fileRefs(payload.files), page: payload.page, user: userName.value || '', thinking: thinking.value },
       {
         signal: controller.signal,
         onEvent: (event, raw) => {
@@ -1582,6 +1587,9 @@ onUnmounted(() => {
               </div>
             </div>
           </div>
+          <select v-model="thinking" class="agent-think" :class="{ on: thinking !== 'off' }" title="让助手先想清楚再回答：开得越高越仔细，但更慢、花费更多" aria-label="思考等级">
+            <option v-for="[value, label] in THINKING" :key="value" :value="value">{{ label }}</option>
+          </select>
           <span class="agent-hint">{{ inGroup ? '' : 'Enter 发送 · Shift+Enter 换行' }}</span>
           <template v-if="steerRun || streaming">
             <button v-if="steerRun" type="button" class="agent-send" :class="{ ready: canSteer }" :disabled="!canSteer" title="追加到正在查的这一轮，不用从头再来" @click="send()">补充<CornerDownRight :size="13" aria-hidden="true" /></button>
@@ -2155,6 +2163,9 @@ onUnmounted(() => {
 }
 .agent-tool:hover:not(:disabled),
 .agent-tool.on { color: var(--accent); }
+.agent-think { flex: none; height: 24px; padding: 0 4px; border: 1px solid transparent; border-radius: 6px; background: transparent; font-size: 12px; color: var(--n6); cursor: pointer; }
+.agent-think:hover { background: var(--n1); }
+.agent-think.on { color: var(--accent); border-color: currentColor; }
 .agent-hint { flex: 0 1 auto; min-width: 0; margin-left: auto; overflow: hidden; text-overflow: ellipsis; font-size: 11px; color: var(--n5); white-space: nowrap; }
 .agent-send,
 .agent-send:hover:not(:disabled) {

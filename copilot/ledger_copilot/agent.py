@@ -8,7 +8,7 @@ import time
 import uuid
 from datetime import datetime
 
-from . import config, docs, events, llm, pi_engine, store, tools
+from . import config, docs, events, llm, pi_engine, store, tools, verify
 
 MAX_STEPS = 16
 WRAP_UP_AT = 8
@@ -184,8 +184,11 @@ def _context(thread_id, query, exclude):
     content = _blocks(_stable(thread_id), mark=True) + (_blocks(background.strip()) if background else [])
     messages = [{'role': 'system', 'content': content}]
     group = thread_id == store.GROUP
-    for m in store.messages(thread_id, row['summarized_upto'] or 0, prompts=True):
+    history = store.messages(thread_id, row['summarized_upto'] or 0, prompts=True)
+    for index, m in enumerate(history):
         if m['id'] == exclude:
+            continue
+        if m['role'] == 'assistant' and _corrected(m['text'], history[index + 1:]):
             continue
         if m['role'] == 'system':
             messages.append({'role': 'user', 'content': _blocks('（系统通知）' + m['text'])})
@@ -194,8 +197,52 @@ def _context(thread_id, query, exclude):
             if prompt:
                 messages.append({'role': 'user', 'content': _blocks(prompt)})
         elif m['text']:
-            messages.append({'role': 'assistant', 'content': m['text']})
+            messages.append({'role': 'assistant', 'content': OLD_ANSWER + m['text']})
     return messages
+
+
+OLD_ANSWER = '（旧回答，未核实）'
+QUOTED = re.compile(r'[“"]([^”"]{4,80})[”"]')
+
+
+def _corrected(text, later):
+    """后面有“更正”点名引用过这条回答里的原话，这条就不再带给模型。"""
+    for m in later:
+        if m['role'] == 'system' and (m['text'] or '').startswith('更正'):
+            if any(q in (text or '') for q in QUOTED.findall(m['text'])):
+                return True
+    return False
+
+
+def _evidence(messages, user_text, results):
+    """核对依据：工具结果、用户说过的话、系统提示（含长期记忆）。助手旧回答不算。"""
+    parts = [user_text, *results]
+    for m in messages:
+        if m['role'] in {'system', 'user', 'tool'}:
+            blocks = [m['content']] if isinstance(m['content'], str) else [b.get('text', '') for b in m['content']]
+            parts += [b.split('【本话题早前的经过】')[0] for b in blocks]
+    return '\n'.join(parts)
+
+
+def _checked(thread_id, answer, evidence, cards, used_tools, emit):
+    """发出前核对。没依据的先让强模型改写一遍，还剩的就地标（未核实）。返回 (正文, tokens, cost)。"""
+    draft = ''.join(answer)
+    problems = verify.issues(draft, evidence, cards=len(cards), tools=used_tools)
+    if not problems:
+        return draft, 0, 0.0
+    tokens, cost, revised = 0, 0.0, ''
+    try:
+        prompt = verify.REVISE.format(items='\n'.join('- ' + p for p in problems), draft=draft)
+        revised, tokens, cost = llm.complete(config.models()['investigate']['id'],
+                                             [{'role': 'user', 'content': prompt}], max_tokens=2500, timeout=90)
+    except Exception as exc:
+        store.log_event('verify_error', {'thread': thread_id, 'error': str(exc)[:500]})
+    revised = revised.strip() or draft
+    left = verify.issues(revised, evidence, cards=len(cards), tools=used_tools)
+    final = verify.mark(revised, left)
+    store.log_event('verify', {'thread': thread_id, 'flagged': problems[:20], 'left': left[:20]})
+    emit('replace', {'text': final})
+    return final, tokens, cost
 
 
 def _volatile(query, page):
@@ -292,7 +339,7 @@ def _attachments(files, text, step_emit):
     return out, tokens, cost
 
 
-def run_turn(thread_id, text, images, page, user, emit, stop, run_id='', files=(), inbox=None, resume=None):
+def run_turn(thread_id, text, images, page, user, emit, stop, run_id='', files=(), inbox=None, resume=None, thinking='off'):
     files = docs.resolve(files)
     if resume:
         message_id, saved = resume, []
@@ -304,6 +351,7 @@ def run_turn(thread_id, text, images, page, user, emit, stop, run_id='', files=(
     tokens = 0
     cost = 0.0
     steps, cards, answer = [], [], []
+    results, used_tools = [], set()
 
     def step_emit(kind, value):
         if kind == 'step':
@@ -332,6 +380,7 @@ def run_turn(thread_id, text, images, page, user, emit, stop, run_id='', files=(
     specs = config.models()
     if role == 'chat':
         return _chat_turn(thread_id, text, user, emit, stop, run_id, message_id, started)
+    thinking = thinking if thinking in llm.THINKING else 'off'
     model_id = specs[role]['id']
     messages = _context(thread_id, text, message_id)
     prompt = (f'【{user or "同事"}】' if thread_id == store.GROUP else '') + user_text.strip()
@@ -342,7 +391,8 @@ def run_turn(thread_id, text, images, page, user, emit, stop, run_id='', files=(
     piped = None
     if pi_engine.available():
         try:
-            piped = _pi_turn(thread_id, role, model_id, messages, prompt, inbox, stop, emit, step_emit, cards, answer, used)
+            piped = _pi_turn(thread_id, role, model_id, messages, prompt, inbox, stop, emit, step_emit, cards, answer, used,
+                             results, used_tools, thinking)
         except pi_engine.Unavailable as exc:
             store.log_event('pi_unavailable', {'thread': thread_id, 'error': str(exc)[:1000]})
             answer.clear()
@@ -364,7 +414,7 @@ def run_turn(thread_id, text, images, page, user, emit, stop, run_id='', files=(
             _mark(messages)
             text_parts, end = [], None
             try:
-                for kind, value in llm.stream(model_id, messages, tools.SPECS, stop=stop):
+                for kind, value in llm.stream(model_id, messages, tools.SPECS, stop=stop, extra=llm.thinking_extra(model_id, thinking)):
                     if kind == 'text':
                         text_parts.append(value)
                         answer.append(value)
@@ -402,6 +452,7 @@ def run_turn(thread_id, text, images, page, user, emit, stop, run_id='', files=(
                 emit('delta', {'text': '\n\n'})
             for call in assistant['tool_calls']:
                 result = _call(call, thread_id, step_emit, cards, emit, role)
+                used_tools.add(call['function']['name'])
                 messages.append({'role': 'tool', 'tool_call_id': call['id'], 'content': result})
                 if call['function']['name'] in {'edit_file', 'write_file'} and role != 'engineer':
                     role, model_id = 'engineer', specs['engineer']['id']
@@ -415,6 +466,10 @@ def run_turn(thread_id, text, images, page, user, emit, stop, run_id='', files=(
     except Exception as exc:
         error = '这次处理遇到了问题，请稍后再试或换个说法。'
         store.log_event('turn_error', {'thread': thread_id, 'error': str(exc)[:2000]})
+    if not error and not stop.is_set() and ''.join(answer).strip():
+        checked, t, c = _checked(thread_id, answer, _evidence(messages, user_text, results), cards, used_tools, emit)
+        answer[:] = [checked]
+        tokens, cost = tokens + t, cost + c
     if error:
         emit('error', {'message': error})
         answer.append(('\n\n' if answer else '') + error)
@@ -467,13 +522,16 @@ def _transcript(messages, limit=60_000):
     return '\n\n'.join(lines)
 
 
-def _pi_turn(thread_id, role, model_id, messages, prompt, inbox, stop, emit, step_emit, cards, answer, used):
+def _pi_turn(thread_id, role, model_id, messages, prompt, inbox, stop, emit, step_emit, cards, answer, used,
+             results, used_tools, thinking):
     """交给 Pi 跑工具循环。返回 (tokens, cost, 错误说明)。"""
     specs = config.models()
     run = pi_engine.Run(thread_id, role, step_emit, cards, emit)
+    run.results, run.used_tools, run.thinking = results, used_tools, thinking
     system = ''.join(block['text'] for block in messages[0]['content'])
     history = _transcript(messages)
-    message = f'【前面的对话】\n{history}\n\n【现在的问题】\n{prompt}' if history else prompt
+    message = (f'【前面的对话】（标“旧回答，未核实”的是你以前的回答，里面的数字、来源和“已办好”都没核实过，'
+               f'要用必须这一轮重新查；“系统通知”里的更正优先）\n{history}\n\n【现在的问题】\n{prompt}') if history else prompt
 
     def on_text(text):
         answer.append(text)
@@ -516,6 +574,11 @@ def _chat_turn(thread_id, text, user, emit, stop, run_id, message_id, started):
         store.log_event('turn_error', {'thread': thread_id, 'error': str(exc)[:2000]})
         answer.append('我这边刚才没接上，你再说一次？')
         emit('delta', {'text': answer[-1]})
+    else:
+        evidence = '\n'.join([text, CHAT_SYSTEM] + [m['text'] or '' for m in recent if m['role'] == 'user'])
+        checked, t, c = _checked(thread_id, answer, evidence, [], set(), emit)
+        answer[:] = [checked]
+        tokens, cost = tokens + t, cost + c
     receipt = {'model': model_id, 'tokens': tokens, 'cost_cny': round(cost, 4), 'ms': int((time.time() - started) * 1000),
                'reply_to': message_id, 'run_id': run_id, 'asker': user}
     reply_id = store.add_message(thread_id, 'assistant', ''.join(answer), receipt=receipt)

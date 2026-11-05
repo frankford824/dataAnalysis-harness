@@ -50,6 +50,7 @@ class Chat(BaseModel):
     page: dict | None = None
     user: str = ''
     files: list[dict] = []
+    thinking: str = 'off'
 
 
 class Steer(BaseModel):
@@ -197,7 +198,7 @@ def _launch(body, resume=None):
                     return
                 _update_task(run_id, status='running', line='在看', _started=time.time())
                 agent.run_turn(body.thread_id, body.text, body.images, body.page, body.user, emit, stop, run_id,
-                               body.files, inbox, resume)
+                               body.files, inbox, resume, body.thinking)
             if stop.is_set():
                 status = 'stopped'
         except Exception as exc:
@@ -374,14 +375,17 @@ def pi_call(request: Request, body: dict):
     call = {'id': body.get('id', ''), 'function': {'name': name, 'arguments': json.dumps(body.get('args') or {}, ensure_ascii=False)}}
     if name in {'edit_file', 'write_file'}:
         run.wants_engineer = True
-    return {'text': agent._call(call, run.thread_id, run.step_emit, run.cards, run.emit, run.role)}
+    result = agent._call(call, run.thread_id, run.step_emit, run.cards, run.emit, run.role)
+    run.results.append(result)
+    run.used_tools.add(name)
+    return {'text': result}
 
 
 @app.post('/internal/pi/v1/chat/completions')
 def pi_model(request: Request, body: dict):
     run = _pi_run(request)
     try:
-        response, model_id = llm.relay_open(body)
+        response, model_id = llm.relay_open(body, run.thinking)
     except llm.BudgetExhausted:
         run.budget_hit = True
         return JSONResponse({'error': {'message': '本月模型费用已到上限'}}, status_code=400)

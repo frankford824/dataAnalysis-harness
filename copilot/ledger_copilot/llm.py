@@ -47,6 +47,20 @@ def _open(model_id, messages, tools, max_tokens, stream, timeout, extra=None):
     return urllib.request.urlopen(request, timeout=timeout)
 
 
+# 思考等级：关 / 低 / 中 / 高，对应百炼的深度思考长度上限（token）。
+THINKING = {'off': 0, 'low': 2048, 'medium': 8192, 'high': 24576}
+_THINKS = ('qwen', 'deepseek', 'glm')
+
+
+def thinking_extra(model_id, level):
+    budget = THINKING.get(level or 'off', 0)
+    if not budget or not model_id.startswith(_THINKS):
+        return None
+    if model_id.startswith('qwen'):
+        return {'enable_thinking': True, 'thinking_budget': budget}
+    return {'enable_thinking': True}
+
+
 def stream(model_id, messages, tools=None, *, max_tokens=4096, timeout=180, stop=None, extra=None):
     """Yield ('text', str), then finally ('end', {'tool_calls': [...], 'tokens': n, 'cost': x})."""
     calls = {}
@@ -78,7 +92,7 @@ def stream(model_id, messages, tools=None, *, max_tokens=4096, timeout=180, stop
     yield 'end', {'tool_calls': [calls[i] for i in sorted(calls)], 'tokens': tokens, 'cost': cost}
 
 
-def relay_open(body):
+def relay_open(body, thinking='off'):
     """Pi 的模型请求转给网关：关深度思考、要用量统计、超预算拒绝；主模型报错时换备用模型再试一次。"""
     from . import costs
     if costs.month_total() >= config.MONTH_BUDGET_CNY:
@@ -94,7 +108,10 @@ def relay_open(body):
                      if spec.get('id') == model_id and role in config.FALLBACK), None)
     for candidate in [model_id, fallback] if fallback else [model_id]:
         body['model'] = candidate
-        if candidate.startswith('qwen'):
+        body.pop('thinking_budget', None)
+        if thinking_extra(candidate, thinking):
+            body.update(thinking_extra(candidate, thinking))
+        elif candidate.startswith('qwen'):
             body['enable_thinking'] = False
         else:
             body.pop('enable_thinking', None)
