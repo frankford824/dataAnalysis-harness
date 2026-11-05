@@ -54,6 +54,10 @@ SYSTEM = '''你是「台账助手」，运行在公司台账系统的生产机�
   用户说“直接做”“强制”“执行”时立即动手，不再反问。唯一的硬限制：已结账月份、已审批发放的提成不改。
 
 环境：
+- 常见问题先用现成工具，一步出结果，不要先翻接口目录或写 python：
+  · 某月店铺排名、合计、某店的收入/退款/毛利/推广/运费/利润等：store_metrics
+  · 商品（SKU）成本价：sku_cost；某个订单在哪个店、有没有售后退款：order_lookup
+  现成工具答不了（要逐单明细、跨月趋势、核对差异）再用下面的接口或 python。
 - 台账服务：本机 8000 端口，ledger_get 调只读接口，api_index 可查全部接口。按问题选最直接的接口：
   · 店铺清单、各店有哪些账期及状态：/api/navigation（很快）
   · 全公司各月收入/毛利趋势：/api/trend
@@ -389,13 +393,16 @@ def run_turn(thread_id, text, images, page, user, emit, stop, run_id='', files=(
     used = [model_id]
     error = None
     piped = None
+    session = pi_engine.claim_session(thread_id)
     if pi_engine.available():
         try:
             piped = _pi_turn(thread_id, role, model_id, messages, prompt, inbox, stop, emit, step_emit, cards, answer, used,
-                             results, used_tools, thinking)
+                             results, used_tools, thinking, session, message_id)
         except pi_engine.Unavailable as exc:
             store.log_event('pi_unavailable', {'thread': thread_id, 'error': str(exc)[:1000]})
             answer.clear()
+            pi_engine.release_session(thread_id, session, keep=False)
+            session = None
     if piped:
         tokens, cost, error = tokens + piped[0], cost + piped[1], piped[2]
     messages.append({'role': 'user', 'content': _blocks(prompt)})
@@ -406,6 +413,7 @@ def run_turn(thread_id, text, images, page, user, emit, stop, run_id='', files=(
             if role == 'quick' and index >= 6:
                 role, model_id = 'investigate', specs['investigate']['id']
                 used.append(model_id)
+            think = thinking if thinking != 'off' else AUTO_THINK.get(role, 'off')
             if index == WRAP_UP_AT:
                 messages.append({'role': 'user', 'content': _blocks(WRAP_UP)})
             _drain(inbox, messages)
@@ -414,7 +422,7 @@ def run_turn(thread_id, text, images, page, user, emit, stop, run_id='', files=(
             _mark(messages)
             text_parts, end = [], None
             try:
-                for kind, value in llm.stream(model_id, messages, tools.SPECS, stop=stop, extra=llm.thinking_extra(model_id, thinking)):
+                for kind, value in llm.stream(model_id, messages, tools.SPECS, stop=stop, extra=llm.thinking_extra(model_id, think)):
                     if kind == 'text':
                         text_parts.append(value)
                         answer.append(value)
@@ -477,7 +485,11 @@ def run_turn(thread_id, text, images, page, user, emit, stop, run_id='', files=(
         answer.append(('\n\n' if answer else '') + '（已停止）')
     receipt = {'model': ' → '.join(dict.fromkeys(used)), 'tokens': tokens, 'cost_cny': round(cost, 4),
                'ms': int((time.time() - started) * 1000), 'reply_to': message_id, 'run_id': run_id, 'asker': user}
-    reply_id = store.add_message(thread_id, 'assistant', ''.join(answer), steps=steps, cards=cards, receipt=receipt)
+    reply_id = None
+    try:
+        reply_id = store.add_message(thread_id, 'assistant', ''.join(answer), steps=steps, cards=cards, receipt=receipt)
+    finally:
+        pi_engine.release_session(thread_id, session, seen=reply_id, keep=bool(piped and reply_id and not error))
     events.publish('message', {'thread_id': thread_id, 'run_id': run_id,
                                'message': store.messages(thread_id, reply_id - 1)[0]})
     emit('done', receipt)
@@ -522,16 +534,45 @@ def _transcript(messages, limit=60_000):
     return '\n\n'.join(lines)
 
 
+AUTO_THINK = {'investigate': 'low'}
+SESSION_NOTE = ('（提醒：前面几轮你自己回答里的数字、来源和“已办好”，只有前面工具结果里对得上的才算数，其余要这一轮重新查；'
+                '系统通知里的更正优先。）')
+
+
+def _since(thread_id, seen, current):
+    """上一轮 Pi 会话之后、话题里新出现的消息（同事的话、系统通知、别的路线给的回答）。"""
+    lines = []
+    for m in store.messages(thread_id, seen or 0):
+        if m['id'] == current or not m['text']:
+            continue
+        if m['role'] == 'user':
+            lines.append(f'{m["user"] or "同事"}：{m["text"][:1500]}')
+        elif m['role'] == 'system':
+            lines.append('（系统通知）' + m['text'][:1500])
+        else:
+            lines.append(OLD_ANSWER + m['text'][:1500])
+    while lines and sum(map(len, lines)) > 20_000:
+        lines.pop(0)
+    return '\n\n'.join(lines)
+
+
 def _pi_turn(thread_id, role, model_id, messages, prompt, inbox, stop, emit, step_emit, cards, answer, used,
-             results, used_tools, thinking):
-    """交给 Pi 跑工具循环。返回 (tokens, cost, 错误说明)。"""
+             results, used_tools, thinking, session=None, message_id=None):
+    """交给 Pi 跑工具循环。返回 (tokens, cost, 错误说明)。有会话时接着上次的会话（以前的工具结果都在），只补新消息。"""
     specs = config.models()
     run = pi_engine.Run(thread_id, role, step_emit, cards, emit)
-    run.results, run.used_tools, run.thinking = results, used_tools, thinking
+    auto = thinking == 'off'
+    run.results, run.used_tools = results, used_tools
+    run.thinking = AUTO_THINK.get(role, 'off') if auto else thinking
     system = ''.join(block['text'] for block in messages[0]['content'])
-    history = _transcript(messages)
-    message = (f'【前面的对话】（标“旧回答，未核实”的是你以前的回答，里面的数字、来源和“已办好”都没核实过，'
-               f'要用必须这一轮重新查；“系统通知”里的更正优先）\n{history}\n\n【现在的问题】\n{prompt}') if history else prompt
+    if session and not session['fresh']:
+        results.extend(pi_engine.session_results(session['id']))
+        news = _since(thread_id, session['seen'], message_id)
+        message = (f'【上次之后话题里的新消息】\n{news}\n\n' if news else '') + f'【现在的问题】\n{prompt}\n\n{SESSION_NOTE}'
+    else:
+        history = _transcript(messages)
+        message = (f'【前面的对话】（标“旧回答，未核实”的是你以前的回答，里面的数字、来源和“已办好”都没核实过，'
+                   f'要用必须这一轮重新查；“系统通知”里的更正优先）\n{history}\n\n【现在的问题】\n{prompt}') if history else prompt
 
     def on_text(text):
         answer.append(text)
@@ -542,6 +583,8 @@ def _pi_turn(thread_id, role, model_id, messages, prompt, inbox, stop, emit, ste
             current.role = 'engineer'
         elif current.role == 'quick' and turns >= 6:
             current.role = 'investigate'
+            if auto:
+                current.thinking = AUTO_THINK.get('investigate', 'off')
         else:
             return None
         target = specs[current.role]['id']
@@ -549,7 +592,7 @@ def _pi_turn(thread_id, role, model_id, messages, prompt, inbox, stop, emit, ste
         return target
 
     _, error = pi_engine.run(run, model_id=model_id, system=system, prompt=message, inbox=inbox, stop=stop,
-                             on_text=on_text, escalate=escalate)
+                             on_text=on_text, escalate=escalate, session=session)
     for model in run.models:
         if model not in used:
             used.append(model)

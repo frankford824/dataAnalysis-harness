@@ -2,6 +2,7 @@
 import json
 import os
 import queue
+import re
 import secrets
 import shutil
 import subprocess
@@ -20,6 +21,10 @@ PROVIDER = 'ledger'
 MAX_TURNS = 20
 TURN_DEADLINE = 15 * 60
 START_DEADLINE = 60
+SESSION_DIR = AGENT_DIR / 'sessions'
+SESSION_IDLE = 8 * 3600
+SESSION_KEEP = 7 * 86400
+EVIDENCE_CHARS = 300_000
 
 
 class Unavailable(RuntimeError):
@@ -84,7 +89,93 @@ def _write_config():
         'models': models,
     }
     _write(AGENT_DIR / 'models.json', {'providers': {PROVIDER: provider}})
-    _write(AGENT_DIR / 'settings.json', {'quietStartup': True, 'enableInstallTelemetry': False})
+    # 上下文到 128000-72000≈5.6 万 token 就压缩，群聊会话长了也不会每步都发十几万 token。
+    _write(AGENT_DIR / 'settings.json', {'quietStartup': True, 'enableInstallTelemetry': False,
+                                         'compaction': {'enabled': True, 'reserveTokens': 72000, 'keepRecentTokens': 20000}})
+
+
+_busy = {}
+_busy_lock = threading.Lock()
+
+
+def _safe(thread_id):
+    return re.sub(r'[^A-Za-z0-9_-]', '_', thread_id)[:60]
+
+
+def _meta_path(thread_id):
+    return SESSION_DIR / f'{_safe(thread_id)}.json'
+
+
+def session_file(session_id):
+    return next(iter(sorted(SESSION_DIR.rglob(f'*_{session_id}.jsonl'))), None) if SESSION_DIR.exists() else None
+
+
+def claim_session(thread_id):
+    """拿这个话题的 Pi 会话：{'id', 'seen', 'fresh'}。同一话题正有另一轮在用、或 Pi 不可用时返回 None（这一轮不留会话）。"""
+    if not available():
+        return None
+    with _busy_lock:
+        since = _busy.get(thread_id)
+        if since and time.time() - since < TURN_DEADLINE + 300:
+            return None
+        _busy[thread_id] = time.time()
+    SESSION_DIR.mkdir(parents=True, exist_ok=True)
+    try:
+        meta = json.loads(_meta_path(thread_id).read_text(encoding='utf-8'))
+    except (OSError, ValueError):
+        meta = None
+    if meta and time.time() - meta.get('at', 0) < SESSION_IDLE and session_file(meta['id']):
+        return {**meta, 'fresh': False}
+    _prune()
+    return {'id': f'{_safe(thread_id)}-{int(time.time())}', 'seen': 0, 'fresh': True}
+
+
+def release_session(thread_id, session, seen=None, keep=True):
+    try:
+        if session and keep and session_file(session['id']):
+            data = {'id': session['id'], 'seen': seen or session.get('seen') or 0, 'at': time.time()}
+            _meta_path(thread_id).write_text(json.dumps(data), encoding='utf-8')
+        elif session:
+            _meta_path(thread_id).unlink(missing_ok=True)
+    finally:
+        with _busy_lock:
+            _busy.pop(thread_id, None)
+
+
+def _prune():
+    cutoff = time.time() - SESSION_KEEP
+    for path in SESSION_DIR.rglob('*.jsonl'):
+        try:
+            if path.stat().st_mtime < cutoff:
+                path.unlink()
+        except OSError:
+            pass
+
+
+def session_results(session_id):
+    """会话里以前各轮工具真实查到的结果（核对用，从新到旧取到上限）。"""
+    path = session_file(session_id)
+    if not path:
+        return []
+    out = []
+    try:
+        lines = path.read_text(encoding='utf-8', errors='replace').splitlines()
+    except OSError:
+        return []
+    for line in lines:
+        try:
+            message = (json.loads(line).get('message') or {})
+        except ValueError:
+            continue
+        if message.get('role') == 'toolResult':
+            out.append(''.join(b.get('text', '') for b in message.get('content') or [] if isinstance(b, dict)))
+    kept, size = [], 0
+    for text in reversed(out):
+        size += len(text)
+        if size > EVIDENCE_CHARS:
+            break
+        kept.append(text)
+    return kept
 
 
 def _write(path, data):
@@ -116,7 +207,7 @@ def _stderr(process, tail):
         del tail[:-40]
 
 
-def run(run, *, model_id, system, prompt, inbox, stop, on_text, escalate):
+def run(run, *, model_id, system, prompt, inbox, stop, on_text, escalate, session=None):
     """跑完一轮，返回 (是否有过动作, 错误说明或 None)。没开始干活就出错抛 Unavailable。"""
     _write_config()
     system_file = AGENT_DIR / f'system-{run.token[:12]}.md'
@@ -124,7 +215,8 @@ def run(run, *, model_id, system, prompt, inbox, stop, on_text, escalate):
     env = {**os.environ, 'PI_CODING_AGENT_DIR': str(AGENT_DIR), 'PI_OFFLINE': '1', 'PI_SKIP_VERSION_CHECK': '1',
            'PI_TELEMETRY': '0', 'LEDGER_PI_TOKEN': run.token, 'LEDGER_PI_URL': f'http://127.0.0.1:{config.PORT}'}
     cwd = config.APP_DIR if config.APP_DIR.exists() else config.ROOT
-    command = [node(), str(CLI), '--mode', 'rpc', '--no-session', '--provider', PROVIDER, '--model', model_id,
+    keep = ['--session-dir', str(SESSION_DIR), '--session-id', session['id']] if session else ['--no-session']
+    command = [node(), str(CLI), '--mode', 'rpc', *keep, '--provider', PROVIDER, '--model', model_id,
                '--thinking', 'off', '--no-builtin-tools', '--no-extensions', '--extension', str(EXTENSION),
                '--no-skills', '--no-prompt-templates', '--no-themes', '--no-context-files', '--no-mcp', '--offline',
                '--system-prompt', str(system_file)]

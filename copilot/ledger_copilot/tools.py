@@ -369,6 +369,136 @@ def run_auto_close(periods=None, **_):
     return _cut(autoclose.run(periods or None))
 
 
+ORDER_URL = 'http://127.0.0.1:8001'
+METRICS = {
+    'net_income': '销售收入（到账）', 'receipts': '对账销售收入（未扣退款）', 'refunds': '销售退款', 'refund_rate': '退款率',
+    'goods_cost': '商品成本', 'goods_rate': '货本率', 'gross_profit': '商品毛利', 'gross_margin': '毛利率',
+    'promotion_cost': '推广费用', 'ad_cost': '平台推广', 'brushing_cost': '补单成本', 'promotion_rate': '推广费用占比',
+    'platform_cost': '平台费用', 'freight_cost': '发货运费', 'freight_rate': '发货运费占比', 'aftersales_cost': '客服售后费用',
+    'profit': '利润（扣兼职前）', 'profit_margin': '利润率', 'labor_cost': '兼职人工费用', 'labor_rate': '兼职人工费用占比',
+    'profit_after_labor': '利润额（扣兼职后）', 'after_labor_margin': '利润额率',
+}
+RATE_METRICS = {'refund_rate', 'goods_rate', 'gross_margin', 'promotion_rate', 'freight_rate', 'profit_margin', 'labor_rate',
+                'after_labor_margin'}
+_METRIC_WORDS = {'退款': 'refunds', '收入': 'net_income', '销售额': 'net_income', '毛利': 'gross_profit', '推广': 'promotion_cost',
+                 '运费': 'freight_cost', '成本': 'goods_cost', '利润': 'profit_after_labor', '兼职': 'labor_cost',
+                 '售后': 'aftersales_cost', '平台费': 'platform_cost', '补单': 'brushing_cost'}
+
+
+def _metric_key(metric):
+    metric = (metric or '').strip()
+    if metric in METRICS:
+        return metric
+    for key, label in METRICS.items():
+        if metric and (metric == label or metric in label.split('（')[0]):
+            return key
+    return next((key for word, key in _METRIC_WORDS.items() if word in metric), None)
+
+
+def _json_get(url, timeout=90):
+    with urllib.request.urlopen(url, timeout=timeout) as response:
+        return json.loads(response.read().decode('utf-8'))
+
+
+def _fmt(value, key):
+    if value is None:
+        return '—（还没算出）'
+    return f'{float(value) * 100:.2f}%' if key in RATE_METRICS else str(value)
+
+
+def store_metrics(month, metric='', store='', top=10, ascending=False, platform='', compare=False, **_):
+    key = _metric_key(metric)
+    if not store and not key:
+        return '请给 metric（可选：' + '、'.join(METRICS.values()) + '）或 store。'
+    query = {'period': month, 'level': 'store', 'compare': 'true' if compare else 'false', 'limit': 200}
+    if platform:
+        query['platform'] = platform
+    try:
+        data = _json_get(config.LEDGER_URL + '/api/operations/month?' + urllib.parse.urlencode(query), timeout=120)
+    except urllib.error.HTTPError as exc:
+        return f'经营看板接口报错：{_friendly_error(exc.read().decode("utf-8", "replace"))}'
+    rows = data.get('rows') or []
+    head = f'{month} 经营看板（口径 {data.get("version")}，{"已结账终版" if data.get("is_final") else "阶段结果，未结账的店还会变"}），共 {len(rows)} 家店。'
+    if store:
+        words = store.split()
+        hits = [r for r in rows if all(w in (r.get('name') or '') + ' ' + (r.get('store_id') or '') for w in words)]
+        if not hits:
+            return head + f'\n没有名称或编号包含「{store}」的店铺。'
+        lines = [head]
+        for r in hits[:5]:
+            m = r.get('metrics') or {}
+            lines.append(f'\n【{r["name"]}】store_id={r["store_id"]} 平台={r.get("platform")}')
+            lines += [f'  {label}：{_fmt(m.get(k), k)}' + (_change(r, k) if compare else '') for k, label in METRICS.items()]
+        return _cut('\n'.join(lines), 12000)
+    label = METRICS[key]
+    known = [r for r in rows if (r.get('metrics') or {}).get(key) is not None]
+    missing = [r['name'] for r in rows if (r.get('metrics') or {}).get(key) is None]
+    known.sort(key=lambda r: float(r['metrics'][key]), reverse=not ascending)
+    lines = [head, f'按「{label}」{"从低到高" if ascending else "从高到低"}：']
+    for index, r in enumerate(known[:max(1, min(int(top or 10), 60))], 1):
+        lines.append(f'{index}. {r["name"]}（{r["store_id"]}）：{_fmt(r["metrics"][key], key)}' + (_change(r, key) if compare else ''))
+    if key not in RATE_METRICS and known:
+        total = sum(float(r['metrics'][key]) for r in known)
+        lines.append(f'已算出的 {len(known)} 家合计：{total:.2f}')
+    if missing:
+        lines.append(f'还没算出这一项的 {len(missing)} 家（不在排名里，合计不含它们）：' + '、'.join(missing[:15]) + ('…' if len(missing) > 15 else ''))
+    return _cut('\n'.join(lines), 12000)
+
+
+def _change(row, key):
+    out = []
+    for name, word in (('mom', '环比'), ('yoy', '同比')):
+        change = (row.get(name) or {}).get(key) or {}
+        if change.get('state') != 'comparable':
+            continue
+        if key in RATE_METRICS:
+            out.append(f'{word} {float(change["delta"]) * 100:+.2f} 个百分点')
+        else:
+            out.append(f'{word} {change.get("delta")}' + (f'（{float(change["rate"]) * 100:+.1f}%）' if change.get('rate') is not None else ''))
+    return ('；' + '，'.join(out)) if out else ''
+
+
+def sku_cost(sku, **_):
+    try:
+        found = _json_get(ORDER_URL + '/api/sku-cost/search?' + urllib.parse.urlencode({'q': sku}), timeout=30).get('rows') or []
+    except (OSError, ValueError) as exc:
+        return f'订单系统没有响应：{exc}'
+    if not found:
+        return f'订单系统的成本库里没有「{sku}」，也就是没有成本价记录。'
+    lines = []
+    for row in found[:8]:
+        lines.append(f'{row.get("skuId")} {row.get("name")}：当前成本 {row.get("cost") if row.get("cost") is not None else "无"}'
+                     + (f'（{row["costNote"]}）' if row.get('costNote') else '') + f'，调价 {row.get("changes") or 0} 次')
+    if len(found) == 1 and found[0].get('changes'):
+        try:
+            history = _json_get(ORDER_URL + f'/api/sku-cost/{urllib.parse.quote(found[0]["skuId"])}/history', timeout=30)
+            lines.append('调价历史：' + _cut(history, 3000))
+        except (OSError, ValueError):
+            pass
+    return '\n'.join(lines)
+
+
+def order_lookup(order_id, **_):
+    order_id = str(order_id).strip()
+    lines = []
+    try:
+        data = _json_get(config.LEDGER_URL + '/api/search?' + urllib.parse.urlencode({'q': order_id}), timeout=60)
+        hits = data.get('hits') or []
+        lines.append(f'台账原始资料里找到 {data.get("total", len(hits))} 处「{order_id}」：')
+        for hit in hits[:15]:
+            lines.append(f'- [{hit.get("subject")}] {hit.get("store")}（{hit.get("store_id")}） 文件 {hit.get("file")} 第 {hit.get("row_no")} 行：'
+                         + (hit.get('snippet') or '')[:400].replace('\t', ' | '))
+    except (OSError, ValueError) as exc:
+        lines.append(f'台账搜索没有响应：{exc}')
+    try:
+        costs = _json_get(ORDER_URL + f'/api/orders/{urllib.parse.quote(order_id)}/cost-history', timeout=30).get('costs') or []
+        lines.append('订单系统成本记录：' + (_cut(costs, 2000) if costs else '没有'))
+    except (OSError, ValueError) as exc:
+        lines.append(f'订单系统没有响应：{exc}')
+    lines.append('（售后/退款看上面 [售后]、[退款] 或资金流水里的退款行；没有这类行就是资料里没有售后记录。）')
+    return _cut('\n'.join(lines), 12000)
+
+
 def schema(name, description, properties, required=()):
     props = {'purpose': {'type': 'string', 'description': '用用户能看懂的业务语言，一句话说明这一步在做什么，例如“查看 8 月这家店的退款明细”。不要出现技术词。'},
              **properties}
@@ -378,6 +508,14 @@ def schema(name, description, properties, required=()):
 
 S = {'type': 'string'}
 SPECS = [
+    schema('store_metrics', '【查经营数字首选，一步出结果】某月各店铺经营指标：按指标排名（谁最高/最低、前几名、合计）或查某家店的全部指标。'
+           '数据就是左侧经营看板的结果。metric 填指标名（销售收入、销售退款、退款率、商品成本、商品毛利、毛利率、推广费用、平台推广、补单成本、'
+           '平台费用、发货运费、客服售后费用、利润、兼职人工费用、利润额等）；store 填店铺名关键字（空格分隔多个关键字）；'
+           'compare=true 时附环比/同比。', {'month': S, 'metric': S, 'store': S, 'top': {'type': 'integer'},
+                                     'ascending': {'type': 'boolean'}, 'platform': S, 'compare': {'type': 'boolean'}}, ['month']),
+    schema('sku_cost', '【查商品成本价首选】按 SKU 编码或商品名查订单系统（聚水潭同步）的当前成本价和调价历史，秒回。', {'sku': S}, ['sku']),
+    schema('order_lookup', '【查某个订单首选】按平台订单号在台账全部原始资料（订单明细、资金流水、售后、退款等）里找出所有相关行，'
+           '并附订单系统的成本记录；用来回答订单在哪个店、有没有售后/退款、金额多少。', {'order_id': S}, ['order_id']),
     schema('ledger_get', '调用台账服务的只读接口（GET），返回 JSON。', {'path': S, 'query': {'type': 'object'}}, ['path']),
     schema('ledger_preview', '调用台账的预览接口（路径含 preview，POST），只生成预览、不改数据，返回 proposal_id/proposal_sha/input_sha 等。',
            {'path': S, 'body': {'type': 'object'}}, ['path', 'body']),
@@ -428,6 +566,7 @@ HANDLERS = {
     'find_files': find_files,
     'remember': remember, 'record_correction': record_correction, 'search_memory': search_memory,
     'auto_close_status': auto_close_status, 'run_auto_close': run_auto_close,
+    'store_metrics': store_metrics, 'sku_cost': sku_cost, 'order_lookup': order_lookup,
 }
 DEFAULT_LABEL = {
     'ledger_get': '查看台账数据', 'ledger_preview': '生成预览', 'api_index': '查找可用功能', 'sql_query': '查询明细数据',
@@ -437,6 +576,7 @@ DEFAULT_LABEL = {
     'find_files': '在共享盘找文件',
     'propose_change': '整理修改方案', 'remember': '记住这条信息', 'record_correction': '记录本次纠错',
     'search_memory': '查找以往类似问题', 'auto_close_status': '查看自动结账情况', 'run_auto_close': '执行自动结账',
+    'store_metrics': '查经营看板数字', 'sku_cost': '查商品成本价', 'order_lookup': '查这个订单',
 }
 
 
