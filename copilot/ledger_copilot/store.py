@@ -177,6 +177,12 @@ def card_view(card_id):
             'status': row['status'], 'message': row['message']}
 
 
+def card_remaining(card_id, actions, message):
+    with _lock:
+        conn().execute('UPDATE card SET actions=?, message=? WHERE id=?', (_j(actions), message, card_id))
+        conn().commit()
+
+
 def decide_card(card_id, status, message, by):
     with _lock:
         conn().execute('UPDATE card SET status=?, message=?, decided_at=?, decided_by=? WHERE id=?',

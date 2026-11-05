@@ -5,6 +5,7 @@ import re
 import shutil
 import sqlite3
 import subprocess
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -647,19 +648,67 @@ DEFAULT_LABEL = {
 }
 
 
+BUSY_WAITS = (10, 20, 30)
+_executing = set()
+_executing_lock = threading.Lock()
+
+
+class LedgerBusy(Exception):
+    pass
+
+
+def _ledger_busy(status, text):
+    # 台账锁库时只回一句笼统的服务器错误；业务上的拒绝都带 detail，不在此列。
+    return status in (500, 502, 503, 504) and '"detail"' not in text
+
+
+def _card_api(action):
+    for wait in BUSY_WAITS + (None,):
+        status, text = _http(action.get('method', 'POST').upper(), action['path'], action.get('body'), timeout=1800)
+        if not _ledger_busy(status, text):
+            break
+        if wait is None:
+            raise LedgerBusy()
+        time.sleep(wait)
+    if status >= 400:
+        raise RuntimeError(_friendly_error(text))
+    return text
+
+
 def execute_card(card_id, by):
+    with _executing_lock:
+        if card_id in _executing:
+            return {'status': 'pending', 'message': '正在执行，请稍候'}
+        _executing.add(card_id)
+    try:
+        return _execute_card(card_id, by)
+    finally:
+        with _executing_lock:
+            _executing.discard(card_id)
+
+
+def _execute_card(card_id, by):
     row = store.card(card_id)
     if not row or row['status'] != 'pending':
         return {'status': row['status'] if row else 'missing', 'message': '这张卡片已经处理过了'}
+    actions = json.loads(row['actions'])
     results = []
     try:
-        for action in json.loads(row['actions']):
+        for index, action in enumerate(actions):
             kind = action.get('type', 'api')
             if kind == 'api':
-                status, text = _http(action.get('method', 'POST').upper(), action['path'], action.get('body'), timeout=1800)
-                if status >= 400:
-                    raise RuntimeError(_friendly_error(text))
-                results.append(text[:2000])
+                try:
+                    results.append(_card_api(action)[:2000])
+                except LedgerBusy:
+                    from . import events
+                    done = f'已完成 {index} 步，' if index else ''
+                    message = f'台账正忙，{done}稍后再点确认会接着做剩下的'
+                    store.card_remaining(card_id, actions[index:], message)
+                    events.publish('card_update', {'card_id': card_id, 'status': 'pending', 'message': message})
+                    if index:
+                        store.add_message(row['thread_id'], 'system', f'「{row["title"]}」执行到一半台账正忙，已完成 {index} 步，'
+                                          f'剩下 {len(actions) - index} 步等再次确认。结果摘要：' + _cut(results, 2000))
+                    return {'status': 'pending', 'message': message}
             elif kind == 'file':
                 outcome = edit_file(action['path'], action['old'], action['new'])
                 if not outcome.startswith('已修改'):
