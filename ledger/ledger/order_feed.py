@@ -95,6 +95,7 @@ create table if not exists feed_entity (
   primary key(entity_type,entity_id)
 );
 create index if not exists feed_entity_store on feed_entity(order_store_id,entity_type);
+create index if not exists feed_entity_store_seq on feed_entity(order_store_id,entity_type,seq);
 create table if not exists feed_pending_store (
   ledger_store_id text primary key,
   seq integer not null

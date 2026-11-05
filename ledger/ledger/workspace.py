@@ -28,11 +28,14 @@ from .finance_guard import locked as financial_decision
 
 import hashlib
 import json
+import logging
 import os
 import re
 import shutil
 import sqlite3
 import threading
+import time
+import traceback
 import uuid
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -48,6 +51,10 @@ from .version import engine_version
 OPEN = "open"
 CLOSED = "closed"
 SHARED_STORE_ID = "__shared__"
+
+#: 写事务占锁超过这个秒数就记一条日志，别人等锁超时报错时能找到是谁占着。
+LONG_WRITE_SECONDS = 5
+_PACKAGE = str(Path(__file__).resolve().parent)
 
 _SCHEMA = """
 create table if not exists file (
@@ -417,6 +424,7 @@ class Workspace:
         nested=conn.in_transaction
         name='automation_'+uuid.uuid4().hex
         conn.execute('SAVEPOINT '+name if nested else 'BEGIN IMMEDIATE')
+        began=time.monotonic()
         try:
             yield conn
             if nested:conn.execute('RELEASE SAVEPOINT '+name)
@@ -427,6 +435,12 @@ class Workspace:
                 conn.execute('RELEASE SAVEPOINT '+name)
             else:conn.rollback()
             raise
+        finally:
+            held=time.monotonic()-began
+            if not nested and held>=LONG_WRITE_SECONDS:
+                frames=[f'{Path(f.filename).name}:{f.lineno}:{f.name}' for f in traceback.extract_stack()[:-2]
+                        if f.filename.startswith(_PACKAGE)][-6:]
+                logging.getLogger(__name__).warning('long_write held_s=%.1f at=%s', held, ' < '.join(reversed(frames)))
 
     # ------------------------------------------------------------------ #
     # 留档

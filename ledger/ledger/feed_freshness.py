@@ -5,7 +5,6 @@ these fields. Missing proofs retain the legacy global synchronization gate.
 """
 from __future__ import annotations
 
-import hashlib
 import json
 import sqlite3
 import contextvars
@@ -112,15 +111,22 @@ def evaluate(ws,store_id,period,recorded):
             mapping=sorted(str(row[0]) for row in conn.execute(
                 "SELECT order_store_id FROM feed_store WHERE ledger_store_id=? AND mapping_status='confirmed'",(store_id,)))
             if mapping!=sorted(boundary['order_store_ids']):return reject('source_mapping_changed')
+            # 每家店只走自己的索引段、只数条数和最新序号：每次变更都会拿到新序号，
+            # 这两样足以标出「边界之后有没有新变更」。逐行读载荷算摘要要扫 2GB 的表，
+            # 订单台大批回填时一家店十几秒，57 家店的整月检查就是十几分钟。
             placeholders=','.join('?' for _ in mapping)
             types=','.join('?' for _ in ACCOUNTING_ENTITIES)
-            rows=conn.execute('SELECT entity_type,entity_id,revision,operation,order_store_id,order_id,sub_order_id,sku_id,payload_json FROM feed_entity WHERE seq>? AND entity_type IN ('+types+') AND (order_store_id IN ('+placeholders+") OR order_store_id IS NULL OR order_store_id='') ORDER BY entity_type,entity_id",
-                [boundary['captured_through_seq'],*sorted(ACCOUNTING_ENTITIES),*mapping]).fetchall()
+            tail=' AND entity_type IN ('+types+') AND seq>?'
+            args=[*sorted(ACCOUNTING_ENTITIES),boundary['captured_through_seq']]
+            changes,through=conn.execute('SELECT count(*),max(seq) FROM ('
+                'SELECT seq FROM feed_entity WHERE order_store_id IN ('+placeholders+')'+tail+
+                ' UNION ALL SELECT seq FROM feed_entity WHERE order_store_id IS NULL'+tail+
+                " UNION ALL SELECT seq FROM feed_entity WHERE order_store_id=''"+tail+')',
+                [*mapping,*args,*args,*args]).fetchone()
             pending=conn.execute('SELECT 1 FROM feed_pending_store WHERE ledger_store_id=? AND seq>?',
                 (store_id,boundary['captured_through_seq'])).fetchone()
-            if rows or pending:
-                controls=[{**dict(row),'payload_json':hashlib.sha256((row['payload_json'] or '').encode()).hexdigest()} for row in rows]
-                return reject('source_changes_not_revalidated',{'changes_sha256':journal.digest(controls),'store_pending':bool(pending)})
+            if changes or pending:
+                return reject('source_changes_not_revalidated',{'changes':changes,'changes_through_seq':through,'store_pending':bool(pending)})
             return {'identity':identity,'blocked':False,'mode':'captured_prefix','reason':None,
                 'proof':{**boundary,'observed_consumed_seq':state['consumed_seq'],
                          'observed_head_seq':state.get('source_latest_seq'),

@@ -13,7 +13,7 @@ from dataclasses import dataclass, field
 
 import polars as pl
 
-from ..cost_evidence import ORDER_DAY_COST_SOURCES, REGISTER_CHANGE_LOG_SINCE, REGISTER_DATED_BASES
+from ..cost_evidence import HISTORY_CARRY_FINAL_BASES, ORDER_DAY_COST_SOURCES, REGISTER_CHANGE_LOG_SINCE, REGISTER_DATED_BASES
 
 from ..model.schema import Metric, Model, NodeExpr, Predicate, Template, ValueExpr
 from ..money import decimal_amount, money_float, sum_amounts
@@ -93,8 +93,10 @@ def historical_price_evidence(frame: pl.DataFrame, *, trusted_feed_history: bool
         logged=(basis.is_in(REGISTER_DATED_BASES)
                 &(wanted>=pl.lit(REGISTER_CHANGE_LOG_SINCE).str.strptime(pl.Date,'%Y-%m-%d')))
         known=known&((col('cost_source')!='register_dated')|logged)
+        carried=col('pricing_evidence').cast(pl.Utf8).str.json_path_match('$.carry_basis').is_in(HISTORY_CARRY_FINAL_BASES)
+        known=known&((col('cost_source')!='history_carry')|carried)
     else:
-        known=known&(col('cost_source')!='register_dated')
+        known=known&~col('cost_source').is_in(['register_dated','history_carry'])
     return known.fill_null(False),wanted
 
 

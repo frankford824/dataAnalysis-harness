@@ -665,6 +665,6 @@ def read_month(ws, model, period, *, require_detail=False, **scope):
             item.income={name:value for name,value in item.income.items() if name not in ('by_spine','detail_proof')}
     with _cache_lock:
         _cache[key]=month
-        while len(_cache)>3:
+        while len(_cache)>6:
             _cache.popitem(last=False)
     return select_report(month,**scope)

@@ -11,8 +11,14 @@ CAPTURED_COST_SOURCES = frozenset({
 # These sources may enter profit only after calculate.historical_price_evidence
 # also proves exact order-day alignment, valid quantity/price and stable identity.
 ORDER_DAY_COST_SOURCES = frozenset({
-    "history", "component_history", "manual", "blue_flag", "register_dated",
+    "history", "component_history", "manual", "blue_flag", "register_dated", "history_carry",
 })
+
+# history_carry is the last known price carried forward to the order day. It is
+# final only when the Order Console states why no later price can exist: the SKU
+# is disabled in the ERP and its cost was never changed. Any other carry still
+# waits for a price covering the order day.
+HISTORY_CARRY_FINAL_BASES = frozenset({"sku_disabled_no_change"})
 
 # register_dated is the 商品维护 cost price the ERP had on the order day, dated
 # by the ERP cost change log rather than by an item timestamp. The log is
