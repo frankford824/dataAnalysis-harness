@@ -488,7 +488,34 @@ FEED_SHOW = {'orders': ('order_id', 'online_order_no', 'shop_name', 'order_statu
              'order_items': ('order_id', 'outer_sku', 'sku_id', 'product_name', 'quantity', 'paid_amount', 'refund_amount', 'item_status_raw'),
              'order_costs': ('order_id', 'sku_id', 'quantity', 'unit_cost', 'cost_amount', 'cost_status', 'cost_as_of'),
              'after_sales': ('after_sale_id', 'platform_after_sale_id', 'order_id', 'online_order_no', 'after_sale_type_raw',
-                             'goods_status_raw', 'refund_status_raw', 'refund_amount', 'created_at_source', 'order_side_decision_reason')}
+                             'goods_status_raw', 'refund_status_raw', 'refund_amount', 'created_at_source', 'order_side_decision_reason'),
+             'after_sale_items': ('after_sale_id', 'order_id', 'sub_order_id', 'outer_sku', 'sku_id', 'merchant_sku', 'quantity',
+                                  'refund_amount')}
+
+
+def _after_items(after, items):
+    """Each after-sale's returned lines matched to the order lines, plus refund vs paid."""
+    rows = _feed('after_sale_items', ('after_sale_id',), {str(r['after_sale_id']) for r in after if r.get('after_sale_id')})
+    by_line = {(str(i.get('order_id')), str(i.get('sub_order_id'))): i for i in items}
+    for row in rows:
+        line = by_line.get((str(row.get('order_id')), str(row.get('sub_order_id'))))
+        if line:
+            row.setdefault('outer_sku', line.get('outer_sku'))
+            if not row.get('sku_id'):
+                row['sku_id'] = line.get('sku_id')
+    notes = []
+    for sale in after:
+        paid = [float(i['paid_amount']) for i in items
+                if str(i.get('order_id')) == str(sale.get('order_id')) and i.get('paid_amount') not in (None, '')]
+        try:
+            refund = float(sale.get('refund_amount'))
+        except (TypeError, ValueError):
+            continue
+        if paid:
+            whole = '按金额看是整单退' if refund >= sum(paid) - 0.005 else '按金额看只退了一部分'
+            notes.append(f'售后单 {sale.get("after_sale_id")}：退款 {refund:.2f}，内部单 {sale.get("order_id")} '
+                         f'商品实付合计 {sum(paid):.2f}（{len(paid)} 行），{whole}')
+    return rows, notes
 
 
 def _feed(name, keys, values):
@@ -537,6 +564,10 @@ def order_lookup(order_id, **_):
             lines += _rows('商品行（outer_sku 就是台账挂账用的平台子订单号）', items, 'order_items')
             lines += _rows('订单台成本', costs, 'order_costs')
             lines += _rows('售后单', after, 'after_sales')
+            if after:
+                returned, notes = _after_items(after, items)
+                lines += _rows('售后退的商品（按内部子单号对到商品行；sku_id 空表示售后单没写编码）', returned, 'after_sale_items')
+                lines += notes
         live = []
         for oid in sorted(internal)[:6]:
             try:
