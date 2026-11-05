@@ -146,3 +146,56 @@ def test_coverage_below_threshold_blocks_profit_even_without_pricing_gap_rows():
     assert sl.cost_coverage['coverage']==.5 and sl.cost_coverage['passed'] is False
     assert sl.nodes['profit'].value is None and not sl.can_close
     assert slice_dict(sl,model.store('s'),model)['pricing_pending_count']==0
+
+
+def _dated_frame(day, evidence):
+    return pl.DataFrame({'order_id': ['SALE'], 'cost_source': ['register_dated'],
+        'cost_status': ['priced'], 'unit_cost': [7.15], 'quantity': [1.],
+        'cost_as_of': [day], '__spine_order_date__': [datetime.strptime(day, '%Y-%m-%d').date()],
+        'pricing_suspect': [False], 'pricing_missing': [False],
+        'pricing_evidence': [json.dumps(evidence) if evidence is not None else None]})
+
+
+@pytest.mark.parametrize('basis', ['change_log', 'change_log_prior', 'log_unchanged', 'custom_first'])
+def test_change_log_dated_register_price_is_order_day_cost(basis):
+    frame = _dated_frame('2026-09-12', {'order_date': '2026-09-12', 'register_basis': basis,
+        'change_log_since': '2025-08-29'})
+    known, _ = historical_price_evidence(frame, trusted_feed_history=True)
+    assert frame.select(known).item() is True
+
+
+@pytest.mark.parametrize('day,evidence', [
+    # The log cannot date a price before it began.
+    ('2025-08-20', {'order_date': '2025-08-20', 'register_basis': 'change_log'}),
+    # A basis the change log does not produce is not dated by it.
+    ('2026-09-12', {'order_date': '2026-09-12', 'register_basis': 'register'}),
+    ('2026-09-12', {'order_date': '2026-09-12', 'register_basis': 'first'}),
+    ('2026-09-12', {'order_date': '2026-09-12'}),
+    # The dated day must be the order day.
+    ('2026-09-12', {'order_date': '2026-09-11', 'register_basis': 'change_log'}),
+    ('2026-09-12', None),
+])
+def test_register_dated_needs_change_log_basis_on_the_order_day(day, evidence):
+    frame = _dated_frame(day, evidence)
+    known, _ = historical_price_evidence(frame, trusted_feed_history=True)
+    assert frame.select(known).item() is False
+
+
+@pytest.mark.parametrize('platform', ['taobao', 'douyin'])
+@pytest.mark.parametrize('quoted,available', [('2026-06-05', True), ('2026-07-02', False)])
+def test_dated_register_price_enters_profit_only_on_the_order_day(platform, quoted, available):
+    full=load_model(MODELS/'cn-ecommerce')
+    metric=full.metric('goods_cost').for_platform(platform).model_copy(update={'by_platform':()})
+    model=Model(id='dated-register',name='dated-register',platforms=(Platform(id=platform,name=platform,cost_pricing='historical'),),
+        stores=(Store(id='s',name='shop',platform=platform),),
+        sources=(SourceContract(id='order_detail',name='订单',is_spine=True,owner_role='shop_owner',cadence='monthly'),
+                 SourceContract(id='order_cost',name='成本',owner_role='shop_owner',cadence='monthly')),
+        metrics=(metric,),statement=(StatementNode(id='profit',name='利润',formula={'op':'add','of':['goods_cost']}),))
+    order=dict(order_id='3306862164152025489',sub_order_id='CHILD',store_name='shop',order_time=datetime(2026,6,5),order_type='销售订单')
+    cost={**order,'original_order_id':order['order_id'],'internal_order_id':'I','sku':'HSC27473','quantity':2.,'unit_cost':5.,
+          'order_state':'Sent','cost_source':'register_dated','cost_status':'priced','cost_as_of':quoted,
+          'pricing_evidence':json.dumps({'order_date':quoted,'register_basis':'log_unchanged','change_log_since':'2025-08-29'})}
+    result=run(Ingestion(model=model,items=[item('order_detail',[order],order),item('order_cost',[cost],cost)]),platform)
+    sl=result.slices[('shop','2026-06')]
+    assert sl.nodes['profit'].value==(-10 if available else None)
+    assert result.pricing_gaps.height==(0 if available else 1)

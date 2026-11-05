@@ -13,7 +13,7 @@ from dataclasses import dataclass, field
 
 import polars as pl
 
-from ..cost_evidence import ORDER_DAY_COST_SOURCES
+from ..cost_evidence import ORDER_DAY_COST_SOURCES, REGISTER_CHANGE_LOG_SINCE, REGISTER_DATED_BASES
 
 from ..model.schema import Metric, Model, NodeExpr, Predicate, Template, ValueExpr
 from ..money import decimal_amount, money_float, sum_amounts
@@ -89,6 +89,12 @@ def historical_price_evidence(frame: pl.DataFrame, *, trusted_feed_history: bool
         # uploaded costs, or an explicitly conflicting JSON order date.
         history_day=(col('cost_source')=='history')&evidence_day.is_null()&pl.lit(trusted_feed_history)
         known=known&(dated|history_day)
+        basis=col('pricing_evidence').cast(pl.Utf8).str.json_path_match('$.register_basis')
+        logged=(basis.is_in(REGISTER_DATED_BASES)
+                &(wanted>=pl.lit(REGISTER_CHANGE_LOG_SINCE).str.strptime(pl.Date,'%Y-%m-%d')))
+        known=known&((col('cost_source')!='register_dated')|logged)
+    else:
+        known=known&(col('cost_source')!='register_dated')
     return known.fill_null(False),wanted
 
 
@@ -381,6 +387,7 @@ def evaluate_metric(
             .then(pl.lit('登记价有变更记录，待核验原始调价凭据及历史有效期'))
             .when(col('cost_source') == 'register').then(pl.lit('登记价历史有效期未证实；保留参考，待核对'))
             .when(col('cost_source') == 'history_carry').then(pl.lit('沿用较早日期的成本，待取得覆盖下单日的历史价'))
+            .when(col('cost_source') == 'register_dated').then(pl.lit('商品维护成本价的改价日志未能对上下单日，需核对'))
             .when(col('failure_reason') == 'unresolved_item_risk').then(pl.lit('订单异常尚未查清，暂不计入成本'))
             .when(col('failure_reason') == 'component_unit_rounding_conflict').then(pl.lit('套餐组件合计与单价乘数量的结果不一致，请核对金额'))
             .when(col('pricing_source_suspect').cast(pl.Boolean).fill_null(False)).then(pl.lit('原订单商品信息待核对'))
