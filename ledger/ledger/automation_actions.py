@@ -371,13 +371,23 @@ def _case(conn,row):
         (row['case_id'],row['store_id'],row['period'],row['status'],row['stage'],row['input_sha'],row['run_id'],journal.encoded(row['issues']),journal.now()))
 
 
-def _audit_cases(ws,model,period,request_id,action,result):
-    """Called inside the same transaction as the decision and its receipt."""
-    for row in _month(ws,model,period)['stores']:
-        _case(ws.conn,row)
-        ws.conn.execute('INSERT INTO automation_attempt VALUES(?,?,?,?,?,?,?)',
-            (journal.ident(),row['case_id'],request_id,row['input_sha'],action,
-             journal.encoded(result),journal.now()))
+def _audit_cases(ws,model,period,request_id,action,result,rows=None):
+    """Record the month's cases. The month check itself is not a write.
+
+    Callers that are not already inside a journal commit the resulting rows in
+    one short transaction. Callers that are journaling keep the rows with that
+    journal, but should pass rows they already computed before taking the lock.
+    """
+    if rows is None:rows=_month(ws,model,period)['stores']
+    def write(conn):
+        for row in rows:
+            _case(conn,row)
+            conn.execute('INSERT INTO automation_attempt VALUES(?,?,?,?,?,?,?)',
+                (journal.ident(),row['case_id'],request_id,row['input_sha'],action,
+                 journal.encoded(result),journal.now()))
+    if ws.conn.in_transaction:write(ws.conn)
+    else:
+        with ws.transaction() as conn:write(conn)
 
 
 def sync_month(ws,model,period,*,worker='native:commission-manager'):
@@ -393,19 +403,24 @@ def sync_month(ws,model,period,*,worker='native:commission-manager'):
     if publication is not None:key_scope.append(publication.identity)
     key='checker-refresh:'+journal.digest(key_scope)
     signature=journal.digest([key,period])
+    # The scope file is hashed once, before the write. Doing it again for every
+    # store held the ledger lock for the whole read.
+    if publication is not None:
+        publication.verify(ws.root, model)
     with ws.transaction() as conn:
         if publication is not None:
-            for row in observed:publication.require(row['store_id'],period,workspace_root=ws.root)
+            for row in observed:
+                if not publication.allows(row['store_id'], period):
+                    from .publication_scope import PublicationScopeError
+                    raise PublicationScopeError('automatic_publication_outside_approved_scope')
         old=journal.receipt(conn,key,signature)
         if old:
             for row in observed:_case(conn,row)
-            if publication is not None:publication.verify(ws.root,model)
             return old
         aid=journal.ident()
         conn.execute('INSERT INTO automation_authorization VALUES(?,?,?,?,?,?,?,?,?)',
             (aid,key,worker,'builtin_service','checker.refresh',value['input_sha'],'',journal.encoded({'period':period}),journal.now()))
         for row in observed:_case(conn,row)
-        if publication is not None:publication.verify(ws.root,model)
         return journal.finish(conn,key,'checker.refresh',signature,aid,{'period':period,'status':value['status'],'observed':len(observed)})
 
 
@@ -592,8 +607,8 @@ def decision_apply(ws,model,*,request_id,proposal_id,proposal_sha,input_sha,acto
             conn.execute('INSERT INTO automation_attempt VALUES(?,?,?,?,?,?,?)',
                 (journal.ident(),case_id,request_id,checked['input_sha'],'dispatch_pending',
                  journal.encoded({'store_id':store_id,'fingerprint':'automation:'+journal.digest([did,input_sha])}),journal.now()))
-        _audit_cases(ws,model,period,key,'decision_applied',{'decision_id':did,'kind':kind})
         result=journal.finish(conn,key,'decision.apply',signature,aid,{'decision_id':did,'status':'applied','period':period,'store_id':store_id})
+    _audit_cases(ws,model,period,key,'decision_applied',{'decision_id':did,'kind':kind})
     if kind=='cost_line':deliver(ws)
     return result
 
@@ -672,8 +687,9 @@ def _decision_revoke(ws,model,decision_id,*,request_id,reason,input_sha,actor):
                  journal.encoded({'store_id':row['store_id'],'fingerprint':'automation:'+journal.digest([decision_id,key])}),journal.now()))
         conn.execute('INSERT INTO automation_decision VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)',
             (journal.ident(),key,row['kind'],row['period'],row['store_id'],'revoke',decision_id,'{}',reason.strip(),input_sha,'',actor['id'],journal.now()))
-        _audit_cases(ws,model,row['period'],key,'decision_revoked',{'decision_id':decision_id})
         result=journal.finish(conn,key,'decision.revoke',signature,aid,{'decision_id':decision_id,'status':'revoked'})
+        audited=row['period']
+    _audit_cases(ws,model,audited,key,'decision_revoked',{'decision_id':decision_id})
     if affects_cost or affects_statement or affects_source_facts or affects_period_cost:deliver(ws)
     return result
 
@@ -780,5 +796,6 @@ def close_confirm(ws,model,*,request_id,proposal_id,proposal_sha,input_sha,actor
                     unfinished.append({'store_id':sid,'issues':[checker.issue('close_not_completed',str(exc))]})
             result={'batch_id':proposal_id,'period':period,'status':'completed' if not unfinished else 'partial',
                     'completed':completed,'unfinished':unfinished}
-            _audit_cases(ws,model,period,key,'close_verified',result)
-            return journal.finish(conn,key,'close.confirm',signature,aid,result)
+            finished=journal.finish(conn,key,'close.confirm',signature,aid,result)
+    _audit_cases(ws,model,period,key,'close_verified',result)
+    return finished

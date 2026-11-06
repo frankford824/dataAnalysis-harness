@@ -74,6 +74,18 @@ export const agentApi = {
   rejectCard: (id, user) => call(`/api/agent/cards/${encodeURIComponent(id)}/reject`, post({ user })),
   uiHistory: () => call('/api/agent/ui/history'),
   uiUndo: user => call('/api/agent/ui/undo', post({ user })),
+  roster: room => call(`/api/agent/roster?room=${encodeURIComponent(room || 'month')}`),
+}
+
+const BOT_NAMES = ['核算', '问答', '资料', '程序', '领队', '助手']
+export const mentionsBot = text => new RegExp(`[@＠](${BOT_NAMES.join('|')})`).test(text || '')
+export const toColleague = text => /^\s*[@＠](?!核算|问答|资料|程序|领队|助手)\S/.test(text || '')
+
+export function askInRoom(detail) {
+  window.dispatchEvent(new CustomEvent('ledger-room-ask', { detail }))
+}
+export function openLedgerRoom(detail) {
+  window.dispatchEvent(new CustomEvent('ledger-room-open', { detail }))
 }
 
 /** 传一个附件。请求体就是文件本身，不是表单；onProgress 收到 0~1。

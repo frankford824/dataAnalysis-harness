@@ -52,9 +52,10 @@ def standing(conn):
     return current
 
 
-def _grant(ws, model, conn, actor, key, proposal_sha, store_id, period, rules, window, reason, grant_key):
-    basis = _decision_input(ws, model, 'rule_grant', store_id, period,
-        {'rule_id': rules[0]['id'], 'rule_sha': rules[0]['sha'], 'enabled': True, **window})
+def _grant(ws, model, conn, actor, key, proposal_sha, store_id, period, rules, window, reason, grant_key, basis=None):
+    if basis is None:
+        basis = _decision_input(ws, model, 'rule_grant', store_id, period,
+            {'rule_id': rules[0]['id'], 'rule_sha': rules[0]['sha'], 'enabled': True, **window})
     granted = []
     for rule in rules:
         values = {'rule_id': rule['id'], 'rule_sha': rule['sha'], 'enabled': True, **window}
@@ -93,13 +94,19 @@ def extend(ws, model, period):
     actor = {'id': consent['actor'], 'kind': 'human', 'authenticated': True}
     key = consent['request_id'];window = {'valid_from': stamp.isoformat(), 'valid_until': STANDING_UNTIL,
         'period_from': period, 'period_until': OPEN_END}
-    granted = []
-    with ws.transaction() as conn:
-        for store_id, missing in sorted(todo.items()):
+    prepared=[]
+    for store_id, missing in sorted(todo.items()):
+        basis=_decision_input(ws, model, 'rule_grant', store_id, period,
+            {'rule_id': missing[0]['id'], 'rule_sha': missing[0]['sha'], 'enabled': True, **window})
+        prepared.append((store_id, missing, basis))
+    granted=[]
+    for store_id, missing, basis in prepared:
+        with ws.transaction() as conn:
             granted += _grant(ws, model, conn, actor, key, consent['proposal_sha'], store_id, period, missing, window,
                 '长期授权自动覆盖新店铺或新月份',
-                lambda sid, rule: 'agent-authority-extend:'+journal.digest([key, sid, rule['id'], rule['sha'], period])[:40])
-        if granted:_audit_cases(ws, model, period, key, 'decision_applied', {'agent_authority': key, 'grants': len(granted), 'extended': True})
+                lambda sid, rule: 'agent-authority-extend:'+journal.digest([key, sid, rule['id'], rule['sha'], period])[:40],
+                basis=basis)
+    if granted:_audit_cases(ws, model, period, key, 'decision_applied', {'agent_authority': key, 'grants': len(granted), 'extended': True})
     return len(granted)
 
 
@@ -197,27 +204,38 @@ def apply(ws, model, *, request_id, proposal_id, proposal_sha, input_sha, actor)
     human(actor);_request(request_id)
     key = 'agent-authority-apply:'+request_id
     signature = journal.digest([key, proposal_id, proposal_sha, input_sha, actor['id']])
+    try:old = journal.receipt(ws.conn, key, signature)
+    except ValueError as exc:raise Conflict(str(exc)) from exc
+    if old:return old
+    proposal, payload = _load_proposal(ws.conn, proposal_id, proposal_sha, input_sha, actor, 'agent_authority')
+    first, last, days = payload['period_from'], payload['period_until'], payload['valid_days']
+    stores, rules, sha = _scope(ws, model, first, last, days)
+    if sha != input_sha:raise Conflict('预览后店铺或规则版本已变化，本次未授权，请重新预览')
+    stamp = datetime.now(timezone.utc)
+    until = STANDING_UNTIL if days is None else (stamp+timedelta(days=days)).isoformat()
+    window = {'valid_from': stamp.isoformat(), 'valid_until': until, 'period_from': first, 'period_until': last}
+    bases={}
+    for store_id in stores:
+        bases[store_id]=_decision_input(ws, model, 'rule_grant', store_id, first,
+            {'rule_id': rules[0]['id'], 'rule_sha': rules[0]['sha'], 'enabled': True, **window})
+    granted=[]
+    for store_id in stores:
+        with ws.transaction() as conn:
+            granted += _grant(ws, model, conn, actor, key, proposal_sha, store_id, first, rules, window, payload['reason'],
+                lambda sid, rule: 'agent-authority:'+request_id+':'+journal.digest([sid, rule['id']])[:24],
+                basis=bases[store_id])
+    _, _, sha = _scope(ws, model, first, last, days)
+    if sha != input_sha:raise Conflict('预览后店铺或规则版本已变化，本次未授权，请重新预览')
     with ws.transaction() as conn:
         old = journal.receipt(conn, key, signature)
         if old:return old
-        proposal, payload = _load_proposal(conn, proposal_id, proposal_sha, input_sha, actor, 'agent_authority')
-        first, last, days = payload['period_from'], payload['period_until'], payload['valid_days']
-        stores, rules, sha = _scope(ws, model, first, last, days)
-        if sha != input_sha:raise Conflict('预览后店铺或规则版本已变化，本次未授权，请重新预览')
-        stamp = datetime.now(timezone.utc)
-        until = STANDING_UNTIL if days is None else (stamp+timedelta(days=days)).isoformat()
-        window = {'valid_from': stamp.isoformat(), 'valid_until': until, 'period_from': first, 'period_until': last}
         aid = journal.authorize(conn, key, actor, 'agent_authority.apply', input_sha, proposal_sha,
             {'period_from': first, 'period_until': last, 'grant_count': len(stores)*len(rules),
              'standing': days is None, 'rules': [[r['id'], r['sha']] for r in rules]})
-        granted = []
-        for store_id in stores:
-            granted += _grant(ws, model, conn, actor, key, proposal_sha, store_id, first, rules, window, payload['reason'],
-                lambda sid, rule: 'agent-authority:'+request_id+':'+journal.digest([sid, rule['id']])[:24])
-        _audit_cases(ws, model, first, key, 'decision_applied', {'agent_authority': key, 'grants': len(granted)})
         result = journal.finish(conn, key, 'agent_authority.apply', signature, aid,
             {'status': 'applied', 'grant_count': len(granted), 'period_from': first, 'period_until': last,
              'valid_until': window['valid_until']})
+    _audit_cases(ws, model, first, key, 'decision_applied', {'agent_authority': key, 'grants': len(granted)})
     from .automation_deterministic import run_available
     present = {r[0] for r in ws.conn.execute("SELECT DISTINCT period FROM period WHERE period BETWEEN ? AND ? AND state<>'closed'", (first, last))}
     for period in sorted(present):run_available(ws, model, period, aid)

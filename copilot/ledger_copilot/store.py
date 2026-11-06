@@ -38,7 +38,7 @@ def conn():
         db.execute('PRAGMA journal_mode=WAL')
         db.executescript(SCHEMA)
         message_columns = {r[1] for r in db.execute('PRAGMA table_info(message)')}
-        for column, kind in (('files', "TEXT DEFAULT '[]'"), ('prompt', 'TEXT')):
+        for column, kind in (('files', "TEXT DEFAULT '[]'"), ('prompt', 'TEXT'), ('bot', "TEXT DEFAULT ''")):
             if column not in message_columns:
                 db.execute(f'ALTER TABLE message ADD COLUMN {column} {kind}')
         columns = {r[1] for r in db.execute('PRAGMA table_info(usage)')}
@@ -79,6 +79,11 @@ def events(kind, limit=20):
 GROUP = 'group'
 
 
+def is_room(thread_id):
+    text = thread_id or ''
+    return text == GROUP or text.startswith('store:') or text.startswith('month:')
+
+
 def ensure_thread(thread_id, title, user):
     now = time.time()
     with _lock:
@@ -88,10 +93,10 @@ def ensure_thread(thread_id, title, user):
             return thread_id, False
         if thread_id == GROUP:
             title = '公共群聊'
-        else:
+        elif not is_room(thread_id):
             thread_id = uuid.uuid4().hex[:12]
         conn().execute('INSERT INTO thread(id,title,user,created_at,updated_at) VALUES(?,?,?,?,?)',
-                       (thread_id, title[:40] or '新话题', user, now, now))
+                       (thread_id, (title or '这间房间')[:80], user, now, now))
         conn().commit()
         return thread_id, True
 
@@ -118,13 +123,14 @@ def threads(limit=50):
 
 
 def add_message(thread_id, role, text, *, images=(), steps=(), cards=(), receipt=None, page=None, user='', files=(),
-                prompt=None):
+                prompt=None, bot=''):
     with _lock:
         cur = conn().execute(
-            'INSERT INTO message(thread_id,role,text,images,steps,cards,receipt,page,user,at,files,prompt) '
-            'VALUES(?,?,?,?,?,?,?,?,?,?,?,?)',
+            'INSERT INTO message(thread_id,role,text,images,steps,cards,receipt,page,user,at,files,prompt,bot) '
+            'VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)',
             (thread_id, role, text, _j(list(images)), _j(list(steps)), _j(list(cards)),
-             _j(receipt) if receipt else None, _j(page) if page else None, user, time.time(), _j(list(files)), prompt))
+             _j(receipt) if receipt else None, _j(page) if page else None, user, time.time(), _j(list(files)), prompt,
+             bot or ''))
         conn().commit()
         return cur.lastrowid
 
@@ -146,7 +152,8 @@ def messages(thread_id, after=0, last=None, prompts=False):
                     'steps': json.loads(r['steps']), 'cards': [c for c in cards if c],
                     'receipt': json.loads(r['receipt']) if r['receipt'] else None,
                     'at': datetime.fromtimestamp(r['at']).astimezone().isoformat(timespec='seconds'), 'user': r['user'],
-                    'files': json.loads(r['files'] or '[]'), **({'prompt': r['prompt']} if prompts else {})})
+                    'bot': r['bot'] or '', 'files': json.loads(r['files'] or '[]'),
+                    **({'prompt': r['prompt']} if prompts else {})})
     return out
 
 

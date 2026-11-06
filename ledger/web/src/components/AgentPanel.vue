@@ -1,16 +1,13 @@
 <script setup>
-/* 台账助手：常驻在右边的对话面板，每一页都在。
- *
- * 发出去的每一句都带上左边此刻打开的页面（路由、标题、选中的文字），人不用再
- * 解释「我说的是哪家店哪个月」。步骤只显示服务端给的那句人话，不出现代码、SQL、
- * 路径这类东西——看的人是财务和店长。
+/* 右边这间房：店月页是那家店这个月，工作台是「这个月」，群聊仍是同事之间。
+ * 房间里每位同事各自说话。没点名时由领队挑选。
  */
-import { ArrowUp, ArrowUpRight, AtSign, Camera, Check, ChevronRight, CircleAlert, CircleX, CornerDownRight, Ellipsis, File, FileArchive, FileSpreadsheet, FileText, History, LoaderCircle, MessageSquare, PanelRightClose, Paperclip, Presentation, Reply, RotateCw, Square, SquarePen, Undo2, X } from '@lucide/vue'
+import { ArrowUp, ArrowUpRight, AtSign, Camera, Check, ChevronRight, CircleAlert, CircleX, CornerDownRight, Ellipsis, File, FileArchive, FileSpreadsheet, FileText, LoaderCircle, MessageSquare, PanelRightClose, Paperclip, Presentation, Reply, RotateCw, Square, SquarePen, Undo2, X } from '@lucide/vue'
 import { useDialog, useMessage } from 'naive-ui'
 import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch, watchEffect } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 
-import { agentApi, errorText, onAgentFailure, openEvents, streamChat, uploadFile } from '../agentClient'
+import { agentApi, errorText, mentionsBot, onAgentFailure, openEvents, streamChat, toColleague, uploadFile } from '../agentClient'
 import { setCosts, setCostsLive, yuan } from '../agentCosts'
 import { renderMarkdown } from '../agentMarkdown'
 import { useApp } from '../store'
@@ -125,12 +122,35 @@ onAgentFailure(markOffline)
 
 // ---------------------------------------------------------------- 话题
 
-// 「群聊」是所有人共用的一个固定话题，「话题」是各人自己的对话，和以前一样。
-// 第一次打开默认在群聊。
-const mode = ref(read(KEY.mode) === 'topic' ? 'topic' : 'group')
+// 群聊是同事的房间。除此之外，右边跟着左边的页面：店月页一间，工作台「这个月」一间。
+const mode = ref(read(KEY.mode) === 'group' ? 'group' : 'room')
 const inGroup = computed(() => mode.value === 'group')
-const threadId = ref(inGroup.value ? GROUP : read(KEY.thread) || null)
-const threadTitle = ref(inGroup.value ? GROUP_TITLE : '')
+const roomKind = computed(() => (inGroup.value ? 'group' : route.meta.room === 'store' ? 'store' : 'month'))
+const roomPeriod = computed(() => String(route.query.period || app.period || ''))
+const roomStore = computed(() => (route.name === 'period' ? String(route.params.id || '') : ''))
+const roomId = computed(() => {
+  if (inGroup.value) return GROUP
+  if (roomKind.value === 'store' && roomStore.value) return `store:${roomStore.value}:${roomPeriod.value}`
+  return `month:${roomPeriod.value}`
+})
+const roomTitle = computed(() => {
+  if (inGroup.value) return GROUP_TITLE
+  if (roomKind.value === 'store') {
+    const name = app.currentStore?.name || '这家店'
+    return `${name}${roomPeriod.value ? ` ${roomPeriod.value}` : ''}`
+  }
+  return roomPeriod.value ? `这个月 ${roomPeriod.value}` : '这个月'
+})
+function fallbackRoster(kind) {
+  if (kind === 'store') return { names: ['领队', '核算', '问答', '资料'], guests: ['程序'] }
+  if (kind === 'month') return { names: ['领队', '资料', '问答'], guests: [] }
+  return { names: [], guests: [] }
+}
+const initialRoster = fallbackRoster(route.meta.room === 'store' ? 'store' : 'month')
+const rosterNames = ref(initialRoster.names)
+const rosterGuests = ref(initialRoster.guests)
+const threadId = ref(roomId.value)
+const threadTitle = ref(roomTitle.value)
 const messages = ref([])
 const loadingThread = ref(false)
 const historyOpen = ref(false)
@@ -143,7 +163,8 @@ watch(mode, value => write(KEY.mode, value))
 const THINKING = [['off', '思考：关'], ['low', '思考：低'], ['medium', '思考：中'], ['high', '思考：高']]
 const thinking = ref(THINKING.some(([v]) => v === read(KEY.thinking)) ? read(KEY.thinking) : 'off')
 watch(thinking, value => write(KEY.thinking, value))
-watch(threadId, value => { if (value !== GROUP) write(KEY.thread, value) })
+const BOT_COLOR = { 领队: 'hsl(210 42% 46%)', 核算: 'hsl(152 32% 36%)', 问答: 'hsl(28 48% 42%)', 资料: 'hsl(262 28% 46%)', 程序: 'hsl(340 32% 42%)' }
+function botColor(name) { return BOT_COLOR[name] || 'var(--accent)' }
 
 function normalize(m) {
   return {
@@ -152,6 +173,8 @@ function normalize(m) {
     runId: m.run_id || '',
     role: m.role === 'user' ? 'user' : 'assistant',
     user: m.user || '',
+    bot: m.bot || m.receipt?.bot || '',
+    questionId: m.receipt?.question_id || '',
     text: m.text || '',
     images: Array.isArray(m.images) ? m.images : [],
     files: Array.isArray(m.files) ? m.files : [],
@@ -177,11 +200,15 @@ async function openThread(id) {
     messages.value = (thread?.messages || []).map(normalize)
   } catch (e) {
     // 群聊还没人说过话时服务端可能还没建这个话题，当作空的群。
-    if (e.status === 404 && id === GROUP) {
-      threadId.value = GROUP
-      threadTitle.value = GROUP_TITLE
+    if (e.status === 404 && (id === GROUP || String(id).startsWith('store:') || String(id).startsWith('month:'))) {
+      threadId.value = id
+      threadTitle.value = id === GROUP ? GROUP_TITLE : roomTitle.value
       messages.value = []
-    } else if (e.status === 404) newThread()
+    } else if (e.status === 404) {
+      threadId.value = roomId.value
+      threadTitle.value = roomTitle.value
+      messages.value = []
+    }
     else notice.value = errorText(e, '这段对话没打开，请稍后再试')
   } finally {
     loadingThread.value = false
@@ -199,16 +226,39 @@ function newThread() {
 }
 function switchMode(next) {
   if (next === mode.value || streaming.value) return
+  if (next === 'group') groupUnread.value = 0
   mode.value = next
-  historyOpen.value = false
-  if (next === 'group') {
-    groupUnread.value = 0
-    openThread(GROUP)
-  } else {
-    const id = read(KEY.thread)
-    if (id) openThread(id)
-    else newThread()
+}
+async function loadRoster() {
+  const kind = roomKind.value
+  const fallback = fallbackRoster(kind)
+  rosterNames.value = fallback.names
+  rosterGuests.value = fallback.guests
+  try {
+    const data = await agentApi.roster(kind)
+    if (roomKind.value !== kind || !data) return
+    rosterNames.value = data.names?.length ? data.names : fallback.names
+    rosterGuests.value = data.guests || []
+  } catch {
+    if (roomKind.value !== kind) return
+    rosterNames.value = fallback.names
+    rosterGuests.value = fallback.guests
   }
+}
+watch(roomKind, loadRoster, { immediate: true })
+watch(roomId, (id, prev) => {
+  if (!id || id === prev || streaming.value) return
+  openThread(id)
+})
+const roomPeople = computed(() => {
+  const names = [...rosterNames.value]
+  const extra = [...rosterGuests.value, ...messages.value.map(m => m.bot).filter(Boolean)]
+  for (const name of extra) if (name && !names.includes(name)) names.push(name)
+  return names
+})
+function callBot(name) {
+  draft.value = `@${name} ${draft.value.replace(/^\s*[@＠]\S+\s*/, '')}`
+  nextTick(() => textarea.value?.focus())
 }
 async function loadThreads() {
   threadsLoading.value = true
@@ -298,6 +348,9 @@ function pageContext() {
     params: { ...route.params },
     heading: (h1?.textContent || '').replace(/\s+/g, ' ').trim().slice(0, 200),
     selection: picked.value,
+    room: route.meta.room || (route.name === 'period' ? 'store' : 'month'),
+    period: String(route.query.period || app.period || ''),
+    store_id: route.name === 'period' ? String(route.params.id || '') : '',
   }
 }
 
@@ -447,9 +500,7 @@ function onKeydown(e) {
   e.preventDefault()
   send()
 }
-// 群里助手默认每句都接；只有以 @某位同事 开头的话是同事之间说的，助手不插嘴。
-// 和服务端用同一条规则，只用来决定要不要摆「正在看」的占位，不拦着不发。
-const toColleague = text => /^\s*[@＠](?!助手)\S/.test(text)
+// 群里以 @某位同事 开头的话只发给那个人。@核算、@问答、@资料、@程序 才会叫到房间里的人。
 const mentionOpen = ref(false)
 const mentionBox = ref(null)
 const colleagues = computed(() => online.value.filter(name => !isSelf(name)))
@@ -515,7 +566,7 @@ function send(preset) {
   const files = fromDraft ? takeAttachments() : []
   shotTip.value = false
   primeAlerts()
-  running = run({ text, files, page: pageContext(), thread: threadId.value })
+  running = run({ text, files, page: pageContext(), thread: inGroup.value ? GROUP : roomId.value })
 }
 
 function setReceipt(reply, data) {
@@ -528,6 +579,22 @@ function dropMessage(m) {
   if (at >= 0) messages.value.splice(at, 1)
 }
 
+function splitReply(reply, bot) {
+  if (!bot) return reply
+  if (!reply.bot) {
+    reply.bot = bot
+    return reply
+  }
+  if (reply.bot === bot) return reply
+  if (!reply.text && !reply.steps.length && !reply.cards.length) {
+    reply.bot = bot
+    return reply
+  }
+  reply.streaming = false
+  const next = { key: ++seq, id: '', role: 'assistant', bot, text: '', steps: [], cards: [], receipt: null, at: Date.now(), streaming: true, error: '', stopped: false, runId: reply.runId || '', remote: !!reply.remote }
+  messages.value.push(next)
+  return messages.value[messages.value.length - 1]
+}
 function apply(reply, event, data) {
   if (event === 'thread') {
     if (data.thread_id) threadId.value = data.thread_id
@@ -555,8 +622,8 @@ async function run(payload) {
   notice.value = ''
   const at = Date.now()
   const group = payload.thread === GROUP
-  // 群里 @同事 的话助手不接，服务端只回 thread 和 done；这时不摆「正在看」的占位。
-  const expectReply = !group || !toColleague(payload.text)
+  // 群里只有点到同事名字才有人接。@其他人只是跟人说话，不摆占位。
+  const expectReply = !group || mentionsBot(payload.text)
   messages.value.push({ key: ++seq, id: '', role: 'user', user: userName.value || '', mine: true, text: payload.text, images: [], files: payload.files, at })
   const ask = messages.value[messages.value.length - 1]
   let reply = { key: ++seq, id: '', role: 'assistant', text: '', steps: [], cards: [], receipt: null, at, streaming: true, error: '', stopped: false, recovering: false, retry: payload, ask }
@@ -581,11 +648,12 @@ async function run(payload) {
   let finished = false
   try {
     await streamChat(
-      { thread_id: payload.thread, text: payload.text, files: fileRefs(payload.files), page: payload.page, user: userName.value || '', thinking: thinking.value },
+      { thread_id: payload.thread, text: payload.text, files: fileRefs(payload.files), page: payload.page, user: userName.value || '', thinking: thinking.value, ...(payload.trigger ? { trigger: payload.trigger } : {}), ...(payload.subject ? { subject: payload.subject } : {}) },
       {
         signal: controller.signal,
         onEvent: (event, raw) => {
           const data = raw || {}
+          if (event === 'bot') reply = splitReply(reply, data.bot)
           if (event === 'thread') {
             turnThread = data.thread_id || payload.thread
             reply.retry = null
@@ -643,7 +711,7 @@ async function run(payload) {
 // 私聊：这个话题正在跑；群聊：自己提的问题还在排队或在查。这时发送键变成「补充」。
 const steerTarget = ref('')
 const myTask = computed(() => {
-  const mine = Object.values(tasks.value).filter(t => RUNNING.has(t.status) && isMineTask(t) && (inGroup.value ? t.thread_id === GROUP : t.thread_id && t.thread_id === threadId.value))
+  const mine = Object.values(tasks.value).filter(t => RUNNING.has(t.status) && (inGroup.value ? t.thread_id === GROUP && isMineTask(t) : t.thread_id && t.thread_id === threadId.value))
   return mine.find(t => t.run_id === steerTarget.value) || mine.sort((a, b) => String(b.started_at).localeCompare(String(a.started_at)))[0] || null
 })
 const steerRun = computed(() => myTask.value?.run_id || liveRun.value)
@@ -833,7 +901,7 @@ const ACTIVE = new Set(['queued', 'running', 'waiting'])
 const RUNNING = new Set(['queued', 'running'])
 const TASK_STATUS = { queued: '排队中', running: '在查', waiting: '等确认', done: '已完成', stopped: '已停止', failed: '没查完' }
 const isMineTask = t => ownRuns.has(t.run_id) || isSelf(t.user)
-const visibleTasks = computed(() => Object.values(tasks.value).filter(t => t.thread_id === GROUP || isMineTask(t)))
+const visibleTasks = computed(() => Object.values(tasks.value).filter(t => t.thread_id === GROUP || t.thread_id === threadId.value || isMineTask(t)))
 const activeTasks = computed(() => visibleTasks.value.filter(t => ACTIVE.has(t.status)).sort((a, b) => String(a.started_at).localeCompare(String(b.started_at))))
 const taskOf = runId => (runId && tasks.value[runId]) || null
 const taskByMessage = computed(() => new Map(visibleTasks.value.filter(t => t.message_id != null).map(t => [String(t.message_id), t])))
@@ -861,7 +929,7 @@ function taskTime(t) {
   const started = toDate(t.started_at)
   return started ? seconds(Math.max(0, now.value - started.getTime())) : ''
 }
-const taskWho = t => (isMineTask(t) ? '你' : t.user || '同事')
+const taskWho = t => t.bot || (isMineTask(t) ? '你' : t.user || '同事')
 async function stopTask(t) {
   if (t.stopping) return
   if (t.run_id === liveRun.value && streaming.value) return stop()
@@ -969,7 +1037,7 @@ function onRemoteMessage(data) {
     // 别人那一轮一直在跟着 turn 显示，最终的回答落库后把它收成正式消息，不再另加一条。
     const live = messages.value.find(x => x.remote && !x.id && (runId ? x.runId === runId : true))
     if (live) {
-      Object.assign(live, { id: m.id || '', text: m.text || live.text, streaming: false, at: m.at || live.at, receipt: m.receipt || live.receipt })
+      Object.assign(live, { id: m.id || '', bot: m.bot || live.bot || m.receipt?.bot || '', questionId: m.receipt?.question_id || live.questionId || '', text: m.text || live.text, streaming: false, at: m.at || live.at, receipt: m.receipt || live.receipt })
       if (m.steps?.length) live.steps = m.steps.map(s => ({ ...s }))
       if (m.cards?.length) live.cards = m.cards.map(c => ({ ...c }))
       follow()
@@ -987,18 +1055,20 @@ function onRemoteMessage(data) {
   follow()
 }
 
-function onRemoteTurn({ thread_id: thread, run_id: runId, kind, data }) {
+function onRemoteTurn({ thread_id: thread, run_id: runId, kind, data, bot }) {
   if (!runId || ownRuns.has(runId)) return
   if (kind === 'card' && thread === GROUP && data?.status === 'pending') {
-    alertHidden('群里有一张确认卡等人处理', data.title || '助手提出了一处修改，需要有人确认。', `card-${data.card_id}`)
+    alertHidden('群里有一张确认卡等人处理', data.title || '有一处修改等人确认。', `card-${data.card_id}`)
   }
   if (thread !== threadId.value) return
-  let reply = messages.value.find(x => x.role === 'assistant' && x.runId === runId)
+  let reply = [...messages.value].reverse().find(x => x.role === 'assistant' && x.runId === runId && x.streaming)
+    || [...messages.value].reverse().find(x => x.role === 'assistant' && x.runId === runId)
   if (!reply) {
     if (kind === 'done' || kind === 'error') return
-    messages.value.push({ key: ++seq, id: '', runId, remote: true, role: 'assistant', text: '', steps: [], cards: [], receipt: null, at: Date.now(), streaming: true, error: '', stopped: false })
+    messages.value.push({ key: ++seq, id: '', runId, remote: true, role: 'assistant', bot: bot || '', text: '', steps: [], cards: [], receipt: null, at: Date.now(), streaming: true, error: '', stopped: false })
     reply = messages.value[messages.value.length - 1]
   }
+  if (bot || kind === 'bot') reply = splitReply(reply, bot || data?.bot)
   if (kind === 'done') {
     reply.streaming = false
     setReceipt(reply, data)
@@ -1203,6 +1273,41 @@ function onEsc(e) {
 function guardFocus(e) {
   if (e.target instanceof Node && root.value?.contains(e.target)) e.stopImmediatePropagation()
 }
+async function onOpenRoom(event) {
+  const detail = event.detail || {}
+  if (mode.value === 'group') mode.value = 'room'
+  if (detail.storeId) await router.push({ name: 'period', params: { id: detail.storeId }, query: detail.period ? { period: detail.period } : {} }).catch(() => {})
+  else if (detail.period) {
+    app.pick({ period: detail.period })
+    if (route.name !== 'board') await router.push({ name: 'board' }).catch(() => {})
+  }
+  collapsed.value = false
+  await nextTick()
+  const id = detail.storeId ? `store:${detail.storeId}:${detail.period || ''}` : `month:${detail.period || roomPeriod.value}`
+  if (threadId.value !== id) await openThread(id)
+  await nextTick()
+  const hit = messages.value.find(m => m.questionId && m.questionId === detail.questionId)
+  if (hit?.id) jumpTo(hit.id)
+}
+async function onAskRoom(event) {
+  const detail = event.detail || {}
+  if (!detail.storeId || streaming.value) return
+  if (mode.value === 'group') mode.value = 'room'
+  await router.push({ name: 'period', params: { id: detail.storeId }, query: detail.period ? { period: detail.period } : {} }).catch(() => {})
+  collapsed.value = false
+  const thread = `store:${detail.storeId}:${detail.period || ''}`
+  threadId.value = thread
+  threadTitle.value = roomTitle.value
+  const name = detail.subject?.node_name || ''
+  run({
+    text: name ? `这笔不对：${name}` : (detail.text || '这笔不对'),
+    files: [],
+    page: { ...pageContext(), room: 'store', name: 'period', period: detail.period || '', store_id: detail.storeId, params: { id: detail.storeId }, query: { period: detail.period || '' } },
+    thread,
+    trigger: 'dispute',
+    subject: detail.subject?.node_id ? { node_id: detail.subject.node_id, row: detail.subject.row || {} } : null,
+  })
+}
 
 onMounted(() => {
   window.addEventListener('focus', guardFocus, true)
@@ -1210,7 +1315,9 @@ onMounted(() => {
   document.addEventListener('selectionchange', onSelection)
   document.addEventListener('pointerdown', onPointerDown, true)
   loadStatus().then(scheduleStatus)
-  if (threadId.value) openThread(threadId.value)
+  if (roomId.value) openThread(roomId.value)
+  window.addEventListener('ledger-room-ask', onAskRoom)
+  window.addEventListener('ledger-room-open', onOpenRoom)
   connectEvents()
   loadUiHistory()
   nextTick(autosize)
@@ -1236,6 +1343,8 @@ onUnmounted(() => {
   window.removeEventListener('resize', onResize)
   document.removeEventListener('selectionchange', onSelection)
   document.removeEventListener('pointerdown', onPointerDown, true)
+  window.removeEventListener('ledger-room-ask', onAskRoom)
+  window.removeEventListener('ledger-room-open', onOpenRoom)
   document.documentElement.style.removeProperty('--agent-dock')
   document.body.classList.remove('agent-resizing')
 })
@@ -1247,16 +1356,16 @@ onUnmounted(() => {
     class="agent"
     :class="{ collapsed, overlay: overlay && !collapsed, resizing }"
     :style="{ width: `${dockWidth}px` }"
-    aria-label="台账助手"
+    aria-label="房间"
     @dragenter="onDragEnter"
     @dragover="onDragOver"
     @dragleave="onDragLeave"
     @drop="onDrop"
     @keydown.esc="onEsc"
   >
-    <button v-if="collapsed" type="button" class="agent-tab" title="展开台账助手" @click="expand">
+    <button v-if="collapsed" type="button" class="agent-tab" title="展开这间房" @click="expand">
       <MessageSquare :size="16" aria-hidden="true" />
-      <span class="agent-tab-text">台账助手</span>
+      <span class="agent-tab-text">房间</span>
       <span v-if="streaming" class="spin" />
       <i v-else class="agent-dot" :class="{ on: status.online === true }" />
       <b v-if="groupUnread" class="agent-unread" :aria-label="`群聊有 ${groupUnread} 条新消息`">{{ groupUnread > 99 ? '99+' : groupUnread }}</b>
@@ -1282,43 +1391,11 @@ onUnmounted(() => {
 
       <header class="agent-head">
         <div class="agent-brand">
-          <strong>台账助手</strong>
+          <strong>{{ roomTitle }}</strong>
           <span class="agent-status" :title="statusText"><i class="agent-dot" :class="{ on: status.online === true }" /><span class="agent-status-text">{{ statusText }}</span></span>
         </div>
         <div class="agent-actions">
           <CostChip compact placement="bottom-end" />
-          <button v-if="!inGroup" type="button" class="agent-btn" :disabled="streaming" title="开一个新话题" aria-label="新话题" @click="newThread">
-            <SquarePen :size="14" aria-hidden="true" /><span class="agent-btn-label">新话题</span>
-          </button>
-          <div v-if="!inGroup" ref="historyBox" class="agent-history">
-            <button type="button" class="agent-btn icon" :class="{ on: historyOpen }" title="历史话题" aria-label="历史话题" :aria-expanded="historyOpen" @click="toggleHistory">
-              <History :size="15" aria-hidden="true" />
-            </button>
-            <div v-if="historyOpen" class="agent-menu">
-              <div class="agent-menu-head">最近的话题</div>
-              <div v-if="threadsLoading && !threads.length" class="agent-menu-note"><span class="spin" /> 正在读取…</div>
-              <div v-else-if="threadsError" class="agent-menu-note">{{ threadsError }}</div>
-              <div v-else-if="!threads.length" class="agent-menu-note">还没有聊过。</div>
-              <div class="agent-menu-list">
-                <button
-                  v-for="t in threads"
-                  :key="t.id"
-                  type="button"
-                  class="agent-menu-item"
-                  :class="{ on: t.id === threadId }"
-                  :disabled="streaming"
-                  @click="openThread(t.id)"
-                >
-                  <span class="truncate">{{ t.title || '未命名话题' }}</span>
-                  <small>{{ t.user ? `${t.user} · ` : '' }}{{ clock(t.updated_at) }}</small>
-                </button>
-              </div>
-              <footer class="agent-menu-foot">
-                <span class="truncate">称呼：{{ userName || '未填' }}</span>
-                <button type="button" class="link" @click="askName(null)">修改</button>
-              </footer>
-            </div>
-          </div>
           <div ref="menuBox" class="agent-history">
             <button type="button" class="agent-btn icon" :class="{ on: menuOpen }" title="更多" aria-label="更多" :aria-expanded="menuOpen" @click="toggleMenu">
               <Ellipsis :size="15" aria-hidden="true" />
@@ -1344,14 +1421,21 @@ onUnmounted(() => {
           <button type="button" role="tab" :aria-selected="inGroup" :class="{ on: inGroup }" :disabled="streaming && !inGroup" :title="GROUP_TITLE" @click="switchMode('group')">
             群聊<b v-if="groupUnread && !inGroup" class="agent-unread">{{ groupUnread > 99 ? '99+' : groupUnread }}</b>
           </button>
-          <button type="button" role="tab" :aria-selected="!inGroup" :class="{ on: !inGroup }" :disabled="streaming && inGroup" title="只有你自己能看到的对话" @click="switchMode('topic')">话题</button>
+          <button type="button" role="tab" :aria-selected="!inGroup" :class="{ on: !inGroup }" :disabled="streaming && inGroup" :title="roomTitle" @click="switchMode('room')">这间房</button>
         </div>
         <div v-if="inGroup" class="agent-people" :title="online.length ? `在线：${online.join('、')}` : ''">
           <span v-for="name in online.slice(0, 5)" :key="name" class="agent-avatar" :style="{ background: tint(name) }" :aria-label="name">{{ initial(name) }}</span>
           <span v-if="online.length > 5" class="agent-avatar more">+{{ online.length - 5 }}</span>
           <small v-if="online.length">{{ online.length }} 人在线</small>
         </div>
-        <span v-else-if="threadTitle && messages.length" class="agent-topic-title truncate" :title="threadTitle">{{ threadTitle }}</span>
+        <span v-else class="agent-topic-title truncate" :title="roomTitle">{{ roomTitle }}</span>
+      </div>
+      <div v-if="!inGroup" class="agent-roster" aria-label="这间房里的同事">
+        <button v-for="name in roomPeople" :key="name" type="button" class="agent-roster-name" :class="{ guest: rosterGuests.includes(name) }" :style="{ color: botColor(name) }" :title="rosterGuests.includes(name) ? `点名 @${name} 后进入` : name" @click="callBot(name)">{{ name }}</button>
+      </div>
+      <div v-else class="agent-roster" aria-label="可以点名的同事">
+        <span class="agent-roster-note">点名才说话</span>
+        <button v-for="name in ['核算', '问答', '资料', '程序']" :key="name" type="button" class="agent-roster-name" :style="{ color: botColor(name) }" @click="callBot(name)">{{ name }}</button>
       </div>
       <div class="agent-scroll">
         <div v-if="activeTasks.length" ref="taskBox" class="agent-tasks">
@@ -1381,7 +1465,7 @@ onUnmounted(() => {
           <section v-else-if="!messages.length && inGroup" class="agent-empty">
             <div class="agent-kicker"><i />{{ GROUP_TITLE }}</div>
             <h2>这里的话，大家都看得到。</h2>
-            <p>直接提问，助手会回答；以 <b>@同事</b> 开头的话只发给同事，助手不插话，对方会收到提醒。助手提出的修改，群里任何人都可以确认。</p>
+            <p>这里是同事之间说话。以 <b>@同事</b> 开头只发给那个人。要叫核算、问答、资料或程序，用 <b>@核算</b> 这样点名，他们才说话。</p>
             <ol class="agent-suggest">
               <li v-for="(s, i) in SUGGESTIONS" :key="s">
                 <button type="button" @click="send(s)">
@@ -1394,9 +1478,9 @@ onUnmounted(() => {
           </section>
 
           <section v-else-if="!messages.length" class="agent-empty">
-            <div class="agent-kicker"><i />台账助手</div>
-            <h2>你好{{ userName ? `，${userName}` : '' }}。<br>哪里的账看着不对？</h2>
-            <p>我能看到你左边正打开的页面。说清是哪家店、哪一笔，或者直接贴一张截图。</p>
+            <div class="agent-kicker"><i />{{ roomTitle }}</div>
+            <h2>你好{{ userName ? `，${userName}` : '' }}。<br>这间房里有人在。</h2>
+            <p>没点名时由领队分派。点名用 @核算、@问答、@资料{{ roomKind === 'store' ? '、@程序' : '' }}。左边正打开的页面他们看得到。</p>
             <ol class="agent-suggest">
               <li v-for="(s, i) in SUGGESTIONS" :key="s">
                 <button type="button" @click="send(s)">
@@ -1446,9 +1530,9 @@ onUnmounted(() => {
                 </div>
               </article>
 
-              <article v-else class="agent-reply" :class="{ live: m.streaming }">
+              <article v-else class="agent-reply" :class="{ live: m.streaming }" :data-bot="m.bot || ''">
                 <header class="agent-meta">
-                  <span class="agent-who ai"><i />台账助手</span>
+                  <span class="agent-who ai" :style="{ color: botColor(m.bot) }"><i />{{ m.bot || '…' }}</span>
                 </header>
                 <button v-for="q in [quoteOf(m, i)].filter(Boolean)" :key="q.id" type="button" class="agent-quote" :disabled="!q.found" :title="q.found ? '看原问题' : ''" @click="jumpTo(q.id)">
                   <Reply :size="12" aria-hidden="true" /><span class="truncate">回复 {{ q.who }}：{{ q.text }}</span>
@@ -1481,7 +1565,7 @@ onUnmounted(() => {
                 </div>
 
                 <div v-if="m.streaming && !m.text && !m.steps.length && !m.cards.length" class="agent-thinking">
-                  <span class="agent-dots"><i /><i /><i /></span>{{ m.remote ? '助手正在回答…' : '正在看你说的情况…' }}
+                  <span class="agent-dots"><i /><i /><i /></span>{{ m.bot ? `${m.bot}在看…` : '在看…' }}
                 </div>
 
                 <!-- renderMarkdown 先整体转义 HTML 再排版，v-html 里不会有回答自带的标签 -->
@@ -1565,8 +1649,8 @@ onUnmounted(() => {
             ref="textarea"
             v-model="draft"
             rows="1"
-            :placeholder="steerRun ? '补充说明，助手接着查，不用从头再来' : inGroup ? '直接提问助手会回答；以 @同事 开头只发给同事' : '描述你发现的问题，可粘贴截图或文件…'"
-            :aria-label="inGroup ? '发到公共群聊的消息' : '给台账助手的消息'"
+            :placeholder="steerRun ? '补充一句，这一轮接着办' : inGroup ? '跟同事说。@核算、@问答、@资料、@程序 才会有人接' : '跟这间房里的同事说，可粘贴截图或文件'"
+            :aria-label="inGroup ? '发到公共群聊的消息' : '发到这间房的消息'"
             @keydown="onKeydown"
             @paste="onPaste"
           />
@@ -1577,7 +1661,7 @@ onUnmounted(() => {
           <div v-if="inGroup" ref="mentionBox" class="agent-mention">
             <button type="button" class="agent-tool" :class="{ on: mentionOpen || toColleague(draft) }" title="@一位在线同事，这条只发给同事" :aria-expanded="mentionOpen" @click="mentionOpen = !mentionOpen"><AtSign :size="13" aria-hidden="true" />同事</button>
             <div v-if="mentionOpen" class="agent-menu agent-mention-menu" role="menu">
-              <div class="agent-menu-head">只发给同事，助手不回答</div>
+              <div class="agent-menu-head">只发给同事，房间里的人不接</div>
               <div v-if="!colleagues.length" class="agent-menu-note">现在没有其他同事在线，也可以直接输入「@称呼」。</div>
               <div class="agent-menu-list">
                 <button v-for="name in colleagues" :key="name" type="button" class="agent-menu-item agent-mention-item" role="menuitem" @click="mention(name)">
@@ -1605,7 +1689,7 @@ onUnmounted(() => {
         <input ref="fileInput" type="file" :accept="ACCEPT" multiple hidden @change="onPick">
       </footer>
 
-      <div v-if="dragDepth > 0" class="agent-drop"><b>松开，作为附件发给助手</b><small>{{ FILE_HINT }}</small></div>
+      <div v-if="dragDepth > 0" class="agent-drop"><b>松开，作为附件发到这间房</b><small>{{ FILE_HINT }}</small></div>
     </div>
 
     <Teleport to="body">
@@ -1791,6 +1875,10 @@ onUnmounted(() => {
   color: var(--n6);
 }
 .agent-topic-title { flex: 1; min-width: 0; text-align: right; }
+.agent-roster { display: flex; flex-wrap: wrap; gap: 6px 10px; align-items: center; padding: 6px var(--s5) 8px; border-bottom: 1px solid var(--n2); }
+.agent-roster-name, .agent-roster-name:hover { padding: 0; border: 0; background: transparent; font-size: 12.5px; font-weight: 650; cursor: pointer; }
+.agent-roster-name.guest { opacity: .72; }
+.agent-roster-note { font-size: 11.5px; color: var(--n5); }
 .agent-mode { display: inline-flex; flex: none; padding: 2px; border-radius: var(--r-sm); background: var(--n2); }
 .agent-mode button,
 .agent-mode button:hover:not(:disabled) {

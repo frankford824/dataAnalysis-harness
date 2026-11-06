@@ -19,12 +19,13 @@ document.addEventListener('scroll', (e) => {
 export const router = createRouter({
   history: createWebHashHistory(),
   routes: [
-    { path: '/', name: 'board', component: () => import('./views/BoardView.vue') },
+    { path: '/', name: 'board', meta: { room: 'month' }, component: () => import('./views/BoardView.vue') },
     { path: '/deliver', name: 'deliver', component: () => import('./views/DeliverView.vue') },
     { path: '/freight', name: 'freight-review', component: () => import('./views/FreightReview.vue') },
     {
       path: '/store/:id',
       name: 'period',
+      meta: { room: 'store' },
       component: () => import('./views/PeriodView.vue'),
       props: true,
     },

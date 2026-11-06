@@ -143,16 +143,18 @@ def install(app,workspace,model,actor,*,lease_seconds=180,clock=time.time):
             if changed:
                 conn.execute("UPDATE automation_attempt SET state='interrupted' WHERE state='worker_running' AND id IN (SELECT worker_attempt_id FROM automation_case WHERE lease_owner=?)",(identity['id'],))
                 conn.execute("UPDATE automation_case SET lease_owner='',lease_until=0,lease_token=lease_token+1 WHERE lease_owner=?",(identity['id'],))
-                from .source_recovery import configuration_changed
-                configuration_changed(ws,identity['id'],body.configuration_sha,model=model(),stamp=int(clock()))
-            from .source_recovery import retry_due
-            retry_due(ws,model(),identity['id'],int(clock()))
             for lease in body.leases:
                 try:
                     case,_=owned(ws,lease.job_id,identity,lease.lease_token)
                     conn.execute('UPDATE automation_case SET lease_until=? WHERE id=? AND lease_owner=? AND lease_token=?',
                         (int(clock())+lease_seconds,case['id'],identity['id'],lease.lease_token));renewed.append(lease.job_id)
                 except HTTPException:rejected.append(lease.job_id)
+        # The scan of pending source work used to sit inside the heartbeat
+        # write. It now runs after that write commits, and only the rows that
+        # actually change take a short transaction of their own.
+        from .source_recovery import configuration_changed,retry_due
+        if changed:configuration_changed(ws,identity['id'],body.configuration_sha,model=model(),stamp=int(clock()))
+        retry_due(ws,model(),identity['id'],int(clock()))
         return {'agent_id':identity['id'],'status':body.status,'renewed':renewed,'rejected':rejected,'server_time':int(clock())}
 
     @router.post('/api/v1/agent-jobs/claim')
@@ -165,45 +167,49 @@ def install(app,workspace,model,actor,*,lease_seconds=180,clock=time.time):
         if source_capable:
             from .source_recovery import ensure_date_demands
             ensure_date_demands(ws,model())
-        with ws.transaction() as conn:
-            for _ in range(32):
-                row=conn.execute("SELECT * FROM automation_case c WHERE status='processing' AND stage IN ('gathering','queued','retry_wait') AND lease_until<=? AND (? OR NOT EXISTS(SELECT 1 FROM automation_attempt a WHERE a.case_id=c.id AND a.input_sha=c.input_sha AND a.state='source_queued')) AND NOT EXISTS(SELECT 1 FROM period p WHERE p.store_id=c.store_id AND p.period=c.period AND p.state='closed') ORDER BY updated_at,id LIMIT 1",(int(clock()),int(source_capable))).fetchone()
-                if not row:return Response(status_code=204)
-                from .automation_actions import _month as month,_case
-                current=next(r for r in month(ws,model(),row['period'])['stores'] if r['store_id']==row['store_id'])
+        from .automation_actions import month as evaluate_month,_case
+        claimable="status='processing' AND stage IN ('gathering','queued','retry_wait')"
+        for _ in range(32):
+            row=ws.conn.execute("SELECT * FROM automation_case c WHERE "+claimable+" AND lease_until<=? AND (? OR NOT EXISTS(SELECT 1 FROM automation_attempt a WHERE a.case_id=c.id AND a.input_sha=c.input_sha AND a.state='source_queued')) AND NOT EXISTS(SELECT 1 FROM period p WHERE p.store_id=c.store_id AND p.period=c.period AND p.state='closed') ORDER BY updated_at,id LIMIT 1",(int(clock()),int(source_capable))).fetchone()
+            if not row:return Response(status_code=204)
+            # The whole-month check is the slow part. It stays outside the write
+            # lock; concurrent claims share one evaluation.
+            current=next(r for r in evaluate_month(ws,model(),row['period'])['stores'] if r['store_id']==row['store_id'])
+            with ws.transaction() as conn:
                 _case(conn,current)
                 row=conn.execute('SELECT * FROM automation_case WHERE id=?',(row['id'],)).fetchone()
-                if row['status']=='processing' and row['stage'] in {'gathering','queued','retry_wait'}:break
-            else:return Response(status_code=204)
-            job_id=journal.ident();token=row['lease_token']+1
-            changed=conn.execute('UPDATE automation_case SET lease_owner=?,lease_token=?,lease_until=?,worker_attempt_id=? WHERE id=? AND lease_token=? AND lease_until<=?',
-                (identity['id'],token,int(clock())+lease_seconds,job_id,row['id'],row['lease_token'],int(clock())))
-            if not changed.rowcount:return Response(status_code=204)
-            if row['worker_attempt_id']:
-                conn.execute("UPDATE automation_attempt SET state='interrupted' WHERE id=? AND state='worker_running'",(row['worker_attempt_id'],))
-            from .automation_handoff import context_sha
-            source_context=context_sha(ws,model(),row['store_id'],row['period'],row['input_sha'])
-            worker_configuration=conn.execute('SELECT configuration_sha FROM automation_worker WHERE id=?',(identity['id'],)).fetchone()
-            metadata={'owner':identity['id'],'lease_token':token,'case_id':row['id'],'source_context_sha':source_context,
-                'worker_configuration_sha':worker_configuration[0] if worker_configuration else ''}
-            from . import source_recovery
-            source_task=source_recovery.queued(ws,row['id'],row['input_sha']) if source_capable else None
-            if source_task:
-                metadata['source_task_id']=source_task['id']
-            conn.execute('INSERT INTO automation_attempt VALUES(?,?,?,?,?,?,?)',
-                (job_id,row['id'],job_id,row['input_sha'],'worker_running',journal.encoded(metadata),journal.now()))
-            aid=service_auth(ws,'worker-claim:'+job_id,identity,'worker.claim',row['input_sha'],metadata)
-            case={'id':row['id'],'store_id':row['store_id'],'period':row['period'],'input_sha':row['input_sha'],
-                'reason_codes':[i['code'] for i in json.loads(row['issues_json'])],'run_id':row['run_id'],'source_context_sha':source_context}
-            result={'id':job_id,'kind':'recompute','idempotency_key':journal.digest([row['id'],row['input_sha'],source_context,'business-evidence.v1']),
-                'payload':{'automation_case':case,'lease_token':token,'scope':'business'}}
-            if source_task:
-                source=json.loads(source_task['result_json'])
-                result['idempotency_key']=journal.digest([source_task['id'],source['plan_sha256'],token])
-                result['payload'].update(capability='source_recovery',source_task={
-                    'task_id':source_task['id'],'plan_sha256':source['plan_sha256']})
-            journal.finish(conn,'worker-claim:'+job_id,'worker.claim',journal.digest(result),aid,result)
-            return result
+                if row['status']!='processing' or row['stage'] not in {'gathering','queued','retry_wait'} or row['lease_until']>int(clock()):
+                    continue
+                job_id=journal.ident();token=row['lease_token']+1
+                changed=conn.execute('UPDATE automation_case SET lease_owner=?,lease_token=?,lease_until=?,worker_attempt_id=? WHERE id=? AND lease_token=? AND lease_until<=?',
+                    (identity['id'],token,int(clock())+lease_seconds,job_id,row['id'],row['lease_token'],int(clock())))
+                if not changed.rowcount:continue
+                if row['worker_attempt_id']:
+                    conn.execute("UPDATE automation_attempt SET state='interrupted' WHERE id=? AND state='worker_running'",(row['worker_attempt_id'],))
+                from .automation_handoff import context_sha
+                source_context=context_sha(ws,model(),row['store_id'],row['period'],row['input_sha'])
+                worker_configuration=conn.execute('SELECT configuration_sha FROM automation_worker WHERE id=?',(identity['id'],)).fetchone()
+                metadata={'owner':identity['id'],'lease_token':token,'case_id':row['id'],'source_context_sha':source_context,
+                    'worker_configuration_sha':worker_configuration[0] if worker_configuration else ''}
+                from . import source_recovery
+                source_task=source_recovery.queued(ws,row['id'],row['input_sha']) if source_capable else None
+                if source_task:
+                    metadata['source_task_id']=source_task['id']
+                conn.execute('INSERT INTO automation_attempt VALUES(?,?,?,?,?,?,?)',
+                    (job_id,row['id'],job_id,row['input_sha'],'worker_running',journal.encoded(metadata),journal.now()))
+                aid=service_auth(ws,'worker-claim:'+job_id,identity,'worker.claim',row['input_sha'],metadata)
+                case={'id':row['id'],'store_id':row['store_id'],'period':row['period'],'input_sha':row['input_sha'],
+                    'reason_codes':[i['code'] for i in json.loads(row['issues_json'])],'run_id':row['run_id'],'source_context_sha':source_context}
+                result={'id':job_id,'kind':'recompute','idempotency_key':journal.digest([row['id'],row['input_sha'],source_context,'business-evidence.v1']),
+                    'payload':{'automation_case':case,'lease_token':token,'scope':'business'}}
+                if source_task:
+                    source=json.loads(source_task['result_json'])
+                    result['idempotency_key']=journal.digest([source_task['id'],source['plan_sha256'],token])
+                    result['payload'].update(capability='source_recovery',source_task={
+                        'task_id':source_task['id'],'plan_sha256':source['plan_sha256']})
+                journal.finish(conn,'worker-claim:'+job_id,'worker.claim',journal.digest(result),aid,result)
+                return result
+        return Response(status_code=204)
 
     @router.post('/api/v1/agent-questions/claim')
     def claim_question(body:Claim,request:Request):

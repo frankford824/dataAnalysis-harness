@@ -92,7 +92,7 @@ def install_reader(conn):
 
     json_columns = {'result', 'shown_result', 'model_json', 'rules_json', 'summary_json',
                     'overview_json', 'commission_json', 'products_slim_json',
-                    'products_json', 'statement_json', 'manual_cost_json'}
+                    'products_json', 'statement_json', 'manual_cost_json', 'result_json'}
 
     def row(cursor, values):
         # User-supplied names/notes are free text even if they happen to start

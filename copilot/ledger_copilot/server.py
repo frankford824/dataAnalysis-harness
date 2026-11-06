@@ -51,6 +51,16 @@ class Chat(BaseModel):
     user: str = ''
     files: list[dict] = []
     thinking: str = 'off'
+    trigger: str = ''
+    subject: dict | None = None
+
+
+class Arrive(BaseModel):
+    store_id: str = ''
+    period: str = ''
+    kind: str = 'materials'
+    note: str = ''
+    items: list[dict] = []
 
 
 class Steer(BaseModel):
@@ -108,14 +118,55 @@ def _single(*items):
     return StreamingResponse(stream(), media_type='text/event-stream', headers=SSE_HEADERS)
 
 
+def _live(thread_id):
+    with _tasks_lock:
+        rows = [t for t in _tasks.values() if t['run_id'] in _inboxes and t['thread_id'] == thread_id
+                and t['status'] in {'queued', 'running'}]
+    return max(rows, key=lambda t: t['_started'], default=None)
+
+
+def _merge_into(live, decision):
+    """同一位还在这间房里跑时，新输入并进这一轮，不另开，也不停掉。"""
+    if not live:
+        return False
+    if decision.get('kind') == 'pending':
+        return True
+    if decision.get('kind') in {'silent', 'refuse'}:
+        return False
+    running = live.get('bot') or ''
+    named = decision.get('bot') or ''
+    if not running:
+        return decision.get('kind') != 'bot'
+    return named == running
+
+
+def _join(body, live):
+    prompt = agent.steer(live['thread_id'], body.text, body.files, body.user)
+    with _tasks_lock:
+        inbox = _inboxes.get(live['run_id'])
+    if inbox is not None:
+        inbox.put(prompt)
+    _update_task(live['run_id'], line='收到补充，接着办')
+    return _single(events.sse('thread', {'thread_id': live['thread_id'], 'title': store.thread(live['thread_id'])['title']
+                                         if store.thread(live['thread_id']) else '', 'run_id': live['run_id']}),
+                   events.sse('merged', {'run_id': live['run_id'], 'asker': live.get('user') or ''}),
+                   events.sse('done', None))
+
+
 @app.post('/api/agent/chat')
 def chat(body: Chat):
+    body.thread_id = agent.bind_thread(body.thread_id, body.page)
     group = body.thread_id == store.GROUP
-    if group and COLLEAGUE.match(body.text):
+    if agent.human_only(body.thread_id, body.text):
         thread_id, message_id, _ = agent.post_message(store.GROUP, body.text, body.images, body.page, body.user,
                                                       docs.resolve(body.files))
         return _single(events.sse('thread', {'thread_id': thread_id, 'title': '公共群聊', 'run_id': '', 'message_id': message_id}),
                        events.sse('done', None))
+    decision = agent.choose(body.text, agent.room_kind(body.thread_id, body.page), body.trigger or None,
+                            has_images=bool(body.images or body.files), picker=False)
+    live = _live(body.thread_id or '')
+    if live and _merge_into(live, decision):
+        return _join(body, live)
     same = _duplicate(body.text) if group and not body.images and not body.files else None
     if same:
         thread_id, message_id, _ = agent.post_message(store.GROUP, body.text, body.images, body.page, body.user)
@@ -143,7 +194,7 @@ def chat(body: Chat):
 
 def _resume_unanswered(started):
     for message in store.unanswered(started - 3600, started):
-        if message['thread_id'] == store.GROUP and COLLEAGUE.match(message['text']):
+        if agent.human_only(message['thread_id'], message['text']):
             continue
         body = Chat(thread_id=message['thread_id'], text=message['text'], page=message['page'], user=message['user'],
                     files=message['files'])
@@ -151,12 +202,8 @@ def _resume_unanswered(started):
         _launch(body, resume=message['id'])
 
 
-def _launch(body, resume=None):
+def _launch(body, resume=None, bot=None, trigger=None):
     group = body.thread_id == store.GROUP
-    if not group:
-        previous = _runs.get(body.thread_id or '')
-        if previous:
-            previous.set()
     _prune_tasks()
     outbox = queue.Queue()
     stop = threading.Event()
@@ -166,13 +213,16 @@ def _launch(body, resume=None):
     inbox = _inboxes[run_id] = queue.Queue()
     now = time.time()
     with _tasks_lock:
-        _tasks[run_id] = {'run_id': run_id, 'thread_id': body.thread_id or '', 'user': body.user,
+        _tasks[run_id] = {'run_id': run_id, 'thread_id': body.thread_id or '', 'user': body.user, 'bot': bot or '',
                           'question': (body.text.strip() or ('（文件）' if body.files else '（截图）'))[:80], 'message_id': None, 'status': 'queued',
                           'line': '排队中', 'started_at': datetime.now().astimezone().isoformat(timespec='seconds'),
                           'ms': 0, 'cost_cny': 0.0, 'followers': [], 'cards': [], '_started': now, '_ended': 0}
     events.publish('task', _task_view(_tasks[run_id]))
 
     def emit(kind, value):
+        if kind == 'bot':
+            holder['bot'] = (value or {}).get('bot') or holder.get('bot') or ''
+            _update_task(run_id, bot=holder['bot'])
         if kind == 'thread':
             holder['thread'] = value['thread_id']
             if not group:
@@ -180,7 +230,7 @@ def _launch(body, resume=None):
             _update_task(run_id, thread_id=value['thread_id'], message_id=value.get('message_id'))
         else:
             events.publish('turn', {'thread_id': holder['thread'], 'run_id': run_id, 'user': body.user,
-                                    'kind': kind, 'data': value})
+                                    'bot': holder.get('bot') or '', 'kind': kind, 'data': value})
             if kind == 'step' and value.get('status') == 'running':
                 _update_task(run_id, line=value.get('label') or '处理中')
             elif kind == 'card':
@@ -198,7 +248,8 @@ def _launch(body, resume=None):
                     return
                 _update_task(run_id, status='running', line='在看', _started=time.time())
                 agent.run_turn(body.thread_id, body.text, body.images, body.page, body.user, emit, stop, run_id,
-                               body.files, inbox, resume, body.thinking)
+                               body.files, inbox, resume, body.thinking, bot=bot, trigger=trigger or body.trigger or None,
+                               subject=body.subject)
             if stop.is_set():
                 status = 'stopped'
         except Exception as exc:
@@ -322,15 +373,53 @@ def list_threads():
     return {'threads': store.threads()}
 
 
+@app.get('/api/agent/roster')
+def roster_view(room: str = 'month'):
+    import roster
+    return roster.public(room)
+
+
+@app.post('/api/agent/rooms/arrive')
+def arrive(body: Arrive):
+    """资料或订单流到达某个店月：叫醒资料。这一位还在跑就把新输入并进当前轮。"""
+    items = list(body.items or [])
+    if not items and body.store_id and body.period:
+        items = [{'store_id': body.store_id, 'period': body.period, 'kind': body.kind, 'note': body.note}]
+    result = []
+    for item in items[:12]:
+        store_id = str(item.get('store_id') or '')
+        period = str(item.get('period') or '')
+        if not store_id or not period:
+            continue
+        kind = item.get('kind') or 'materials'
+        note = str(item.get('note') or '')
+        text = ('新的订单到了。' if kind == 'orders' else '新的资料到了。') + note
+        thread_id = f'store:{store_id}:{period}'
+        page = {'room': 'store', 'name': 'period', 'period': period, 'store_id': store_id,
+                'params': {'id': store_id}, 'query': {'period': period}}
+        live = _live(thread_id)
+        if live and (not live.get('bot') or live.get('bot') == '资料'):
+            _join(Chat(thread_id=thread_id, text=text, user='房间', page=page, trigger=kind), live)
+            result.append({'thread_id': thread_id, 'status': 'merged', 'run_id': live['run_id']})
+            continue
+        _launch(Chat(thread_id=thread_id, text=text, user='房间', page=page, trigger=kind), bot='资料', trigger=kind)
+        result.append({'thread_id': thread_id, 'status': 'started'})
+    return {'items': result}
+
+
 @app.get('/api/agent/threads/{thread_id}')
 def get_thread(thread_id: str):
     if thread_id == store.GROUP:
         store.ensure_thread(store.GROUP, '', '') if not store.thread(store.GROUP) else None
     row = store.thread(thread_id)
+    if not row and store.is_room(thread_id):
+        return {'id': thread_id, 'title': agent.room_title(thread_id), 'messages': [], 'running': thread_id in _runs,
+                'room': agent.room_kind(thread_id)}
     if not row:
-        raise HTTPException(404, '话题不存在')
+        raise HTTPException(404, '这间房间还没有对话')
     messages = [m for m in store.messages(thread_id, last=300) if m['role'] in {'user', 'assistant'}]
-    return {'id': row['id'], 'title': row['title'], 'messages': messages, 'running': thread_id in _runs}
+    return {'id': row['id'], 'title': row['title'], 'messages': messages, 'running': thread_id in _runs,
+            'room': agent.room_kind(thread_id)}
 
 
 @app.post('/api/agent/cards/{card_id}/confirm')
@@ -364,7 +453,7 @@ def _pi_run(request):
 @app.get('/internal/pi/setup')
 def pi_setup(request: Request):
     _pi_run(request)
-    return {'tools': tools.SPECS, 'wrap_up_at': agent.WRAP_UP_AT, 'wrap_up': agent.WRAP_UP, 'final': agent.FINAL,
+    return {'tools': agent._specs(run.role), 'wrap_up_at': agent.WRAP_UP_AT, 'wrap_up': agent.WRAP_UP, 'final': agent.FINAL,
             'max_turns': pi_engine.MAX_TURNS}
 
 
@@ -373,9 +462,20 @@ def pi_call(request: Request, body: dict):
     run = _pi_run(request)
     name = body.get('name', '')
     call = {'id': body.get('id', ''), 'function': {'name': name, 'arguments': json.dumps(body.get('args') or {}, ensure_ascii=False)}}
-    if name in {'edit_file', 'write_file'}:
-        run.wants_engineer = True
+    allowed = set()
+    try:
+        import roster
+        allowed = set(roster.tools_of(run.role))
+    except Exception:
+        allowed = set()
+    if allowed and name not in allowed:
+        return {'text': '这轮不能做这件事。'}
     result = agent._call(call, run.thread_id, run.step_emit, run.cards, run.emit, run.role)
+    if name == '交给':
+        try:
+            run.handoff = json.loads(result).get('handoff') or ''
+        except ValueError:
+            run.handoff = ''
     run.results.append(result)
     run.used_tools.add(name)
     return {'text': result}

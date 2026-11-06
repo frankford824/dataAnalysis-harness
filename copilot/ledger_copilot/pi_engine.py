@@ -40,6 +40,7 @@ class Run:
         self.models = []
         self.budget_hit = False
         self.wants_engineer = False
+        self.handoff = ''
         self.results, self.used_tools, self.thinking = [], set(), 'off'
         self.lock = threading.Lock()
 
@@ -71,8 +72,15 @@ def available():
 
 
 def _model_ids():
-    ids = [spec['id'] for role, spec in config.models().items() if role != 'vision']
+    import sys
+    from pathlib import Path
+    root = Path(__file__).resolve().parents[1]
+    if str(root) not in sys.path:
+        sys.path.insert(0, str(root))
+    import roster
+    ids = [spec['id'] for role, spec in config.models().items() if spec.get('id')]
     ids += list(config.FALLBACK.values())
+    ids += roster.model_ids()
     return list(dict.fromkeys(ids))
 
 

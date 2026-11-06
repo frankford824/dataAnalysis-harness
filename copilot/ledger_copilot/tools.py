@@ -655,6 +655,8 @@ SPECS = [
     schema('auto_close_status', '查看最近的自动结账运行结果。', {}),
     schema('run_auto_close', '立即对指定月份执行自动结账（检查全部通过的店铺直接结账，耗时可能几十分钟）。不填则为最近三个已过去的月份。',
            {'periods': {'type': 'array', 'items': S}}),
+    schema('交给', '把这件事交给房间里的另一位同事。先把已经能说清的结论说完，再调用。who 填同事的名字。',
+           {'who': S}, ['who']),
 ]
 
 HANDLERS = {
@@ -676,6 +678,7 @@ DEFAULT_LABEL = {
     'propose_change': '整理修改方案', 'remember': '记住这条信息', 'record_correction': '记录本次纠错',
     'search_memory': '查找以往类似问题', 'auto_close_status': '查看自动结账情况', 'run_auto_close': '执行自动结账',
     'store_metrics': '查经营看板数字', 'sku_cost': '查商品成本价', 'order_lookup': '查这个订单',
+    '交给': '交给另一位同事',
 }
 
 

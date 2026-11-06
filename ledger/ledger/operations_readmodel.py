@@ -9,7 +9,6 @@ import hashlib
 import json
 import re
 import sqlite3
-import threading
 from collections import OrderedDict
 from collections import defaultdict
 from contextlib import closing
@@ -21,7 +20,6 @@ import polars as pl
 
 VERSION = 'operations-20261027.v4'
 _cache = OrderedDict()
-_cache_lock = threading.Lock()
 # 推广费用 = 平台推广 + 补单成本（本金佣金）；客服售后费用只含客服打款。
 PROMOTION = ('ad_cost', 'brushing_cost')
 AFTERSALES = ('small_payment_cost',)
@@ -644,27 +642,22 @@ def read_month(ws, model, period, *, require_detail=False, **scope):
     signature=digest([VERSION,model.model_dump_json(),descriptor,organization_revision,policy_sha])
     details=require_detail or not (scope.get('level','store')=='store' and not any(scope.get(name) for name in ('team_id','person_id','product_id')) and scope.get('managed','all')=='all')
     key=(str(ws.root.resolve()),period,signature,details)
-    with _cache_lock:
-        cached=_cache.get(key)
-        if cached is not None:
-            _cache.move_to_end(key)
-    if cached is not None:
-        return select_report(cached,**scope)
-    inputs, roster, revision = load_inputs(ws,model,period,details=details)
-    inputs=[item for item in inputs if item.store_id not in excluded]
-    month = build_month(inputs,model,period,policy_total,roster,shares)
-    for item in inputs:
-        item.issues.extend(policy_issues)
-    month['organization_revision'] = revision
-    month['overhead_total'] = policy_total
-    month['model_sha'] = digest([model.model_dump_json(),policy_sha])
-    for item in inputs:
-        item.projections=[]
-        item.assignments=[]
-        if item.income is not None:
-            item.income={name:value for name,value in item.income.items() if name not in ('by_spine','detail_proof')}
-    with _cache_lock:
-        _cache[key]=month
-        while len(_cache)>6:
-            _cache.popitem(last=False)
-    return select_report(month,**scope)
+
+    def build():
+        inputs, roster, revision = load_inputs(ws,model,period,details=details)
+        kept=[item for item in inputs if item.store_id not in excluded]
+        month = build_month(kept,model,period,policy_total,roster,shares)
+        for item in kept:
+            item.issues.extend(policy_issues)
+        month['organization_revision'] = revision
+        month['overhead_total'] = policy_total
+        month['model_sha'] = digest([model.model_dump_json(),policy_sha])
+        for item in kept:
+            item.projections=[]
+            item.assignments=[]
+            if item.income is not None:
+                item.income={name:value for name,value in item.income.items() if name not in ('by_spine','detail_proof')}
+        return month
+
+    from .read_cache import cached
+    return select_report(cached(_cache, key, build, 6),**scope)

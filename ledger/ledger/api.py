@@ -282,10 +282,32 @@ async def protect_migrated_commission(request: Request, call_next):
     return await call_next(request)
 
 
+def _wake_rooms(ws, store_ids, kind, periods=None, note=""):
+    """告诉店月房间有新资料或新订单。说不出去也不影响入账。"""
+    pairs = []
+    for row in periods or []:
+        if not isinstance(row, dict):
+            continue
+        store_id = row.get("store_id") or ""
+        period = row.get("period") or ""
+        if store_id and period and row.get("state") != "closed":
+            pairs.append((store_id, period))
+    if not pairs:
+        for store_id in sorted(store_ids or []):
+            states = [item for item in _periods_of_store(ws, store_id) if not item.closed]
+            states.sort(key=lambda item: item.period, reverse=True)
+            pairs.extend((store_id, item.period) for item in states[:3])
+    if not pairs:
+        return
+    from .room_notify import post
+    post(pairs, kind, note)
+
+
 def _apply_nas_files(store_ids: set[str], fingerprint: str) -> None:
     """File receipt and accounting are separate, crash-recoverable steps."""
     from .commission_registry import Registry
     Registry(workspace().root).enqueue_files(store_ids, fingerprint)
+    _wake_rooms(workspace(), store_ids, "materials")
 
 
 def _apply_order_feed(store_ids: set[str], fingerprint: str) -> None:
@@ -295,6 +317,7 @@ def _apply_order_feed(store_ids: set[str], fingerprint: str) -> None:
         ws.note_external_version(store_id, "__order_console__", fingerprint)
     from .commission_registry import Registry
     Registry(ws.root).enqueue_source(store_ids, fingerprint)
+    _wake_rooms(ws, store_ids, "orders")
 
 
 def _periods_of_store(ws: Any, store_id: str) -> list[PeriodState]:
@@ -544,6 +567,10 @@ def upload(files: Annotated[list[UploadFile], File()], token: str = "") -> dict:
         progress.close(token, "出错了")
         raise HTTPException(500, f"交表算账时出错：{exc}") from exc
     progress.close(token)
+    changed = [k for k in result.kept if not k.unchanged]
+    if changed:
+        _wake_rooms(ws, result.stores, "materials", periods=result.periods,
+                    note="、".join(k.name for k in changed[:6]))
     return {
         "summary": result.summary(),
         "kept": [

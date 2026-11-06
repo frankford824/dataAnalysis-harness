@@ -460,6 +460,20 @@ def _queue_retry(ws,row,payload,case,*,reason,stamp,configuration_sha=None):
          journal.encoded(value),journal.now()))
 
 
+def _commit_pending(ws, attempt_id, original_json, write):
+    """Write one pending attempt, after the scan that selected it has released the lock.
+
+    A caller that is already journaling keeps the write in that journal. Everyone
+    else, including the heartbeat, commits this single row and returns.
+    """
+    def apply():
+        fresh=ws.conn.execute('SELECT * FROM automation_attempt WHERE id=?',(attempt_id,)).fetchone()
+        if not fresh or fresh['state']!='source_pending' or fresh['result_json']!=original_json:return False
+        return write(fresh)
+    if ws.conn.in_transaction:return apply()
+    with ws.transaction():return apply()
+
+
 def configuration_changed(ws, worker_id, configuration_sha,*,model=None,stamp=None):
     """Genuine local session/config epochs wake once, independently of time."""
     stamp=int(time.time() if stamp is None else stamp)
@@ -471,11 +485,18 @@ def configuration_changed(ws, worker_id, configuration_sha,*,model=None,stamp=No
             or payload.get('worker_configuration_sha') in (None,'',configuration_sha)):continue
         try:case=_retry_current(ws,model,row,payload,stamp)
         except (Conflict,SourcePending,ValueError,KeyError):continue
-        _queue_retry(ws,row,payload,case,reason='worker_configuration_changed',stamp=stamp,configuration_sha=configuration_sha)
+        def queue(fresh, row=row, payload=payload, case=case):
+            _queue_retry(ws,fresh,payload,case,reason='worker_configuration_changed',stamp=stamp,configuration_sha=configuration_sha)
+            return True
+        _commit_pending(ws,row['id'],row['result_json'],queue)
 
 
 def retry_due(ws,model,worker_id,stamp):
-    """At most one bounded technical retry per authenticated heartbeat."""
+    """At most one bounded technical retry per authenticated heartbeat.
+
+    Selecting due rows does not hold the write lock. Each row that still needs
+    a change is committed on its own.
+    """
     stamp=int(stamp);scheduled=0;day=stamp//86400
     daily=ws.conn.execute("SELECT count(*) FROM automation_attempt WHERE state='source_retry_scheduled' AND json_extract(result_json,'$.worker_id')=? AND json_extract(result_json,'$.day')=?",(worker_id,day)).fetchone()[0]
     rows=ws.conn.execute("SELECT * FROM automation_attempt WHERE state='source_pending' ORDER BY json_extract(result_json,'$.automatic_retry.next_attempt_at'),rowid").fetchall()
@@ -488,22 +509,37 @@ def retry_due(ws,model,worker_id,stamp):
         try:case=_retry_current(ws,model,row,payload,stamp)
         except (Conflict,SourcePending,ValueError,KeyError) as error:
             if getattr(error,'reason',None)=='source_retry_case_busy':continue
-            retry.update(state='held_current_context',next_attempt_at=None,
-                         hold_reason=getattr(error,'reason',None) or 'source_retry_current_input_changed')
-            payload['automatic_retry']=retry
-            ws.conn.execute('UPDATE automation_attempt SET result_json=? WHERE id=?',(journal.encoded(payload),row['id']))
+            hold_reason=getattr(error,'reason',None) or 'source_retry_current_input_changed'
+            def hold(fresh, payload=payload, retry=dict(retry), hold_reason=hold_reason):
+                body=_json(fresh['result_json']);body_retry=dict(body.get('automatic_retry') or retry)
+                body_retry.update(state='held_current_context',next_attempt_at=None,hold_reason=hold_reason)
+                body['automatic_retry']=body_retry
+                ws.conn.execute('UPDATE automation_attempt SET result_json=? WHERE id=?',(journal.encoded(body),fresh['id']))
+                return True
+            _commit_pending(ws,row['id'],row['result_json'],hold)
             continue
         if retry.get('scheduled_count',0)>=len(RETRY_DELAYS):
-            retry.update(state='exhausted',next_attempt_at=None);payload['automatic_retry']=retry
-            ws.conn.execute('UPDATE automation_attempt SET result_json=? WHERE id=?',(journal.encoded(payload),row['id']))
+            def exhaust(fresh, payload=payload, retry=dict(retry)):
+                body=_json(fresh['result_json']);body_retry=dict(body.get('automatic_retry') or retry)
+                body_retry.update(state='exhausted',next_attempt_at=None);body['automatic_retry']=body_retry
+                ws.conn.execute('UPDATE automation_attempt SET result_json=? WHERE id=?',(journal.encoded(body),fresh['id']))
+                return True
+            _commit_pending(ws,row['id'],row['result_json'],exhaust)
             continue
         if daily>=RETRY_DAILY_LIMIT:
-            retry.update(state='daily_limit',next_attempt_at=(day+1)*86400,
-                         hold_reason='source_retry_daily_limit');payload['automatic_retry']=retry
-            ws.conn.execute('UPDATE automation_attempt SET result_json=? WHERE id=?',(journal.encoded(payload),row['id']))
+            def limit(fresh, payload=payload, retry=dict(retry), day=day):
+                body=_json(fresh['result_json']);body_retry=dict(body.get('automatic_retry') or retry)
+                body_retry.update(state='daily_limit',next_attempt_at=(day+1)*86400,hold_reason='source_retry_daily_limit')
+                body['automatic_retry']=body_retry
+                ws.conn.execute('UPDATE automation_attempt SET result_json=? WHERE id=?',(journal.encoded(body),fresh['id']))
+                return True
+            _commit_pending(ws,row['id'],row['result_json'],limit)
             continue
-        _queue_retry(ws,row,payload,case,reason=payload['reason'],stamp=stamp)
-        daily+=1;scheduled+=1
+        def queue(fresh, payload=payload, case=case):
+            _queue_retry(ws,fresh,_json(fresh['result_json']),case,reason=payload['reason'],stamp=stamp)
+            return True
+        if _commit_pending(ws,row['id'],row['result_json'],queue):
+            daily+=1;scheduled+=1
     return scheduled
 
 

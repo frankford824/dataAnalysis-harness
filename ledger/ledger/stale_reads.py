@@ -1,4 +1,4 @@
-"""慢的只读接口：先答上次的结果，后台再刷新。
+"""慢的只读接口：先答上次的结果，后台再刷新。同一地址同时只有一路在算。
 
 这些接口要算几十秒到几分钟，同时被几个页面轮询时会占满线程池，连 /api/version
 都要排队。缓存按完整 URL 存；超过有效期后，下一次读取仍立即返回旧结果，同时在
@@ -6,6 +6,7 @@
 旧数。手动刷新带 X-Ledger-Fresh: 1，同样直接重算。
 改账的动作各自重新校验输入，所以页面上稍旧的数字不会导致改错账。
 """
+import asyncio
 import re
 import threading
 import time
@@ -49,6 +50,7 @@ class _Cache:
     def __init__(self):
         self.entries = OrderedDict()
         self.flights = set()
+        self.waits = {}
         self.lock = threading.Lock()
 
     def put(self, key, status, body, media, headers):
@@ -81,6 +83,35 @@ class _Cache:
 
         threading.Thread(target=run, name='ledger-read-refresh', daemon=True).start()
 
+    async def share(self, key, produce):
+        """One in-flight computation per key. Later requests wait for that result."""
+        loop = asyncio.get_running_loop()
+        with self.lock:
+            fut = self.waits.get(key)
+            owner = fut is None
+            if owner:
+                fut = loop.create_future()
+                self.waits[key] = fut
+        if not owner:
+            return await fut
+        try:
+            value = await produce()
+            if not fut.done():
+                fut.set_result(value)
+            return value
+        except asyncio.CancelledError:
+            if not fut.done():
+                fut.set_exception(RuntimeError('汇总计算已中断'))
+            raise
+        except BaseException as exc:
+            if not fut.done():
+                fut.set_exception(exc)
+            raise
+        finally:
+            with self.lock:
+                if self.waits.get(key) is fut:
+                    self.waits.pop(key, None)
+
 
 def install(app):
     cache = _Cache()
@@ -95,11 +126,14 @@ def install(app):
             if time.monotonic() - entry['at'] > TTL:
                 cache.refresh(request.url.port or 8000, key, _target(request))
             return Response(entry['body'], media_type=entry['media'], headers={**entry['headers'], 'X-Ledger-Cached': '1'})
-        response = await call_next(request)
-        if response.status_code != 200:
-            return response
-        body = b''.join([chunk async for chunk in response.body_iterator])
-        media = response.headers.get('content-type')
-        headers = {k: v for k, v in response.headers.items() if k.lower() not in DROP}
-        cache.put(key, response.status_code, body, media, headers)
-        return Response(body, status_code=200, headers=headers, media_type=media)
+
+        async def produce():
+            response = await call_next(request)
+            body = b''.join([chunk async for chunk in response.body_iterator])
+            media = response.headers.get('content-type')
+            headers = {k: v for k, v in response.headers.items() if k.lower() not in DROP}
+            cache.put(key, response.status_code, body, media, headers)
+            return response.status_code, body, media, headers
+
+        status, body, media, headers = await cache.share(key, produce)
+        return Response(body, status_code=status, headers=headers, media_type=media)

@@ -34,6 +34,7 @@ PRICES = {
     'glm-5.3': {'tiers': [(None, 8, 28)]},
     'deepseek-v4-pro': {'tiers': [(None, 12, 24)]},
     'deepseek-v4.1-flash': {'tiers': [(None, 2, 8)], 'offpeak': (1, 4)},
+    'deepseek-v4.1-flash-1017': {'tiers': [(None, 2, 8)], 'offpeak': (1, 4)},
     'deepseek-v4-flash-0731': {'tiers': [(None, 3, 9)], 'offpeak': (1.5, 4.5)},
 }
 

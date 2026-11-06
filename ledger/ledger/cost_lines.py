@@ -350,28 +350,30 @@ def batch_apply(ws, store_id: str, period: str, run_id: int, content: bytes,
         raise WorkspaceError('批量成本表不能提交：' + result['issues'][0])
     if result['line_revision'] != expected_line_revision:
         raise WorkspaceError('已有人工成本发生变化，请重新预览')
-    with ws.conn as conn:
-        conn.execute('BEGIN IMMEDIATE')
-        active = conn.execute('SELECT id FROM run WHERE store_id=? AND period=? '
-                              'ORDER BY id DESC LIMIT 1', (store_id, period)).fetchone()
-        state = conn.execute('SELECT state FROM period WHERE store_id=? AND period=?',
-                             (store_id, period)).fetchone()
-        if not active or active['id'] != run_id or not state or state['state'] != 'open':
-            raise WorkspaceError('核算结果或账期状态已更新，请重新导出成本表')
-        if revision(ws, store_id, period) != expected_line_revision:
-            raise WorkspaceError('已有人工成本发生变化，请重新预览')
-        for item in result['changes']:
-            previous = conn.execute('SELECT coalesce(max(id),0) FROM cost_line_log '
-                                    'WHERE store_id=? AND period=? AND coverage_key=?',
-                                    (store_id, period, item['coverage_key'])).fetchone()[0]
-            if previous != item['expected_line_revision']:
-                raise WorkspaceError('订单金额已被修改，请重新预览')
-            conn.execute('''INSERT INTO cost_line_log(
-              store_id,period,coverage_key,context_sha,source_run_id,action,
-              amount,reason,at,by) VALUES(?,?,?,?,?,?,?,?,?,?)''',
-              (store_id, period, item['coverage_key'], item['context_sha'], run_id,
-               'save', str(item['amount']), item['reason'],
-               datetime.now(timezone.utc).astimezone().isoformat(timespec='seconds'), by))
+    changes=result['changes']
+    for start in range(0, len(changes), 500):
+        chunk=changes[start:start+500]
+        with ws.transaction() as conn:
+            active = conn.execute('SELECT id FROM run WHERE store_id=? AND period=? '
+                                  'ORDER BY id DESC LIMIT 1', (store_id, period)).fetchone()
+            state = conn.execute('SELECT state FROM period WHERE store_id=? AND period=?',
+                                 (store_id, period)).fetchone()
+            if not active or active['id'] != run_id or not state or state['state'] != 'open':
+                raise WorkspaceError('核算结果或账期状态已更新，请重新导出成本表')
+            if start==0 and revision(ws, store_id, period) != expected_line_revision:
+                raise WorkspaceError('已有人工成本发生变化，请重新预览')
+            for item in chunk:
+                previous = conn.execute('SELECT coalesce(max(id),0) FROM cost_line_log '
+                                        'WHERE store_id=? AND period=? AND coverage_key=?',
+                                        (store_id, period, item['coverage_key'])).fetchone()[0]
+                if previous != item['expected_line_revision']:
+                    raise WorkspaceError('订单金额已被修改，请重新预览')
+                conn.execute('''INSERT INTO cost_line_log(
+                  store_id,period,coverage_key,context_sha,source_run_id,action,
+                  amount,reason,at,by) VALUES(?,?,?,?,?,?,?,?,?,?)''',
+                  (store_id, period, item['coverage_key'], item['context_sha'], run_id,
+                   'save', str(item['amount']), item['reason'],
+                   datetime.now(timezone.utc).astimezone().isoformat(timespec='seconds'), by))
     return {'saved': len(result['changes']), 'amount_total': float(sum(
         (row['amount'] for row in result['changes']), Decimal(0))),
         'line_revision': revision(ws, store_id, period), 'run_id': run_id}

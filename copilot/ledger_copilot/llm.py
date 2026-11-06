@@ -104,8 +104,19 @@ def relay_open(body, thinking='off'):
         body['stream_options'] = {'include_usage': True}
     base, key = config.gateway()
     model_id = body.get('model', '')
-    fallback = next((config.FALLBACK[role] for role, spec in config.models().items()
-                     if spec.get('id') == model_id and role in config.FALLBACK), None)
+    try:
+        import sys
+        from pathlib import Path
+        root = Path(__file__).resolve().parents[1]
+        if str(root) not in sys.path:
+            sys.path.insert(0, str(root))
+        import roster
+        fallback = roster.fallback_for(model_id)
+    except Exception:
+        fallback = None
+    if not fallback:
+        fallback = next((config.FALLBACK[role] for role, spec in config.models().items()
+                         if spec.get('id') == model_id and role in config.FALLBACK), None)
     for candidate in [model_id, fallback] if fallback else [model_id]:
         body['model'] = candidate
         body.pop('thinking_budget', None)

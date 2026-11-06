@@ -5,6 +5,7 @@ import {api} from '../api'
 import {stamp} from '../format'
 import {useApp} from '../store'
 import {clientRequestId} from '../telemetry'
+import {openLedgerRoom} from '../agentClient'
 
 const props=defineProps({period:{type:String,required:true}})
 const emit=defineEmits(['changed'])
@@ -35,6 +36,8 @@ async function run(task,done){
 const recompute=()=>run(async()=>{for(const item of changed.value.filter(i=>i.status==='pending_recompute'))await api.recompute(item.store_id)},'已提交重算，完成后这里会更新')
 const confirmUpgrade=()=>run(()=>api.upgradeConfirm({request_id:clientRequestId(),period:props.period,input_sha:upgrade.value.input_sha}),'已确认新版本结果，Agent 继续自动处理')
 const acknowledge=item=>run(()=>api.agentQuestionAcknowledge(item.question_id),'已处理')
+function openDispute(item){openLedgerRoom({storeId:item.store_id,period:item.period,questionId:item.question_id})}
+function openMonth(){openLedgerRoom({period:props.period})}
 defineExpose({load,count})
 </script>
 
@@ -43,7 +46,7 @@ defineExpose({load,count})
     <h3>待你确认 · {{count}} 件</h3>
     <n-alert v-if="error" type="warning" :bordered="false">{{error}}<n-button text @click="load">重试</n-button></n-alert>
     <article v-if="upgrade?.needs_confirmation" class="card" data-inbox-card="upgrade">
-      <header><strong>新版本核对</strong><span>{{upgrade.same}} 家店结果与旧版本一致，{{upgrade.changed}} 家有变化<template v-if="upgrade.pending_recompute">，{{upgrade.pending_recompute}} 家待重算</template></span></header>
+      <header><strong>新版本核对</strong><span>{{upgrade.same}} 家店结果与旧版本一致，{{upgrade.changed}} 家有变化<template v-if="upgrade.pending_recompute">，{{upgrade.pending_recompute}} 家待重算</template></span><n-button text size="tiny" type="primary" @click="openMonth">在这个月的房间里打开</n-button></header>
       <p class="advice">Agent 建议：逐家看下面的变化，确认无误后点“确认新版本结果”。确认前 Agent 不会自动改这个月的账。</p>
       <ul v-if="detailed.length">
         <li v-for="item in detailed" :key="item.store_id">
@@ -69,7 +72,7 @@ defineExpose({load,count})
       </footer>
     </article>
     <article v-for="item in disputes" :key="item.question_id" class="card" data-inbox-card="dispute" :data-question-state="item.state">
-      <header><strong>员工异议 · {{item.store_name}}</strong><span>{{item.subject?.node_name}} · {{item.asked_by}} · {{stamp(item.asked_at)}}</span></header>
+      <header><button type="button" class="open-room" @click="openDispute(item)"><strong>员工异议 · {{item.store_name}}</strong><span>{{item.subject?.node_name}} · {{item.asked_by}} · {{stamp(item.asked_at)}}</span></button></header>
       <p class="question">{{item.question}}</p>
       <p v-if="item.state==='answered'" class="advice">Agent 核查：{{item.answer}}</p>
       <p v-else class="advice">{{item.failure||'Agent 未能给出核查结果'}}</p>
@@ -82,5 +85,5 @@ defineExpose({load,count})
 </template>
 
 <style scoped>
-.agent-inbox{border:1px solid #f0d9a8;background:#fffaf0;border-radius:8px;padding:18px;margin:16px 0;display:flex;flex-direction:column;gap:12px}.agent-inbox h3{font-size:15px}.card{background:white;border:1px solid #eadfca;border-radius:8px;padding:14px 16px}.card header{display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap;font-size:13px}.card header span{color:#657184;font-size:12px}.advice,.question{font-size:13px;line-height:1.7;margin-top:8px;white-space:pre-wrap;overflow-wrap:anywhere}.advice{color:#35506e}.card ul{padding-left:18px;font-size:12px;margin-top:8px}.card li{margin:8px 0}.card table{border-collapse:collapse;margin-top:4px}.card td{padding:2px 10px 2px 0;font-variant-numeric:tabular-nums}.muted{color:#8a94a6}.pending{font-size:12px;margin-top:8px;line-height:1.8}.pending .names{display:block;color:#4b5565;overflow-wrap:anywhere}.other{font-size:12px;margin-top:6px}.card footer{display:flex;gap:10px;margin-top:12px;flex-wrap:wrap}
+.agent-inbox{border:1px solid #f0d9a8;background:#fffaf0;border-radius:8px;padding:18px;margin:16px 0;display:flex;flex-direction:column;gap:12px}.agent-inbox h3{font-size:15px}.card{background:white;border:1px solid #eadfca;border-radius:8px;padding:14px 16px}.card header{display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap;font-size:13px}.card header span{color:#657184;font-size:12px}.open-room{display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap;width:100%;padding:0;border:0;background:transparent;text-align:left;font:inherit;cursor:pointer}.advice,.question{font-size:13px;line-height:1.7;margin-top:8px;white-space:pre-wrap;overflow-wrap:anywhere}.advice{color:#35506e}.card ul{padding-left:18px;font-size:12px;margin-top:8px}.card li{margin:8px 0}.card table{border-collapse:collapse;margin-top:4px}.card td{padding:2px 10px 2px 0;font-variant-numeric:tabular-nums}.muted{color:#8a94a6}.pending{font-size:12px;margin-top:8px;line-height:1.8}.pending .names{display:block;color:#4b5565;overflow-wrap:anywhere}.other{font-size:12px;margin-top:6px}.card footer{display:flex;gap:10px;margin-top:12px;flex-wrap:wrap}
 </style>
