@@ -264,7 +264,9 @@ def _statement(sl: Slice, model: Model) -> list[dict[str, Any]]:
             continue
         mids=node_metrics(model,node.id)
         partial=None
-        if (not nv.available and nv.display=='amount' and not nv.is_total and (len(mids)==1 or node.id=='n_receipt')
+        # 一行底下可以有多项指标（商品成本＝货本＋退货成本）。覆盖率过线后，
+        # 未核齐的少数订单会让整行不出正式金额；已入账的部分仍要显示，不能看成没资料。
+        if (not nv.available and nv.display=='amount' and not nv.is_total and mids
                 and facts is not None and {'counted','contribution'}<=set(facts.columns)):
             evidence=facts.filter(_claimed_by(model,mids) & pl.col('counted'))
             if evidence.height:

@@ -40,6 +40,8 @@ const ranking=computed(()=>!!currentBoard.value.ranking)
 const identity=computed(()=>identityColumns(level.value))
 const showManaged=computed(()=>managedSplit.value&&compare.value==='current'&&managed.value==='all')
 const exportUrl=computed(()=>api.operationsExport({...params.value,expected_input_sha:report.value?.input_sha,comparison:compare.value}))
+// 人员看板点进某一个人后，当前导出会带上这个人。这份不带人员、店铺筛选，每人每店一行。
+const peopleStoresExportUrl=computed(()=>api.operationsExport({period:period.value,level:'store',split:'person',platform:app.platform,managed:managed.value,expected_input_sha:report.value?.input_sha,comparison:'current',sort_key:'name',sort_direction:'asc'}))
 const storeExportUrl=row=>api.operationsExport({...params.value,level:'product',store_id:row.store_id,offset:0,expected_input_sha:report.value?.input_sha,comparison:'current'})
 const platformLabel=id=>app.platforms?.find(item=>item.id===id)?.name||id||'多平台'
 const busy=ref(false),preview=ref(null),modal=ref(false),decision=ref(null),decisionAmount=ref(''),decisionReason=ref(''),included=ref(true),selectedStore=ref(''),modalError=ref('')
@@ -60,14 +62,15 @@ async function loadReport(quiet=false){
   catch(reason){if(serial===reportSerial)error.value=reason.message}finally{if(serial===reportSerial)loading.value=false}
 }
 const exporting=ref(false)
-async function exportBoard(){
+async function exportBoard(address){
   if(exporting.value)return
   exporting.value=true
+  const url=()=>address?address():exportUrl.value
   try{
-    let response=await fetch(exportUrl.value)
+    let response=await fetch(url())
     if(response.status===409){
       await withFresh(()=>loadReport(true))
-      response=await fetch(exportUrl.value)
+      response=await fetch(url())
       if(response.ok)message.info('数据刚更新，已按最新结果导出')
     }
     if(!response.ok){
@@ -264,7 +267,7 @@ const metricChange=(key,item)=>comparisonCopy(item,(report.value?.metrics||[]).f
       <div class="operations-controls">
         <label v-if="ranking">排名维度<n-select :value="level" :options="[{label:'个人排名',value:'person'},{label:'团队排名',value:'team'}]" @update:value="changeLevel" aria-label="排名维度"/></label>
         <label>经营范围<n-select v-model:value="managed" :options="[{label:'全部（互斥合计）',value:'all'},{label:'托管',value:'managed'},{label:'非托管',value:'standard'}]" aria-label="托管范围"/></label>
-        <n-button v-if="compare==='current'" :type="managedSplit?'primary':'default'" :disabled="managed!=='all'" :aria-pressed="managedSplit" @click="managedSplit=!managedSplit">{{managedSplit?'收起托管拆分':'显示其中托管'}}</n-button><a :href="exportUrl" class="export-link" aria-label="导出当前看板全部记录" @click.prevent="exportBoard">{{exporting?'导出中…':'全部导出'}}</a>
+        <n-button v-if="compare==='current'" :type="managedSplit?'primary':'default'" :disabled="managed!=='all'" :aria-pressed="managedSplit" @click="managedSplit=!managedSplit">{{managedSplit?'收起托管拆分':'显示其中托管'}}</n-button><a :href="exportUrl" class="export-link" aria-label="导出当前看板全部记录" @click.prevent="exportBoard()">{{exporting?'导出中…':'全部导出'}}</a><a v-if="board==='person'" :href="peopleStoresExportUrl" class="export-link" aria-label="导出所有人在各店铺的做货和抽点" @click.prevent="exportBoard(()=>peopleStoresExportUrl)">{{exporting?'导出中…':'所有人所有店铺'}}</a>
       </div>
       <div v-if="trail.length" class="operations-trail"><n-button text @click="reset">全公司</n-button><span v-for="(name,index) in trail" :key="index"> / {{name}}</span></div>
       <p class="small muted operations-note">{{report?.is_final?'当前为已结账依据的完整经营结果。':'当前为阶段结果，缺少依据的金额显示“—”。'}} 点击名称继续查看下一层（店铺→宝贝→订单，人员→店铺）；环比、同比红色表示上升，绿色表示下降。</p>

@@ -49,6 +49,14 @@ const dialog = useDialog()
 
 const info = ref(null)
 const snap = ref(null)
+function unavailableLabel(row) {
+  const reason = row.unavailable_reason || ''
+  if (reason.includes('待核对') || reason.includes('尚未核')) return '待核对 · 点击查看原因'
+  const missing = row.missing_sources || []
+  if (reason && !snap.value?.cost_coverage?.passed && !missing.length) return '可人工确认'
+  if (!reason || reason.includes('还没')) return '资料未齐'
+  return '待核对 · 点击查看原因'
+}
 const loading = ref(false)
 const failed = ref('')
 const refreshFailed = ref(false)
@@ -569,7 +577,7 @@ watch(
                 <span>{{ row.name }}</span>
                 <span v-if="!row.available" class="na" :title="row.unavailable_reason || ''" style="max-width:65%;text-align:right;white-space:normal">
                   <template v-if="row.verified_partial!=null"><span class="num">已入账 {{ money(row.verified_partial) }}</span><br><span class="xs">完整金额待核对 · 点击查看原因</span></template>
-                  <template v-else>{{ row.unavailable_reason?.includes('待核对') ? '待核对 · 点击查看原因' : row.unavailable_reason && !snap.cost_coverage?.passed && row.missing_sources?.length === 0 ? '可人工确认' : '资料未齐' }}</template>
+                  <template v-else>{{ unavailableLabel(row) }}</template>
                 </span>
                 <span v-else class="amt" :class="{ neg: row.value < 0 }">
                   {{ row.display === 'percent' ? percent(row.value) : money(row.value) }}

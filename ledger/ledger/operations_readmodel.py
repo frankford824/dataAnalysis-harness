@@ -18,7 +18,7 @@ from pathlib import Path
 
 import polars as pl
 
-VERSION = 'operations-20261027.v4'
+VERSION = 'operations-20261107.v5'
 _cache = OrderedDict()
 # 推广费用 = 平台推广 + 补单成本（本金佣金）；客服售后费用只含客服打款。
 PROMOTION = ('ad_cost', 'brushing_cost')
@@ -203,11 +203,24 @@ def _components(model):
     return {key:set().union(*(visit(node) for node in refs)) for key,refs in NODES.items()}
 
 
+def _posted_amount(node):
+    """Certified total, or the booked part when the row is still incomplete.
+
+    An unresolved remainder keeps the row uncertified. It does not erase the
+    amount already posted, and it is not filled in as zero.
+    """
+    if not node:
+        return None
+    if node.get('available', True):
+        return decimal(node.get('value'))
+    return decimal(node.get('verified_partial'))
+
+
 def store_metrics(statement):
     nodes = {row.get('id'):row for row in statement or []}
     result = {}
     for key, refs in NODES.items():
-        values = [decimal(nodes.get(ref,{}).get('value')) if nodes.get(ref,{}).get('available',True) else None for ref in refs]
+        values = [_posted_amount(nodes.get(ref)) for ref in refs]
         value = _sum(values)
         result[key] = -value if value is not None and key != 'receipts' else value
     result['labor_cost'] = None
@@ -507,10 +520,10 @@ def load_inputs(ws, model, period, *, details=True):
     return inputs, roster, revision
 
 
-def select_report(month, *, level='store', platform='', store_id='', team_id='', person_id='', product_id='', managed='all'):
-    if level not in {'store','team','person','product','order'} or managed not in {'all','managed','standard'}:
+def select_report(month, *, level='store', platform='', store_id='', team_id='', person_id='', product_id='', managed='all', split=''):
+    if level not in {'store','team','person','product','order'} or managed not in {'all','managed','standard'} or split not in {'','person'} or (split=='person' and level!='store'):
         raise OperationsError('不支持的经营分析维度')
-    scope = dict(period=month['period'],level=level,platform=platform,store_id=store_id,team_id=team_id,person_id=person_id,product_id=product_id,managed=managed)
+    scope = dict(period=month['period'],level=level,platform=platform,store_id=store_id,team_id=team_id,person_id=person_id,product_id=product_id,managed=managed,split=split)
     def match(row):
         return all(not value or row.get(key) == value for key,value in (('platform',platform),('store_id',store_id),('team_id',team_id),('person_id',person_id),('product_id',product_id))) and (managed == 'all' or row['managed'] == managed)
     atoms = [row for row in month['atoms'] if match(row)]
@@ -522,7 +535,11 @@ def select_report(month, *, level='store', platform='', store_id='', team_id='',
             key = {'store':atom['store_id'],'team':atom['team_id'] or '__unclaimed__','person':atom['person_id'] or '__unclaimed__',
                    'product':atom['product_key'] or f'{atom["store_id"]}:__unallocated__',
                    'order':f'{atom["store_id"]}:{atom["order_id"]}:{atom["sub_order_id"]}:{atom["spine_row"]}'}[level]
-            groups[f'{key}|{atom["person_id"]}' if per_person and level != 'person' else key].append(atom)
+            # 店铺按人拆开时，每人每店一行。抽点本来就按人分开，不能再套一层。
+            if split=='person' and level=='store' and not per_person:
+                groups[f"{atom['store_id']}|{atom['person_id'] or '__unclaimed__'}"].append(atom)
+            else:
+                groups[f'{key}|{atom["person_id"]}' if per_person and level != 'person' else key].append(atom)
         return groups
     def total(group):
         values = {name:_sum(row['values'].get(name) for row in group) for name in (*PRIMITIVES,'commission')}
@@ -537,15 +554,16 @@ def select_report(month, *, level='store', platform='', store_id='', team_id='',
         return total(selected)
     def describe(key, group, metrics):
         head = group[0]
-        name = {'store':head['store'],'team':head['team'],'person':head['person'],
+        by_person = split=='person' and level=='store'
+        name = head['person'] if by_person else {'store':head['store'],'team':head['team'],'person':head['person'],
                 'product':head['product_name'] or head['product_id'] or '待归属商品',
                 'order':head['sub_order_id'] or head['order_id'] or '待归属金额'}[level]
         part = managed_part(group)
         return {'id':key,'name':name,'store_id':head['store_id'] if len({row['store_id'] for row in group}) == 1 else '',
             'store':head['store'] if len({row['store_id'] for row in group}) == 1 else '',
             'platform':head['platform'] if len({row['platform'] for row in group}) == 1 else '',
-            'person_id':head['person_id'] if level == 'person' else '', 'team_id':head['team_id'] if level in {'person','team'} else '',
-            'team':head['team'] if level in {'person','team'} else '',
+            'person_id':head['person_id'] if level == 'person' or by_person else '', 'team_id':head['team_id'] if level in {'person','team'} or by_person else '',
+            'team':head['team'] if level in {'person','team'} or by_person else '',
             'product_id':head['product_id'] if level in {'product','order'} else '',
             'order_id':head['order_id'] if level=='order' else '', 'sub_order_id':head['sub_order_id'] if level=='order' else '',
             'order_count':len({(row['store_id'],row['order_id'],row['sub_order_id']) for row in group if row['order_id'] or row['sub_order_id']}),
@@ -553,7 +571,7 @@ def select_report(month, *, level='store', platform='', store_id='', team_id='',
             'run_ids':sorted({row['run_id'] for row in group if row['run_id']}),
             'managed':sorted({row['managed'] for row in group}),'cost_input_scope':head.get('cost_input_scope','')}
     # Store summary remains authoritative even if historical order detail is absent.
-    store_summary = level == 'store' and not any((team_id,person_id,product_id)) and managed == 'all'
+    store_summary = level == 'store' and split!='person' and not any((team_id,person_id,product_id)) and managed == 'all'
     rows, raw_metrics = [], []
     for key,group in grouped(atoms).items():
         metrics = total(group)

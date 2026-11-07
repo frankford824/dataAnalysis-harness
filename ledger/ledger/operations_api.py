@@ -59,14 +59,14 @@ def install(app, workspace, model, registry_factory=None):
         return result
 
     @router.get('/export.csv')
-    def export(period:str,level:str='store',platform:str='',store_id:str='',team_id:str='',person_id:str='',product_id:str='',managed:str='all',expected_input_sha:str='',sort_key:str='profit_after_labor',sort_direction:str='desc',comparison:str='current',sort_basis:str='current'):
+    def export(period:str,level:str='store',platform:str='',store_id:str='',team_id:str='',person_id:str='',product_id:str='',managed:str='all',split:str='',expected_input_sha:str='',sort_key:str='profit_after_labor',sort_direction:str='desc',comparison:str='current',sort_basis:str='current'):
         if comparison not in {'current','mom','yoy'}:raise HTTPException(400,'不支持的比较方式')
-        result = report(period,dict(level=level,platform=platform,store_id=store_id,team_id=team_id,person_id=person_id,product_id=product_id,managed=managed),comparison!='current',expected_input_sha,True)
+        result = report(period,dict(level=level,platform=platform,store_id=store_id,team_id=team_id,person_id=person_id,product_id=product_id,managed=managed,split=split),comparison!='current',expected_input_sha,True)
         out = io.StringIO(newline='')
         writer = csv.writer(out)
         comparison_headers=[] if comparison=='current' else [label for key in operations.DISPLAY for label in (operations.LABELS[key]+'变化额',operations.LABELS[key]+'变化比例',operations.LABELS[key]+'比较说明')]
         managed_headers=['托管：'+operations.LABELS[key] for key in operations.DISPLAY]
-        writer.writerow(['经营口径版本','账期','输入版本','范围版本','记录类型','维度','名称','身份','团队','平台','店铺ID','人员ID','宝贝ID','排名','订单数',*[operations.LABELS[key] for key in operations.DISPLAY],'已保存提成','核算运行ID','比较月份','比较输入版本',*comparison_headers,*managed_headers,'金额精度说明','全范围两位显示尾差（不计金额）'])
+        writer.writerow(['经营口径版本','账期','输入版本','范围版本','记录类型','维度','名称','身份','团队','平台','店铺','店铺ID','人员ID','宝贝ID','排名','订单数',*[operations.LABELS[key] for key in operations.DISPLAY],'已保存提成','核算运行ID','比较月份','比较输入版本',*comparison_headers,*managed_headers,'金额精度说明','全范围两位显示尾差（不计金额）'])
         baseline=result.get('comparison_refs',{}).get(comparison,{})
         def safe(value):
             value = str(value or '')
@@ -76,11 +76,12 @@ def install(app, workspace, model, registry_factory=None):
         rounding_note='；'.join(f"{item['label']}：全范围显示合计{item['displayed_scope_total']}，逐项显示合计{item['displayed_rows_total']}，显示尾差{item['difference']}" for item in result['display_rounding'].values())
         for index,row in enumerate(sort_rows(result['rows'],sort_key,sort_direction,sort_basis)):
             changed=[] if comparison=='current' else [value for key in operations.DISPLAY for value in (row[comparison][key]['delta'],row[comparison][key]['rate'],{'zero_base':'上期为零','negative_base':'上期为负','unavailable':'缺少可比数据','comparable':'可比较'}[row[comparison][key]['state']])]
-            duty='' if level not in {'person','team'} else '未认领' if row['unclaimed'] else '做货'
-            writer.writerow([result['version'],period,result['input_sha'],result['scope_sha'],'归属业绩',level,safe(row['name']),duty,safe(row['team']),safe(row['platform']),safe(row['store_id']),safe(row['person_id']),safe(row['product_id']),row['rank'] or '',row['order_count'],*[row['metrics'].get(key) for key in operations.DISPLAY],row['metrics'].get('commission'),';'.join(map(str,row['run_ids'])),baseline.get('period',''),baseline.get('input_sha',''),*changed,*managed_values(row),'原始精度汇总，界面两位显示；尾差不调整入账' if index==0 else '',rounding_note if index==0 else ''])
+            duty='未认领' if row['unclaimed'] else '做货' if level in {'person','team'} or split=='person' else ''
+            writer.writerow([result['version'],period,result['input_sha'],result['scope_sha'],'归属业绩',level,safe(row['name']),duty,safe(row['team']),safe(row['platform']),safe(row.get('store')),safe(row['store_id']),safe(row['person_id']),safe(row['product_id']),row['rank'] or '',row['order_count'],*[row['metrics'].get(key) for key in operations.DISPLAY],row['metrics'].get('commission'),';'.join(map(str,row['run_ids'])),baseline.get('period',''),baseline.get('input_sha',''),*changed,*managed_values(row),'原始精度汇总，界面两位显示；尾差不调整入账' if index==0 else '',rounding_note if index==0 else ''])
         for row in result['reference_groups']:
-            writer.writerow([result['version'],period,result['input_sha'],result['scope_sha'],'抽点参考（不计业绩）',level,safe(row['person']),'抽点',safe(row['team']),safe(row['platform']),safe(row['store_id']),safe(row['person_id']),safe(row['product_id']),'',row['order_count'],*[row['metrics'].get(key) for key in operations.DISPLAY],row['metrics'].get('commission'),';'.join(map(str,row['run_ids'])),'','',*['']*len(comparison_headers),*managed_values(row),'',''])
-        return Response('\ufeff'+out.getvalue(),media_type='text/csv; charset=utf-8',headers={'Content-Disposition':f'attachment; filename="operations-{period}-{level}.csv"','X-Operations-Input':result['input_sha'],'X-Operations-Scope':result['scope_sha']})
+            writer.writerow([result['version'],period,result['input_sha'],result['scope_sha'],'抽点参考（不计业绩）',level,safe(row['person']),'抽点',safe(row['team']),safe(row['platform']),safe(row.get('store')),safe(row['store_id']),safe(row['person_id']),safe(row['product_id']),'',row['order_count'],*[row['metrics'].get(key) for key in operations.DISPLAY],row['metrics'].get('commission'),';'.join(map(str,row['run_ids'])),'','',*['']*len(comparison_headers),*managed_values(row),'',''])
+        name='person-store' if split=='person' else level
+        return Response('\ufeff'+out.getvalue(),media_type='text/csv; charset=utf-8',headers={'Content-Disposition':f'attachment; filename="operations-{period}-{name}.csv"','X-Operations-Input':result['input_sha'],'X-Operations-Scope':result['scope_sha']})
 
     @router.get('/evidence')
     def evidence(period:str,store_id:str,product_id:str='',order_id:str='',sub_order_id:str='',metric:str='',expected_input_sha:str='',offset:int=Query(0,ge=0),limit:int=Query(50,ge=1,le=200)):
