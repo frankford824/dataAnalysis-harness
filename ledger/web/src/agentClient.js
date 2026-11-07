@@ -65,8 +65,14 @@ const post = body => ({ method: 'POST', headers: { 'content-type': 'application/
 
 export const agentApi = {
   status: () => call('/api/agent/status'),
-  threads: () => call('/api/agent/threads'),
+  threads: (q = '') => call(`/api/agent/threads${q ? `?q=${encodeURIComponent(q)}` : ''}`),
   thread: id => call(`/api/agent/threads/${encodeURIComponent(id)}`),
+  threadOfQuestion: id => call(`/api/agent/threads?question=${encodeURIComponent(id)}`),
+  renameThread: (id, title, user = '') => call(`/api/agent/threads/${encodeURIComponent(id)}/rename`, post({ title, user })),
+  deleteThread: (id, user = '') => call(`/api/agent/threads/${encodeURIComponent(id)}/delete`, post({ user })),
+  restoreThread: (id, user = '') => call(`/api/agent/threads/${encodeURIComponent(id)}/restore`, post({ user })),
+  arrivals: period => call(`/api/agent/arrivals?period=${encodeURIComponent(period)}`),
+  seeArrivals: (storeId, period) => call('/api/agent/arrivals/seen', post({ store_id: storeId, period })),
   stop: (threadId, runId, user = '') => call('/api/agent/stop', post({ thread_id: threadId, ...(runId ? { run_id: runId } : {}), user })),
   // 正在查的这一轮里追加一句：{status:'queued'} 是接上了；{status:'finished'} 是那一轮已经结束。
   steer: body => call('/api/agent/steer', post(body)),
@@ -74,18 +80,15 @@ export const agentApi = {
   rejectCard: (id, user) => call(`/api/agent/cards/${encodeURIComponent(id)}/reject`, post({ user })),
   uiHistory: () => call('/api/agent/ui/history'),
   uiUndo: user => call('/api/agent/ui/undo', post({ user })),
-  roster: room => call(`/api/agent/roster?room=${encodeURIComponent(room || 'month')}`),
 }
 
-const BOT_NAMES = ['核算', '问答', '资料', '程序', '领队', '助手']
-export const mentionsBot = text => new RegExp(`[@＠](${BOT_NAMES.join('|')})`).test(text || '')
-export const toColleague = text => /^\s*[@＠](?!核算|问答|资料|程序|领队|助手)\S/.test(text || '')
-
-export function askInRoom(detail) {
-  window.dispatchEvent(new CustomEvent('ledger-room-ask', { detail }))
+/** 在右边开一段新会话，直接发出 detail.text（这笔不对、新资料到了）。 */
+export function askAgent(detail) {
+  window.dispatchEvent(new CustomEvent('ledger-agent-ask', { detail }))
 }
-export function openLedgerRoom(detail) {
-  window.dispatchEvent(new CustomEvent('ledger-room-open', { detail }))
+/** 在右边打开助手：带 questionId 时打开那条异议所在的会话，否则开新会话并把 detail.draft 填进输入框。 */
+export function openAgent(detail) {
+  window.dispatchEvent(new CustomEvent('ledger-agent-open', { detail }))
 }
 
 /** 传一个附件。请求体就是文件本身，不是表单；onProgress 收到 0~1。
@@ -116,7 +119,7 @@ export function uploadFile(file, name, onProgress) {
 
 const LIVE_EVENTS = ['hello', 'presence', 'users', 'message', 'turn', 'task', 'card_update', 'ui_updated', 'data_updated', 'costs']
 
-/** 订阅大家共用的实时事件：谁在线、群里新消息、任何一轮的进度、任务池、确认卡被谁处理、
+/** 订阅大家共用的实时事件：谁在线、会话里的新消息、任何一轮的进度、任务池、确认卡被谁处理、
  *  界面和数据变了、模型费用。断了 EventSource 自己会重连，这里不另做；连上、断开
  *  通过 onState(true/false) 告诉调用方。返回关闭函数。 */
 export function openEvents(user, onEvent, onState = () => {}) {
@@ -169,7 +172,7 @@ export async function streamChat(body, { signal, onEvent, idleMs = 120000 }) {
   let data = []
 
   const dispatch = () => {
-    // done 的 data 可能就是 null（群里 @同事 时没有回执），照样要派发出去。
+    // done 的 data 可能就是 null（没有回执时），照样要派发出去。
     if (data.length) {
       let payload
       let ok = true

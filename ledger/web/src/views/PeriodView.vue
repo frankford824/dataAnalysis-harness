@@ -1,7 +1,7 @@
 <script setup>
 import AllocationNotice from '../components/AllocationNotice.vue'
 import PeriodCostApproval from '../components/PeriodCostApproval.vue'
-import { askInRoom } from '../agentClient'
+import { askAgent } from '../agentClient'
 /* 一家店一个账期：损益表、自检、所需资料、质量、结账。
  *
  * 损益表每一行都能点开——这是这套系统和一张普通报表的唯一区别。数字点不开，
@@ -115,7 +115,7 @@ async function load(force=false, quiet=false) {
 pauseWhileHidden(watch(()=>[props.id,period.value],()=>{reviewingPeriod.value=false;drill.value=null;orderIssue.value=null;load()}, {immediate:true}))
 useRefresh(()=>load(true,true))
 function onDispute(subject) {
-  askInRoom({
+  askAgent({
     storeId: props.id,
     period: period.value,
     text: '这笔不对',

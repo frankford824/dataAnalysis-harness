@@ -1,4 +1,4 @@
-"""问答和资料仍由现有 Worker 与租约办事。这里只把过程和结果说进房间。
+"""问答和资料仍由现有 Worker 与租约办事。这里只把过程和结果说进提问的那段会话。
 
 没有评测通过的档案时，不换一个别的模型顶上，也不在这里打开模型。
 """
@@ -18,7 +18,7 @@ _LEDGER_ROOT = Path(__file__).resolve().parents[2] / 'ledger'
 _WORKER_ROOT = Path(__file__).resolve().parents[2] / 'agent-worker'
 _MODEL_ROOT = Path(__file__).resolve().parents[2] / 'models' / 'cn-ecommerce'
 _UNANSWERED = '暂时无法回答'
-_WAIT = '我正在看这期账单，看完写在这间房里。'
+_WAIT = '我正在看这期账单，看完接着写在这里。'
 
 
 def qualified(skill):
@@ -115,7 +115,7 @@ def _spoken(item):
     return ''
 
 
-def answer_question(store_id, period, question, user, subject, stop, inbox, step):
+def answer_question(store_id, period, question, user, subject, stop, inbox, step, thread_id=''):
     """走现有提问队列，等 Worker 用租约答完。返回 (正文, question_id)。"""
     if not qualified('qa'):
         return _UNANSWERED, ''
@@ -143,7 +143,7 @@ def answer_question(store_id, period, question, user, subject, stop, inbox, step
         extras.extend(_drain(inbox))
         if not _sleep(stop, 2):
             return '（已停止）', question_id
-    _watch(ws, store_id, period, question_id, user, extras)
+    _watch(ws, store_id, period, question_id, user, extras, thread_id)
     return _WAIT, question_id
 
 
@@ -165,7 +165,7 @@ def _follow(ws, store_id, period, user, extras, stop, deadline):
     return ''
 
 
-def _watch(ws, store_id, period, question_id, user, extras):
+def _watch(ws, store_id, period, question_id, user, extras, thread_id=''):
     def wait():
         for _ in range(40):
             item = _view(ws, question_id)
@@ -181,15 +181,15 @@ def _watch(ws, store_id, period, question_id, user, extras):
                             if more:
                                 break
                             time.sleep(3)
-                _post(store_id, period, spoken if not more else spoken + '\n\n' + more, question_id)
+                _post(store_id, period, spoken if not more else spoken + '\n\n' + more, question_id, thread_id)
                 return
             time.sleep(3)
     import threading
     threading.Thread(target=wait, name='room-qa', daemon=True).start()
 
 
-def _post(store_id, period, text, question_id):
-    thread_id = f'store:{store_id}:{period}'
+def _post(store_id, period, text, question_id, thread_id=''):
+    thread_id = thread_id or f'store:{store_id}:{period}'
     if not store.thread(thread_id):
         store.ensure_thread(thread_id, f'{store_id} {period}', '')
     receipt = {'bot': '问答', 'model': '', 'tokens': 0, 'cost_cny': 0, 'reply_to': None, 'question_id': question_id}

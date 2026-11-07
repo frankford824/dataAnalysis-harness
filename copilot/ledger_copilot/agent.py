@@ -1,4 +1,4 @@
-"""一间房间里的一轮：先定是哪位同事，再用这位的模型和工具把话说完。"""
+"""会话里的一轮：后台先定由哪位同事办，再用这位的模型和工具把话说完。"""
 import base64
 import json
 import queue
@@ -53,12 +53,10 @@ def mentioned(text):
 
 
 def human_only(thread_id, text):
-    """公共群聊里，没点到同事名字，或开头是在 @某个人，bot 不说话。"""
+    """只有开头在 @某个人时，才不叫模型。没点名的话由模型自己分派。"""
     if thread_id != store.GROUP:
         return False
-    if _HUMAN_AT.match(text or ''):
-        return True
-    return not mentioned(text)
+    return bool(_HUMAN_AT.match(text or ''))
 
 
 def room_kind(thread_id, page=None):
@@ -93,10 +91,8 @@ def room_from_page(page):
 
 
 def bind_thread(thread_id, page):
-    if thread_id == store.GROUP:
-        return store.GROUP
-    room = room_from_page(page)
-    return room or thread_id
+    """会话由人自己开，不跟着页面换。页面只当背景带给模型。"""
+    return thread_id or uuid.uuid4().hex[:12]
 
 
 def parse_room(thread_id):
@@ -133,7 +129,7 @@ def choose(text, room, trigger=None, *, has_images=False, original=None, picker=
     picture = (text or '').strip()
     routed = basis or picture
     richer = (basis + '\n' + picture).strip() if picture and picture != basis else routed
-    if room == 'group' and (_HUMAN_AT.match(routed) or not mentioned(routed)):
+    if room == 'group' and _HUMAN_AT.match(routed):
         return {'kind': 'silent', 'bot': '', 'via': 'group'}
     # 反结账、已结账、实发、空值当 0：点了名也不交给程序或核算。
     refused = _refusal(richer)
@@ -158,9 +154,22 @@ def choose(text, room, trigger=None, *, has_images=False, original=None, picker=
     return picked
 
 
+_BOOKS = re.compile(r'利润|成本|费用|金额|亏|赚|毛利|净利|偏低|偏高|差额|对不上|入账|科目|算一算|为什么')
+_FILES = re.compile(r'资料|缺什么|账单|对账单|文件|没到|补录|导入|附件')
+
+
+def _route_work(text):
+    """挑选模型没给出干活的人时，按这句话自己定，不再反问找谁。"""
+    if _FILES.search(text or ''):
+        return '资料'
+    if _BOOKS.search(text or ''):
+        return '核算'
+    return '问答'
+
+
 def _pick(text, room):
-    """温度 0，只收这间房可叫名单里的一个名字。1.5 秒回不来就由领队问一句，到此结束。"""
-    names = team.callable_names(room)
+    """温度 0，只从核算、问答、资料、程序里收一个名字。领队不接活。"""
+    names = [name for name in team.callable_names(room) if name != '领队'] or ['核算', '问答', '资料', '程序']
     prompt = ('你只从名单里选一个名字来处理下面这句话。只回复那个名字，不要解释，不要做别的事。\n'
               f'名单：{"、".join(names)}\n\n这句话：{(text or "")[:1500]}')
     messages = [{'role': 'user', 'content': prompt}]
@@ -169,20 +178,12 @@ def _pick(text, room):
                                  extra={'temperature': 0})
     except Exception as exc:
         store.log_event('pick_error', {'error': str(exc)[:500]})
-        return {'kind': 'ask', 'bot': '领队', 'via': 'pick', 'failed': True, 'names': names}
+        return {'kind': 'bot', 'bot': _route_work(text), 'via': 'pick', 'announce': True}
     cleaned = (out or '').strip().strip('。．.！!？? \n"「」"\'')
     if cleaned in names:
-        if cleaned == '领队':
-            return {'kind': 'ask', 'bot': '领队', 'via': 'pick', 'failed': False, 'names': names}
         return {'kind': 'bot', 'bot': cleaned, 'via': 'pick', 'announce': True}
     store.log_event('pick_rejected', {'text': cleaned[:80]})
-    return {'kind': 'ask', 'bot': '领队', 'via': 'pick', 'failed': False, 'names': names}
-
-
-def _ask_line(names):
-    shown = '、'.join(names)
-    example = names[0] if names else '核算'
-    return f'要找哪一位？这间房里有{shown}。直接点名就行，比如 @{example}。'
+    return {'kind': 'bot', 'bot': _route_work(text), 'via': 'pick', 'announce': True}
 
 
 def _save_images(images):
@@ -268,7 +269,7 @@ def _context(thread_id, query, exclude, bot):
     if general:
         background += '【长期记忆】\n' + general
     if row and row['summary']:
-        background += '\n\n【这间房早前的经过】\n' + row['summary']
+        background += '\n\n【这段对话早前的经过】\n' + row['summary']
     content = _blocks(_stable(thread_id, bot), mark=True) + (_blocks(background.strip()) if background else [])
     messages = [{'role': 'system', 'content': content}]
     group = thread_id == store.GROUP
@@ -309,7 +310,7 @@ def _evidence(messages, user_text, results):
     for m in messages:
         if m['role'] in {'system', 'user', 'tool'}:
             blocks = [m['content']] if isinstance(m['content'], str) else [b.get('text', '') for b in m['content']]
-            parts += [b.split('【本话题早前的经过】')[0] for b in blocks]
+            parts += [b.split('【这段对话早前的经过】')[0] for b in blocks]
     return '\n'.join(parts)
 
 
@@ -388,7 +389,7 @@ def _merge_alternating(messages):
 
 def post_message(thread_id, text, images, page, user, files=(), prompt=None, title=None):
     if not title:
-        title = text.strip().splitlines()[0] if text.strip() else (files[0]['name'] if files else '这间房间')
+        title = text.strip().splitlines()[0] if text.strip() else (files[0]['name'] if files else '新会话')
     thread_id, _ = store.ensure_thread(thread_id, title, user)
     saved = _save_images(images or [])
     message_id = store.add_message(thread_id, 'user', text, images=[u for u, _ in saved], page=page, user=user,
@@ -432,7 +433,7 @@ def run_turn(thread_id, text, images, page, user, emit, stop, run_id='', files=(
              thinking='off', bot=None, trigger=None, subject=None):
     page = page or {}
     thread_id = bind_thread(thread_id, page)
-    title = room_title(thread_id, page)
+    title = room_title(thread_id, page) if store.is_room(thread_id) else None
     files = docs.resolve(files)
     if resume:
         message_id, saved = resume, []
@@ -477,15 +478,12 @@ def run_turn(thread_id, text, images, page, user, emit, stop, run_id='', files=(
         return thread_id
     if decision['kind'] == 'refuse':
         return _finish_say(thread_id, '领队', decision['text'], emit, run_id, message_id, user, started, steps)
-    if decision['kind'] in {'ask', 'chat'}:
-        line = _lead_question(decision, user_text) if decision['kind'] == 'ask' else None
-        if line:
-            return _finish_say(thread_id, '领队', line, emit, run_id, message_id, user, started, steps)
+    if decision['kind'] == 'ask':
+        decision = {'kind': 'bot', 'bot': _route_work(text or user_text), 'via': 'pick', 'announce': True}
+    if decision['kind'] == 'chat':
         return _plain_reply(thread_id, text or user_text, user, emit, stop, run_id, message_id, started, '领队')
 
     current = decision['bot']
-    if decision.get('announce'):
-        _finish_say(thread_id, '领队', f'领队交给了{current}', emit, run_id, message_id, user, started, [], done=False)
     hops = 0
     while current and hops < 3 and not stop.is_set():
         hops += 1
@@ -498,7 +496,8 @@ def run_turn(thread_id, text, images, page, user, emit, stop, run_id='', files=(
 
             step = {'id': uuid.uuid4().hex[:8], 'label': '正在看这期账单', 'status': 'running', 'bot': current}
             step_emit('step', step)
-            spoken, question_id = room_worker.answer_question(store_id, period, question, user, subject, stop, inbox, lambda _label: None)
+            spoken, question_id = room_worker.answer_question(store_id, period, question, user, subject, stop, inbox, lambda _label: None,
+                                                                 thread_id)
             step_emit('step', {**step, 'status': 'done', 'ms': int((time.time() - started) * 1000)})
             _finish_say(thread_id, current, spoken, emit, run_id, message_id, user, started, steps,
                         extra={'question_id': question_id} if question_id else None)
@@ -513,9 +512,8 @@ def run_turn(thread_id, text, images, page, user, emit, stop, run_id='', files=(
                          thinking, started, step_emit, steps, kind)
         if not nxt or nxt == current:
             break
-        _finish_say(thread_id, current, f'{current}交给了{nxt}', emit, run_id, message_id, user, started, [], done=False)
         current = nxt
-        user_text = f'请接着这间房里已经说出来的内容办。刚才的问题是：{(text or user_text)[:1500]}'
+        user_text = f'请接着这段对话里已经说出来的内容办。刚才的问题是：{(text or user_text)[:1500]}'
     else:
         if stop.is_set():
             pass
@@ -534,21 +532,6 @@ def _scope(thread_id, page, subject):
     if subject and not store_id:
         store_id = subject.get('store_id') or store_id
     return store_id, period
-
-
-def _lead_question(decision, user_text):
-    names = decision.get('names') or team.callable_names('store')
-    if decision.get('failed'):
-        try:
-            prompt = ('你是领队。模型挑选失败了。只问一句要找哪一位，列出名单，不查账、不改任何东西。\n名单：' + '、'.join(names))
-            out, _, _ = llm.complete(team.PICK_FALLBACK, [{'role': 'user', 'content': prompt + '\n\n对方说：' + (user_text or '')[:400]}],
-                                     max_tokens=80, timeout=15, extra={'temperature': 0})
-            line = (out or '').strip()
-            if line:
-                return line
-        except Exception as exc:
-            store.log_event('pick_error', {'error': 'fallback ' + str(exc)[:300]})
-    return _ask_line(names)
 
 
 def _finish_say(thread_id, bot, text, emit, run_id, message_id, user, started, steps, extra=None, done=True):
@@ -674,7 +657,7 @@ def _tool_turn(thread_id, bot, user_text, text, page, user, emit, stop, run_id, 
                         handoff = target
                         result = f'已交给{target}。'
                     elif name == '交给':
-                        result = '这间房里不能交给这位。'
+                        result = '这件事不能交给这位。'
                 used_tools.add(name)
                 messages.append({'role': 'tool', 'tool_call_id': call['id'], 'content': result if isinstance(result, str) else json.dumps(result, ensure_ascii=False)})
                 if handoff:

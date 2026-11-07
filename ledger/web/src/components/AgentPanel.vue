@@ -1,21 +1,18 @@
 <script setup>
-/* 右边这间房：店月页是那家店这个月，工作台是「这个月」，群聊仍是同事之间。
- * 房间里每位同事各自说话。没点名时由领队挑选。
+/* 右边的助手：一段一段的会话，大家都能看到。左边打开的页面当背景带上，谁来办由后台定。
  */
-import { ArrowUp, ArrowUpRight, AtSign, Camera, Check, ChevronRight, CircleAlert, CircleX, CornerDownRight, Ellipsis, File, FileArchive, FileSpreadsheet, FileText, LoaderCircle, MessageSquare, PanelRightClose, Paperclip, Presentation, Reply, RotateCw, Square, SquarePen, Undo2, X } from '@lucide/vue'
+import { ArrowUp, ArrowUpRight, Camera, Check, ChevronRight, CircleAlert, CircleX, CornerDownRight, Ellipsis, File, FileArchive, FileSpreadsheet, FileText, History, LoaderCircle, MessageSquare, PanelRightClose, Paperclip, Pencil, Presentation, Reply, RotateCw, Search, Square, SquarePen, Trash2, Undo2, X } from '@lucide/vue'
 import { useDialog, useMessage } from 'naive-ui'
 import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch, watchEffect } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 
-import { agentApi, errorText, mentionsBot, onAgentFailure, openEvents, streamChat, toColleague, uploadFile } from '../agentClient'
+import { agentApi, errorText, onAgentFailure, openEvents, streamChat, uploadFile } from '../agentClient'
 import { setCosts, setCostsLive, yuan } from '../agentCosts'
 import { renderMarkdown } from '../agentMarkdown'
 import { useApp } from '../store'
 import CostChip from './CostChip.vue'
 
-const KEY = { width: 'ledger.agent.width', collapsed: 'ledger.agent.collapsed', user: 'ledger.agent.user', thread: 'ledger.agent.thread', mode: 'ledger.agent.mode', thinking: 'ledger.agent.thinking', notify: 'ledger.agent.notifyAsked' }
-const GROUP = 'group'
-const GROUP_TITLE = '公共群聊'
+const KEY = { width: 'ledger.agent.width', collapsed: 'ledger.agent.collapsed', user: 'ledger.agent.user', thread: 'ledger.agent.session', thinking: 'ledger.agent.thinking', notify: 'ledger.agent.notifyAsked' }
 const MIN_W = 320
 const MAX_W = 720
 const DEFAULT_W = 400
@@ -83,7 +80,6 @@ function resetWidth() {
 }
 function expand() {
   collapsed.value = false
-  if (inGroup.value) groupUnread.value = 0
   nextTick(() => {
     textarea.value?.focus()
     follow(true)
@@ -120,37 +116,16 @@ function markOffline() {
 }
 onAgentFailure(markOffline)
 
-// ---------------------------------------------------------------- 话题
+// ---------------------------------------------------------------- 会话
 
-// 群聊是同事的房间。除此之外，右边跟着左边的页面：店月页一间，工作台「这个月」一间。
-const mode = ref(read(KEY.mode) === 'group' ? 'group' : 'room')
-const inGroup = computed(() => mode.value === 'group')
-const roomKind = computed(() => (inGroup.value ? 'group' : route.meta.room === 'store' ? 'store' : 'month'))
-const roomPeriod = computed(() => String(route.query.period || app.period || ''))
-const roomStore = computed(() => (route.name === 'period' ? String(route.params.id || '') : ''))
-const roomId = computed(() => {
-  if (inGroup.value) return GROUP
-  if (roomKind.value === 'store' && roomStore.value) return `store:${roomStore.value}:${roomPeriod.value}`
-  return `month:${roomPeriod.value}`
-})
-const roomTitle = computed(() => {
-  if (inGroup.value) return GROUP_TITLE
-  if (roomKind.value === 'store') {
-    const name = app.currentStore?.name || '这家店'
-    return `${name}${roomPeriod.value ? ` ${roomPeriod.value}` : ''}`
-  }
-  return roomPeriod.value ? `这个月 ${roomPeriod.value}` : '这个月'
-})
-function fallbackRoster(kind) {
-  if (kind === 'store') return { names: ['领队', '核算', '问答', '资料'], guests: ['程序'] }
-  if (kind === 'month') return { names: ['领队', '资料', '问答'], guests: [] }
-  return { names: [], guests: [] }
+// 会话由人自己开，不跟着页面换。id 在这边生成，第一句还没回来也能切走再切回。
+function newId() {
+  const bytes = new Uint8Array(6)
+  crypto.getRandomValues(bytes)
+  return [...bytes].map(b => b.toString(16).padStart(2, '0')).join('')
 }
-const initialRoster = fallbackRoster(route.meta.room === 'store' ? 'store' : 'month')
-const rosterNames = ref(initialRoster.names)
-const rosterGuests = ref(initialRoster.guests)
-const threadId = ref(roomId.value)
-const threadTitle = ref(roomTitle.value)
+const threadId = ref(read(KEY.thread) || newId())
+const threadTitle = ref('')
 const messages = ref([])
 const loadingThread = ref(false)
 const historyOpen = ref(false)
@@ -158,13 +133,14 @@ const historyBox = ref(null)
 const threads = ref([])
 const threadsLoading = ref(false)
 const threadsError = ref('')
-const groupUnread = ref(0)
-watch(mode, value => write(KEY.mode, value))
+const sessionQuery = ref('')
+const renaming = ref('')
+const renameDraft = ref('')
+const removed = ref(null)
+watch(threadId, value => write(KEY.thread, value))
 const THINKING = [['off', '思考：关'], ['low', '思考：低'], ['medium', '思考：中'], ['high', '思考：高']]
 const thinking = ref(THINKING.some(([v]) => v === read(KEY.thinking)) ? read(KEY.thinking) : 'off')
 watch(thinking, value => write(KEY.thinking, value))
-const BOT_COLOR = { 领队: 'hsl(210 42% 46%)', 核算: 'hsl(152 32% 36%)', 问答: 'hsl(28 48% 42%)', 资料: 'hsl(262 28% 46%)', 程序: 'hsl(340 32% 42%)' }
-function botColor(name) { return BOT_COLOR[name] || 'var(--accent)' }
 
 function normalize(m) {
   return {
@@ -189,103 +165,139 @@ function normalize(m) {
 }
 
 async function openThread(id) {
-  if (streaming.value || !id) return
+  if (!id) return
+  detach()
   historyOpen.value = false
   loadingThread.value = true
   openSteps.value = new Set()
+  threadId.value = id
   try {
     const thread = await agentApi.thread(id)
-    threadId.value = thread?.id || id
-    threadTitle.value = id === GROUP ? GROUP_TITLE : thread?.title || ''
+    if (threadId.value !== id) return
+    threadTitle.value = thread?.title || ''
     messages.value = (thread?.messages || []).map(normalize)
   } catch (e) {
-    // 群聊还没人说过话时服务端可能还没建这个话题，当作空的群。
-    if (e.status === 404 && (id === GROUP || String(id).startsWith('store:') || String(id).startsWith('month:'))) {
-      threadId.value = id
-      threadTitle.value = id === GROUP ? GROUP_TITLE : roomTitle.value
-      messages.value = []
-    } else if (e.status === 404) {
-      threadId.value = roomId.value
-      threadTitle.value = roomTitle.value
-      messages.value = []
-    }
-    else notice.value = errorText(e, '这段对话没打开，请稍后再试')
+    if (threadId.value !== id) return
+    // 还没说过话的新会话服务端没有，当作空的。
+    threadTitle.value = ''
+    messages.value = []
+    if (e.status !== 404) notice.value = errorText(e, '这段对话没打开，请稍后再试')
   } finally {
-    loadingThread.value = false
-    follow(true)
+    if (threadId.value === id) {
+      loadingThread.value = false
+      follow(true)
+    }
   }
 }
 function newThread() {
-  if (streaming.value) return
-  threadId.value = null
+  detach()
+  threadId.value = newId()
   threadTitle.value = ''
   messages.value = []
   openSteps.value = new Set()
   historyOpen.value = false
+  loadingThread.value = false
   nextTick(() => textarea.value?.focus())
 }
-function switchMode(next) {
-  if (next === mode.value || streaming.value) return
-  if (next === 'group') groupUnread.value = 0
-  mode.value = next
+// 正在等回答时切到别的会话：这边不再接这条流，后台照样办完，切回来从服务端取。
+function detach() {
+  const job = activeJob
+  if (!job) return
+  job.detached = true
+  if (liveRun.value) ownRuns.delete(liveRun.value)
+  activeJob = null
+  streaming.value = false
+  liveRun.value = ''
+  cancelRecovery()
+  controller?.abort()
+  controller = null
 }
-async function loadRoster() {
-  const kind = roomKind.value
-  const fallback = fallbackRoster(kind)
-  rosterNames.value = fallback.names
-  rosterGuests.value = fallback.guests
-  try {
-    const data = await agentApi.roster(kind)
-    if (roomKind.value !== kind || !data) return
-    rosterNames.value = data.names?.length ? data.names : fallback.names
-    rosterGuests.value = data.guests || []
-  } catch {
-    if (roomKind.value !== kind) return
-    rosterNames.value = fallback.names
-    rosterGuests.value = fallback.guests
-  }
-}
-watch(roomKind, loadRoster, { immediate: true })
-watch(roomId, (id, prev) => {
-  if (!id || id === prev || streaming.value) return
-  openThread(id)
-})
-const roomPeople = computed(() => {
-  const names = [...rosterNames.value]
-  const extra = [...rosterGuests.value, ...messages.value.map(m => m.bot).filter(Boolean)]
-  for (const name of extra) if (name && !names.includes(name)) names.push(name)
-  return names
-})
-function callBot(name) {
-  draft.value = `@${name} ${draft.value.replace(/^\s*[@＠]\S+\s*/, '')}`
-  nextTick(() => textarea.value?.focus())
-}
+
+let searchTimer = null
 async function loadThreads() {
   threadsLoading.value = true
   threadsError.value = ''
+  const query = sessionQuery.value.trim()
   try {
-    threads.value = ((await agentApi.threads())?.threads || []).filter(t => t.id !== GROUP)
+    const list = (await agentApi.threads(query))?.threads || []
+    if (query === sessionQuery.value.trim()) threads.value = list
   } catch (e) {
-    threadsError.value = errorText(e, '话题列表没取到，请稍后再试')
+    threadsError.value = errorText(e, '会话列表没取到，请稍后再试')
   } finally {
     threadsLoading.value = false
   }
 }
+watch(sessionQuery, () => {
+  clearTimeout(searchTimer)
+  searchTimer = setTimeout(loadThreads, 250)
+})
 function toggleHistory() {
   historyOpen.value = !historyOpen.value
   menuOpen.value = false
+  renaming.value = ''
   if (historyOpen.value) loadThreads()
+}
+const runningThreads = computed(() => new Set(Object.values(tasks.value).filter(t => RUNNING.has(t.status)).map(t => t.thread_id)))
+
+const renameInput = ref(null)
+function startRename(t) {
+  renaming.value = t.id
+  renameDraft.value = t.title || ''
+  nextTick(() => {
+    const el = Array.isArray(renameInput.value) ? renameInput.value[0] : renameInput.value
+    el?.focus()
+    el?.select()
+  })
+}
+async function saveRename(t) {
+  const title = renameDraft.value.trim()
+  renaming.value = ''
+  if (!title || title === t.title) return
+  try {
+    const result = await agentApi.renameThread(t.id, title, displayName.value)
+    t.title = result?.title || title
+    if (t.id === threadId.value) threadTitle.value = t.title
+  } catch (e) {
+    toast.warning(errorText(e, '没改成，请稍后再试'))
+  }
+}
+let removedTimer = null
+async function removeThread(t) {
+  try {
+    await agentApi.deleteThread(t.id, displayName.value)
+  } catch (e) {
+    toast.warning(errorText(e, '没删掉，请稍后再试'))
+    return
+  }
+  threads.value = threads.value.filter(x => x.id !== t.id)
+  removed.value = t
+  clearTimeout(removedTimer)
+  removedTimer = setTimeout(() => { removed.value = null }, 8000)
+  if (t.id === threadId.value) {
+    newThread()
+    historyOpen.value = true
+  }
+}
+async function undoRemove() {
+  const t = removed.value
+  if (!t) return
+  removed.value = null
+  clearTimeout(removedTimer)
+  try {
+    await agentApi.restoreThread(t.id, displayName.value)
+    await loadThreads()
+  } catch (e) {
+    toast.warning(errorText(e, '没恢复成，请稍后再试'))
+  }
 }
 function onPointerDown(e) {
   if (historyOpen.value && historyBox.value && !historyBox.value.contains(e.target)) historyOpen.value = false
   if (tasksOpen.value && taskBox.value && !taskBox.value.contains(e.target)) tasksOpen.value = false
   if (menuOpen.value && menuBox.value && !menuBox.value.contains(e.target)) menuOpen.value = false
-  if (mentionOpen.value && mentionBox.value && !mentionBox.value.contains(e.target)) mentionOpen.value = false
 }
 
-// ---------------------------------------------------------------- 群里谁在线
+// ---------------------------------------------------------------- 头像
 
-const online = ref([])
 // 中文称呼取最后一个字（小王、老张、小李不至于都显示成「小」「老」），其他取首字母。
 function initial(name) {
   const chars = [...(name || '').trim()]
@@ -301,7 +313,7 @@ function tint(name) {
 // ---------------------------------------------------------------- 称呼
 
 const userName = ref(read(KEY.user)) // null 表示还没问过；空字符串是「不填」
-// 群里总得有个名字给别人看；没填称呼的就叫「同事」。
+// 会话大家都能看到，总得有个名字；没填称呼的就叫「同事」。
 const displayName = computed(() => userName.value || '同事')
 const isSelf = name => !!userName.value && name === userName.value
 const isMine = m => !!m.mine || isSelf(m.user)
@@ -338,7 +350,25 @@ function onSelection() {
   if (sel.anchorNode && root.value?.contains(sel.anchorNode)) return
   picked.value = sel.toString().replace(/[ \t]+\n/g, '\n').trim().slice(0, 2000)
 }
+// 左边的页面默认一起带上；点掉以后，换到别的页面再自动带上。
+const pageOff = ref(false)
+const pageLabel = ref('')
+const pageHeading = () => ((document.querySelector('.dock-main main h1') || document.querySelector('.dock-main h1'))?.textContent || '').replace(/\s+/g, ' ').trim()
+let labelTimer = null
+function readPageLabel() {
+  const period = String(route.query.period || app.period || '')
+  const name = route.name === 'period' ? app.currentStore?.name || pageHeading() || '这家店' : pageHeading() || document.title || '当前页面'
+  pageLabel.value = [name.slice(0, 40), period && !name.includes(period) ? period : ''].filter(Boolean).join(' · ')
+}
+watch(() => route.fullPath, () => {
+  pageOff.value = false
+  readPageLabel()
+  clearTimeout(labelTimer)
+  labelTimer = setTimeout(readPageLabel, 600)
+})
+watch(() => app.currentStore?.name, readPageLabel)
 function pageContext() {
+  if (pageOff.value) return picked.value ? { selection: picked.value } : null
   const h1 = document.querySelector('.dock-main main h1') || document.querySelector('.dock-main h1')
   return {
     path: route.fullPath,
@@ -500,20 +530,6 @@ function onKeydown(e) {
   e.preventDefault()
   send()
 }
-// 群里以 @某位同事 开头的话只发给那个人。@核算、@问答、@资料、@程序 才会叫到房间里的人。
-const mentionOpen = ref(false)
-const mentionBox = ref(null)
-const colleagues = computed(() => online.value.filter(name => !isSelf(name)))
-function mention(name) {
-  mentionOpen.value = false
-  draft.value = `@${name} ${draft.value.replace(/^\s*[@＠]\S+\s*/, '')}`
-  nextTick(() => {
-    const el = textarea.value
-    if (!el) return
-    el.focus()
-    el.setSelectionRange(el.value.length, el.value.length)
-  })
-}
 
 // ---------------------------------------------------------------- 滚动
 
@@ -544,6 +560,7 @@ function follow(force = false) {
 const streaming = ref(false)
 let controller = null
 let running = null
+let activeJob = null
 const liveRun = ref('')
 // 自己这个页面发起的轮次和消息。广播回来时据此去重，不在列表里再出现一遍。
 const ownRuns = reactive(new Set())
@@ -558,7 +575,7 @@ function send(preset) {
   if (preparing.value || uploadFailed.value) return
   const fromDraft = typeof preset !== 'string'
   const text = (fromDraft ? draft.value : preset).trim()
-  if (fromDraft && steerRun.value && !(inGroup.value && toColleague(text))) return steer()
+  if (fromDraft && steerRun.value) return steer()
   if (streaming.value) return
   if (!text && !(fromDraft && hasContent.value)) return
   if (userName.value === null) return askName({ preset })
@@ -566,7 +583,7 @@ function send(preset) {
   const files = fromDraft ? takeAttachments() : []
   shotTip.value = false
   primeAlerts()
-  running = run({ text, files, page: pageContext(), thread: inGroup.value ? GROUP : roomId.value })
+  running = run({ text, files, page: pageContext(), thread: threadId.value })
 }
 
 function setReceipt(reply, data) {
@@ -597,8 +614,7 @@ function splitReply(reply, bot) {
 }
 function apply(reply, event, data) {
   if (event === 'thread') {
-    if (data.thread_id) threadId.value = data.thread_id
-    if (data.title && threadId.value !== GROUP) threadTitle.value = data.title
+    if (data.title) threadTitle.value = data.title
   } else if (event === 'step') {
     const step = reply.steps.find(s => s.id === data.id)
     if (step) Object.assign(step, data)
@@ -621,23 +637,12 @@ function apply(reply, event, data) {
 async function run(payload) {
   notice.value = ''
   const at = Date.now()
-  const group = payload.thread === GROUP
-  // 群里只有点到同事名字才有人接。@其他人只是跟人说话，不摆占位。
-  const expectReply = !group || mentionsBot(payload.text)
+  const job = { detached: false }
+  activeJob = job
   messages.value.push({ key: ++seq, id: '', role: 'user', user: userName.value || '', mine: true, text: payload.text, images: [], files: payload.files, at })
   const ask = messages.value[messages.value.length - 1]
-  let reply = { key: ++seq, id: '', role: 'assistant', text: '', steps: [], cards: [], receipt: null, at, streaming: true, error: '', stopped: false, recovering: false, retry: payload, ask }
-  if (expectReply) {
-    messages.value.push(reply)
-    reply = messages.value[messages.value.length - 1]
-  }
-  // 没有占位时，出错了才把这条说明挂到列表里。
-  const surface = () => {
-    if (!messages.value.includes(reply)) {
-      messages.value.push(reply)
-      reply = messages.value[messages.value.length - 1]
-    }
-  }
+  messages.value.push({ key: ++seq, id: '', role: 'assistant', text: '', steps: [], cards: [], receipt: null, at, streaming: true, error: '', stopped: false, recovering: false, retry: payload, ask })
+  let reply = messages.value[messages.value.length - 1]
   picked.value = ''
   streaming.value = true
   follow(true)
@@ -678,7 +683,6 @@ async function run(payload) {
             ask.merged = { runId: data.run_id || '', asker: data.asker || '同事' }
           }
           if (event === 'done' || event === 'error') finished = true
-          if (event === 'card' && group && data.status === 'pending') alertHidden('群里有一张确认卡等人处理', data.title || '助手提出了一处修改，需要有人确认。', `card-${data.card_id}`)
           apply(reply, event, event === 'done' ? raw : data)
           follow()
         },
@@ -687,31 +691,34 @@ async function run(payload) {
     if (!finished) throw Object.assign(new Error('网络中断'), { network: true })
     reply.streaming = false
     if (isEmptyReply(reply)) dropMessage(reply)
+    else alertHidden('助手回答好了', cut(reply.text, 60) || '回答好了，回来看看。', `done-${reply.runId || at}`)
   } catch (e) {
     reply.streaming = false
-    if (e?.name === 'AbortError') {
-      if (expectReply) reply.stopped = true
-    } else if (turnThread && expectReply) await recover(reply, turnThread, payload, at)
-    else if (!turnThread) {
-      surface()
+    if (job.detached) return
+    if (e?.name === 'AbortError') reply.stopped = true
+    else if (turnThread) await recover(reply, turnThread, payload, at)
+    else {
       reply.error = e?.network ? '网络中断，这条没发出去。稍等一会儿再点「重试」。' : errorText(e)
     }
   } finally {
     reply.streaming = false
-    streaming.value = false
-    controller = null
-    liveRun.value = ''
-    follow()
+    if (activeJob === job) {
+      activeJob = null
+      streaming.value = false
+      controller = null
+      liveRun.value = ''
+      follow()
+    }
     if (historyOpen.value) loadThreads()
   }
 }
 
 // ---------------------------------------------------------------- 补充：不打断正在查的那一轮
 
-// 私聊：这个话题正在跑；群聊：自己提的问题还在排队或在查。这时发送键变成「补充」。
+// 这段会话正在办的时候，发送键变成「补充」，接进那一轮。
 const steerTarget = ref('')
 const myTask = computed(() => {
-  const mine = Object.values(tasks.value).filter(t => RUNNING.has(t.status) && (inGroup.value ? t.thread_id === GROUP && isMineTask(t) : t.thread_id && t.thread_id === threadId.value))
+  const mine = Object.values(tasks.value).filter(t => RUNNING.has(t.status) && t.thread_id && t.thread_id === threadId.value)
   return mine.find(t => t.run_id === steerTarget.value) || mine.sort((a, b) => String(b.started_at).localeCompare(String(a.started_at)))[0] || null
 })
 const steerRun = computed(() => myTask.value?.run_id || liveRun.value)
@@ -806,14 +813,14 @@ async function recover(reply, id, payload, sentAt) {
       if (!settled(list, payload, sentAt, ids)) continue
       if (threadId.value === id) {
         messages.value = list.map(normalize)
-        if (thread?.title && id !== GROUP) threadTitle.value = thread.title
+        if (thread?.title) threadTitle.value = thread.title
         follow(true)
       }
       return
     }
     if (!job.cancelled) {
       reply.recovering = false
-      reply.error = '这次的结果还没取回来。过一会儿从「历史话题」重新打开这段对话看看。'
+      reply.error = '这次的结果还没取回来。过一会儿从「会话列表」重新打开这段对话看看。'
     }
   } finally {
     if (recovery === job) recovery = null
@@ -893,15 +900,15 @@ async function decide(card, action) {
 }
 const cardBy = c => (c.by && c.status && c.status !== 'pending' ? `由 ${c.by} ${c.status === 'rejected' ? '拒绝' : '确认'}` : '')
 
-// ---------------------------------------------------------------- 任务：群里每个问题是一个任务
+// ---------------------------------------------------------------- 任务：每个问题是一个任务
 
-// 任务池是服务端给的，所有人的都在里面；群里的大家都看，私聊话题只看自己的。
+// 任务池是服务端给的，所有人的都在里面；这里只看当前会话的和自己提的。
 const tasks = ref({})
 const ACTIVE = new Set(['queued', 'running', 'waiting'])
 const RUNNING = new Set(['queued', 'running'])
 const TASK_STATUS = { queued: '排队中', running: '在查', waiting: '等确认', done: '已完成', stopped: '已停止', failed: '没查完' }
 const isMineTask = t => ownRuns.has(t.run_id) || isSelf(t.user)
-const visibleTasks = computed(() => Object.values(tasks.value).filter(t => t.thread_id === GROUP || t.thread_id === threadId.value || isMineTask(t)))
+const visibleTasks = computed(() => Object.values(tasks.value).filter(t => t.thread_id === threadId.value || isMineTask(t)))
 const activeTasks = computed(() => visibleTasks.value.filter(t => ACTIVE.has(t.status)).sort((a, b) => String(a.started_at).localeCompare(String(b.started_at))))
 const taskOf = runId => (runId && tasks.value[runId]) || null
 const taskByMessage = computed(() => new Map(visibleTasks.value.filter(t => t.message_id != null).map(t => [String(t.message_id), t])))
@@ -929,7 +936,7 @@ function taskTime(t) {
   const started = toDate(t.started_at)
   return started ? seconds(Math.max(0, now.value - started.getTime())) : ''
 }
-const taskWho = t => t.bot || (isMineTask(t) ? '你' : t.user || '同事')
+const taskWho = t => (isMineTask(t) ? '你' : t.user || '同事')
 async function stopTask(t) {
   if (t.stopping) return
   if (t.run_id === liveRun.value && streaming.value) return stop()
@@ -942,22 +949,23 @@ async function stopTask(t) {
     putTask({ run_id: t.run_id, stopping: false })
   }
 }
-// 群里提问消息底下挂的小卡片：还在查、停了或没查完时才挂；查完了看回答本身就够了。
+// 提问底下挂的小卡片：回答没在跟着显示时（别人问的、切走又切回来的），才挂出进度；查完了看回答本身就够了。
 function taskCard(m) {
-  if (!inGroup.value || m.role !== 'user' || m.id === '' || m.id == null) return null
+  if (m.role !== 'user' || m.id === '' || m.id == null) return null
   const t = taskByMessage.value.get(String(m.id))
-  return t && t.status !== 'done' ? t : null
+  if (!t || t.status === 'done') return null
+  return messages.value.some(x => x.role === 'assistant' && x.runId === t.run_id && x.streaming) ? null : t
 }
 // 回答本身已经在一行一行显示进度时，卡片上不再重复那一行。
 const liveReplyOf = runId => messages.value.some(x => x.role === 'assistant' && x.runId === runId && x.streaming && x.steps.length)
 const followersText = t => (t.followers || []).filter(Boolean).map(name => (isSelf(name) ? '你' : name)).join('、')
 
-// ---------------------------------------------------------------- 群里的回答引用原问题
+// ---------------------------------------------------------------- 回答没紧跟在问题后面时，引用原问题
 
 const indexById = computed(() => new Map(messages.value.map((m, i) => [m.id === '' || m.id == null ? '' : `${m.role}:${m.id}`, i])))
 const cut = (text, n) => { const chars = [...String(text || '').replace(/\s+/g, ' ').trim()]; return chars.length > n ? `${chars.slice(0, n).join('')}…` : chars.join('') }
 function quoteOf(m, i) {
-  if (!inGroup.value || m.role !== 'assistant') return null
+  if (m.role !== 'assistant') return null
   const task = taskOf(m.runId)
   const id = m.receipt?.reply_to ?? task?.message_id ?? m.ask?.id
   if (id == null || id === '') return null
@@ -995,7 +1003,7 @@ async function onListClick(e) {
   jumpTimer = setTimeout(() => { jumpFlash.value = '' }, 1000)
 }
 
-// ---------------------------------------------------------------- 实时事件（群聊、别人的轮次、任务、卡片、界面和数据变化）
+// ---------------------------------------------------------------- 实时事件（别人的轮次、任务、卡片、界面和数据变化）
 
 let closeEvents = () => {}
 function connectEvents() {
@@ -1004,11 +1012,9 @@ function connectEvents() {
 }
 function onLive(name, data) {
   if (name === 'hello') {
-    if (Array.isArray(data.users)) online.value = data.users.filter(Boolean)
     setCosts(data.costs)
     setTasks(data.tasks)
   } else if (name === 'costs') setCosts(data)
-  else if (name === 'presence' || name === 'users') online.value = (Array.isArray(data) ? data : data.users || []).filter(Boolean)
   else if (name === 'task') putTask(data)
   else if (name === 'message') onRemoteMessage(data)
   else if (name === 'turn') onRemoteTurn(data)
@@ -1022,15 +1028,7 @@ function onRemoteMessage(data) {
   if (!m) return
   const runId = data.run_id || m.run_id || ''
   if ((runId && ownRuns.has(runId)) || (m.id && ownMessages.has(String(m.id)))) return
-  const fromColleague = m.role === 'user' && !isSelf(m.user)
-  if (data.thread_id === GROUP && fromColleague && userName.value && (m.text || '').includes(`@${userName.value}`)) {
-    alertHidden(`${m.user || '同事'} 在群里提到了你`, m.text || '[附件]', `mention-${m.id || Date.now()}`)
-  }
-  if (data.thread_id !== threadId.value) {
-    if (data.thread_id === GROUP && fromColleague) groupUnread.value += 1
-    return
-  }
-  if (collapsed.value && data.thread_id === GROUP && fromColleague) groupUnread.value += 1
+  if (data.thread_id !== threadId.value) return
   if (m.id && messages.value.some(x => x.id === m.id)) return
   const recent = messages.value.slice(-30).reverse()
   if (m.role === 'assistant') {
@@ -1057,9 +1055,6 @@ function onRemoteMessage(data) {
 
 function onRemoteTurn({ thread_id: thread, run_id: runId, kind, data, bot }) {
   if (!runId || ownRuns.has(runId)) return
-  if (kind === 'card' && thread === GROUP && data?.status === 'pending') {
-    alertHidden('群里有一张确认卡等人处理', data.title || '有一处修改等人确认。', `card-${data.card_id}`)
-  }
   if (thread !== threadId.value) return
   let reply = [...messages.value].reverse().find(x => x.role === 'assistant' && x.runId === runId && x.streaming)
     || [...messages.value].reverse().find(x => x.role === 'assistant' && x.runId === runId)
@@ -1136,8 +1131,6 @@ function alertHidden(title, body, tag) {
     note.onclick = () => {
       window.focus()
       collapsed.value = false
-      switchMode('group')
-      groupUnread.value = 0
       note.close()
     }
   } catch {}
@@ -1263,7 +1256,6 @@ function onEsc(e) {
   if (preview.value) preview.value = ''
   else if (menuOpen.value) menuOpen.value = false
   else if (tasksOpen.value) tasksOpen.value = false
-  else if (mentionOpen.value) mentionOpen.value = false
   else if (historyOpen.value) historyOpen.value = false
   else if (askingName.value) { askingName.value = false; pendingSend = null }
   else if (shotTip.value) shotTip.value = false
@@ -1273,9 +1265,7 @@ function onEsc(e) {
 function guardFocus(e) {
   if (e.target instanceof Node && root.value?.contains(e.target)) e.stopImmediatePropagation()
 }
-async function onOpenRoom(event) {
-  const detail = event.detail || {}
-  if (mode.value === 'group') mode.value = 'room'
+async function goTo(detail) {
   if (detail.storeId) await router.push({ name: 'period', params: { id: detail.storeId }, query: detail.period ? { period: detail.period } : {} }).catch(() => {})
   else if (detail.period) {
     app.pick({ period: detail.period })
@@ -1283,28 +1273,41 @@ async function onOpenRoom(event) {
   }
   collapsed.value = false
   await nextTick()
-  const id = detail.storeId ? `store:${detail.storeId}:${detail.period || ''}` : `month:${detail.period || roomPeriod.value}`
-  if (threadId.value !== id) await openThread(id)
-  await nextTick()
-  const hit = messages.value.find(m => m.questionId && m.questionId === detail.questionId)
-  if (hit?.id) jumpTo(hit.id)
 }
-async function onAskRoom(event) {
+// 别处点「问助手」：员工异议打开原来那段会话；其他的开一段新会话，把话先填进输入框。
+async function onOpenAgent(event) {
   const detail = event.detail || {}
-  if (!detail.storeId || streaming.value) return
-  if (mode.value === 'group') mode.value = 'room'
-  await router.push({ name: 'period', params: { id: detail.storeId }, query: detail.period ? { period: detail.period } : {} }).catch(() => {})
-  collapsed.value = false
-  const thread = `store:${detail.storeId}:${detail.period || ''}`
-  threadId.value = thread
-  threadTitle.value = roomTitle.value
+  await goTo(detail)
+  if (detail.questionId) {
+    const found = await agentApi.threadOfQuestion(detail.questionId).catch(() => null)
+    if (found?.thread_id) {
+      if (threadId.value !== found.thread_id) await openThread(found.thread_id)
+      await nextTick()
+      const hit = messages.value.find(m => m.questionId && m.questionId === detail.questionId)
+      if (hit?.id) jumpTo(hit.id)
+      return
+    }
+  }
+  newThread()
+  if (detail.draft) draft.value = detail.draft
+}
+// 别处直接发一句（这笔不对、新资料到了）：开一段新会话发出去。
+async function onAskAgent(event) {
+  const detail = event.detail || {}
+  if (!detail.storeId) return
+  await goTo(detail)
+  newThread()
+  if (userName.value === null) {
+    draft.value = detail.text || ''
+    return askName(null)
+  }
   const name = detail.subject?.node_name || ''
-  run({
+  running = run({
     text: name ? `这笔不对：${name}` : (detail.text || '这笔不对'),
     files: [],
     page: { ...pageContext(), room: 'store', name: 'period', period: detail.period || '', store_id: detail.storeId, params: { id: detail.storeId }, query: { period: detail.period || '' } },
-    thread,
-    trigger: 'dispute',
+    thread: threadId.value,
+    trigger: detail.trigger || 'dispute',
     subject: detail.subject?.node_id ? { node_id: detail.subject.node_id, row: detail.subject.row || {} } : null,
   })
 }
@@ -1315,9 +1318,11 @@ onMounted(() => {
   document.addEventListener('selectionchange', onSelection)
   document.addEventListener('pointerdown', onPointerDown, true)
   loadStatus().then(scheduleStatus)
-  if (roomId.value) openThread(roomId.value)
-  window.addEventListener('ledger-room-ask', onAskRoom)
-  window.addEventListener('ledger-room-open', onOpenRoom)
+  openThread(threadId.value)
+  readPageLabel()
+  labelTimer = setTimeout(readPageLabel, 800)
+  window.addEventListener('ledger-agent-ask', onAskAgent)
+  window.addEventListener('ledger-agent-open', onOpenAgent)
   connectEvents()
   loadUiHistory()
   nextTick(autosize)
@@ -1337,14 +1342,17 @@ onUnmounted(() => {
   clearTimeout(statusTimer)
   clearTimeout(reloadTimer)
   clearTimeout(jumpTimer)
+  clearTimeout(labelTimer)
+  clearTimeout(searchTimer)
+  clearTimeout(removedTimer)
   clearInterval(tick)
   for (const a of attachments.value) removeAttachment(a)
   window.removeEventListener('focus', guardFocus, true)
   window.removeEventListener('resize', onResize)
   document.removeEventListener('selectionchange', onSelection)
   document.removeEventListener('pointerdown', onPointerDown, true)
-  window.removeEventListener('ledger-room-ask', onAskRoom)
-  window.removeEventListener('ledger-room-open', onOpenRoom)
+  window.removeEventListener('ledger-agent-ask', onAskAgent)
+  window.removeEventListener('ledger-agent-open', onOpenAgent)
   document.documentElement.style.removeProperty('--agent-dock')
   document.body.classList.remove('agent-resizing')
 })
@@ -1356,19 +1364,18 @@ onUnmounted(() => {
     class="agent"
     :class="{ collapsed, overlay: overlay && !collapsed, resizing }"
     :style="{ width: `${dockWidth}px` }"
-    aria-label="房间"
+    aria-label="助手"
     @dragenter="onDragEnter"
     @dragover="onDragOver"
     @dragleave="onDragLeave"
     @drop="onDrop"
     @keydown.esc="onEsc"
   >
-    <button v-if="collapsed" type="button" class="agent-tab" title="展开这间房" @click="expand">
+    <button v-if="collapsed" type="button" class="agent-tab" title="展开助手" @click="expand">
       <MessageSquare :size="16" aria-hidden="true" />
-      <span class="agent-tab-text">房间</span>
-      <span v-if="streaming" class="spin" />
+      <span class="agent-tab-text">助手</span>
+      <span v-if="streaming || myTask" class="spin" />
       <i v-else class="agent-dot" :class="{ on: status.online === true }" />
-      <b v-if="groupUnread" class="agent-unread" :aria-label="`群聊有 ${groupUnread} 条新消息`">{{ groupUnread > 99 ? '99+' : groupUnread }}</b>
     </button>
 
     <div v-show="!collapsed" class="agent-inner" :style="overlay ? null : { width: `${panelWidth}px` }">
@@ -1391,11 +1398,52 @@ onUnmounted(() => {
 
       <header class="agent-head">
         <div class="agent-brand">
-          <strong>{{ roomTitle }}</strong>
+          <strong>助手</strong>
           <span class="agent-status" :title="statusText"><i class="agent-dot" :class="{ on: status.online === true }" /><span class="agent-status-text">{{ statusText }}</span></span>
         </div>
         <div class="agent-actions">
           <CostChip compact placement="bottom-end" />
+          <button type="button" class="agent-btn" title="开一段新会话" aria-label="新会话" @click="newThread">
+            <SquarePen :size="14" aria-hidden="true" /><span class="agent-btn-label">新会话</span>
+          </button>
+          <div ref="historyBox" class="agent-history">
+            <button type="button" class="agent-btn icon" :class="{ on: historyOpen }" title="会话列表" aria-label="会话列表" :aria-expanded="historyOpen" @click="toggleHistory">
+              <History :size="15" aria-hidden="true" />
+            </button>
+            <div v-if="historyOpen" class="agent-menu agent-sessions">
+              <label class="agent-search">
+                <Search :size="13" aria-hidden="true" />
+                <input v-model="sessionQuery" type="search" placeholder="找会话：标题或说过的话" aria-label="找会话" autocomplete="off">
+              </label>
+              <p v-if="removed" class="agent-removed">
+                <span class="truncate">已删除「{{ removed.title || '未命名会话' }}」</span>
+                <button type="button" class="link" @click="undoRemove">撤销</button>
+              </p>
+              <div v-if="threadsLoading && !threads.length" class="agent-menu-note"><span class="spin" /> 正在读取…</div>
+              <div v-else-if="threadsError" class="agent-menu-note">{{ threadsError }}</div>
+              <div v-else-if="!threads.length" class="agent-menu-note">{{ sessionQuery.trim() ? '没有找到。' : '还没有会话。' }}</div>
+              <div class="agent-menu-list">
+                <div v-for="t in threads" :key="t.id" class="agent-session" :class="{ on: t.id === threadId }">
+                  <form v-if="renaming === t.id" class="agent-rename" @submit.prevent="saveRename(t)">
+                    <input ref="renameInput" v-model="renameDraft" maxlength="80" aria-label="会话名称" @keydown.esc.stop.prevent="renaming = ''" @blur="saveRename(t)">
+                  </form>
+                  <template v-else>
+                    <button type="button" class="agent-session-open" @click="openThread(t.id)">
+                      <span class="agent-session-title">
+                        <LoaderCircle v-if="runningThreads.has(t.id)" class="agent-spinner" :size="12" aria-label="正在办" />
+                        <span class="truncate">{{ t.title || '未命名会话' }}</span>
+                      </span>
+                      <small>{{ t.user ? `${isSelf(t.user) ? '你' : t.user} · ` : '' }}{{ clock(t.updated_at) }}</small>
+                    </button>
+                    <span class="agent-session-tools">
+                      <button type="button" class="agent-btn icon" title="改名" aria-label="改名" @click="startRename(t)"><Pencil :size="12" aria-hidden="true" /></button>
+                      <button type="button" class="agent-btn icon" title="删除" aria-label="删除" @click="removeThread(t)"><Trash2 :size="12" aria-hidden="true" /></button>
+                    </span>
+                  </template>
+                </div>
+              </div>
+            </div>
+          </div>
           <div ref="menuBox" class="agent-history">
             <button type="button" class="agent-btn icon" :class="{ on: menuOpen }" title="更多" aria-label="更多" :aria-expanded="menuOpen" @click="toggleMenu">
               <Ellipsis :size="15" aria-hidden="true" />
@@ -1416,26 +1464,8 @@ onUnmounted(() => {
           </button>
         </div>
       </header>
-      <div class="agent-topic">
-        <div class="agent-mode" role="tablist" aria-label="对话类型">
-          <button type="button" role="tab" :aria-selected="inGroup" :class="{ on: inGroup }" :disabled="streaming && !inGroup" :title="GROUP_TITLE" @click="switchMode('group')">
-            群聊<b v-if="groupUnread && !inGroup" class="agent-unread">{{ groupUnread > 99 ? '99+' : groupUnread }}</b>
-          </button>
-          <button type="button" role="tab" :aria-selected="!inGroup" :class="{ on: !inGroup }" :disabled="streaming && inGroup" :title="roomTitle" @click="switchMode('room')">这间房</button>
-        </div>
-        <div v-if="inGroup" class="agent-people" :title="online.length ? `在线：${online.join('、')}` : ''">
-          <span v-for="name in online.slice(0, 5)" :key="name" class="agent-avatar" :style="{ background: tint(name) }" :aria-label="name">{{ initial(name) }}</span>
-          <span v-if="online.length > 5" class="agent-avatar more">+{{ online.length - 5 }}</span>
-          <small v-if="online.length">{{ online.length }} 人在线</small>
-        </div>
-        <span v-else class="agent-topic-title truncate" :title="roomTitle">{{ roomTitle }}</span>
-      </div>
-      <div v-if="!inGroup" class="agent-roster" aria-label="这间房里的同事">
-        <button v-for="name in roomPeople" :key="name" type="button" class="agent-roster-name" :class="{ guest: rosterGuests.includes(name) }" :style="{ color: botColor(name) }" :title="rosterGuests.includes(name) ? `点名 @${name} 后进入` : name" @click="callBot(name)">{{ name }}</button>
-      </div>
-      <div v-else class="agent-roster" aria-label="可以点名的同事">
-        <span class="agent-roster-note">点名才说话</span>
-        <button v-for="name in ['核算', '问答', '资料', '程序']" :key="name" type="button" class="agent-roster-name" :style="{ color: botColor(name) }" @click="callBot(name)">{{ name }}</button>
+      <div v-if="messages.length || threadTitle" class="agent-topic">
+        <span class="agent-topic-title truncate" :title="threadTitle">{{ threadTitle || '新会话' }}</span>
       </div>
       <div class="agent-scroll">
         <div v-if="activeTasks.length" ref="taskBox" class="agent-tasks">
@@ -1462,25 +1492,10 @@ onUnmounted(() => {
         <div ref="list" class="agent-list" @scroll="onScroll" @click="onListClick">
           <div v-if="loadingThread" class="agent-loading"><span class="spin" /> 正在打开这段对话…</div>
 
-          <section v-else-if="!messages.length && inGroup" class="agent-empty">
-            <div class="agent-kicker"><i />{{ GROUP_TITLE }}</div>
-            <h2>这里的话，大家都看得到。</h2>
-            <p>这里是同事之间说话。以 <b>@同事</b> 开头只发给那个人。要叫核算、问答、资料或程序，用 <b>@核算</b> 这样点名，他们才说话。</p>
-            <ol class="agent-suggest">
-              <li v-for="(s, i) in SUGGESTIONS" :key="s">
-                <button type="button" @click="send(s)">
-                  <span class="num">0{{ i + 1 }}</span>
-                  <span class="agent-suggest-text">{{ s }}</span>
-                  <ArrowUpRight :size="14" aria-hidden="true" />
-                </button>
-              </li>
-            </ol>
-          </section>
-
           <section v-else-if="!messages.length" class="agent-empty">
-            <div class="agent-kicker"><i />{{ roomTitle }}</div>
-            <h2>你好{{ userName ? `，${userName}` : '' }}。<br>这间房里有人在。</h2>
-            <p>没点名时由领队分派。点名用 @核算、@问答、@资料{{ roomKind === 'store' ? '、@程序' : '' }}。左边正打开的页面他们看得到。</p>
+            <div class="agent-kicker"><i />新会话</div>
+            <h2>你好{{ userName ? `，${userName}` : '' }}。</h2>
+            <p>想问什么直接说，查账、解释账单、看资料还缺什么、系统上的问题都行。左边打开的页面会一起带上。</p>
             <ol class="agent-suggest">
               <li v-for="(s, i) in SUGGESTIONS" :key="s">
                 <button type="button" @click="send(s)">
@@ -1494,9 +1509,9 @@ onUnmounted(() => {
 
           <template v-else>
             <template v-for="(m, i) in messages" :key="m.key">
-              <article v-if="m.role === 'user'" class="agent-user" :class="{ chat: inGroup, mine: inGroup && isMine(m) }" :data-mid="m.id">
+              <article v-if="m.role === 'user'" class="agent-user" :data-mid="m.id">
                 <header class="agent-meta">
-                  <span class="agent-who" :style="inGroup && !isMine(m) ? { background: tint(m.user || '同事') } : null">{{ !inGroup || isMine(m) ? '你' : m.user || '同事' }}</span>
+                  <span class="agent-who" :style="m.user && !isMine(m) ? { background: tint(m.user) } : null">{{ !m.user || isMine(m) ? '你' : m.user }}</span>
                   <time class="num">{{ clock(m.at) }}</time>
                 </header>
                 <ul v-if="m.images.length" class="agent-thumbs">
@@ -1532,7 +1547,7 @@ onUnmounted(() => {
 
               <article v-else class="agent-reply" :class="{ live: m.streaming }" :data-bot="m.bot || ''">
                 <header class="agent-meta">
-                  <span class="agent-who ai" :style="{ color: botColor(m.bot) }"><i />{{ m.bot || '…' }}</span>
+                  <span class="agent-who ai"><i />助手</span>
                 </header>
                 <button v-for="q in [quoteOf(m, i)].filter(Boolean)" :key="q.id" type="button" class="agent-quote" :disabled="!q.found" :title="q.found ? '看原问题' : ''" @click="jumpTo(q.id)">
                   <Reply :size="12" aria-hidden="true" /><span class="truncate">回复 {{ q.who }}：{{ q.text }}</span>
@@ -1565,7 +1580,7 @@ onUnmounted(() => {
                 </div>
 
                 <div v-if="m.streaming && !m.text && !m.steps.length && !m.cards.length" class="agent-thinking">
-                  <span class="agent-dots"><i /><i /><i /></span>{{ m.bot ? `${m.bot}在看…` : '在看…' }}
+                  <span class="agent-dots"><i /><i /><i /></span>在看…
                 </div>
 
                 <!-- renderMarkdown 先整体转义 HTML 再排版，v-html 里不会有回答自带的标签 -->
@@ -1628,6 +1643,10 @@ onUnmounted(() => {
           <span>{{ notice }}</span>
           <button type="button" class="agent-x" aria-label="知道了" @click="notice = ''"><X :size="12" /></button>
         </p>
+        <div v-if="pageLabel && !pageOff" class="agent-picked agent-context" :title="`左边的「${pageLabel}」会一起发给助手`">
+          <span class="truncate">正在看：{{ pageLabel }}</span>
+          <button type="button" class="agent-x" aria-label="这次不带上左边的页面" title="这次不带上左边的页面" @click="pageOff = true"><X :size="12" /></button>
+        </div>
         <div v-if="picked" class="agent-picked" :title="picked">
           <span class="truncate">附上左边选中的：「{{ picked }}」</span>
           <button type="button" class="agent-x" aria-label="不附选中的内容" @click="picked = ''"><X :size="12" /></button>
@@ -1649,8 +1668,8 @@ onUnmounted(() => {
             ref="textarea"
             v-model="draft"
             rows="1"
-            :placeholder="steerRun ? '补充一句，这一轮接着办' : inGroup ? '跟同事说。@核算、@问答、@资料、@程序 才会有人接' : '跟这间房里的同事说，可粘贴截图或文件'"
-            :aria-label="inGroup ? '发到公共群聊的消息' : '发到这间房的消息'"
+            :placeholder="steerRun ? '补充一句，这一轮接着办' : '直接说，可粘贴截图或文件'"
+            aria-label="发给助手的消息"
             @keydown="onKeydown"
             @paste="onPaste"
           />
@@ -1658,23 +1677,10 @@ onUnmounted(() => {
         <div class="agent-toolbar">
           <button type="button" class="agent-tool" :title="`附上文件（每个不超过 50MB，一次最多 ${MAX_FILES} 个）。${FILE_HINT}`" @click="fileInput?.click()"><Paperclip :size="13" aria-hidden="true" />附件</button>
           <button type="button" class="agent-tool" :class="{ on: shotTip }" title="怎么截图" @click="shotTip = !shotTip"><Camera :size="13" aria-hidden="true" />截图</button>
-          <div v-if="inGroup" ref="mentionBox" class="agent-mention">
-            <button type="button" class="agent-tool" :class="{ on: mentionOpen || toColleague(draft) }" title="@一位在线同事，这条只发给同事" :aria-expanded="mentionOpen" @click="mentionOpen = !mentionOpen"><AtSign :size="13" aria-hidden="true" />同事</button>
-            <div v-if="mentionOpen" class="agent-menu agent-mention-menu" role="menu">
-              <div class="agent-menu-head">只发给同事，房间里的人不接</div>
-              <div v-if="!colleagues.length" class="agent-menu-note">现在没有其他同事在线，也可以直接输入「@称呼」。</div>
-              <div class="agent-menu-list">
-                <button v-for="name in colleagues" :key="name" type="button" class="agent-menu-item agent-mention-item" role="menuitem" @click="mention(name)">
-                  <span class="agent-avatar" :style="{ background: tint(name) }">{{ initial(name) }}</span>
-                  <span class="truncate">{{ name }}</span>
-                </button>
-              </div>
-            </div>
-          </div>
           <select v-model="thinking" class="agent-think" :class="{ on: thinking !== 'off' }" title="让助手先想清楚再回答：开得越高越仔细，但更慢、花费更多" aria-label="思考等级">
             <option v-for="[value, label] in THINKING" :key="value" :value="value">{{ label }}</option>
           </select>
-          <span class="agent-hint">{{ inGroup ? '' : 'Enter 发送 · Shift+Enter 换行' }}</span>
+          <span class="agent-hint">Enter 发送 · Shift+Enter 换行</span>
           <template v-if="steerRun || streaming">
             <button v-if="steerRun" type="button" class="agent-send" :class="{ ready: canSteer }" :disabled="!canSteer" title="追加到正在查的这一轮，不用从头再来" @click="send()">补充<CornerDownRight :size="13" aria-hidden="true" /></button>
             <button type="button" class="agent-send stop" @click="stop"><Square :size="9" fill="currentColor" aria-hidden="true" />停止</button>
@@ -1689,7 +1695,7 @@ onUnmounted(() => {
         <input ref="fileInput" type="file" :accept="ACCEPT" multiple hidden @change="onPick">
       </footer>
 
-      <div v-if="dragDepth > 0" class="agent-drop"><b>松开，作为附件发到这间房</b><small>{{ FILE_HINT }}</small></div>
+      <div v-if="dragDepth > 0" class="agent-drop"><b>松开，作为附件发送</b><small>{{ FILE_HINT }}</small></div>
     </div>
 
     <Teleport to="body">
@@ -1789,7 +1795,7 @@ onUnmounted(() => {
 .agent-dot.on { background: var(--ok); box-shadow: 0 0 0 3px var(--ok-bg); }
 .agent-actions { display: flex; align-items: center; gap: 2px; flex: none; }
 .agent-actions :deep(.cost-chip) { margin-right: 4px; }
-/* 面板拖窄时头部放不下费用标签，「新话题」只留图标。 */
+/* 面板拖窄时头部放不下费用标签，「新会话」只留图标。 */
 .agent-head { container-type: inline-size; }
 @container (max-width: 380px) {
   .agent-btn-label, .agent-status-text, .agent-actions :deep(.cost-chip svg) { display: none; }
@@ -1811,11 +1817,6 @@ onUnmounted(() => {
 .agent-btn:hover:not(:disabled),
 .agent-btn.on { background: var(--n2); color: var(--n9); }
 .agent-history { position: relative; }
-.agent-mention { position: relative; display: flex; }
-.agent-menu.agent-mention-menu { top: auto; right: auto; bottom: 28px; left: -8px; width: 220px; }
-.agent-menu-item.agent-mention-item,
-.agent-menu-item.agent-mention-item:hover:not(:disabled) { flex-direction: row; align-items: center; gap: 8px; }
-.agent-mention-item .agent-avatar { margin-left: 0; border: 0; }
 .agent-menu {
   position: absolute;
   top: 34px;
@@ -1862,6 +1863,27 @@ onUnmounted(() => {
 }
 .agent-menu-foot .link { font-size: 11.5px; }
 .agent-more { right: 0; width: 240px; }
+.agent-sessions { right: -40px; width: min(340px, calc(100vw - 24px)); padding: 8px; }
+.agent-search { display: flex; align-items: center; gap: 6px; margin-bottom: 6px; padding: 0 8px; border: 1px solid var(--n3); border-radius: var(--r-sm); color: var(--n5); }
+.agent-search:focus-within { border-color: var(--accent); }
+.agent-search input { flex: 1; min-width: 0; height: 30px; padding: 0; border: 0; outline: none; background: none; font-size: var(--t-sm); }
+.agent-removed { display: flex; align-items: center; gap: 8px; margin: 0 0 6px; padding: 6px 8px; border-radius: var(--r-sm); background: var(--n1); font-size: var(--t-xs); color: var(--n7); }
+.agent-removed .truncate { flex: 1; }
+.agent-sessions .agent-menu-list { max-height: min(420px, 60vh); }
+.agent-session { position: relative; display: flex; align-items: center; border-radius: var(--r-sm); }
+.agent-session:hover { background: var(--n1); }
+.agent-session.on { background: var(--accent-bg); }
+.agent-session-open,
+.agent-session-open:hover:not(:disabled) { display: flex; flex: 1; min-width: 0; flex-direction: column; gap: 1px; padding: 7px 8px; border: 0; background: none; color: var(--n8); font: 500 var(--t-sm)/1.45 var(--sans); text-align: left; }
+.agent-session.on .agent-session-open { color: var(--accent); }
+.agent-session-title { display: flex; align-items: center; gap: 5px; min-width: 0; }
+.agent-session-open small { font-size: 11px; color: var(--n5); font-weight: 400; }
+.agent-session-tools { display: flex; flex: none; padding-right: 4px; opacity: 0; }
+.agent-session:hover .agent-session-tools,
+.agent-session:focus-within .agent-session-tools { opacity: 1; }
+.agent-rename { flex: 1; padding: 4px; }
+.agent-rename input { width: 100%; height: 28px; padding: 0 8px; font-size: var(--t-sm); }
+.agent-context .truncate { color: var(--n6); }
 .agent-menu-line { display: inline-flex; align-items: center; gap: 6px; }
 .agent-menu-item small.truncate { display: block; }
 .agent-topic {
@@ -1875,38 +1897,6 @@ onUnmounted(() => {
   color: var(--n6);
 }
 .agent-topic-title { flex: 1; min-width: 0; text-align: right; }
-.agent-roster { display: flex; flex-wrap: wrap; gap: 6px 10px; align-items: center; padding: 6px var(--s5) 8px; border-bottom: 1px solid var(--n2); }
-.agent-roster-name, .agent-roster-name:hover { padding: 0; border: 0; background: transparent; font-size: 12.5px; font-weight: 650; cursor: pointer; }
-.agent-roster-name.guest { opacity: .72; }
-.agent-roster-note { font-size: 11.5px; color: var(--n5); }
-.agent-mode { display: inline-flex; flex: none; padding: 2px; border-radius: var(--r-sm); background: var(--n2); }
-.agent-mode button,
-.agent-mode button:hover:not(:disabled) {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  height: 24px;
-  padding: 0 10px;
-  border: 0;
-  border-radius: 4px;
-  background: none;
-  color: var(--n6);
-  font: 500 var(--t-xs)/1 var(--sans);
-}
-.agent-mode button:hover:not(:disabled) { color: var(--n9); }
-.agent-mode button.on { background: var(--n0); color: var(--n9); box-shadow: 0 1px 2px rgba(15, 23, 42, .08); }
-.agent-unread {
-  min-width: 16px;
-  height: 16px;
-  padding: 0 4px;
-  border-radius: 8px;
-  background: var(--bad, #d14343);
-  color: #fff;
-  font: 600 10px/16px var(--sans);
-  text-align: center;
-}
-.agent-tab .agent-unread { writing-mode: horizontal-tb; }
-.agent-people { display: flex; align-items: center; justify-content: flex-end; flex: 1; min-width: 0; }
 .agent-avatar {
   display: inline-grid;
   place-items: center;
@@ -1920,7 +1910,6 @@ onUnmounted(() => {
 }
 .agent-avatar:first-child { margin-left: 0; }
 .agent-avatar.more { background: var(--n4); color: var(--n8); }
-.agent-people small { margin-left: 8px; font-size: 11px; color: var(--n5); white-space: nowrap; }
 
 /* 消息列表 */
 .agent-scroll { position: relative; flex: 1; min-height: 0; }
@@ -2015,21 +2004,6 @@ onUnmounted(() => {
 .agent-reply { padding-top: 18px; }
 
 /* 群聊：别人说的话靠左、标上名字；自己说的靠右、用强调色。 */
-.agent-user.chat { padding-top: 14px; }
-.agent-user.chat + .agent-user.chat { border-top: 0; }
-.agent-user.chat .agent-user-text { font-size: var(--t-md); font-weight: 500; line-height: 1.6; }
-.agent-user.mine { text-align: right; }
-.agent-user.mine .agent-meta { flex-direction: row-reverse; }
-.agent-user.mine .agent-who { background: var(--accent); }
-.agent-user.mine .agent-thumbs { justify-content: flex-end; }
-.agent-user.mine .agent-user-text {
-  display: inline-block;
-  max-width: 92%;
-  padding: 7px 11px;
-  border-radius: 10px 10px 2px 10px;
-  background: var(--accent-bg);
-  text-align: left;
-}
 
 .agent-thumbs { list-style: none; display: flex; flex-wrap: wrap; gap: 6px; margin: 0 0 8px; padding: 0; }
 .agent-thumbs li { position: relative; }
@@ -2478,7 +2452,6 @@ onUnmounted(() => {
 
 /* 附件：消息里的文件卡片和输入框上方待发的 */
 .agent-files { list-style: none; display: flex; flex-direction: column; gap: 6px; margin: 0 0 8px; padding: 0; }
-.agent-user.mine .agent-files { align-items: flex-end; }
 .agent-file {
   display: grid;
   grid-template-columns: auto minmax(0, 1fr);

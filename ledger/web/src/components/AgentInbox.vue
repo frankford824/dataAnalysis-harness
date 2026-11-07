@@ -5,7 +5,7 @@ import {api} from '../api'
 import {stamp} from '../format'
 import {useApp} from '../store'
 import {clientRequestId} from '../telemetry'
-import {openLedgerRoom} from '../agentClient'
+import {agentApi,askAgent,openAgent} from '../agentClient'
 
 const props=defineProps({period:{type:String,required:true}})
 const emit=defineEmits(['changed'])
@@ -20,10 +20,17 @@ const detailed=computed(()=>scoped.value.filter(item=>!isPending(item)))
 const pending=computed(()=>scoped.value.filter(isPending))
 const pendingPreview=computed(()=>pending.value.slice(0,3).map(item=>item.store_name).join('、'))
 const disputes=computed(()=>inbox.value?.disputes||[])
-const count=computed(()=>(upgrade.value?.needs_confirmation?1:0)+disputes.value.length)
+const arrivals=ref([])
+const storeName=id=>app.stores.find(s=>s.id===id)?.name||id
+const arrivalText=item=>[item.materials?`资料 ${item.materials} 批`:'',item.orders?`订单 ${item.orders} 批`:''].filter(Boolean).join('、')
+const count=computed(()=>(upgrade.value?.needs_confirmation?1:0)+disputes.value.length+(arrivals.value.length?1:0))
 
+async function loadArrivals(){
+  try{arrivals.value=(await agentApi.arrivals(props.period))?.items||[]}catch{arrivals.value=[]}
+}
 async function load(){
   if(!props.period)return
+  loadArrivals()
   try{inbox.value=await api.agentInbox(props.period);error.value=''}catch(reason){error.value=reason.message}
 }
 watch(()=>props.period,load,{immediate:true})
@@ -36,8 +43,17 @@ async function run(task,done){
 const recompute=()=>run(async()=>{for(const item of changed.value.filter(i=>i.status==='pending_recompute'))await api.recompute(item.store_id)},'已提交重算，完成后这里会更新')
 const confirmUpgrade=()=>run(()=>api.upgradeConfirm({request_id:clientRequestId(),period:props.period,input_sha:upgrade.value.input_sha}),'已确认新版本结果，Agent 继续自动处理')
 const acknowledge=item=>run(()=>api.agentQuestionAcknowledge(item.question_id),'已处理')
-function openDispute(item){openLedgerRoom({storeId:item.store_id,period:item.period,questionId:item.question_id})}
-function openMonth(){openLedgerRoom({period:props.period})}
+function openDispute(item){openAgent({storeId:item.store_id,period:item.period,questionId:item.question_id})}
+function openMonth(){openAgent({period:props.period,draft:'帮我看看这次新版本核对里有变化的店'})}
+async function seen(item){
+  arrivals.value=arrivals.value.filter(x=>x.store_id!==item.store_id)
+  await agentApi.seeArrivals(item.store_id,item.period).catch(()=>{})
+}
+function askArrival(item){
+  const what=item.orders&&!item.materials?'订单':'资料'
+  askAgent({storeId:item.store_id,period:item.period,text:`${storeName(item.store_id)} 这个月新到了${what}，帮我看看还缺什么`,trigger:item.orders&&!item.materials?'orders':'materials'})
+  seen(item)
+}
 defineExpose({load,count})
 </script>
 
@@ -46,7 +62,7 @@ defineExpose({load,count})
     <h3>待你确认 · {{count}} 件</h3>
     <n-alert v-if="error" type="warning" :bordered="false">{{error}}<n-button text @click="load">重试</n-button></n-alert>
     <article v-if="upgrade?.needs_confirmation" class="card" data-inbox-card="upgrade">
-      <header><strong>新版本核对</strong><span>{{upgrade.same}} 家店结果与旧版本一致，{{upgrade.changed}} 家有变化<template v-if="upgrade.pending_recompute">，{{upgrade.pending_recompute}} 家待重算</template></span><n-button text size="tiny" type="primary" @click="openMonth">在这个月的房间里打开</n-button></header>
+      <header><strong>新版本核对</strong><span>{{upgrade.same}} 家店结果与旧版本一致，{{upgrade.changed}} 家有变化<template v-if="upgrade.pending_recompute">，{{upgrade.pending_recompute}} 家待重算</template></span><n-button text size="tiny" type="primary" @click="openMonth">问助手</n-button></header>
       <p class="advice">Agent 建议：逐家看下面的变化，确认无误后点“确认新版本结果”。确认前 Agent 不会自动改这个月的账。</p>
       <ul v-if="detailed.length">
         <li v-for="item in detailed" :key="item.store_id">
@@ -71,6 +87,15 @@ defineExpose({load,count})
         <n-button v-else type="primary" :loading="busy" @click="confirmUpgrade">确认新版本结果</n-button>
       </footer>
     </article>
+    <article v-if="arrivals.length" class="card" data-inbox-card="arrival">
+      <header><strong>新资料到了</strong><span>{{arrivals.length}} 家店，点「问助手」看还缺什么</span></header>
+      <ul class="arrivals">
+        <li v-for="item in arrivals" :key="item.store_id">
+          <strong>{{storeName(item.store_id)}}</strong><span class="muted"> · {{arrivalText(item)}} · {{stamp(item.last)}}</span>
+          <span class="arrival-actions"><n-button text size="tiny" type="primary" @click="askArrival(item)">问助手</n-button><n-button text size="tiny" @click="seen(item)">知道了</n-button></span>
+        </li>
+      </ul>
+    </article>
     <article v-for="item in disputes" :key="item.question_id" class="card" data-inbox-card="dispute" :data-question-state="item.state">
       <header><button type="button" class="open-room" @click="openDispute(item)"><strong>员工异议 · {{item.store_name}}</strong><span>{{item.subject?.node_name}} · {{item.asked_by}} · {{stamp(item.asked_at)}}</span></button></header>
       <p class="question">{{item.question}}</p>
@@ -85,5 +110,5 @@ defineExpose({load,count})
 </template>
 
 <style scoped>
-.agent-inbox{border:1px solid #f0d9a8;background:#fffaf0;border-radius:8px;padding:18px;margin:16px 0;display:flex;flex-direction:column;gap:12px}.agent-inbox h3{font-size:15px}.card{background:white;border:1px solid #eadfca;border-radius:8px;padding:14px 16px}.card header{display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap;font-size:13px}.card header span{color:#657184;font-size:12px}.open-room{display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap;width:100%;padding:0;border:0;background:transparent;text-align:left;font:inherit;cursor:pointer}.advice,.question{font-size:13px;line-height:1.7;margin-top:8px;white-space:pre-wrap;overflow-wrap:anywhere}.advice{color:#35506e}.card ul{padding-left:18px;font-size:12px;margin-top:8px}.card li{margin:8px 0}.card table{border-collapse:collapse;margin-top:4px}.card td{padding:2px 10px 2px 0;font-variant-numeric:tabular-nums}.muted{color:#8a94a6}.pending{font-size:12px;margin-top:8px;line-height:1.8}.pending .names{display:block;color:#4b5565;overflow-wrap:anywhere}.other{font-size:12px;margin-top:6px}.card footer{display:flex;gap:10px;margin-top:12px;flex-wrap:wrap}
+.agent-inbox{border:1px solid #f0d9a8;background:#fffaf0;border-radius:8px;padding:18px;margin:16px 0;display:flex;flex-direction:column;gap:12px}.agent-inbox h3{font-size:15px}.card{background:white;border:1px solid #eadfca;border-radius:8px;padding:14px 16px}.card header{display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap;font-size:13px}.card header span{color:#657184;font-size:12px}.open-room{display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap;width:100%;padding:0;border:0;background:transparent;text-align:left;font:inherit;cursor:pointer}.advice,.question{font-size:13px;line-height:1.7;margin-top:8px;white-space:pre-wrap;overflow-wrap:anywhere}.advice{color:#35506e}.card ul{padding-left:18px;font-size:12px;margin-top:8px}.card li{margin:8px 0}.card table{border-collapse:collapse;margin-top:4px}.card td{padding:2px 10px 2px 0;font-variant-numeric:tabular-nums}.muted{color:#8a94a6}.pending{font-size:12px;margin-top:8px;line-height:1.8}.pending .names{display:block;color:#4b5565;overflow-wrap:anywhere}.other{font-size:12px;margin-top:6px}.card footer{display:flex;gap:10px;margin-top:12px;flex-wrap:wrap}.arrivals{list-style:none;padding-left:0!important}.arrivals li{display:flex;align-items:center;gap:4px;flex-wrap:wrap}.arrival-actions{display:inline-flex;gap:10px;margin-left:auto}
 </style>

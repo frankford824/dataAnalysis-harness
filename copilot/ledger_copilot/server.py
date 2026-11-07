@@ -369,8 +369,42 @@ def _settle_card(card_id):
 
 
 @app.get('/api/agent/threads')
-def list_threads():
-    return {'threads': store.threads()}
+def list_threads(q: str = '', question: str = ''):
+    if question:
+        return {'thread_id': store.thread_of_question(question)}
+    return {'threads': store.threads(query=q[:80])}
+
+
+class ThreadEdit(BaseModel):
+    title: str = ''
+    user: str = ''
+
+
+@app.post('/api/agent/threads/{thread_id}/rename')
+def rename_thread(thread_id: str, body: ThreadEdit):
+    title = ' '.join(body.title.split())
+    if not title:
+        raise HTTPException(400, '名字不能为空')
+    if not store.thread(thread_id):
+        raise HTTPException(404, '没有找到这段对话')
+    store.rename_thread(thread_id, title)
+    return {'id': thread_id, 'title': title[:80]}
+
+
+@app.post('/api/agent/threads/{thread_id}/delete')
+def delete_thread(thread_id: str, body: ThreadEdit | None = None):
+    if store.thread(thread_id):
+        store.delete_thread(thread_id, True)
+        store.log_event('thread_deleted', {'thread': thread_id, 'by': (body.user if body else '')})
+    return {'id': thread_id, 'deleted': True}
+
+
+@app.post('/api/agent/threads/{thread_id}/restore')
+def restore_thread(thread_id: str, body: ThreadEdit | None = None):
+    if store.thread(thread_id):
+        store.delete_thread(thread_id, False)
+        store.log_event('thread_restored', {'thread': thread_id, 'by': (body.user if body else '')})
+    return {'id': thread_id, 'deleted': False}
 
 
 @app.get('/api/agent/roster')
@@ -381,7 +415,7 @@ def roster_view(room: str = 'month'):
 
 @app.post('/api/agent/rooms/arrive')
 def arrive(body: Arrive):
-    """资料或订单流到达某个店月：叫醒资料。这一位还在跑就把新输入并进当前轮。"""
+    """资料或订单流到达某个店月：只记下来，在工作台「待你确认」里提示，不自动开对话。"""
     items = list(body.items or [])
     if not items and body.store_id and body.period:
         items = [{'store_id': body.store_id, 'period': body.period, 'kind': body.kind, 'note': body.note}]
@@ -391,20 +425,27 @@ def arrive(body: Arrive):
         period = str(item.get('period') or '')
         if not store_id or not period:
             continue
-        kind = item.get('kind') or 'materials'
-        note = str(item.get('note') or '')
-        text = ('新的订单到了。' if kind == 'orders' else '新的资料到了。') + note
-        thread_id = f'store:{store_id}:{period}'
-        page = {'room': 'store', 'name': 'period', 'period': period, 'store_id': store_id,
-                'params': {'id': store_id}, 'query': {'period': period}}
-        live = _live(thread_id)
-        if live and (not live.get('bot') or live.get('bot') == '资料'):
-            _join(Chat(thread_id=thread_id, text=text, user='房间', page=page, trigger=kind), live)
-            result.append({'thread_id': thread_id, 'status': 'merged', 'run_id': live['run_id']})
-            continue
-        _launch(Chat(thread_id=thread_id, text=text, user='房间', page=page, trigger=kind), bot='资料', trigger=kind)
-        result.append({'thread_id': thread_id, 'status': 'started'})
+        kind = 'orders' if item.get('kind') == 'orders' else 'materials'
+        store.add_arrival(store_id, period, kind, str(item.get('note') or ''))
+        result.append({'store_id': store_id, 'period': period, 'status': 'noted'})
     return {'items': result}
+
+
+@app.get('/api/agent/arrivals')
+def list_arrivals(period: str = ''):
+    return {'items': store.arrivals(period) if period else []}
+
+
+class Seen(BaseModel):
+    store_id: str = ''
+    period: str = ''
+
+
+@app.post('/api/agent/arrivals/seen')
+def see_arrivals(body: Seen):
+    if body.store_id and body.period:
+        store.see_arrivals(body.store_id, body.period)
+    return {'ok': True}
 
 
 @app.get('/api/agent/threads/{thread_id}')
@@ -416,7 +457,7 @@ def get_thread(thread_id: str):
         return {'id': thread_id, 'title': agent.room_title(thread_id), 'messages': [], 'running': thread_id in _runs,
                 'room': agent.room_kind(thread_id)}
     if not row:
-        raise HTTPException(404, '这间房间还没有对话')
+        raise HTTPException(404, '没有找到这段对话')
     messages = [m for m in store.messages(thread_id, last=300) if m['role'] in {'user', 'assistant'}]
     return {'id': row['id'], 'title': row['title'], 'messages': messages, 'running': thread_id in _runs,
             'room': agent.room_kind(thread_id)}
