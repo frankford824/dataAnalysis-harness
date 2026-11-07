@@ -415,8 +415,8 @@ def overlay(root,store,orders,items,costs,relations=None):
 
 def run_available(ws,model,period,store_id,*,worker='native:commission-manager'):
     if not enabled() or not granted(ws,store_id,period):return []
-    from .automation_actions import sync_month
-    sync_month(ws,model,period,worker=worker)
+    from .automation_actions import sync_store_month
+    sync_store_month(ws,model,period,store_id,worker=worker)
     current=checker.check(ws,store_id,period,model=model)
     if not current['run_id']:return []
     state=ws.state(store_id,period)

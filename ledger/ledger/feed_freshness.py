@@ -52,6 +52,10 @@ def _integer(value):
     return type(value) is int and value>=0
 
 
+def _month(value):
+    return isinstance(value,str) and len(value)==7 and value[4]=='-' and value[:4].isdigit() and value[5:].isdigit()
+
+
 def _legacy(value,reason):
     fields=('snapshot_id','consumed_seq','source_latest_seq','last_error')
     identity={key:value.get(key) for key in fields} if value else None
@@ -114,16 +118,23 @@ def evaluate(ws,store_id,period,recorded):
             # 每家店只走自己的索引段、只数条数和最新序号：每次变更都会拿到新序号，
             # 这两样足以标出「边界之后有没有新变更」。逐行读载荷算摘要要扫 2GB 的表，
             # 订单台大批回填时一家店十几秒，57 家店的整月检查就是十几分钟。
+            # 变更只会影响它订单所在月及以后的月份（按下单日或按发生日入账）。
+            # 认不出月份的变更照旧挡住所有月份。
             placeholders=','.join('?' for _ in mapping)
             types=','.join('?' for _ in ACCOUNTING_ENTITIES)
             tail=' AND entity_type IN ('+types+') AND seq>?'
             args=[*sorted(ACCOUNTING_ENTITIES),boundary['captured_through_seq']]
+            if _month(period):
+                tail+=' AND (business_month IS NULL OR business_month<=?)'
+                args.append(period)
             changes,through=conn.execute('SELECT count(*),max(seq) FROM ('
                 'SELECT seq FROM feed_entity WHERE order_store_id IN ('+placeholders+')'+tail+
                 ' UNION ALL SELECT seq FROM feed_entity WHERE order_store_id IS NULL'+tail+
                 " UNION ALL SELECT seq FROM feed_entity WHERE order_store_id=''"+tail+')',
                 [*mapping,*args,*args,*args]).fetchone()
-            pending=conn.execute('SELECT 1 FROM feed_pending_store WHERE ledger_store_id=? AND seq>?',
+            # 店铺待通知行和它的变更同一事务写入，按月份数变更已经覆盖它；
+            # 快照更换另有 source_snapshot_changed 挡住。
+            pending=None if _month(period) else conn.execute('SELECT 1 FROM feed_pending_store WHERE ledger_store_id=? AND seq>?',
                 (store_id,boundary['captured_through_seq'])).fetchone()
             if changes or pending:
                 return reject('source_changes_not_revalidated',{'changes':changes,'changes_through_seq':through,'store_pending':bool(pending)})

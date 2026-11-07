@@ -26,6 +26,7 @@ const period=computed(()=>app.period||app.periods[0]||'')
 const params=computed(()=>({period:period.value,level:level.value,platform:app.platform,store_id:app.storeId,...scope.value,managed:managed.value,offset:(page.value-1)*50,limit:50,sort_key:sortKey.value,sort_direction:sortDirection.value,sort_basis:compare.value,...(managedSplit.value?{managed_split:true}:{})}))
 const companyFinance=computed(()=>workflow.value?.decision_groups?.find(group=>group.kind==='company_finance')||null)
 const monthAdvanceBlocked=computed(()=>onlyCompanyHistoryRemains(workflow.value))
+const workingMonth=computed(()=>app.navigation?.default_period||'')
 const businessDecisionGroups=computed(()=>(workflow.value?.decision_groups||[]).filter(group=>group.kind!=='company_finance'))
 const waitingGroups=computed(()=>workflow.value?.waiting_groups||[])
 const waitingCount=computed(()=>workflow.value?.counts?.waiting??0)
@@ -190,8 +191,17 @@ async function applyPreview(){
     const result=decision.value?await api.automationDecisionApply(body):await api.automationCloseConfirm(body)
     if(result.unfinished?.length)message.warning(`已完成 ${result.completed?.length||0} 家，${result.unfinished.length} 家继续保留待处理`)
     else message.success(decision.value?'决定已保存，系统继续核算':'本次结账已处理')
+    const closing=!decision.value
     modal.value=false;app.invalidate();await reload()
+    if(closing)await followWorkingMonth()
   }catch(reason){modalError.value=reason.message}finally{busy.value=false}
+}
+// 本月能结的都结完了，就跟着转到下一个还在结的月份。
+async function followWorkingMonth(){
+  if(workflow.value?.close?.eligible_store_ids?.length)return
+  const before=period.value
+  const next=(await app.loadNavigation(true).catch(()=>null))?.default_period
+  if(next&&next>before&&period.value===before){app.pick({period:next});message.info(`${prettyPeriod(before)}已结完，已转到${prettyPeriod(next)}`)}
 }
 function openRevocation(policy){
   revocation.value=policy;revocationReason.value='';revocationSnapshot.value=null;revocationError.value=''
@@ -279,7 +289,7 @@ const metricChange=(key,item)=>comparisonCopy(item,(report.value?.metrics||[]).f
       <div class="decision-list"><article><div><h3>固定规则自动处理授权</h3><p>选择一店一规则及适用月份，一次确认后按有效范围执行。</p><p v-if="ruleContracts&&!ruleContracts.enabled">自动处理开关未启用，授权会保存，启用后才执行。</p></div><n-button :disabled="!ruleOptions.length" @click="openDecision({kind:'rule_grant',title:'授权固定规则自动处理'})">授权固定规则</n-button></article></div>
       <n-alert v-if="ruleError" type="warning" :bordered="false">{{ruleError}}<n-button text @click="loadRules">重试读取规则</n-button></n-alert>
       <details v-if="workflow?.policies?.length" class="operations-details" open><summary>本月适用的范围与授权历史（{{workflow.policies.length}}）</summary><ul><li v-for="policy in workflow.policies" :key="policy.decision_id" :data-policy-id="policy.decision_id"><strong>{{policyLabel(policy)}}</strong> · {{storeOptions.find(item=>item.value===policy.store_id)?.label||policy.store_id}} · {{policyStatusLabels[policy.status]||'状态待读取'}}<br/>业务月份：{{policyRange(policy)}}<span v-if="policy.kind==='store_scope'"> · {{policy.values?.included?'纳入处理':'排除处理'}}</span><br v-if="policy.kind==='rule_grant'"/><span v-if="policy.kind==='rule_grant'">执行有效期：{{executionRange(policy)}}</span><p>{{policy.reason}}</p><n-button v-if="policy.can_revoke" text size="small" :disabled="busy" @click="openRevocation(policy)">预览撤销</n-button><span v-else-if="policy.revoke_blocker">{{policy.revoke_blocker}}</span></li></ul></details>
-      <div class="month-close"><div><strong>本月全公司结账</strong><p>{{workflow?.close?.eligible_store_ids?.length??0}} 家可进入预览，{{workflow?.close?.blocked_store_ids?.length??0}} 家保留待处理。</p></div><n-button type="primary" :disabled="!workflow?.close?.can_preview||busy" @click="previewClose()">预览本月全公司结账</n-button></div>
+      <div class="month-close"><div><strong>本月全公司结账</strong><p>{{workflow?.close?.eligible_store_ids?.length??0}} 家可进入预览，{{workflow?.close?.blocked_store_ids?.length??0}} 家保留待处理。</p></div><n-button type="primary" :disabled="!workflow?.close?.can_preview||busy" @click="previewClose()">预览本月全公司结账</n-button><n-button v-if="workingMonth>period&&!workflow?.close?.can_preview" @click="app.pick({period:workingMonth})">转到{{prettyPeriod(workingMonth)}}</n-button></div>
       <details class="operations-details" v-if="workflow?.stores?.length"><summary>各店处理进度</summary><ul><li v-for="store in workflow.stores" :key="store.case_id||store.store_id"><button class="link" @click="periodDetail(store.store_id)">{{store.store}}</button> · {{workflowLabels[store.status]||store.status}} · {{store.message}} <n-button v-if="store.actions?.some(action=>action.kind==='store_scope')" text size="small" @click="openDecision({kind:'store_scope',title:'确认本月店铺范围',store_ids:[store.store_id]})">调整本月范围</n-button></li></ul></details>
     </n-tab-pane>
   </n-tabs></div></n-spin>

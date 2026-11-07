@@ -497,7 +497,10 @@ def _build_navigation(
     periods = sorted(period_counts, reverse=True)
     real = [period for period in periods if _YM.match(period or "")]
     pool = real or periods
-    default_period = max(pool, key=lambda p: (period_counts[p], p)) if pool else ""
+    # 月结一个月一个月往下走：默认落在最早还在结的月份，结完自动到下个月。
+    from .commission_manager import working_months
+    working = working_months(ws)
+    default_period = working[0] if working else max(pool, key=lambda p: (period_counts[p], p)) if pool else ""
     return {
         "model_revision": revision,
         "workspace_generation": generation,

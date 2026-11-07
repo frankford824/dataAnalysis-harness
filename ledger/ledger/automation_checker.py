@@ -375,7 +375,12 @@ def check(ws,store_id,period,*,model=None,expected_run_id=None,ignored_blockers=
     if feed['blocked']:
         problems.append(issue('source_sync_pending','本次捕获的来源同步前缀或本店后续变更尚未完成复核，不能确认月结'))
     work=pending(ws,store_id) if check_pending else None
-    if work:problems.append(issue('recompute_pending',work.get('error') or '本店新资料尚在自动核算，完成后再确认'))
+    # Order-only work is bounded per month by the captured-prefix check above;
+    # it must not hold back a month none of its changes reach.
+    order_only=bool(work and not work.get('error') and feed['mode']=='captured_prefix'
+        and work.get('full_revision',1)<=work.get('full_applied_revision',0)
+        and work.get('files_revision',0)<=work.get('files_applied_revision',0))
+    if work and not order_only:problems.append(issue('recompute_pending',work.get('error') or '本店新资料尚在自动核算，完成后再确认'))
     company=(company_context if company_context is not None else company_basis(ws,model,period)) if check_company else None
     if company:problems.extend(company['issues'])
     # Deduplicate by code while retaining a deterministic order for CAS.
@@ -387,7 +392,7 @@ def check(ws,store_id,period,*,model=None,expected_run_id=None,ignored_blockers=
         'period_cost_input_revision':ws.conn.execute("SELECT coalesce(max(rowid),0) FROM automation_decision WHERE kind='period_cost_input' AND store_id=? AND period=?",(store_id,period)).fetchone()[0],
         'period_state':state.state if state else 'open','feed':feed['identity'],
         'unverified_source_sha':pending_input_identity(ws,store_id,period,recorded=recorded),
-        'pending':{k:work.get(k) for k in ('revision','source_seq','source_fingerprint','files_revision','files_applied_revision')} if work else None,
+        'pending':{k:work.get(k) for k in ('revision','source_seq','source_fingerprint','files_revision','files_applied_revision')} if work and not order_only else None,
         'company_sha':company['input_sha'] if company else None,'code_integrity':code_state}
     from .automation_source_cost_v3 import used as physical_facts,verify_for_close as verify_physical_facts,_adoption_authority
     from .automation_cost_actions import Pending as SourceFactPending

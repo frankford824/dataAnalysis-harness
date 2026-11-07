@@ -339,12 +339,12 @@ def run_available(ws,model,period,store_id,*,worker='native:commission-manager')
     current_input=checker.check(ws,store_id,period,model=model)['input_sha']
     if any(wait['source_kind'] in {'order','history_cost','seller_member'}
         for wait in active(ws,model,store_id,period,current_input)):return []
-    from .automation_actions import sync_month
+    from .automation_actions import sync_store_month
     results=[];inspected=0
     actor={'id':worker,'kind':'service','authenticated':True,'scopes':['business'],'capabilities':['approved_action']}
     history=None
     for _ in range(20):
-        sync_month(ws,model,period,worker=worker)
+        sync_store_month(ws,model,period,store_id,worker=worker)
         current=checker.check(ws,store_id,period,model=model)
         if not current['run_id']:break
         try:rows=cost_lines.current(ws,current['run_id'],store_id,period)['items']

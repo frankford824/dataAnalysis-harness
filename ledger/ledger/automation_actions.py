@@ -225,116 +225,133 @@ def _refresh_view(workspace,model,period,key):
     threading.Thread(target=run,name='ledger-month-view',daemon=True).start()
 
 
-def _month(ws,model,period):
+def _month_context(ws,model,period):
     journal.period(period)
     decisions=journal.active_decisions(ws.conn,period)
     company=checker.company_basis(ws,model,period)
     company_waiting,company_source_decision=_company_labor_source(ws,model,period,company)
+    return decisions,company,company_waiting,company_source_decision
+
+
+def _month(ws,model,period):
+    decisions,company,company_waiting,company_source_decision=_month_context(ws,model,period)
     rows=[]
     groups={}
     code_maintenance=False
     for store in checker.operating_stores(ws,model,period,include_excluded=True):
-        case_id=journal.digest([store.id,period])[:32]
-        excluded=decisions.get((store.id,'store_scope'),{}).get('values',{}).get('included') is False
-        checked=checker.check(ws,store.id,period,model=model,company_context=company,reuse_refund_validation=True)
-        code_maintenance=code_maintenance or any(p['code']=='code_source_drift' for p in checked['issues'])
-        from . import automation_handoff as handoff
-        waiting_items=handoff.active(ws,model,store.id,period,checked['input_sha'])
-        state=checker.period_header(ws,store.id,period,checked['run_id'])
-        problems=checked['issues']
-        if state and state.closed:
-            status,stage,message='completed','closed','本月已结账，展示冻结结果'
-            problems=[]
-        elif excluded:
-            status,stage,message='completed','excluded','已按本月营业范围决定排除'
-            problems=[]
-        elif checked['allowed']:
-            status,stage,message='needs_decision','ready_for_close','核算与复核已完成，请确认本月结账'
-        elif any(p['code'] in {'cost_decision_required','commission_incomplete','frozen_refund_finance_conflict'} for p in problems):
-            status,stage,message='needs_decision','business_decision','请确认确实需要业务决定的事项'
-            cost_work=(any(p['code']=='cost_decision_required' for p in problems)
-                or bool(json.loads(checker.current_run(ws,store.id,period)['result']).get('pricing_pending_count',0) if checked['run_id'] else False))
-            if cost_work:
-                from .automation_deterministic import approved_rule,enabled
-                from .automation_cost_actions import RULE as history_rule,RULE_SHA as history_sha
-                try:
-                    if enabled():
-                        from .historical_cost_facts import granted as facts_granted
-                        if not facts_granted(ws,store.id,period):
-                            try:approved_rule(ws,store.id,period,rule_id=history_rule,rule_sha=history_sha)
-                            except PermissionError:
-                                from .automation_source_cost_v3 import enabled as physical_enabled,RULE as physical_rule,RULE_SHA as physical_sha
-                                if not physical_enabled():raise
-                                approved_rule(ws,store.id,period,rule_id=physical_rule,rule_sha=physical_sha)
-                        status,stage,message='processing','gathering','正在按已批准规则查找原始成本凭据并核算'
-                except (PermissionError,ValueError):pass
-        else:
-            status,stage,message='processing','gathering','系统正在取证、核算或等待来源恢复'
-            codes={p['code'] for p in problems}
-            if codes and codes<={'company_revenue_unknown','overhead_basis_empty','overhead_total_unknown'}:
-                stage,message='waiting_company','本店核算已完成，等待公司其他营业店资料与公摊依据完整'
-            elif codes and codes<={'recompute_pending','unverified_input_change','input_capture_unverified','manual_input_unverified','unverified_code_change','original_date_input_unverified','source_fact_input_unverified','period_cost_input_unverified'}:
-                stage,message='calculating','新资料已进入现有核算队列，完成后自动更新'
-        waiting=None
-        if waiting_items and status!='completed' and not checked['allowed']:
-            waiting={'items':waiting_items,'since':min(item['since'] for item in waiting_items),
-                'summary':'；'.join(dict.fromkeys(item['summary'] for item in waiting_items))}
-            stage='waiting_source' if any(item['kind']=='source' for item in waiting_items) else 'waiting_maintenance'
-            status='processing'
-            message=waiting['summary']
-        codes={p['code'] for p in problems}
-        local_recompute=(bool(codes&{'unverified_input_change','unverified_model_change','manual_input_unverified','input_capture_unverified','unverified_code_change','period_cost_input_unverified'})
-            or ('no_result' in codes and bool(ws.active_files(store.id))))
-        if not waiting and status!='completed' and 'recompute_pending' in codes and local_recompute:
-            status='processing'
-            stage,message='calculating','资料已收到，正在现有核算队列中复核'
-        if status!='completed' and codes&{'original_date_input_unverified','source_fact_input_unverified'}:
-            status,stage,message='processing','calculating','来源依据已更新或撤回，系统正在复核本店账期，无需重新录入金额'
-            waiting=None
-        finance_codes={'overhead_frozen_input_changed','overhead_legacy_frozen_basis','overhead_frozen_basis_unverified'}
-        local_work=codes-finance_codes-{'company_revenue_unknown','overhead_basis_empty','overhead_total_unknown'}
-        local_income_missing=store.id in company.get('missing_store_ids',[])
-        if status!='completed' and company.get('finance_decision') and not local_work and not local_income_missing:
-            status,stage,message='needs_decision','company_finance',company['finance_decision']['summary']
-            waiting=None
-        # Company source readiness and this store's remaining work are
-        # independent. Do not park a runnable source/cost job behind payroll.
-        if status=='processing' and not waiting and company_waiting and codes and codes<={'company_revenue_unknown','overhead_basis_empty','overhead_total_unknown'}:
-            stage,message='waiting_company',company_waiting['summary']
-            waiting={'items':[],'since':None,'summary':message,'scope':'company',
-                     'company_waiting_id':company_waiting['id']}
-        from .source_recovery import close_refresh_pending,retry_queued
-        if status!='completed' and (close_refresh_pending(ws,case_id,checked['input_sha']) or retry_queued(ws,case_id,checked['input_sha'])):
-            status,stage,message='processing','gathering','正在刷新月结所需的上游凭据，完成后继续预览'
-            waiting=None
-        cost_conflict=None
-        if status!='completed' and 'period_cost_input_source_unverified' in codes:
-            status,stage,message='processing','maintenance','成本审批原档校验失败，已转维护恢复；无需重新录入或确认金额'
-            waiting=None
-        elif status!='completed' and 'period_cost_input_unverified' in codes:
-            status,stage,message='processing','calculating','成本已经批准，系统正在应用并核算；无需再次确认金额'
-            waiting=None
-        elif status!='completed' and 'period_cost_input_stale' in codes:
-            from .period_cost_inputs import conflict_details
-            cost_conflict=conflict_details(ws,model,store.id,period)
-            status,stage,message='needs_decision','period_cost_conflict','原成本批准与新依据冲突，请选择依据；无需重录三个金额'
-            waiting=None
-        if status!='completed' and 'code_source_drift' in codes:
-            from .version import CODE_MAINTENANCE
-            status,stage,message='processing','maintenance',CODE_MAINTENANCE
-        actions=[]
-        if stage=='ready_for_close':actions.append({'kind':'close','label':'预览月结'})
-        elif stage not in {'closed','maintenance','company_finance','waiting_company'} and not waiting:actions.append({'kind':'advance','label':'继续自动处理'})
-        if stage not in {'closed','maintenance','company_finance'}:actions.append({'kind':'store_scope','label':'确认营业范围'})
-        rows.append({'case_id':case_id,'store_id':store.id,'store':store.name,'period':period,
-            'status':status,'stage':stage,'message':message,'run_id':state.run_id if state else None,
-            'input_sha':checked['input_sha'],'issues':problems,'actions':actions,
-            'waiting':waiting,'period_cost_input_conflict':cost_conflict,'source_context_sha':handoff.context_sha(ws,model,store.id,period,checked['input_sha']),
-            'verification':{'allowed':checked['allowed'] and not bool(state and state.closed),
-                            'input_sha':checked['input_sha']}})
-        if status=='needs_decision' and stage!='company_finance':
+        row,drift=_store_row(ws,model,period,store,decisions,company,company_waiting)
+        code_maintenance=code_maintenance or drift
+        rows.append(row)
+        if row['status']=='needs_decision' and row['stage']!='company_finance':
+            stage=row['stage']
             kind='close' if stage=='ready_for_close' else 'period_cost_conflict' if stage=='period_cost_conflict' else 'business_decision'
             groups.setdefault(kind,[]).append(store.id)
+    return _month_summary(ws,model,period,rows,groups,code_maintenance,decisions,company,company_waiting,company_source_decision)
+
+
+def _store_row(ws,model,period,store,decisions,company,company_waiting):
+    case_id=journal.digest([store.id,period])[:32]
+    excluded=decisions.get((store.id,'store_scope'),{}).get('values',{}).get('included') is False
+    checked=checker.check(ws,store.id,period,model=model,company_context=company,reuse_refund_validation=True)
+    drift=any(p['code']=='code_source_drift' for p in checked['issues'])
+    from . import automation_handoff as handoff
+    waiting_items=handoff.active(ws,model,store.id,period,checked['input_sha'])
+    state=checker.period_header(ws,store.id,period,checked['run_id'])
+    problems=checked['issues']
+    if state and state.closed:
+        status,stage,message='completed','closed','本月已结账，展示冻结结果'
+        problems=[]
+    elif excluded:
+        status,stage,message='completed','excluded','已按本月营业范围决定排除'
+        problems=[]
+    elif checked['allowed']:
+        status,stage,message='needs_decision','ready_for_close','核算与复核已完成，请确认本月结账'
+    elif any(p['code'] in {'cost_decision_required','commission_incomplete','frozen_refund_finance_conflict'} for p in problems):
+        status,stage,message='needs_decision','business_decision','请确认确实需要业务决定的事项'
+        cost_work=(any(p['code']=='cost_decision_required' for p in problems)
+            or bool(json.loads(checker.current_run(ws,store.id,period)['result']).get('pricing_pending_count',0) if checked['run_id'] else False))
+        if cost_work:
+            from .automation_deterministic import approved_rule,enabled
+            from .automation_cost_actions import RULE as history_rule,RULE_SHA as history_sha
+            try:
+                if enabled():
+                    from .historical_cost_facts import granted as facts_granted
+                    if not facts_granted(ws,store.id,period):
+                        try:approved_rule(ws,store.id,period,rule_id=history_rule,rule_sha=history_sha)
+                        except PermissionError:
+                            from .automation_source_cost_v3 import enabled as physical_enabled,RULE as physical_rule,RULE_SHA as physical_sha
+                            if not physical_enabled():raise
+                            approved_rule(ws,store.id,period,rule_id=physical_rule,rule_sha=physical_sha)
+                    status,stage,message='processing','gathering','正在按已批准规则查找原始成本凭据并核算'
+            except (PermissionError,ValueError):pass
+    else:
+        status,stage,message='processing','gathering','系统正在取证、核算或等待来源恢复'
+        codes={p['code'] for p in problems}
+        if codes and codes<={'company_revenue_unknown','overhead_basis_empty','overhead_total_unknown'}:
+            stage,message='waiting_company','本店核算已完成，等待公司其他营业店资料与公摊依据完整'
+        elif codes and codes<={'recompute_pending','unverified_input_change','input_capture_unverified','manual_input_unverified','unverified_code_change','original_date_input_unverified','source_fact_input_unverified','period_cost_input_unverified'}:
+            stage,message='calculating','新资料已进入现有核算队列，完成后自动更新'
+    waiting=None
+    if waiting_items and status!='completed' and not checked['allowed']:
+        waiting={'items':waiting_items,'since':min(item['since'] for item in waiting_items),
+            'summary':'；'.join(dict.fromkeys(item['summary'] for item in waiting_items))}
+        stage='waiting_source' if any(item['kind']=='source' for item in waiting_items) else 'waiting_maintenance'
+        status='processing'
+        message=waiting['summary']
+    codes={p['code'] for p in problems}
+    local_recompute=(bool(codes&{'unverified_input_change','unverified_model_change','manual_input_unverified','input_capture_unverified','unverified_code_change','period_cost_input_unverified'})
+        or ('no_result' in codes and bool(ws.active_files(store.id))))
+    if not waiting and status!='completed' and 'recompute_pending' in codes and local_recompute:
+        status='processing'
+        stage,message='calculating','资料已收到，正在现有核算队列中复核'
+    if status!='completed' and codes&{'original_date_input_unverified','source_fact_input_unverified'}:
+        status,stage,message='processing','calculating','来源依据已更新或撤回，系统正在复核本店账期，无需重新录入金额'
+        waiting=None
+    finance_codes={'overhead_frozen_input_changed','overhead_legacy_frozen_basis','overhead_frozen_basis_unverified'}
+    local_work=codes-finance_codes-{'company_revenue_unknown','overhead_basis_empty','overhead_total_unknown'}
+    local_income_missing=store.id in company.get('missing_store_ids',[])
+    if status!='completed' and company.get('finance_decision') and not local_work and not local_income_missing:
+        status,stage,message='needs_decision','company_finance',company['finance_decision']['summary']
+        waiting=None
+    # Company source readiness and this store's remaining work are
+    # independent. Do not park a runnable source/cost job behind payroll.
+    if status=='processing' and not waiting and company_waiting and codes and codes<={'company_revenue_unknown','overhead_basis_empty','overhead_total_unknown'}:
+        stage,message='waiting_company',company_waiting['summary']
+        waiting={'items':[],'since':None,'summary':message,'scope':'company',
+                 'company_waiting_id':company_waiting['id']}
+    from .source_recovery import close_refresh_pending,retry_queued
+    if status!='completed' and (close_refresh_pending(ws,case_id,checked['input_sha']) or retry_queued(ws,case_id,checked['input_sha'])):
+        status,stage,message='processing','gathering','正在刷新月结所需的上游凭据，完成后继续预览'
+        waiting=None
+    cost_conflict=None
+    if status!='completed' and 'period_cost_input_source_unverified' in codes:
+        status,stage,message='processing','maintenance','成本审批原档校验失败，已转维护恢复；无需重新录入或确认金额'
+        waiting=None
+    elif status!='completed' and 'period_cost_input_unverified' in codes:
+        status,stage,message='processing','calculating','成本已经批准，系统正在应用并核算；无需再次确认金额'
+        waiting=None
+    elif status!='completed' and 'period_cost_input_stale' in codes:
+        from .period_cost_inputs import conflict_details
+        cost_conflict=conflict_details(ws,model,store.id,period)
+        status,stage,message='needs_decision','period_cost_conflict','原成本批准与新依据冲突，请选择依据；无需重录三个金额'
+        waiting=None
+    if status!='completed' and 'code_source_drift' in codes:
+        from .version import CODE_MAINTENANCE
+        status,stage,message='processing','maintenance',CODE_MAINTENANCE
+    actions=[]
+    if stage=='ready_for_close':actions.append({'kind':'close','label':'预览月结'})
+    elif stage not in {'closed','maintenance','company_finance','waiting_company'} and not waiting:actions.append({'kind':'advance','label':'继续自动处理'})
+    if stage not in {'closed','maintenance','company_finance'}:actions.append({'kind':'store_scope','label':'确认营业范围'})
+    return {'case_id':case_id,'store_id':store.id,'store':store.name,'period':period,
+        'status':status,'stage':stage,'message':message,'run_id':state.run_id if state else None,
+        'input_sha':checked['input_sha'],'issues':problems,'actions':actions,
+        'waiting':waiting,'period_cost_input_conflict':cost_conflict,'source_context_sha':handoff.context_sha(ws,model,store.id,period,checked['input_sha']),
+        'verification':{'allowed':checked['allowed'] and not bool(state and state.closed),
+                        'input_sha':checked['input_sha']}},drift
+
+
+def _month_summary(ws,model,period,rows,groups,code_maintenance,decisions,company,company_waiting,company_source_decision):
+    from . import automation_handoff as handoff
     counts={k:sum(r['status']==k for r in rows) for k in ('completed','processing','needs_decision')}
     counts['total']=len(rows)
     counts['waiting']=sum(bool(row['waiting']) for row in rows)
@@ -390,9 +407,39 @@ def _audit_cases(ws,model,period,request_id,action,result,rows=None):
         with ws.transaction() as conn:write(conn)
 
 
+def sync_store_month(ws,model,period,store_id,*,worker='native:commission-manager'):
+    """Refresh one store's case after its own recompute.
+
+    Other stores only change through the company basis; the full month pass
+    picks that up once the month's queue drains.
+    """
+    store=next((s for s in checker.operating_stores(ws,model,period,include_excluded=True) if s.id==store_id),None)
+    if store is None:return {'period':period,'status':'not_operating','observed':0}
+    from . import publication_scope
+    publication=publication_scope.resolve(ws.root,model)
+    if publication is not None and not publication.allows(store_id,period):
+        return {'period':period,'status':'outside_publication_scope','observed':0}
+    decisions,company,company_waiting,_=_month_context(ws,model,period)
+    row,_=_store_row(ws,model,period,store,decisions,company,company_waiting)
+    key='checker-refresh:'+journal.digest([period,store_id,row['input_sha'],row['status'],row['stage'],row['source_context_sha'],
+        publication.identity if publication is not None else None])
+    signature=journal.digest([key,period])
+    if publication is not None:publication.verify(ws.root,model)
+    with ws.transaction() as conn:
+        old=journal.receipt(conn,key,signature)
+        _case(conn,row)
+        if old:return old
+        aid=journal.ident()
+        conn.execute('INSERT INTO automation_authorization VALUES(?,?,?,?,?,?,?,?,?)',
+            (aid,key,worker,'builtin_service','checker.refresh',row['input_sha'],'',journal.encoded({'period':period,'store_id':store_id}),journal.now()))
+        return journal.finish(conn,key,'checker.refresh',signature,aid,{'period':period,'status':row['status'],'observed':1})
+
+
 def sync_month(ws,model,period,*,worker='native:commission-manager'):
     """Journal all expected stores after source arrival, never approve or close."""
-    value=_month(ws,model,period)
+    writes=_writes[0]
+    value=month(ws,model,period)
+    _month_views[(str(ws.root),period)]={'value':copy.deepcopy(value),'at':time.monotonic(),'writes':writes}
     from . import publication_scope
     publication=publication_scope.resolve(ws.root,model)
     observed=value['stores']

@@ -437,7 +437,7 @@ def run_available(ws,model,period,store_id,*,worker='native:commission-manager')
     """Bounded, model-free adoption after a durable source task has finished."""
     if not enabled():return []
     from .automation_deterministic import approved_rule
-    from .automation_actions import Conflict,sync_month
+    from .automation_actions import Conflict,sync_store_month
     from . import automation_checker as checker,cost_lines
     from .source_recovery import verified_source,SourcePending
     from .workspace import WorkspaceError
@@ -446,7 +446,7 @@ def run_available(ws,model,period,store_id,*,worker='native:commission-manager')
     outcomes=[]
     # No model-loop waits and no repeated scans of unknown raw tasks.
     for _ in range(20):
-        sync_month(ws,model,period,worker=worker)
+        sync_store_month(ws,model,period,store_id,worker=worker)
         current=checker.check(ws,store_id,period,model=model)
         if not current['run_id']:break
         existing={f['target']['coverage_key'] for f in active(ws.conn,store_id,period)}

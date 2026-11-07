@@ -13,6 +13,19 @@ from . import commission_catalog, commission_import, order_feed, service, fee_jo
 from .commission_registry import Registry, json_text
 
 
+def working_months(ws):
+    """Months still being closed, oldest first.
+
+    A month counts when it has at least half the stores of the busiest month
+    and at least half of its stores are still open; a few stray open cells in
+    an old month do not pull the whole company back to it.
+    """
+    rows=ws.conn.execute("SELECT period,count(*) n,sum(state<>'closed') open FROM period "
+                         "WHERE period GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]' GROUP BY period").fetchall()
+    busiest=max((row['n'] for row in rows),default=0)
+    return sorted(row['period'] for row in rows if 2*row['n']>=busiest and 2*row['open']>=row['n'] and row['open'])
+
+
 class Manager:
     def __init__(self, workspace, model, *, publication_scope=None):
         self.workspace = workspace
@@ -29,6 +42,36 @@ class Manager:
         self.lease_owner = 'commission-manager:' + uuid.uuid4().hex
         self.current_lease = None
         self._publication_scope = publication_scope
+        # Months whose other stores still show the company basis from before
+        # a recompute, with the time the first such recompute finished.
+        self.month_dirty = {}
+        self.last_busy_month_sync = time.time()
+
+    # A full month pass checks every store (minutes per month). It waits for
+    # the queue to drain; under a queue that never drains, one month per
+    # interval, oldest month first.
+    BUSY_MONTH_SYNC_INTERVAL = 1800
+
+    def _sync_dirty_month(self, ws, scope, *, idle):
+        if not self.month_dirty:
+            return False
+        now = time.time()
+        if not idle and now - self.last_busy_month_sync < self.BUSY_MONTH_SYNC_INTERVAL:
+            return False
+        due = [p for p, since in self.month_dirty.items() if idle or now - since >= self.BUSY_MONTH_SYNC_INTERVAL]
+        if not due:
+            return False
+        period = min(due)
+        self.month_dirty.pop(period, None)
+        if not idle:
+            self.last_busy_month_sync = now
+        from .automation_actions import sync_month
+        try:
+            sync_month(ws, self.model(), period, worker=self.lease_owner)
+        except Exception:
+            self.month_dirty.setdefault(period, now)
+            raise
+        return True
 
     def _scope(self, ws):
         value = self._publication_scope
@@ -152,14 +195,23 @@ class Manager:
                 with registry.transaction() as conn:
                     conn.execute("UPDATE job SET status='failed',error=? WHERE id=?", (str(exc)[:2000], job["id"]))
             return
+        if self._sync_dirty_month(ws,scope,idle=False):
+            return
         claimed_at = int(time.time())
         allowed_stores=sorted({sid for sid,_period in scope.scopes})
         scope.verify(ws.root,self.model())
+        # Month by month: stores still open in the earliest month go first.
+        working=set(working_months(ws))
+        oldest_open={}
+        for row in ws.conn.execute("SELECT store_id,period FROM period WHERE state<>'closed'"):
+            if row[1] in working:oldest_open[row[0]]=min(oldest_open.get(row[0],row[1]),row[1])
         with registry.transaction() as conn:
-            pending = conn.execute("SELECT * FROM pending WHERE next_attempt<=? AND lease_until<=? "
-                                   "AND store_id IN (%s) "
-                                   "ORDER BY (next_attempt=0) DESC,(files_revision>files_applied_revision) DESC,next_attempt,revision,store_id LIMIT 1" % ','.join('?' for _ in allowed_stores),
-                                   (claimed_at,claimed_at,*allowed_stores)).fetchone()
+            candidates = conn.execute("SELECT * FROM pending WHERE next_attempt<=? AND lease_until<=? "
+                                      "AND store_id IN (%s)" % ','.join('?' for _ in allowed_stores),
+                                      (claimed_at,claimed_at,*allowed_stores)).fetchall()
+            pending = min(candidates, key=lambda r: (r['next_attempt']!=0, r['files_revision']<=r['files_applied_revision'],
+                                                     oldest_open.get(r['store_id'],'9999-99'), r['next_attempt'],
+                                                     r['revision'], r['store_id'])) if candidates else None
             if pending:
                 pending=dict(pending)
                 pending['lease_token']+=1
@@ -256,6 +308,11 @@ class Manager:
                     conn.execute("UPDATE pending SET files_applied_revision=max(files_applied_revision,?) "
                                  "WHERE store_id=? AND files_revision>=?",
                                  (pending['files_revision'],store_id,pending['files_revision']))
+                    # Rules, files and code captured by this run now reach every
+                    # month; what is left can only be order changes, which the
+                    # month check bounds by business date.
+                    conn.execute("UPDATE pending SET full_applied_revision=max(full_applied_revision,?) WHERE store_id=?",
+                                 (pending.get('full_revision',1),store_id))
                 if provisional:
                     retry_at = int(time.time()) + 60
                     changed = conn.execute("UPDATE pending SET next_attempt=? WHERE store_id=? AND revision<=? AND source_seq<=? AND source_fingerprint=? AND files_revision=?",
@@ -306,20 +363,25 @@ class Manager:
             # after retiring the captured generation so an older run cannot ack
             # away the newly approved source decision.
             if automatic:deliver(ws)
-            from .automation_actions import sync_month
+            from .automation_actions import sync_store_month
             from .automation_cost_actions import run_available as cost_actions
             periods={p['period']:p for p in result.periods if p.get('period')}
             # A real delivery can fail to yield any slice (missing/unknown
             # originals). Existing store-month waits still need reconciliation.
-            for row in ws.conn.execute('SELECT period FROM automation_case WHERE store_id=?',(store_id,)):
-                if scope.allows(store_id,row['period']):periods.setdefault(row['period'],{'period':row['period']})
+            cases={row['period']:row['stage'] for row in ws.conn.execute('SELECT period,stage FROM automation_case WHERE store_id=?',(store_id,))}
+            for period in cases:
+                if scope.allows(store_id,period):periods.setdefault(period,{'period':period})
             for period in scope.periods_for_store(store_id):periods.setdefault(period,{'period':period})
-            for period,period_result in periods.items():
+            for period,period_result in sorted(periods.items()):
                 scope.require(store_id,period,workspace_root=ws.root)
-                sync_month(ws,self.model(),period,worker=self.lease_owner)
+                if period_result.get('state')=='closed' and cases.get(period)=='closed':continue
+                sync_store_month(ws,self.model(),period,store_id,worker=self.lease_owner)
                 if period_result.get('state')!='closed':
                     cost_actions(ws,self.model(),period,store_id,worker=self.lease_owner)
+                    self.month_dirty.setdefault(period,time.time())
             deliver(ws)
+            return
+        if self._sync_dirty_month(ws,scope,idle=True):
             return
         if order_feed.enabled() and time.time() - self.last_catalog > 12 * 3600:
             self.last_catalog = time.time()

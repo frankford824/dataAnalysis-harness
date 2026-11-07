@@ -92,10 +92,12 @@ create table if not exists feed_entity (
   sub_order_id text,
   sku_id text,
   payload_json text,
+  business_month text,
   primary key(entity_type,entity_id)
 );
 create index if not exists feed_entity_store on feed_entity(order_store_id,entity_type);
 create index if not exists feed_entity_store_seq on feed_entity(order_store_id,entity_type,seq);
+create index if not exists feed_entity_order on feed_entity(order_id);
 create table if not exists feed_pending_store (
   ledger_store_id text primary key,
   seq integer not null
@@ -206,6 +208,37 @@ def _query_scope_fingerprint(manifest: dict[str, Any]) -> str:
 
 def _now() -> str:
     return datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds")
+
+
+def _month_of(value: Any) -> str | None:
+    text = str(value or "").strip()[:7]
+    return text if len(text) == 7 and text[4] == "-" and text[:4].isdigit() and text[5:].isdigit() else None
+
+
+def _own_months(entity_type: str, payload: dict[str, Any] | None) -> list[str]:
+    """Business months the entity states itself: order day, original day, pay day."""
+    if not payload:
+        return []
+    if entity_type == "order":
+        body = payload.get("order") or {}
+        values = [body.get(k) for k in ("order_date", "order_time", "pay_date", "pay_time")]
+    elif entity_type == "order_item":
+        body = payload.get("order_item") or {}
+        values = [body.get(k) for k in ("original_order_date", "order_date", "order_time")]
+    elif entity_type == "order_cost":
+        body = payload.get("cost") or payload
+        evidence = body.get("pricing_evidence") if isinstance(body.get("pricing_evidence"), dict) else {}
+        values = [evidence.get("order_date"), body.get("cost_as_of")]
+    else:
+        return []
+    return [m for m in map(_month_of, values) if m]
+
+
+def _order_refs(change: dict[str, Any], payload: dict[str, Any] | None) -> set[str]:
+    refs = {str(change.get("order_id") or "")}
+    relation = (payload or {}).get("order_relation") or {}
+    refs.update(str(relation.get(k) or "") for k in ("source_order_id", "target_order_id"))
+    return {ref for ref in refs if ref}
 
 
 def enabled() -> bool:
@@ -338,6 +371,10 @@ class OrderFeed:
             self._guard = _sync_guards.setdefault(key, threading.RLock())
             if key not in _initialized_databases or not self.db_path.exists():
                 with self._connect() as conn:
+                    if conn.execute("select 1 from sqlite_master where name='feed_entity'").fetchone():
+                        entity = {row["name"] for row in conn.execute("pragma table_info(feed_entity)")}
+                        if "business_month" not in entity:
+                            conn.execute("alter table feed_entity add column business_month text")
                     conn.executescript(_DB_SCHEMA)
                     have = {row["name"] for row in conn.execute("pragma table_info(feed_state)")}
                     for name, declaration in _STATE_COLUMNS.items():
@@ -841,6 +878,65 @@ class OrderFeed:
                 [(sid, through_seq) for sid in stores],
             )
 
+    def _business_months(
+        self, entities: list[tuple[dict[str, Any], dict[str, Any] | None]],
+    ) -> list[str | None]:
+        """Earliest month each change can move; None when it cannot be bounded.
+
+        A change reaches its order's month (order-date metrics) and any later
+        month (occurrence-date metrics), so one lower bound is enough. The old
+        version of an order is read back too: moving an order's date touches
+        both months.
+        """
+        known: dict[str, str] = {}
+
+        def note(order_id: str, months: list[str]) -> None:
+            if order_id and months:
+                low = min(months)
+                known[order_id] = min(known.get(order_id, low), low)
+
+        for change, payload in entities:
+            if change["entity_type"] in ("order", "order_item"):
+                note(str(change.get("order_id") or ""), _own_months(change["entity_type"], payload))
+        wanted = sorted({ref for change, payload in entities if change["entity_type"] in ACCOUNTING_ENTITIES
+                         for ref in _order_refs(change, payload)})
+        failed = False
+        try:
+            with self._connect() as conn:
+                for start in range(0, len(wanted), 500):
+                    chunk = wanted[start:start + 500]
+                    for row in conn.execute(
+                        "select entity_type,order_id,payload_json from feed_entity where order_id in (%s) "
+                        "and entity_type in ('order','order_item')" % ",".join("?" for _ in chunk), chunk,
+                    ):
+                        payload = json.loads(row["payload_json"]) if row["payload_json"] else None
+                        note(str(row["order_id"]), _own_months(row["entity_type"], payload))
+            objects = json.loads(self.state().get("manifest_json") or "{}").get("objects") or {}
+            for name, columns in (("orders.parquet", ("order_time", "pay_time")),
+                                  ("order_items.parquet", ("original_order_date",))):
+                if not wanted or name not in objects:
+                    continue
+                scan = pl.scan_parquet(self.feed_root / objects[name]["path"])
+                present = [c for c in columns if c in scan.collect_schema().names()]
+                if not present:
+                    continue
+                frame = scan.filter(pl.col("order_id").cast(pl.Utf8).is_in(wanted)).select(
+                    pl.col("order_id").cast(pl.Utf8), *[pl.col(c).cast(pl.Utf8) for c in present]).collect()
+                for row in frame.iter_rows():
+                    note(str(row[0]), [m for m in map(_month_of, row[1:]) if m])
+        except (OSError, sqlite3.Error, ValueError, pl.exceptions.PolarsError):
+            failed = True
+        months: list[str | None] = []
+        for change, payload in entities:
+            entity_type = change["entity_type"]
+            refs = _order_refs(change, payload)
+            linked = [known[ref] for ref in refs if ref in known]
+            candidates = _own_months(entity_type, payload) + linked
+            unbounded = failed or entity_type not in ACCOUNTING_ENTITIES or (
+                entity_type not in ("order", "order_item", "order_cost") and (not refs or len(linked) < len(refs)))
+            months.append(None if unbounded or not candidates else min(candidates))
+        return months
+
     def _commit_page(
         self,
         page: dict[str, Any],
@@ -851,6 +947,7 @@ class OrderFeed:
         revision_etag: str,
     ) -> set[str]:
         affected: set[str] = set()
+        months = self._business_months(entities)
         with self._connect() as conn:
             conn.execute("begin immediate")
             mapping = {
@@ -858,16 +955,19 @@ class OrderFeed:
                 for r in conn.execute("select order_store_id,ledger_store_id from feed_store "
                                       "where mapping_status='confirmed'")
             }
-            for change, payload in entities:
+            for (change, payload), month in zip(entities, months):
                 order_store_id = str(change.get("order_store_id") or "")
                 if order_store_id in mapping and change["entity_type"] in ACCOUNTING_ENTITIES:
                     affected.add(mapping[order_store_id])
                 conn.execute(
                     "insert into feed_entity(entity_type,entity_id,seq,revision,operation,order_store_id,"
-                    "order_id,sub_order_id,sku_id,payload_json) values(?,?,?,?,?,?,?,?,?,?) "
+                    "order_id,sub_order_id,sku_id,payload_json,business_month) values(?,?,?,?,?,?,?,?,?,?,?) "
                     "on conflict(entity_type,entity_id) do update set seq=excluded.seq,revision=excluded.revision,"
                     "operation=excluded.operation,order_store_id=excluded.order_store_id,order_id=excluded.order_id,"
-                    "sub_order_id=excluded.sub_order_id,sku_id=excluded.sku_id,payload_json=excluded.payload_json",
+                    "sub_order_id=excluded.sub_order_id,sku_id=excluded.sku_id,payload_json=excluded.payload_json,"
+                    "business_month=CASE WHEN excluded.business_month IS NULL THEN NULL "
+                    "WHEN feed_entity.business_month IS NULL THEN excluded.business_month "
+                    "ELSE min(feed_entity.business_month,excluded.business_month) END",
                     (
                         str(change["entity_type"]), str(change["entity_id"]), int(change["seq"]),
                         int(change["revision"]), str(change["operation"]), order_store_id or None,
@@ -875,6 +975,7 @@ class OrderFeed:
                         str(change.get("sub_order_id") or "") or None,
                         str(change.get("sku_id") or "") or None,
                         json.dumps(payload, ensure_ascii=False, separators=(",", ":")) if payload else None,
+                        month,
                     ),
                 )
             conn.execute(

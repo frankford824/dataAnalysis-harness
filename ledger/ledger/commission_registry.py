@@ -454,7 +454,9 @@ class Registry:
                                                ("lease_owner", "TEXT NOT NULL DEFAULT ''"),
                                                ("lease_token", "INTEGER NOT NULL DEFAULT 0"),
                                                ("lease_until", "INTEGER NOT NULL DEFAULT 0"),
-                                               ("attempt_count", "INTEGER NOT NULL DEFAULT 0")]:
+                                               ("attempt_count", "INTEGER NOT NULL DEFAULT 0"),
+                                               ("full_revision", "INTEGER NOT NULL DEFAULT 1"),
+                                               ("full_applied_revision", "INTEGER NOT NULL DEFAULT 0")]:
                         if column not in fields:
                             conn.execute(f"ALTER TABLE pending ADD COLUMN {column} {definition}")
                     _migrate_store_member(conn)
@@ -971,7 +973,7 @@ class Registry:
         if publish:
             rev = int(conn.execute("SELECT revision FROM meta WHERE id=1").fetchone()[0])
             conn.execute("INSERT INTO pending(store_id,revision) VALUES(?,?) ON CONFLICT(store_id) "
-                         "DO UPDATE SET revision=excluded.revision,next_attempt=0,error=''",
+                         "DO UPDATE SET revision=excluded.revision,next_attempt=0,error='',full_revision=full_revision+1",
                          (store_id, rev))
         return result
 
@@ -1221,7 +1223,7 @@ class Registry:
             for sid in sorted(stores):
                 added=conn.execute('INSERT OR IGNORE INTO automation_dispatch VALUES(?,?,?)',(sid,fingerprint,now()))
                 if not added.rowcount:continue
-                conn.execute('INSERT INTO pending(store_id,revision,source_fingerprint,files_revision,next_attempt) VALUES(?,?,?,1,?) ON CONFLICT(store_id) DO UPDATE SET revision=max(revision,excluded.revision),source_fingerprint=excluded.source_fingerprint,files_revision=files_revision+1,error=\'\'',
+                conn.execute('INSERT INTO pending(store_id,revision,source_fingerprint,files_revision,next_attempt) VALUES(?,?,?,1,?) ON CONFLICT(store_id) DO UPDATE SET revision=max(revision,excluded.revision),source_fingerprint=excluded.source_fingerprint,files_revision=files_revision+1,full_revision=full_revision+1,error=\'\'',
                     (sid,revision,fingerprint,int(time.time())))
 
     def enqueue_cost_lines(self, store_id: str, period: str, revision: int) -> None:
@@ -1236,7 +1238,8 @@ class Registry:
             conn.executemany(
                 "INSERT INTO pending(store_id,revision,source_fingerprint,files_revision,next_attempt) VALUES(?,?,?,1,?) "
                 "ON CONFLICT(store_id) DO UPDATE SET revision=max(revision,excluded.revision),"
-                "source_fingerprint=excluded.source_fingerprint,files_revision=files_revision+1,error=''",
+                "source_fingerprint=excluded.source_fingerprint,files_revision=files_revision+1,"
+                "full_revision=full_revision+1,error=''",
                 [(sid, revision, fingerprint, int(time.time())) for sid in stores],
             )
 
@@ -1248,7 +1251,7 @@ class Registry:
         with self.transaction() as conn:
             revision = conn.execute("SELECT revision FROM meta WHERE id=1").fetchone()[0]
             conn.executemany(
-                "INSERT INTO pending(store_id,revision,source_seq,source_fingerprint,next_attempt) VALUES(?,?,?,?,?) "
+                "INSERT INTO pending(store_id,revision,source_seq,source_fingerprint,next_attempt,full_revision) VALUES(?,?,?,?,?,0) "
                 "ON CONFLICT(store_id) DO UPDATE SET revision=max(revision,excluded.revision),"
                 "source_seq=max(source_seq,excluded.source_seq),source_fingerprint=excluded.source_fingerprint,"
                 # Keep the original due time, active lease and retry backoff.
@@ -1285,5 +1288,5 @@ class Registry:
             revision = conn.execute("SELECT revision FROM meta WHERE id=1").fetchone()[0]
             touched = [store_id] if store_id else (stores or [r[0] for r in conn.execute("SELECT DISTINCT store_id FROM scheme")])
             conn.executemany("INSERT INTO pending(store_id,revision) VALUES(?,?) ON CONFLICT(store_id) "
-                             "DO UPDATE SET revision=excluded.revision,next_attempt=0,error=''", [(sid, revision) for sid in touched])
+                             "DO UPDATE SET revision=excluded.revision,next_attempt=0,error='',full_revision=full_revision+1", [(sid, revision) for sid in touched])
         return result
