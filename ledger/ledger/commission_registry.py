@@ -1241,7 +1241,7 @@ class Registry:
             )
 
     def enqueue_source(self, stores: set[str], fingerprint: str) -> None:
-        match = re.fullmatch(r"order-feed:[^:]+:(\d+)(?::components:[0-9a-f]{64})?", fingerprint)
+        match = re.fullmatch(r"order-feed:[^:]+:(\d+)(?::query-scope:[0-9a-f]{64})?(?::components:[0-9a-f]{64})?", fingerprint)
         if match is None:
             raise RegistryError("订单来源版本格式不正确")
         seq = int(match.group(1))
