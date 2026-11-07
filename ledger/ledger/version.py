@@ -24,6 +24,7 @@ import hashlib
 import json
 import re
 import threading
+import time
 from pathlib import Path
 
 #: 仓库根。从这个文件往上两层：ledger/ledger/version.py → ledger/ → 仓库根。
@@ -148,7 +149,7 @@ class CodeIntegrityMonitor:
         self._lock=threading.Lock();self._fault=None;self._approved=None;self._receipt_bytes=None
         self._had_receipt=self.receipt.exists() or self.receipt.is_symlink()
         self._had_stamp=self.stamp.exists() or self.stamp.is_symlink()
-        self._initial_stamp=None;self._mode='approved'
+        self._initial_stamp=None;self._mode='approved';self._unchecked=None
         try:self._initial_source=source_code_sha(self.root)
         except (OSError,ValueError):self._initial_source=None;self._fault='source_unavailable'
         try:self._initial_stamp=self._stamp_value()
@@ -203,12 +204,22 @@ class CodeIntegrityMonitor:
             raise _IntegrityFault('receipt_invalid')
         return approved
 
+    # Unchecked mode never blocks, so a reading up to a minute old is enough;
+    # hashing the tree on every call was a third of each store's recompute.
+    UNCHECKED_TTL=60
+
     def state(self):
+        if os.environ.get('LEDGER_CODE_INTEGRITY')=='off':
+            cached=self._unchecked
+            if cached is None or time.monotonic()-cached[0]>=self.UNCHECKED_TTL:
+                try:cached=(time.monotonic(),source_code_sha(self.root))
+                except (OSError,ValueError):cached=None
+                self._unchecked=cached
+            if cached is not None:
+                return {'healthy':True,'source_code_sha':cached[1],'approved_source_code_sha':cached[1],
+                    'source_code_status':'unchecked','restart_required':False}
         try:actual=source_code_sha(self.root)
         except (OSError,ValueError):actual=None
-        if os.environ.get('LEDGER_CODE_INTEGRITY')=='off' and actual is not None:
-            return {'healthy':True,'source_code_sha':actual,'approved_source_code_sha':actual,
-                'source_code_status':'unchecked','restart_required':False}
         with self._lock:
             fault=self._fault
             if fault is None:
