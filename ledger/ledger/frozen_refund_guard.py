@@ -131,18 +131,31 @@ class Context:
             if path.is_file() and digest(path)==row['file_sha']:
                 from .engine.parse import parse
                 from .engine.normalize import _bind_columns
+                from .model.schema import normalize_header
                 try:
-                    for table in parse(path,template.parse,sha=row['file_sha']):
-                        bound=_bind_columns(table.headers,template,[])
-                        if 'txn_id' not in bound:continue
-                        index=bound['txn_id']
-                        for original in table.rows:
-                            if index<len(original.cells):identities[(table.ref.sheet,original.row_no)]=valid_id(original.cells[index])
+                    # Ingestion overrides the template header row with the one it
+                    # recognized (Alipay CSV headers follow "#" preamble lines).
+                    for options in (template.parse,template.parse.model_copy(update={'header_row':0})):
+                        for table in parse(path,options,sha=row['file_sha']):
+                            headers={normalize_header(h) for h in table.headers}
+                            if not all(normalize_header(c) in headers for c in template.match_columns):continue
+                            bound=_bind_columns(table.headers,template,[])
+                            if 'txn_id' not in bound:continue
+                            index=bound['txn_id']
+                            for original in table.rows:
+                                if index<len(original.cells):identities[(table.ref.sheet or '',original.row_no)]=valid_id(original.cells[index])
+                        if identities:break
                 except Exception:
                     identities={}  # Missing/unsupported identity stays pending.
             self.original_cache[key]=identities
-        result['event_id']=self.original_cache[key].get((row['sheet'],int(row['row_no'])))
+        result['event_id']=self.original_cache[key].get((row['sheet'] or '',int(row['row_no'])))
         return result
+
+    def imported(self,period,run_id):
+        from .historical_close import CUTOFF,OPERATOR
+        if not run_id or period>CUTOFF:return False
+        row=self.ws.conn.execute('SELECT by FROM period WHERE store_id=? AND period=? AND run_id=?',(self.store.id,period,run_id)).fetchone()
+        return bool(row) and row[0]==OPERATOR
 
     def history(self):
         if self.loaded:return
@@ -161,7 +174,7 @@ class Context:
                 path=self.ws.facts_path(run_id)
                 if not path.is_file() or not verified(path):raise ValueError('frozen_facts_missing_or_unsealed')
                 if proof:
-                    m=manifest;rel=path.resolve().relative_to(self.ws.root.resolve()).as_posix()
+                    m=manifest;rel=path.relative_to(self.ws.root).as_posix()
                     artifact=next((a for a in m.get('artifacts',[]) if a['path']==rel),None)
                     if not artifact or not valid_artifact(self.ws,artifact):raise ValueError('frozen_facts_expected_hash_mismatch')
                     assurance='run_proof_bound_archive'
@@ -178,18 +191,21 @@ class Context:
                         if metric not in totals or not same(booked,money(totals[metric])):
                             raise ValueError('frozen_refund_facts_and_snapshot_conflict')
                 shas=set(json.loads(self.ws.conn.execute('SELECT shas FROM run WHERE id=?',(run_id,)).fetchone()[0]))
-                archive={'path':path.resolve().relative_to(self.ws.root.resolve()).as_posix(),'sha':digest(path),'sealed':True}
+                archive={'path':path.relative_to(self.ws.root).as_posix(),'sha':digest(path),'sealed':True}
                 for row in rows:
-                    if not row.get('file_sha') or not row.get('sheet') or int(row['row_no'])<1:raise ValueError('frozen_original_anchor_missing')
+                    # CSV originals have no sheet name; their anchor is the empty sheet.
+                    if not row.get('file_sha') or row.get('sheet') is None or int(row['row_no'])<1:raise ValueError('frozen_original_anchor_missing')
                     if not proof and row['file_sha'] not in shas:raise ValueError('legacy_frozen_original_not_bound_to_run')
                     identity=self.old_identity(row)
                     record={'owner':owner,'row':row,'identity':identity,'artifact':archive,'assurance':assurance}
                     self.exact[physical(row)].append(record)
                     key=native_key(row,identity)
                     if key:self.native[key].append(record)
-                    else:self.uncertain.append({'source':row['source_id'],'namespace':identity.get('namespace'),'potential_event_id':identity.get('event_id'),'physical':physical(row),'reason':'legacy_native_event_identity_unverified','owner':owner})
+                    else:self.uncertain.append({'source':row['source_id'],'namespace':identity.get('namespace'),'potential_event_id':identity.get('event_id'),'physical':physical(row),'reason':'legacy_native_event_identity_unverified','owner':owner,
+                        'parent':str(row.get('link_key') or '').strip()})
             except Exception as exc:
-                self.uncertain.append({'source':None,'namespace':None,'reason':str(exc) if isinstance(exc,ValueError) else 'frozen_archive_unreadable','owner':owner,'manifest':manifest})
+                self.uncertain.append({'source':None,'namespace':None,'reason':str(exc) if isinstance(exc,ValueError) else 'frozen_archive_unreadable','owner':owner,'manifest':manifest,
+                    'imported':not proof and self.imported(period,run_id)})
 
     def potential_original_index(self,uncertain):
         """Recover only event identity from complete original input evidence.
@@ -252,6 +268,15 @@ class Context:
         if uncertain['source'] not in (None,row['source_id']):return False
         if uncertain['namespace'] not in (None,identity.get('namespace')):return False
         if uncertain.get('physical')==physical(row):return True
+        # Imported pre-Ledger reports have no event list. Posting month is the
+        # original order month (occurrence month when orderless), so such a
+        # report cannot hold an event of an order placed after its month.
+        current=str(row.get('period') or '')
+        if uncertain.get('imported') and len(current)==7 and current[4]=='-' and current>str(uncertain['owner']['period']):return False
+        # One old row without a native ID: a refund of another original order
+        # posted to another month is a different event.
+        parent=str(row.get('link_key') or '').strip()
+        if uncertain.get('parent') and parent and parent!=uncertain['parent'] and current and current!=uncertain['owner']['period']:return False
         if uncertain.get('potential_event_id') and identity.get('event_id') and uncertain['potential_event_id']!=identity['event_id']:return False
         manifest=uncertain.get('manifest') or {}
         index=manifest.get('frozen_refund_event_index')
