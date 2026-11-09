@@ -21,7 +21,9 @@ import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
+from collections import defaultdict
 from datetime import date, datetime, timezone
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any, Callable, Iterator
 
@@ -54,6 +56,7 @@ MEMBER_PARENT_NUMBERS = {"taobao": r"\d{19}", "douyin": r"\d{19}", "alibaba1688"
 # 一行商品成本超过该行售价这么多倍、且金额超过这个门槛，视为数量或成本写错，不计。
 # 正常亏本引流是 1 分钱卖 1 块成本的东西，绝对金额小；5 倍 + 100 元把它们都放过。
 IMPLAUSIBLE_COST_TO_PRICE = 5.0
+COST_CLEARING_GOODS = frozenset({"买家未收到货", "买家已退货", "卖家已收到退货"})
 IMPLAUSIBLE_COST_FLOOR = 100.0
 _DB_SCHEMA = """
 pragma journal_mode=wal;
@@ -1625,7 +1628,7 @@ class OrderFeed:
         reship_origins = self._reshipment_origins(after, items, exported_orders)
         order_frame = self._order_frame(orders, items, after, relations, store, fingerprint, reship_origins, exported_orders)
         cost_frame = self._cost_frame(orders, items, costs, relations, store, fingerprint, reship_origins, require_history, require_pricing, exported_orders)
-        after_frame = self._after_frame(after, after_items, items, store, fingerprint)
+        after_frame = self._after_frame(after, after_items, items, store, fingerprint, orders)
         cost_item = self._item("order_cost", "order_console_cost_v1", "订单台日期时点成本", cost_frame,
                                self._cost_template(), fingerprint)
         if getattr(self, "_retired_cost_rows", 0):
@@ -1653,6 +1656,15 @@ class OrderFeed:
             after_item.notes.append(
                 f"{self._whole_order_after_sales:,} 张订单台售后的数量与所属平台订单的全部商品件数一致，"
                 "按该平台订单的每个商品行判定，不只看售后上挂的那一个商品"
+            )
+        resolved, unresolved = self._unnamed_after_sales
+        if resolved:
+            after_item.notes.append(
+                f"{resolved:,} 张订单台售后没写明商品，退款额正好对上同一平台订单里唯一一组已发货商品，按这组商品判定"
+            )
+        if unresolved:
+            after_item.notes.append(
+                f"{unresolved:,} 张订单台售后没写明商品，退款额对不上或对上多组商品，这些商品成本照记"
             )
         return [
             self._item("order_detail", "order_console_order_v1", "订单台实时订单", order_frame,
@@ -2205,12 +2217,17 @@ class OrderFeed:
 
     def _after_frame(
         self, after: pl.DataFrame, items: pl.DataFrame, order_items: pl.DataFrame,
-        store: Store, fingerprint: str,
+        store: Store, fingerprint: str, orders: pl.DataFrame | None = None,
     ) -> pl.DataFrame:
         items, self._whole_order_after_sales = self._whole_platform_order_items(after, items, order_items)
+        items, *self._unnamed_after_sales = self._unnamed_after_sale_items(after, items, order_items, orders)
         # 成本帧的 sub_order_id 是平台子订单号（outer_sku），售后行要走同一把钥匙，
         # 否则「内部单号 + 子订单号 + 商品编码」三键永远对不上，规则形同虚设。
-        keyed = items.select("after_sale_id", "order_id", "sub_order_id", "sku_id", "quantity").with_columns(
+        resolved_internal = (pl.col("__resolved_internal") if "__resolved_internal" in items.columns
+                             else pl.lit(None, dtype=pl.Utf8)).cast(pl.Utf8)
+        keyed = items.with_columns(resolved_internal.alias("__resolved_internal")).select(
+            "after_sale_id", "order_id", "sub_order_id", "sku_id", "quantity", "__resolved_internal",
+        ).with_columns(
             pl.col("order_id", "sub_order_id").cast(pl.Utf8)
         ).join(
             order_items.select("order_id", "sub_order_id", "outer_sku").cast(pl.Utf8),
@@ -2218,12 +2235,12 @@ class OrderFeed:
         ).select(
             "after_sale_id",
             pl.col("outer_sku").fill_null(pl.col("sub_order_id")).alias("sub_order_id"),
-            "sku_id", "quantity",
+            "sku_id", "quantity", "__resolved_internal",
         )
         frame = after.join(keyed, on="after_sale_id", how="left", suffix="_item").select(
             pl.col("after_sale_id").cast(pl.Utf8),
             (pl.col("updated_at_source") if "updated_at_source" in after.columns else pl.lit(None)).cast(pl.Utf8).alias("refund_confirm_time"),
-            pl.col("order_id").cast(pl.Utf8).alias("internal_order_id"),
+            pl.coalesce(pl.col("__resolved_internal"), pl.col("order_id").cast(pl.Utf8)).alias("internal_order_id"),
             pl.col("online_order_no").cast(pl.Utf8).alias("order_id"),
             pl.coalesce(pl.col("sub_order_id_item"), pl.col("sub_order_id")).cast(pl.Utf8).alias("sub_order_id"),
             pl.col("sku_id").cast(pl.Utf8).alias("sku"),
@@ -2295,6 +2312,103 @@ class OrderFeed:
         kept = items.select(pl.col(columns).cast(pl.Utf8)).filter(
             ~pl.col("after_sale_id").is_in(whole["after_sale_id"].implode()))
         return pl.concat([kept, expanded], how="vertical_relaxed"), whole.height
+
+    @staticmethod
+    def _unnamed_after_sale_items(
+        after: pl.DataFrame, items: pl.DataFrame, order_items: pl.DataFrame, orders: pl.DataFrame | None,
+    ) -> tuple[pl.DataFrame, int, int]:
+        """Name the goods of an after-sale whose items carry no sub-order or SKU.
+
+        The console often hangs such an after-sale on the pre-split parent order
+        with a meaningless quantity. Its refund amount is still exact, so the
+        shipped lines of the same shop's platform order are matched by paid
+        amount: the whole order, else exactly one platform sub-order or one line.
+        Several or no matching groups leave the after-sale unnamed.
+        """
+        columns = ["after_sale_id", "order_id", "sub_order_id", "sku_id", "quantity"]
+        if (orders is None or after.is_empty() or not set(columns) <= set(items.columns)
+                or not {"after_sale_id", "order_store_id", "online_order_no", "refund_amount"} <= set(after.columns)
+                or not {"order_id", "sub_order_id", "sku_id", "quantity", "online_order_no", "order_store_id",
+                        "outer_sku", "paid_amount"} <= set(order_items.columns)
+                or not {"order_id", "ship_time"} <= set(orders.columns)):
+            return items, 0, 0
+        named = items.filter(pl.col("sub_order_id").is_not_null() & pl.col("sku_id").is_not_null())
+        heads = after.join(named.select(pl.col("after_sale_id").cast(pl.Utf8)).unique(),
+                           on="after_sale_id", how="anti")
+        if heads.is_empty():
+            return items, 0, 0
+
+        def cents(value: Any) -> int | None:
+            try:
+                number = Decimal(str(value).strip())
+            except (InvalidOperation, ValueError):
+                return None
+            return int((number * 100).to_integral_value()) if number.is_finite() else None
+
+        def platform(value: Any, shop: Any) -> str:
+            raw = str(value or "").strip()
+            prefix, _, rest = raw.rpartition(":")
+            if prefix and prefix != str(shop or ""):
+                return ""
+            return "" if any(c in rest for c in ",，;； ") else rest
+
+        header = orders.select(
+            pl.col("order_id").cast(pl.Utf8),
+            pl.col("ship_time").cast(pl.Utf8),
+            (pl.col("order_type") if "order_type" in orders.columns else pl.lit(None)).cast(pl.Utf8).alias("__type"),
+        ).unique("order_id")
+        families: dict[tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
+        for line in order_items.select(
+            pl.col("order_id", "sub_order_id", "sku_id", "outer_sku", "online_order_no",
+                   "order_store_id", "paid_amount", "quantity").cast(pl.Utf8)
+        ).join(header, on="order_id", how="inner").iter_rows(named=True):
+            if not line["ship_time"] or line["__type"] == "补发订单":
+                continue
+            key = (str(line["order_store_id"] or ""), platform(line["online_order_no"], line["order_store_id"]))
+            if key[1]:
+                families[key].append(line)
+
+        resolved: list[dict[str, Any]] = []
+        replaced: set[str] = set()
+        unresolved = 0
+        status = [(pl.col(c) if c in heads.columns else pl.lit(None)).cast(pl.Utf8).alias(c)
+                  for c in ("online_status_raw", "goods_status_raw")]
+        for head in heads.select(*[pl.col(c).cast(pl.Utf8) for c in
+                                   ("after_sale_id", "order_store_id", "online_order_no", "refund_amount")],
+                                 *status).unique("after_sale_id").iter_rows(named=True):
+            shop = str(head["order_store_id"] or "")
+            lines = families.get((shop, platform(head["online_order_no"], shop)))
+            amount = cents(head["refund_amount"])
+            if not lines or not amount or amount <= 0:
+                continue
+            clears = head["online_status_raw"] == "退款成功" and head["goods_status_raw"] in COST_CLEARING_GOODS
+            paid = [cents(line["paid_amount"]) for line in lines]
+            if any(p is None for p in paid):
+                unresolved += clears
+                continue
+            if sum(paid) == amount:
+                chosen = list(range(len(lines)))
+            else:
+                groups: dict[str, list[int]] = defaultdict(list)
+                for i, line in enumerate(lines):
+                    groups[str(line["outer_sku"] or "")].append(i)
+                options = {tuple(g) for name, g in groups.items() if name and sum(paid[i] for i in g) == amount}
+                options |= {(i,) for i, p in enumerate(paid) if p == amount}
+                if len(options) != 1:
+                    unresolved += clears
+                    continue
+                chosen = list(options.pop())
+            replaced.add(head["after_sale_id"])
+            resolved.extend({
+                "after_sale_id": head["after_sale_id"], "order_id": lines[i]["order_id"],
+                "sub_order_id": lines[i]["sub_order_id"], "sku_id": lines[i]["sku_id"],
+                "quantity": lines[i]["quantity"], "__resolved_internal": lines[i]["order_id"],
+            } for i in chosen)
+        if not resolved:
+            return items, 0, unresolved
+        kept = items.select(pl.col(columns).cast(pl.Utf8)).filter(~pl.col("after_sale_id").is_in(sorted(replaced)))
+        added = pl.DataFrame(resolved, schema={name: pl.Utf8 for name in [*columns, "__resolved_internal"]})
+        return pl.concat([kept, added], how="diagonal_relaxed"), len(replaced), unresolved
 
     @staticmethod
     def _template(template_id: str, source: str, roles: list[tuple[str, str]]) -> Template:
