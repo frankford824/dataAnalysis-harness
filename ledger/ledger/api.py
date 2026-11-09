@@ -33,7 +33,7 @@ import anyio.to_thread
 from fastapi import FastAPI, File, HTTPException, Query, Request, Response, UploadFile
 from fastapi.responses import HTMLResponse, PlainTextResponse
 from starlette.middleware.gzip import GZipMiddleware
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, Field, ValidationError, model_validator
 
 from . import assist, cost_lines, fees as fees_mod, gaps, index_client, manual_cost, nas_ingest, nas_status, onboard, order_feed, overhead, ownership, progress, service, view
 from . import search as search_mod
@@ -1306,6 +1306,15 @@ class CostAdjustmentItem(BaseModel):
 class CostAdjustmentBody(BaseModel):
     items: list[CostAdjustmentItem] = Field(min_length=1, max_length=2000)
     by: str = Field(default='', max_length=100)
+
+    @model_validator(mode='before')
+    @classmethod
+    def _single(cls, data):
+        if isinstance(data, dict) and 'items' not in data:
+            return {'items': [{k: v for k, v in data.items() if k != 'by'}], 'by': data.get('by', '')}
+        if isinstance(data, list):
+            return {'items': data}
+        return data
 
 
 class CostAdjustmentRevoke(BaseModel):
