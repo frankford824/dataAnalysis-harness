@@ -123,7 +123,17 @@ def _refusal(text):
     return ''
 
 
-def choose(text, room, trigger=None, *, has_images=False, original=None, picker=True):
+def last_worker(thread_id, before=None):
+    """这段会话里最近一位干活的（核算、资料、程序）。问答和领队不算。"""
+    for m in reversed(store.messages(thread_id, last=10)):
+        if before is not None and m['id'] >= before:
+            continue
+        if m['role'] == 'assistant' and m['bot'] in _WORKERS:
+            return m['bot']
+    return ''
+
+
+def choose(text, room, trigger=None, *, has_images=False, original=None, picker=True, last_bot=''):
     """按固定顺序定这一轮是谁。picker=False 时不调用挑选模型。"""
     basis = ((original if original is not None else text) or '').strip()
     picture = (text or '').strip()
@@ -146,9 +156,14 @@ def choose(text, room, trigger=None, *, has_images=False, original=None, picker=
         return {'kind': 'bot', 'bot': '程序', 'via': 'engineer', 'announce': False}
     if not has_images and basis and SMALL_TALK.match(basis):
         return {'kind': 'chat', 'bot': '领队', 'via': 'talk'}
+    # “要”“可以”“确认”这类短句是在答上一位刚问的话，挑选模型单看这一句分不出来。
+    if last_bot and not has_images and basis and len(basis) <= _FOLLOW_UP_CHARS:
+        return {'kind': 'bot', 'bot': last_bot, 'via': 'continue', 'announce': False}
     if not picker:
         return {'kind': 'pending', 'bot': '', 'via': 'pick'}
-    picked = _pick(richer[:1500], room)
+    picked = _pick(richer[:1500], room, last_bot)
+    if picked['kind'] == 'bot' and picked['bot'] == '问答' and not room_worker.qualified('qa'):
+        picked['bot'] = _route_work(richer, last_bot)
     if picked['kind'] == 'bot' and picked['bot'] != '领队':
         picked['announce'] = True
     return picked
@@ -158,16 +173,23 @@ _BOOKS = re.compile(r'利润|成本|费用|金额|亏|赚|毛利|净利|偏低|�
 _FILES = re.compile(r'资料|缺什么|账单|对账单|文件|没到|补录|导入|附件')
 
 
-def _route_work(text):
+_WORKERS = {'核算', '资料', '程序'}
+_FOLLOW_UP_CHARS = 12
+
+
+def _route_work(text, last_bot=''):
     """挑选模型没给出干活的人时，按这句话自己定，不再反问找谁。"""
     if _FILES.search(text or ''):
         return '资料'
     if _BOOKS.search(text or ''):
         return '核算'
-    return '问答'
+    if last_bot:
+        return last_bot
+    # 问答没有评测通过的模型时只会回“暂时无法回答”。
+    return '问答' if room_worker.qualified('qa') else '核算'
 
 
-def _pick(text, room):
+def _pick(text, room, last_bot=''):
     """温度 0，只从核算、问答、资料、程序里收一个名字。领队不接活。"""
     names = [name for name in team.callable_names(room) if name != '领队'] or ['核算', '问答', '资料', '程序']
     prompt = ('你只从名单里选一个名字来处理下面这句话。只回复那个名字，不要解释，不要做别的事。\n'
@@ -178,12 +200,12 @@ def _pick(text, room):
                                  extra={'temperature': 0})
     except Exception as exc:
         store.log_event('pick_error', {'error': str(exc)[:500]})
-        return {'kind': 'bot', 'bot': _route_work(text), 'via': 'pick', 'announce': True}
+        return {'kind': 'bot', 'bot': _route_work(text, last_bot), 'via': 'pick', 'announce': True}
     cleaned = (out or '').strip().strip('。．.！!？? \n"「」"\'')
     if cleaned in names:
         return {'kind': 'bot', 'bot': cleaned, 'via': 'pick', 'announce': True}
     store.log_event('pick_rejected', {'text': cleaned[:80]})
-    return {'kind': 'bot', 'bot': _route_work(text), 'via': 'pick', 'announce': True}
+    return {'kind': 'bot', 'bot': _route_work(text, last_bot), 'via': 'pick', 'announce': True}
 
 
 def _save_images(images):
@@ -467,10 +489,13 @@ def run_turn(thread_id, text, images, page, user, emit, stop, run_id='', files=(
     if (saved or files) and not (text or '').strip():
         user_text += '\n\n（用户只发了附件，没有写问题。先用一两句话说清这是什么、可能值得注意的地方，然后问用户想做什么；不要直接深入排查。）'
 
+    last_bot = ''
     if bot:
         decision = {'kind': 'bot', 'bot': bot, 'via': trigger or 'given', 'announce': False}
     else:
-        decision = choose(user_text, kind, trigger, has_images=bool(saved or files), original=text, picker=True)
+        last_bot = last_worker(thread_id, message_id)
+        decision = choose(user_text, kind, trigger, has_images=bool(saved or files), original=text, picker=True,
+                          last_bot=last_bot)
     store.log_event('room_route', {'thread': thread_id, 'kind': decision.get('kind'), 'bot': decision.get('bot'),
                                    'via': decision.get('via')})
     if decision['kind'] == 'silent':
@@ -479,7 +504,7 @@ def run_turn(thread_id, text, images, page, user, emit, stop, run_id='', files=(
     if decision['kind'] == 'refuse':
         return _finish_say(thread_id, '领队', decision['text'], emit, run_id, message_id, user, started, steps)
     if decision['kind'] == 'ask':
-        decision = {'kind': 'bot', 'bot': _route_work(text or user_text), 'via': 'pick', 'announce': True}
+        decision = {'kind': 'bot', 'bot': _route_work(text or user_text, last_bot), 'via': 'pick', 'announce': True}
     if decision['kind'] == 'chat':
         return _plain_reply(thread_id, text or user_text, user, emit, stop, run_id, message_id, started, '领队')
 
