@@ -8,7 +8,7 @@
 VISION = 'qwen3-vl-plus'
 PICK_MODEL = 'deepseek-v4.1-flash-1017'
 PICK_FALLBACK = 'qwen3.8-flash'
-PICK_TIMEOUT = 1.5
+PICK_TIMEOUT = 3
 
 NAMES = ('领队', '核算', '问答', '资料', '程序')
 

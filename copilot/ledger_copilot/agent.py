@@ -123,17 +123,50 @@ def _refusal(text):
     return ''
 
 
-def last_worker(thread_id, before=None):
-    """这段会话里最近一位干活的（核算、资料、程序）。问答和领队不算。"""
+_WORKERS = {'核算', '资料', '程序'}
+_PUNCT = r'[\s！!。.~～，,、？?呀啊呢哦吧嘛啦]*'
+# 上一位刚问过话时，这些短句就是在答那一问，不必再问挑选模型。
+_YES = re.compile(r'^(要|要的|需要|可以|好|好的|好滴|行|行的|对|对的|是|是的|嗯+|确认|确定|同意|没问题|ok|okay|可|'
+                  r'就这样|照办|照这个办|按你说的办?|就按这个|写进规则|写进去|记下来|出卡|出确认卡|改吧|做吧|办吧|补吧|'
+                  r'弄吧|搞吧|来吧|继续|接着|接着办|go)' + _PUNCT + '$', re.I)
+_NO = re.compile(r'^(不用了?|不要了?|不需要|先不了?|先不用|算了|别了?|不了|暂时不用|不必了?|取消|先别|不行|不对)' + _PUNCT + '$')
+_INTENTS = {'同意': 'yes', '拒绝': 'no', '补充': 'more', '新问题': 'new', '寒暄': 'talk'}
+
+
+def last_turn(thread_id, before=None):
+    """这段会话里最近一位干活的（核算、资料、程序）说的话。问答和领队不算。"""
     for m in reversed(store.messages(thread_id, last=10)):
         if before is not None and m['id'] >= before:
             continue
         if m['role'] == 'assistant' and m['bot'] in _WORKERS:
-            return m['bot']
-    return ''
+            return {'bot': m['bot'], 'text': m['text'] or ''}
+    return None
 
 
-def choose(text, room, trigger=None, *, has_images=False, original=None, picker=True, last_bot=''):
+def asked(text):
+    """上一条最后问对方的那一句；没问就返回空。"""
+    tail = (text or '').strip()[-600:]
+    found = re.findall(r'[^。！!\n]*[？?]', tail)
+    return found[-1].strip()[-200:] if found else ''
+
+
+def framed(intent, reply, last):
+    """把对方这句的意思说给接手的那位，免得一个“要”被当成新问题从头查。"""
+    question = asked(last['text']) if last else ''
+    if intent == 'yes':
+        if question:
+            return (f'【对方回复「{reply}」，是同意你上一条问的：「{question}」。直接照你提的去办，'
+                    '该出确认卡就出卡，不要从头再查，也不要再问一遍。】')
+        return f'【对方回复「{reply}」，是认可你上一条说的。接着刚才的事办，不要从头再查。】'
+    if intent == 'no':
+        target = f'：「{question}」' if question else ''
+        return f'【对方回复「{reply}」，意思是不用{target}。简短回一句即可，不要再做那件事。】'
+    if intent == 'more':
+        return '【这句是接着你上一条说的同一件事补充或追问，接着刚才的进度办，不要从头再来。】\n' + reply
+    return reply
+
+
+def choose(text, room, trigger=None, *, has_images=False, original=None, picker=True, last=None):
     """按固定顺序定这一轮是谁。picker=False 时不调用挑选模型。"""
     basis = ((original if original is not None else text) or '').strip()
     picture = (text or '').strip()
@@ -156,16 +189,18 @@ def choose(text, room, trigger=None, *, has_images=False, original=None, picker=
         return {'kind': 'bot', 'bot': '程序', 'via': 'engineer', 'announce': False}
     if not has_images and basis and SMALL_TALK.match(basis):
         return {'kind': 'chat', 'bot': '领队', 'via': 'talk'}
-    # “要”“可以”“确认”这类短句是在答上一位刚问的话，挑选模型单看这一句分不出来。
-    if last_bot and not has_images and basis and len(basis) <= _FOLLOW_UP_CHARS:
-        return {'kind': 'bot', 'bot': last_bot, 'via': 'continue', 'announce': False}
+    if last and not has_images and basis:
+        if _YES.match(basis):
+            return {'kind': 'bot', 'bot': last['bot'], 'via': 'reply', 'intent': 'yes', 'announce': False}
+        if _NO.match(basis):
+            return {'kind': 'bot', 'bot': last['bot'], 'via': 'reply', 'intent': 'no', 'announce': False}
     if not picker:
         return {'kind': 'pending', 'bot': '', 'via': 'pick'}
-    picked = _pick(richer[:1500], room, last_bot)
+    picked = _pick(richer[:1500], room, last)
     if picked['kind'] == 'bot' and picked['bot'] == '问答' and not room_worker.qualified('qa'):
-        picked['bot'] = _route_work(richer, last_bot)
+        picked['bot'] = _route_work(richer, last)
     if picked['kind'] == 'bot' and picked['bot'] != '领队':
-        picked['announce'] = True
+        picked['announce'] = picked.get('intent') in (None, 'new')
     return picked
 
 
@@ -173,39 +208,60 @@ _BOOKS = re.compile(r'利润|成本|费用|金额|亏|赚|毛利|净利|偏低|�
 _FILES = re.compile(r'资料|缺什么|账单|对账单|文件|没到|补录|导入|附件')
 
 
-_WORKERS = {'核算', '资料', '程序'}
-_FOLLOW_UP_CHARS = 12
-
-
-def _route_work(text, last_bot=''):
+def _route_work(text, last=None):
     """挑选模型没给出干活的人时，按这句话自己定，不再反问找谁。"""
     if _FILES.search(text or ''):
         return '资料'
     if _BOOKS.search(text or ''):
         return '核算'
-    if last_bot:
-        return last_bot
+    if last:
+        return last['bot']
     # 问答没有评测通过的模型时只会回“暂时无法回答”。
     return '问答' if room_worker.qualified('qa') else '核算'
 
 
-def _pick(text, room, last_bot=''):
-    """温度 0，只从核算、问答、资料、程序里收一个名字。领队不接活。"""
+def _pick_prompt(text, names, last):
+    lines = ['你在给一段对话分派下一步。先判断对方这句话的意思，再从名单里选一个名字。']
+    if last:
+        lines.append(f'上一条是「{last["bot"]}」说的（结尾）：{(last["text"] or "").strip()[-400:]}')
+    lines += [f'对方这句话：{(text or "")[:1500]}',
+              '意思只能是：同意（答应上一条提的事）、拒绝（不要上一条提的事）、补充（同一件事追问或补充）、新问题、寒暄。',
+              f'名单：{"、".join(names)}',
+              '只回复一行，格式「意思|名字」，例如「同意|核算」。不要解释。']
+    return '\n'.join(lines)
+
+
+def _pick(text, room, last=None):
+    """温度 0、不思考：先判意思，再从核算、问答、资料、程序里收一个名字。领队不接活。"""
     names = [name for name in team.callable_names(room) if name != '领队'] or ['核算', '问答', '资料', '程序']
-    prompt = ('你只从名单里选一个名字来处理下面这句话。只回复那个名字，不要解释，不要做别的事。\n'
-              f'名单：{"、".join(names)}\n\n这句话：{(text or "")[:1500]}')
-    messages = [{'role': 'user', 'content': prompt}]
-    try:
-        out, _, _ = llm.complete(team.PICK_MODEL, messages, max_tokens=16, timeout=team.PICK_TIMEOUT,
-                                 extra={'temperature': 0})
-    except Exception as exc:
-        store.log_event('pick_error', {'error': str(exc)[:500]})
-        return {'kind': 'bot', 'bot': _route_work(text, last_bot), 'via': 'pick', 'announce': True}
-    cleaned = (out or '').strip().strip('。．.！!？? \n"「」"\'')
-    if cleaned in names:
-        return {'kind': 'bot', 'bot': cleaned, 'via': 'pick', 'announce': True}
-    store.log_event('pick_rejected', {'text': cleaned[:80]})
-    return {'kind': 'bot', 'bot': _route_work(text, last_bot), 'via': 'pick', 'announce': True}
+    if not room_worker.qualified('qa'):
+        names = [name for name in names if name != '问答'] or ['核算']
+    messages = [{'role': 'user', 'content': _pick_prompt(text, names, last)}]
+    out = None
+    for model_id in (team.PICK_MODEL, team.PICK_FALLBACK):
+        try:
+            out, _, _ = llm.complete(model_id, messages, max_tokens=24, timeout=team.PICK_TIMEOUT,
+                                     extra={'temperature': 0, 'enable_thinking': False})
+        except Exception as exc:
+            store.log_event('pick_error', {'model': model_id, 'error': str(exc)[:500]})
+            continue
+        if (out or '').strip():
+            break
+    raw = (out or '').strip().splitlines()[0] if (out or '').strip() else ''
+    meaning, _, who = raw.replace('｜', '|').partition('|')
+    meaning = meaning.strip().strip('「」"\' ')
+    who = who.strip().strip('。．.！!？? "「」\'')
+    intent = _INTENTS.get(meaning)
+    store.log_event('pick_intent', {'text': (text or '')[:80], 'out': raw[:80], 'intent': intent, 'last': last['bot'] if last else ''})
+    if intent == 'talk':
+        return {'kind': 'chat', 'bot': '领队', 'via': 'talk'}
+    if last and intent in ('yes', 'no', 'more'):
+        return {'kind': 'bot', 'bot': last['bot'], 'via': 'pick', 'intent': intent}
+    if who in names:
+        return {'kind': 'bot', 'bot': who, 'via': 'pick', 'intent': intent}
+    if raw:
+        store.log_event('pick_rejected', {'text': raw[:80]})
+    return {'kind': 'bot', 'bot': _route_work(text, last), 'via': 'pick', 'intent': intent}
 
 
 def _save_images(images):
@@ -489,22 +545,29 @@ def run_turn(thread_id, text, images, page, user, emit, stop, run_id='', files=(
     if (saved or files) and not (text or '').strip():
         user_text += '\n\n（用户只发了附件，没有写问题。先用一两句话说清这是什么、可能值得注意的地方，然后问用户想做什么；不要直接深入排查。）'
 
-    last_bot = ''
+    last = None
     if bot:
         decision = {'kind': 'bot', 'bot': bot, 'via': trigger or 'given', 'announce': False}
     else:
-        last_bot = last_worker(thread_id, message_id)
+        last = last_turn(thread_id, message_id)
         decision = choose(user_text, kind, trigger, has_images=bool(saved or files), original=text, picker=True,
-                          last_bot=last_bot)
+                          last=last)
+    intent = decision.get('intent')
+    if last and decision.get('kind') == 'bot' and decision.get('bot') == last['bot'] and intent in ('yes', 'no', 'more'):
+        reply = (text or '').strip()
+        if intent == 'more':
+            user_text = framed(intent, user_text, last)
+        else:
+            user_text = framed(intent, reply, last) + ('' if user_text.strip() == reply else '\n' + user_text)
     store.log_event('room_route', {'thread': thread_id, 'kind': decision.get('kind'), 'bot': decision.get('bot'),
-                                   'via': decision.get('via')})
+                                   'via': decision.get('via'), 'intent': intent})
     if decision['kind'] == 'silent':
         emit('done', {'bot': '', 'reply_to': message_id, 'run_id': run_id})
         return thread_id
     if decision['kind'] == 'refuse':
         return _finish_say(thread_id, '领队', decision['text'], emit, run_id, message_id, user, started, steps)
     if decision['kind'] == 'ask':
-        decision = {'kind': 'bot', 'bot': _route_work(text or user_text, last_bot), 'via': 'pick', 'announce': True}
+        decision = {'kind': 'bot', 'bot': _route_work(text or user_text, last), 'via': 'pick', 'announce': True}
     if decision['kind'] == 'chat':
         return _plain_reply(thread_id, text or user_text, user, emit, stop, run_id, message_id, started, '领队')
 
