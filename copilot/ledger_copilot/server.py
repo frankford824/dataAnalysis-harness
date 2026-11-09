@@ -493,7 +493,7 @@ def _pi_run(request):
 
 @app.get('/internal/pi/setup')
 def pi_setup(request: Request):
-    _pi_run(request)
+    run = _pi_run(request)
     return {'tools': agent._specs(run.role), 'wrap_up_at': agent.WRAP_UP_AT, 'wrap_up': agent.WRAP_UP, 'final': agent.FINAL,
             'max_turns': pi_engine.MAX_TURNS}
 
