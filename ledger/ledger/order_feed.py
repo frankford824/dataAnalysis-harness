@@ -1245,6 +1245,8 @@ class OrderFeed:
         normalize_component_returns(ingestion, feed_cost.frame, components)
         from .engine.preship_refunds import apply as apply_preship_refunds
         apply_preship_refunds(feed_cost, [*ingestion.frames_of("after_sales"), feed_after])
+        from .cost_adjustments import apply as apply_cost_adjustments
+        feed_cost.notes.extend(apply_cost_adjustments(self.workspace_root, store, feed_cost))
         self._enrich_existing_orders(ingestion, feed_order.frame)
         assert feed_order.frame is not None
         has_suborders = any(

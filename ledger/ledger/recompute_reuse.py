@@ -27,6 +27,7 @@ def revisions(ws, registry):
         registry.revision() if registry else None,
         ws.conn.execute("select coalesce(max(id),0) from config_log").fetchone()[0],
         ws.conn.execute("select coalesce(max(id),0) from cost_line_log").fetchone()[0],
+        ws.conn.execute("select coalesce(max(id),0) from cost_adjustment").fetchone()[0],
     )
 
 

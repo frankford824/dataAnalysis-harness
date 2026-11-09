@@ -1232,6 +1232,11 @@ class Registry:
             raise RegistryError('人工补录版本格式不正确')
         self._enqueue_changed_inputs({store_id}, f'cost-lines:{period}:{revision}')
 
+    def enqueue_cost_adjustments(self, stores: set[str], revision: int) -> None:
+        if revision < 0:
+            raise RegistryError('人工成本调整版本格式不正确')
+        self._enqueue_changed_inputs(stores, f'cost-adjust:{revision}')
+
     def _enqueue_changed_inputs(self, stores: set[str], fingerprint: str) -> None:
         with self.transaction() as conn:
             revision = conn.execute("SELECT revision FROM meta WHERE id=1").fetchone()[0]

@@ -175,6 +175,27 @@ create trigger if not exists cost_line_no_delete before delete on cost_line_log 
   select raise(abort, 'immutable cost line');
 end;
 
+-- 人工成本调整：按订单商品行或商品规则指定成本，每次重算都套用。只追加，撤销也追加一条。
+create table if not exists cost_adjustment (
+  id integer primary key autoincrement,
+  store_id text not null,
+  period text not null default '',
+  kind text not null check(kind in ('line','rule','revoke')),
+  spec_json text not null default '{}',
+  unit_cost text,
+  total_cost text,
+  target_id integer,
+  reason text not null,
+  at text not null,
+  by text not null
+);
+create trigger if not exists cost_adjustment_no_update before update on cost_adjustment begin
+  select raise(abort, 'immutable cost adjustment');
+end;
+create trigger if not exists cost_adjustment_no_delete before delete on cost_adjustment begin
+  select raise(abort, 'immutable cost adjustment');
+end;
+
 create table if not exists config_log (
   id integer primary key,
   at text not null,
@@ -254,6 +275,9 @@ create trigger if not exists bump_manual_finance_delete after delete on manual_f
   update workspace_meta set generation=generation+1 where id=1;
 end;
 create trigger if not exists bump_cost_line_insert after insert on cost_line_log begin
+  update workspace_meta set generation=generation+1 where id=1;
+end;
+create trigger if not exists bump_cost_adjustment_insert after insert on cost_adjustment begin
   update workspace_meta set generation=generation+1 where id=1;
 end;
 """

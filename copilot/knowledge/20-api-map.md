@@ -17,7 +17,12 @@ python 里 `get(path, **query)` 返回 JSON（超时 300s）；ledger_get 90s �
 - /api/gaps?period=&store_id= 5–8s {cells[{store_id,store,platform,period,state,count,worst,gaps[{kind blocking|missing|dropped|unlinked|coverage, severity, title, detail, node, metric, source, amount}]}]}。全店 190KB→python 汇总 title 计数。
 - /api/runs/{run_id}/drill/{node_id}?limit=&offset=&subject=&file=&q=&only= 0.8s {name,value,total,rows,uncounted{rows,amount},by_subject[{subject,count,amount}],by_file[{file,sheet,count,amount}],sample[{order_id,subject,amount,contribution,counted,linked,file_name,row_no}]}。node_id 用 n_*/g_*。
 - /api/runs/{run}/coverage-gaps?q=订单号 0.7s {total,line_revision,category_counts[{category,label,count}],items[{order_id,sub_order_id,product_ids,order_state,pending_cost_skus,category_label,coverage_key,context_sha,editable,line_revision,posted_goods_cost,manual_amount,coverage_reason}]}；.xlsx 导出。
-  逐单补录成本：run 用该店月最新 run_id；按订单号查出那一行（editable 为 true 才能逐单补），确认卡动作 POST /api/stores/{id}/periods/{p}/cost-lines body {run_id, coverage_key, context_sha, amount, reason, expected_line_revision=该行 line_revision}。amount 只填还没计入的部分（posted_goods_cost 已计的不要重复），赠品填 0。cost-lines/batch-preview 要上传 Excel 文件，对话里不用它。
+  逐单补录成本：run 用该店月最新 run_id；按订单号查出那一行（editable 为 true 才能逐单补），确认卡动作 POST /api/stores/{id}/periods/{p}/cost-lines body {run_id, coverage_key, context_sha, amount, reason, expected_line_revision=该行 line_revision}。amount 只填还没计入的部分（posted_goods_cost 已计的不要重复），赠品填 0。cost-lines/batch-preview 要上传 Excel 文件，对话里不用它。台账在确认时会自动换到最新一次计算，同一单内容没变就照常写入。
+- 人工成本调整（改任意一行或定商品规则，不绑定 run）：确认卡动作 POST /api/cost-adjustments body {items:[{kind:"line", store_id, period:"2026-08", order_id, sub_order_id, sku, unit_cost 或 total_cost, reason}]}。
+  order_id 填平台订单号，sub_order_id 填平台子订单号，sku 填商品编码；total_cost 要求只对上一行，清 0 填 unit_cost 0。
+  规则 {kind:"rule", store_id:店铺或"*", sku, with_sku(可选，同一平台订单里有这个商品时才生效), unit_cost, reason}。后写的调整优先。
+  保存后店铺自动重算，明细说明写「人工调整 #编号：…」；没对上的会在成本说明里列出编号。GET /api/cost-adjustments?store_id= 看当前有效清单；
+  撤销 POST /api/cost-adjustments/revoke {ids:[编号], reason}。
 - /api/runs/{run}/fees.csv、/api/runs/{run}/allocation.csv：费用/分摊明细下载。
 - /api/search?q=&limit= 0.9s（全文索引）{total,amount,by_store,hits[{subject,metric,amount,store,store_id,period,source,file,path,sheet,row_no,snippet}]}。
 - /api/recompute/progress 0.7s {items[{store_id,store,state,phase,percent,seconds}]}

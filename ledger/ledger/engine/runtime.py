@@ -1156,7 +1156,8 @@ def _exclude_linked(
     """按模型声明的另一数据源逐复合键排除，不猜主订单或整单范围。"""
     zero_costs = []
     if metric.id in {"goods_cost", "reshipment_cost"}:
-        frame = frame.with_columns(pl.lit(None, dtype=pl.Utf8).alias("__cost_exempt_reason"))
+        frame = frame.with_columns((pl.col("__cost_exempt_reason").cast(pl.Utf8) if "__cost_exempt_reason" in frame.columns
+                                    else pl.lit(None, dtype=pl.Utf8)).alias("__cost_exempt_reason"))
         from .cost_policy import is_brushing
         brushing = is_brushing(frame)
         brushing_rows = int(frame.select(brushing.sum()).item() or 0)

@@ -391,18 +391,26 @@ def save(ws, store_id: str, period: str, run_id: int, *, coverage_key: str,
         amount = _cents(amount)
     else:
         amount = None
+    latest = ws.conn.execute('SELECT id FROM run WHERE store_id=? AND period=? ORDER BY id DESC LIMIT 1',
+                             (store_id, period)).fetchone()
+    if latest and latest['id'] != run_id and ws.coverage_gaps_path(latest['id']).exists():
+        run_id = latest['id']
     source = next((row for row in _source_rows(ws, run_id, for_edit=True)
                    if row['coverage_key'] == coverage_key), None)
-    if source is None or source['order_count'] != 1 or source['context_sha'] != context_sha:
-        raise WorkspaceError("订单对应关系已变化或存在歧义，请刷新明细后再修改")
+    if source is None:
+        raise WorkspaceError("这笔订单在最新计算里已不缺成本，不用再补录")
+    if source['order_count'] != 1 or source['context_sha'] != context_sha:
+        raise WorkspaceError("这笔订单的商品或数量在最新计算里有变化，请按最新明细重新确认金额")
     conn = ws.conn
     with ws.transaction():
         active = conn.execute('SELECT id FROM run WHERE store_id=? AND period=? ORDER BY id DESC LIMIT 1',
                               (store_id, period)).fetchone()
         state = conn.execute('SELECT state FROM period WHERE store_id=? AND period=?',
                              (store_id, period)).fetchone()
-        if not active or active['id'] != run_id or not state or state['state'] != 'open':
-            raise WorkspaceError("计算结果或账期状态已更新，请刷新后重试")
+        if not state or state['state'] != 'open':
+            raise WorkspaceError("这个月已结账，不能再补录成本")
+        if not active or active['id'] != run_id:
+            raise WorkspaceError("本店正在出新的计算结果，请几秒后再点确认")
         previous = conn.execute('SELECT id FROM cost_line_log WHERE store_id=? AND period=? '
                                 'AND coverage_key=? ORDER BY id DESC LIMIT 1',
                                 (store_id, period, coverage_key)).fetchone()

@@ -1290,6 +1290,71 @@ class CostLineChange(BaseModel):
     expected_line_revision: int = Field(default=0, ge=0)
 
 
+class CostAdjustmentItem(BaseModel):
+    kind: Literal['', 'line', 'rule'] = ''
+    store_id: str = Field(min_length=1, max_length=100)
+    period: str = Field(default='', max_length=7)
+    order_id: str = Field(default='', max_length=100)
+    sub_order_id: str = Field(default='', max_length=100)
+    sku: str = Field(default='', max_length=200)
+    with_sku: str = Field(default='', max_length=200)
+    unit_cost: Decimal | None = None
+    total_cost: Decimal | None = None
+    reason: str = Field(min_length=1, max_length=500)
+
+
+class CostAdjustmentBody(BaseModel):
+    items: list[CostAdjustmentItem] = Field(min_length=1, max_length=2000)
+    by: str = Field(default='', max_length=100)
+
+
+class CostAdjustmentRevoke(BaseModel):
+    ids: list[int] = Field(min_length=1, max_length=2000)
+    reason: str = Field(min_length=1, max_length=500)
+    by: str = Field(default='', max_length=100)
+
+
+def _enqueue_adjusted(stores: list[str], revision: int) -> None:
+    from .commission_registry import Registry
+    Registry(workspace().root).enqueue_cost_adjustments(set(stores), revision)
+
+
+@app.get('/api/cost-adjustments')
+def cost_adjustments_list(store_id: str = '') -> dict:
+    """人工成本调整（按商品行或商品规则）当前有效的清单。"""
+    from . import cost_adjustments
+    return {'items': cost_adjustments.listing(workspace(), store_id or None)}
+
+
+@app.post('/api/cost-adjustments')
+def cost_adjustments_add(body: CostAdjustmentBody) -> dict:
+    """指定商品成本：kind=line 按订单号（可加子订单号、商品编码）改单价或总成本，含计 0；
+    kind=rule 按商品编码（可加同单商品编码）改单价，store_id 填 * 表示全部店铺。
+    不绑定某一次计算结果，保存后相关店铺自动重算，之后每次重算都套用。"""
+    from . import cost_adjustments
+    ids = {s.id for s in _model().stores}
+    try:
+        saved = cost_adjustments.add(workspace(), [item.model_dump() for item in body.items], ids,
+                                     by=body.by.strip() or '人工操作')
+    except WorkspaceError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    _enqueue_adjusted(saved['stores'], saved['revision'])
+    return saved
+
+
+@app.post('/api/cost-adjustments/revoke')
+def cost_adjustments_revoke(body: CostAdjustmentRevoke) -> dict:
+    """撤销人工成本调整，相关店铺自动重算后恢复原成本。"""
+    from . import cost_adjustments
+    ids = {s.id for s in _model().stores}
+    try:
+        saved = cost_adjustments.revoke(workspace(), body.ids, body.reason, ids, by=body.by.strip() or '人工操作')
+    except WorkspaceError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    _enqueue_adjusted(saved['stores'], saved['revision'])
+    return saved
+
+
 @app.get('/api/runs/{run_id}/coverage-gaps')
 def coverage_gaps(run_id: int, q: str = '', category: str = '', offset: int = 0, limit: int = 50) -> dict:
     st = workspace().state_by_run(run_id)

@@ -342,6 +342,8 @@ def evaluate_metric(
         known=(known & fact_scope) if (require_historical_pricing or require_pricing) else fact_scope
         pending = (~known.fill_null(False) | col("pricing_suspect").cast(pl.Boolean).fill_null(False)) & ((quantity != 0) | quantity.is_null())
         pending = pending & ~erp_exempt
+        if "__manual_cost" in frame.columns:
+            pending = pending & ~pl.col("__manual_cost").cast(pl.Boolean).fill_null(False)
         gaps = frame.filter(pending).select(
             store.fill_null("(未知店铺)").alias("store"), period.fill_null("(未知账期)").alias("period"),
             pl.lit(metric.id).alias("metric_id"), key.alias("order_id"),
