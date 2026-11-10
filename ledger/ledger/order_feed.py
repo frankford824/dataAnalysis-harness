@@ -2325,7 +2325,9 @@ class OrderFeed:
         with a meaningless quantity. Its refund amount is still exact, so the
         shipped lines of the same shop's platform order are matched by paid
         amount: the whole order, else exactly one platform sub-order or one line.
-        Several or no matching groups leave the after-sale unnamed.
+        When paid amounts tie or none match, the line-level refunded amount
+        decides: exactly one group whose refunded total is within 3% (at least
+        5 cents) of the refund. Several or no matching groups leave it unnamed.
         """
         columns = ["after_sale_id", "order_id", "sub_order_id", "sku_id", "quantity"]
         if (orders is None or after.is_empty() or not set(columns) <= set(items.columns)
@@ -2362,7 +2364,9 @@ class OrderFeed:
         families: dict[tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
         for line in order_items.select(
             pl.col("order_id", "sub_order_id", "sku_id", "outer_sku", "online_order_no",
-                   "order_store_id", "paid_amount", "quantity").cast(pl.Utf8)
+                   "order_store_id", "paid_amount", "quantity").cast(pl.Utf8),
+            (pl.col("refund_amount") if "refund_amount" in order_items.columns else pl.lit(None))
+            .cast(pl.Utf8).alias("refund_amount"),
         ).join(header, on="order_id", how="inner").iter_rows(named=True):
             if not line["ship_time"] or line["__type"] == "补发订单":
                 continue
@@ -2396,6 +2400,14 @@ class OrderFeed:
                     groups[str(line["outer_sku"] or "")].append(i)
                 options = {tuple(g) for name, g in groups.items() if name and sum(paid[i] for i in g) == amount}
                 options |= {(i,) for i, p in enumerate(paid) if p == amount}
+                if len(options) != 1:
+                    refunded = [cents(line.get("refund_amount")) or 0 for line in lines]
+                    pool = options or ({tuple(g) for name, g in groups.items() if name}
+                                       | {(i,) for i in range(len(lines))}
+                                       | {tuple(i for i, r in enumerate(refunded) if r > 0)})
+                    slack = max(5, amount * 3 // 100)
+                    options = {g for g in pool if g and sum(refunded[i] for i in g) > 0
+                               and abs(sum(refunded[i] for i in g) - amount) <= slack}
                 if len(options) != 1:
                     unresolved += clears
                     continue
