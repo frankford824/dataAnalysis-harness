@@ -106,12 +106,12 @@ def _deduct_labor_if_trial_accepted(amounts: dict[str, Decimal], commission: dic
 
 def certified(model, result: dict, source_run_id: int, confirmed: dict,
               payouts: list[dict], no_payout: bool, reason: str,
-              labor_cut=None) -> tuple[dict, dict]:
+              labor_cut=None, allow_open_profit: bool = False) -> tuple[dict, dict]:
     """Prepare a separate immutable human result for the close transaction."""
     if not reason.strip():
         raise WorkspaceError("人工确认成本和提成必须填写原因")
     trial = preview(model, result, confirmed)
-    if trial["profit"] is None:
+    if trial["profit"] is None and not allow_open_profit:
         raise WorkspaceError("除成本外仍有资料缺口，当前无法确认利润；请先补齐其他资料")
     original_people = list((result.get("commission") or {}).get("people") or [])
     identities = [str(person.get("person_id") or "") for person in original_people]

@@ -169,8 +169,14 @@ def _close_boundaries(ws,period,store_ids,request_id,actor):
     else:
         from .pricing_status import read_feed
         feed=read_feed(ws.root)
+        # 边界用已经吃进台账的序号。订单台头部还在往前走时，不能因为差几条新单
+        # 就把整月结账预览作废；受影响的店仍由各店自己的来源复核拦住。
+        caught=feed.get('consumed_seq') if feed else None
+        if feed and not _integer(caught):
+            raise ValueError('订单同步前缀还没有可读的已消费序号，请稍后重试')
         boundaries={sid:{'period':period,'snapshot_id':feed['snapshot_id'],
-            'required_through_seq':feed['source_latest_seq']} for sid in store_ids} if feed else {}
+            'required_through_seq':caught,'observed_head_seq':feed.get('source_latest_seq')}
+            for sid in store_ids} if feed else {}
         with ws.transaction() as conn:
             conn.execute('INSERT INTO automation_attempt VALUES(?,?,?,?,?,?,?)',
                 (journal.ident(),'__company__',key,signature,'close_feed_boundary',

@@ -31,7 +31,7 @@ def prefix(sample):
 
 def event(feed,shop,seq=101):
     with feed._connect() as db:
-        db.execute('INSERT INTO feed_entity VALUES(?,?,?,?,?,?,?,?,?,?)',('order','changed',seq,1,'upsert',shop,'new-order',None,None,'{}'))
+        db.execute('INSERT INTO feed_entity VALUES(?,?,?,?,?,?,?,?,?,?,?)',('order','changed',seq,1,'upsert',shop,'new-order',None,None,'{}',None))
         db.execute('UPDATE feed_state SET consumed_seq=?,source_latest_seq=? WHERE id=1',(seq,seq))
         if shop:db.execute('INSERT INTO feed_pending_store VALUES(?,?)',('s1' if shop=='77' else 's2',seq))
 
@@ -80,14 +80,10 @@ def test_http_close_retry_keeps_one_server_prefix_and_rejects_scope_rebinding(pr
     client=TestClient(app);body={'request_id':'bounded-close','period':PERIOD,'store_ids':['s1']}
     with feed._connect() as db:db.execute('UPDATE feed_state SET source_latest_seq=101 WHERE id=1')
     response=client.post('/api/automation/close-batches/preview',json=body)
-    assert response.status_code==409,response.text
-    row=ws.conn.execute("SELECT result_json FROM automation_attempt WHERE state='close_feed_boundary'").fetchone()
-    assert json.loads(row[0])['boundaries']['s1']['required_through_seq']==101
-    event(feed,'88')
-    with feed._connect() as db:db.execute('UPDATE feed_state SET source_latest_seq=110 WHERE id=1')
-    assert client.post('/api/automation/close-batches/preview',json={**body,'store_ids':['s2']}).status_code==409
-    response=client.post('/api/automation/close-batches/preview',json=body)
     assert response.status_code==200,response.text
+    row=ws.conn.execute("SELECT result_json FROM automation_attempt WHERE state='close_feed_boundary'").fetchone()
+    assert json.loads(row[0])['boundaries']['s1']['required_through_seq']==100
+    assert client.post('/api/automation/close-batches/preview',json={**body,'store_ids':['s2']}).status_code==409
     proposal=response.json();assert len(proposal['eligible'])==1
     confirm=client.post('/api/automation/close-batches/confirm',json={'request_id':'bounded-confirm',
         **{k:proposal[k] for k in ('proposal_id','proposal_sha','input_sha')}})

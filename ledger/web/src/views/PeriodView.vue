@@ -69,13 +69,8 @@ const needsCompanyDecision=computed(()=>needsMonthWorkspace(finalIssues.value,pe
 function openMonthWorkspace(){app.pick({store:'',platform:'',period:period.value});router.push({name:'board'})}
 
 async function beginClose() {
-  if(needsCompanyDecision.value){reviewingPeriod.value=true;return}
-  if (needsManualCostInput(snap.value?.cost_review)) return openManualClose()
-  if (snap.value?.commission?.unassigned_orders) return openManualClose()
-  if (snap.value?.can_close) return close()
-  rail.value = 'checks'
-  await nextTick()
-  checksPanel.value?.scrollIntoView({ behavior: 'smooth', block: 'nearest' })
+  if (snap.value?.can_close && !needsManualCostInput(snap.value?.cost_review) && !snap.value?.commission?.unassigned_orders) return close()
+  return openManualClose()
 }
 
 const period = computed(() => route.query.period || app.period || '')
@@ -301,7 +296,7 @@ const manualCloseReady = computed(() =>
   && !hardBlockers.value.length
   && manualCloseBlockers.value.every((f) => ignoredBlockers.value.includes(f.id))
   && (manualCostEnabled.value
-    ? manualPreview.value?.profit != null
+    ? !!manualPreview.value
       && manualPreview.value.inputKey === manualPreviewKey.value
       && (manualPayouts.value.length
         ? manualPayouts.value.every(p => !!p.person_id && centsInput(p.amount))
@@ -317,7 +312,7 @@ const manualCloseNeeds = computed(() => {
   const needs = []
   if (manualRunId.value !== snap.value?.run_id) needs.push('刷新到最新核算结果')
   if (manualLineRevision.value !== (snap.value?.cost_review?.line_revision ?? 0)) needs.push('重新预览最新人工成本')
-  if (manualCostEnabled.value && (manualPreview.value?.profit == null || manualPreview.value.inputKey !== manualPreviewKey.value)) {
+  if (manualCostEnabled.value && (!manualPreview.value || manualPreview.value.inputKey !== manualPreviewKey.value)) {
     needs.push('预览确认后的成本与利润')
   }
   if ((manualCostEnabled.value || manualPayoutEnabled.value) && manualPayouts.value.length &&
@@ -435,15 +430,15 @@ watch(
           <n-button v-if="snap?.run_id" size="small" @click="reviewingStatement=true">流水关联核对</n-button>
           <n-button v-if="app.ingestMode !== 'nas'" size="small" :loading="!!app.busy" :disabled="loading" @click="recompute">重算</n-button>
           <n-tag v-else size="small" :type="refreshFailed?'warning':'info'" :bordered="false">{{refreshFailed?'更新失败，请刷新重试':'结果自动更新'}}</n-tag>
-          <n-button v-if="!closed && snap?.run_id && !snap?.cost_review?.requires_human" size="small" :disabled="loading || !!app.busy || needsCompanyDecision" @click="openManualClose">人工确认金额</n-button>
+          <n-button v-if="!closed && snap?.run_id && !snap?.cost_review?.requires_human" size="small" :disabled="loading || !!app.busy" @click="openManualClose">人工确认金额</n-button>
           <n-button
             v-if="!closed"
             type="primary"
             :disabled="loading || !!app.busy || !snap"
-            :title="needsManualCostInput(snap?.cost_review) ? '成本尚未完整，请补齐凭据或核定完整金额' : snap?.can_close ? `结账 ${period}` : '查看本月尚未完成的结账条件'"
+            :title="needsManualCostInput(snap?.cost_review) ? '成本尚未完整，请补齐凭据或核定完整金额' : snap?.can_close ? `结账 ${period}` : '按当前结果人工结账'"
             @click="beginClose"
           >
-            {{ needsCompanyDecision ? '查看本月结账条件' : needsManualCostInput(snap?.cost_review) ? '核对未完整成本' : snap?.commission?.unassigned_orders ? '人工确认提成' : snap?.can_close ? `结账 ${period}` : '查看结账条件' }}
+            {{ needsManualCostInput(snap?.cost_review) ? '核对未完整成本' : snap?.commission?.unassigned_orders ? '人工确认提成' : snap?.can_close ? `结账 ${period}` : '人工结账' }}
           </n-button>
           <n-button v-else size="small" :disabled="loading || !!app.busy" @click="asking = true">反结账</n-button>
           <n-button v-if="!closed && (needsManualCostInput(snap?.cost_review) || snap?.period_cost_input?.status==='stale')" size="small" :disabled="loading || !!app.busy || costInputRecomputing || costInputNeedsRecovery" @click="revokingCostInput=false;reviewingCostInput=true">{{costInputRecomputing?'成本决定已保存，正在核算':costInputNeedsRecovery?'成本凭据待恢复':'确认本期成本'}}</n-button>
@@ -885,6 +880,7 @@ watch(
     >
       <div class="manual-close-content">
         <p class="small muted">人工确认会保留原始订单、文件行号和当前运行记录；结账金额另存为人工决定。</p>
+        <n-alert v-if="needsCompanyDecision" type="info" :bordered="false">公司里还有店的收入或兼职没定。这不拦本店结账，本店兼职等公司收入齐了再冻，不会把未知分摊记成 0。</n-alert>
         <n-alert v-if="manualRunId !== snap?.run_id" type="warning" :bordered="false">本店计算结果已更新。请关闭窗口，按新金额重新确认。</n-alert>
         <n-alert v-else-if="manualLineRevision !== (snap?.cost_review?.line_revision ?? 0)" type="warning" :bordered="false">未覆盖订单的人工金额已变化，请关闭后按新明细重新预览。</n-alert>
         <n-checkbox v-model:checked="manualCostEnabled" class="manual-choice" @update:checked="manualPayoutEnabled=false">按人工金额确认成本与提成</n-checkbox>
@@ -902,7 +898,7 @@ watch(
           <div class="row manual-preview-row">
             <n-button size="small" :loading="manualPreviewBusy" :disabled="!manualCostRows.every(([key]) => centsInput(manualCosts[key]))" @click="previewManualCost">预览确认金额</n-button>
             <span v-if="manualPreview?.profit != null" class="manual-preview-total">商品成本合计 {{ money(manualPreview.confirmed.goods) }} · 利润 {{ money(manualPreview.profit) }} · 毛利 {{ money(manualPreview.gross) }}</span>
-            <span v-else-if="manualPreview" class="small muted">除成本外仍有资料缺口，暂不能结账</span>
+            <span v-else-if="manualPreview" class="small muted">除成本外仍有未确定项。确认后按当前结果结账，不确定的金额保持未确定，不会记成 0。</span>
           </div>
           <n-alert v-if="manualPreviewError" type="warning" :bordered="false">{{ manualPreviewError }}</n-alert>
         </template>

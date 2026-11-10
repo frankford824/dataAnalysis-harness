@@ -31,12 +31,15 @@ def frozen_shares(root):
         return {(r['period'],r['store_id'],r['run_id']):r for r in csv.DictReader(f)}
 
 
-def share_at_close(workspace, model, period: str, store_id: str) -> str | None:
+def share_at_close(workspace, model, period: str, store_id: str, *, allow_pending: bool = False) -> str | None:
     """Calculate the current monthly allocation before freezing a period in SQLite."""
     if hasattr(workspace,'conn'):
-        from .automation_checker import company_basis
+        from .automation_checker import HUMAN_CLOSE_DEFER, company_basis
         company=company_basis(workspace,model,period)
         if company['issues']:
+            pending={row['code'] for row in company['issues']}
+            if allow_pending and pending <= HUMAN_CLOSE_DEFER:
+                return None
             raise WorkspaceError('；'.join(row['message'] for row in company['issues']))
         if store_id not in company['shares']:
             raise WorkspaceError('本店不在本月已确认营业范围')

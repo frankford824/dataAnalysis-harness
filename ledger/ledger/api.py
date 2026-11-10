@@ -1533,7 +1533,8 @@ def close_period(store_id: str, period: str, action: PeriodAction) -> dict:
             manual_result = manual_decision = None
             if ws.state(store_id, period) is None:
                 raise WorkspaceError("这个账期还没算过账，不能结账")
-            labor_cut = labor_api.share_at_close(ws, model, period, store_id)
+            labor_cut = labor_api.share_at_close(
+                ws, model, period, store_id, allow_pending=bool(action.note.strip()))
             if action.payout_only and action.costs is not None:
                 raise WorkspaceError("只确认提成时不能同时修改成本")
             if action.costs is not None:
@@ -1543,7 +1544,7 @@ def close_period(store_id: str, period: str, action: PeriodAction) -> dict:
                     model, json.loads(run["result"]), run["id"],
                     _costs_with_lines(action.costs, lines),
                     action.payouts, action.no_payout, action.note,
-                    labor_cut=labor_cut,
+                    labor_cut=labor_cut, allow_open_profit=True,
                 )
                 manual_decision['base_costs'] = {key: str(value) for key, value in action.costs.items()}
                 manual_decision['line_revision'] = lines['line_revision']
@@ -1569,6 +1570,7 @@ def close_period(store_id: str, period: str, action: PeriodAction) -> dict:
                 labor_cut=labor_cut,
                 manual_result=manual_result,
                 manual_decision=manual_decision,
+                human_override=bool(action.note.strip()),
             )
     except WorkspaceError as exc:
         raise HTTPException(409, str(exc)) from exc
@@ -2754,7 +2756,10 @@ def fees_catalog(section: str = "", platform: str = "") -> dict:
     if all_sections or section in {"unmatched", "rules"}:
         payload["rules"] = [fees_mod.rule_dict(r) for r in model.fee_rules]
     if all_sections or section == "unmatched":
+        from . import fee_judge
         payload["unmatched"] = fees_mod.unmatched_from(workspace())
+        for item, guess in zip(payload["unmatched"], fee_judge.cached(workspace().root, model, payload["unmatched"])):
+            item["guess"] = guess
     if all_sections or section == "known":
         known = fees_mod.known_fees(model)
         payload["known"] = [

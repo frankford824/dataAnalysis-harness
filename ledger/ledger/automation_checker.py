@@ -128,6 +128,16 @@ def operating_stores(ws,model,period,*,include_excluded=False):
     return result
 
 
+# 这些是「还在等别的店或下一轮重算」，不是本店账不能由人确认。
+# 自动结账仍然认它们；只有人在店月页写明原因结账时才先放过。
+HUMAN_CLOSE_DEFER = frozenset({
+    'recompute_pending', 'unverified_code_change', 'unverified_input_change',
+    'unverified_model_change', 'input_capture_unverified', 'source_sync_pending',
+    'manual_input_unverified', 'company_revenue_unknown', 'overhead_basis_empty',
+    'overhead_total_unknown',
+})
+
+
 def company_basis(ws,model,period):
     """Missing stores and unknown revenue never silently become zero."""
     model=resolve_model(ws,model)
@@ -280,7 +290,7 @@ def source_fact_dependencies_current(ws,store_id,recorded):
 
 def check(ws,store_id,period,*,model=None,expected_run_id=None,ignored_blockers=(),
           manual_result=None,check_company=True,check_pending=True,company_context=None,verify_artifacts=False,
-          reuse_refund_validation=False):
+          reuse_refund_validation=False,defer_codes=()):
     model=resolve_model(ws,model)
     row=current_run(ws,store_id,period)
     state=period_header(ws,store_id,period,row['id'] if row else None)
@@ -428,6 +438,9 @@ def check(ws,store_id,period,*,model=None,expected_run_id=None,ignored_blockers=
             problems.append(issue('frozen_refund_recheck_required','已结退款归属依据已变化或未完整核实，请等待当前结果重新核算，不能确认旧金额'))
     scope['company_finance_sha']=journal.digest(company.get('finance_decision')) if company else None
     scope['shared_fee_source_sha']=shared_fee['input_sha']
+    if defer_codes:
+        deferred=set(defer_codes)
+        problems=[item for item in problems if item['code'] not in deferred]
     return {'allowed':not problems,'input_sha':journal.digest(scope),'scope':scope,'run_id':scope['run_id'],
             'issues':problems,'overhead':company,'result':payload,'shared_fee':shared_fee}
 

@@ -1008,6 +1008,7 @@ class Workspace:
         manual_result: dict[str, Any] | None = None,
         manual_decision: dict[str, Any] | None = None,
         model=None,
+        human_override: bool = False,
     ) -> PeriodState:
         """结账；允许人工确认无法追溯的业务事项，但不允许绕过证据留档。"""
         from .pricing_status import read_feed
@@ -1039,9 +1040,12 @@ class Workspace:
             if source != run["id"] or (bool(manual_result.get("manual_cost")) == bool(manual_result.get("manual_payout"))):
                 raise WorkspaceError("人工确认来源运行号不一致，请刷新后重试")
             result = manual_result
+        if human_override and not note.strip():
+            raise WorkspaceError("人工结账必须填写说明")
         profit = next((row for row in result.get("statement", [])
                        if row.get("id") == "net_profit" or row.get("name") == "利润"), None)
-        if profit and (profit.get("value") is None or not profit.get("available", True)):
+        profit_open = bool(profit and (profit.get("value") is None or not profit.get("available", True)))
+        if profit_open and not human_override:
             raise WorkspaceError("利润尚未算出金额，不能人工结账")
         active = {
             str(f.get("id") or f"__blocker_{index}"): f
@@ -1065,7 +1069,8 @@ class Workspace:
             raise WorkspaceError("人工结账必须填写说明")
         remaining = [item for key, item in active.items() if key not in ignored]
         missing = result.get("missing_sources") or []
-        if remaining or missing or (not run["can_close"] and not active and manual_result is None):
+        if remaining or (missing and not human_override) or (
+                not human_override and not run["can_close"] and not active and manual_result is None):
             blockers = [str(item.get("message") or item.get("name") or "待处理事项") for item in remaining]
             if missing:
                 blockers.append("还缺：" + "、".join(missing))
@@ -1075,6 +1080,10 @@ class Workspace:
         close_note = note.strip()
         if ignored_names:
             close_note = f"人工结账：{close_note}；已确认忽略：{'、'.join(ignored_names)}"
+        if human_override and profit_open:
+            close_note += "；利润仍有未确定项，按确认时的结果结账，未把未知记为 0"
+        if human_override and missing:
+            close_note += "；资料未齐仍结账：" + "、".join(str(item) for item in missing)
         if labor_cut is not None:
             try:
                 amount = Decimal(str(labor_cut))
@@ -1083,19 +1092,24 @@ class Workspace:
                 labor_cut = str(amount.quantize(Decimal("0.01")))
             except (InvalidOperation, ValueError) as exc:
                 raise WorkspaceError("兼职分摊金额无效，不能冻结结账") from exc
+        from .automation_checker import HUMAN_CLOSE_DEFER
+        deferred = HUMAN_CLOSE_DEFER if human_override else ()
         close_check = assert_close(
             self, store_id, period, model=model, expected_run_id=expected_run_id,
-            ignored_blockers=ignored_blockers, manual_result=manual_result)
+            ignored_blockers=ignored_blockers, manual_result=manual_result, defer_codes=deferred)
         with self.transaction() as conn:
             # Final validation belongs inside the writer transaction. Financial
             # publication uses the same store-period guard as this method.
             final_check = assert_close(
                 self, store_id, period, model=model, expected_run_id=run['id'],
-                ignored_blockers=ignored_blockers, manual_result=manual_result)
+                ignored_blockers=ignored_blockers, manual_result=manual_result, defer_codes=deferred)
             if final_check['input_sha'] != close_check['input_sha']:
                 raise WorkspaceError('预览后输入已变化，本次未结账，请重新核对')
             company = final_check['overhead']
-            if company:
+            company_codes = {item['code'] for item in (company or {}).get('issues') or []}
+            # 公司收入还没齐时，不把一份不完整的公摊冻成全公司基准，否则后结的店会被卡住。
+            skip_company_freeze = bool(human_override and company_codes and company_codes <= HUMAN_CLOSE_DEFER)
+            if company and not skip_company_freeze:
                 from .automation_store import encoded as automation_json
                 frozen = conn.execute('SELECT input_sha FROM automation_overhead_close WHERE period=? AND input_sha=?', (period,company['input_sha'])).fetchone()
                 if not frozen:
