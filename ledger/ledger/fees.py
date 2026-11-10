@@ -213,7 +213,7 @@ _ID_NOISE = re.compile(
     r"|\b\d{16,}\b",
     re.I,
 )
-_FALLBACK_FIELD = re.compile(r"\b(subject|remark|biz_type)=")
+_FALLBACK_FIELD = re.compile(r"(?:^|\s)([A-Za-z_][A-Za-z0-9_]*)=")
 # 支付宝备注形如「扣款用途: 淘宝联盟佣金代扣 tradeid:5123…」。用途后面紧跟
 # 英文键值，不能把 tradeid 算进匹配词，否则每笔流水都会拆成单独一条未归类。
 _PURPOSE = re.compile(
