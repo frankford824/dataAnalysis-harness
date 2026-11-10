@@ -298,11 +298,10 @@ def test_http_edit_is_visible_in_all_missing_orders_and_store_preview(tmp_path,m
     closed=client.post(f"/api/stores/{raw['store_id']}/periods/{raw['period']}/close",json={
         **body,'note':'财务逐行核实，无提成人员','no_payout':True,
     })
-    # This endpoint has just created durable accounting work. A preview proves
-    # its monetary effect, but cannot consume or bypass that pending work.
-    assert closed.status_code==409 and '自动核算' in closed.text,closed.text
-    assert ws.state(raw['store_id'],raw['period']).state=='open'
-    assert not ws.conn.execute('SELECT 1 FROM manual_finance WHERE run_id=?',(run,)).fetchone()
+    # A noted human close may override pending recompute; the confirmed amounts
+    # already include the saved line.
+    assert closed.status_code==200,closed.text
+    assert ws.state(raw['store_id'],raw['period']).state=='closed'
     assert cost_lines.current(ws,run,raw['store_id'],raw['period'])['supplement_total']==12
     ws.close()
 

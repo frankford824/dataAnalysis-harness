@@ -191,8 +191,10 @@ def _current(ws,model,store_id,period,run_id):
     proof=ws.conn.execute('SELECT manifest_json FROM automation_run_proof WHERE run_id=?',(run_id,)).fetchone()
     if not proof or not run['evidence_ready'] or run['evidence_error']:raise WorkspaceError('核算事实证据尚未完成封存')
     if any(not valid_artifact(ws,a) for a in json.loads(proof[0]).get('artifacts',[])):raise WorkspaceError('封存原件已变化，不能批准成本输入')
-    from .cost_lines import revision as line_revision
-    if line_revision(ws,store_id,period):raise WorkspaceError('已有逐笔补录记录，禁止再叠加整期成本；请先核对原批准基数')
+    from .cost_lines import revision as line_revision,posted_current,current as line_current
+    if line_revision(ws,store_id,period):
+        if not posted_current(ws,run['id'],store_id,period):raise WorkspaceError('逐笔补录尚未计入本次结果，请等待重算后再批准整期成本')
+        if line_current(ws,run['id'],store_id,period)['reviewed_count']:raise WorkspaceError('已有逐笔补录记录，禁止再叠加整期成本；请先核对原批准基数')
     return run
 
 def normalize(ws,model,store_id,period,values):
