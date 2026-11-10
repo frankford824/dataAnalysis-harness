@@ -41,10 +41,13 @@ def candidates(root, policy):
         stat=p.stat()
         if stat.st_mtime>cutoff:return
         seen.add(p);items.append((base,p,stat.st_size))
-    for p in (root/'runs').glob('*'):
-        try:rid=int(p.name.split('.')[0])
-        except ValueError:continue
-        if rid in known and (p.name.endswith('.parquet') or p.name.endswith('.parquet.sha256')):add(root,p)
+    # runs 下几百万项几乎都是已归档的链接；目录列表自带链接标记，逐个 lstat 要十几分钟。
+    with os.scandir(root/'runs') as entries:
+        for entry in entries:
+            try:rid=int(entry.name.split('.')[0])
+            except ValueError:continue
+            if entry.is_symlink() or rid not in known:continue
+            if entry.name.endswith('.parquet') or entry.name.endswith('.parquet.sha256'):add(root,Path(entry.path))
     if (root/'commission/registry.db').exists():
         with closing(sqlite3.connect((root/'commission/registry.db').as_uri()+'?mode=ro',uri=True)) as c:
             for rid,name in c.execute('SELECT finance_run,path FROM calculation'):
