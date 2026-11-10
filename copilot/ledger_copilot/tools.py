@@ -1,4 +1,5 @@
 """助手可调用的工具。每个工具都带 purpose：给用户看的一句话进度。"""
+import contextvars
 import json
 import os
 import re
@@ -17,6 +18,9 @@ from . import config, llm, store
 
 LIMIT = 6000
 SKIP_DIRS = {'node_modules', '.git', '__pycache__', 'venv', '.venv', 'static', 'dist'}
+SEARCH_SECONDS = 60
+# 这一轮的停止开关。工具在服务端线程里跑，模型那头停了不会自动传到这里。
+current_stop = contextvars.ContextVar('copilot_tool_stop', default=None)
 _openapi = {}
 
 
@@ -105,17 +109,38 @@ def read_file(path, offset=1, limit=300, **_):
     return _cut('\n'.join(f'{start + i:>6}|{line}' for i, line in enumerate(chunk)) + f'\n（共 {len(lines)} 行）')
 
 
+def _data_dirs():
+    """台账数据、发布副本和各种备份：几百万个小文件，整搜一遍要几个小时。"""
+    base = config.APP_DIR.parent
+    names = ('home', 'releases', 'backups', 'model-backups', 'qa', 'incoming', 'export', 'index', 'logs',
+             'agent-venv', 'agent-pi', 'agent-worker')
+    return {os.path.normcase(str(base / name)) for name in names} | {os.path.normcase(str(config.LEDGER_HOME))}
+
+
 def search_files(pattern, path=None, glob='*', **_):
     root = Path(path or config.APP_DIR)
     regex = re.compile(pattern)
     hits = []
+    deadline = time.monotonic() + SEARCH_SECONDS
+    stop = current_stop.get()
+    start = os.path.normcase(str(root.resolve()))
+    # 明确点名搜某个数据目录（或其子目录）时照搜，只是不从上层顺带搜进去。
+    skip = {d for d in _data_dirs() if not (start == d or start.startswith(d + os.sep))}
     for directory, dirs, files in os.walk(root):
-        dirs[:] = [d for d in dirs if d not in SKIP_DIRS]
+        dirs[:] = [d for d in dirs if d not in SKIP_DIRS
+                   and os.path.normcase(os.path.join(directory, d)) not in skip
+                   and not os.path.islink(os.path.join(directory, d))
+                   and not os.path.isjunction(os.path.join(directory, d))]
         for name in files:
+            if time.monotonic() > deadline or (stop is not None and stop.is_set()):
+                note = '（已停止）' if stop is not None and stop.is_set() else (
+                    f'（{SEARCH_SECONDS} 秒内没搜完，以上只是已找到的部分。查程序逻辑请把目录缩小到 '
+                    f'{config.APP_DIR / "ledger" / "ledger"}）')
+                return _cut('\n'.join(hits + [note]))
             file = Path(directory) / name
-            if not file.match(glob) or file.stat().st_size > 2_000_000:
-                continue
             try:
+                if not file.match(glob) or file.stat().st_size > 2_000_000:
+                    continue
                 for number, line in enumerate(file.read_text(encoding='utf-8', errors='ignore').splitlines(), 1):
                     if regex.search(line):
                         hits.append(f'{file}:{number}: {line.strip()[:200]}')
@@ -622,7 +647,8 @@ SPECS = [
     schema('sql_query', '只读 SQL 查询。db=workspace（台账主库，体积很大，必须带店铺/账期过滤和 LIMIT）或 commission（提成库）。',
            {'sql': S, 'db': {'type': 'string', 'enum': list(config.DATABASES)}}, ['sql']),
     schema('read_file', '读取文本文件（带行号）。', {'path': S, 'offset': {'type': 'integer'}, 'limit': {'type': 'integer'}}, ['path']),
-    schema('search_files', '在目录中按正则搜索文本，默认程序目录。', {'pattern': S, 'path': S, 'glob': S}, ['pattern']),
+    schema('search_files', f'在目录中按正则搜索文本，默认程序目录。查程序逻辑只搜 {config.APP_DIR / "ledger" / "ledger"}；'
+           '从上层目录搜时会跳过台账数据和备份目录，60 秒内没搜完只返回已找到的部分。', {'pattern': S, 'path': S, 'glob': S}, ['pattern']),
     schema('write_file', '写入整个文件（会自动留存修改前版本）。', {'path': S, 'content': S}, ['path', 'content']),
     schema('edit_file', '把文件中唯一出现的一段原文替换为新文本（会自动留存修改前版本）。', {'path': S, 'old': S, 'new': S}, ['path', 'old', 'new']),
     schema('python', '运行一段 Python 处理数据（排序、汇总、对比、核对），print 输出结果。已内置 get(path, **query) 调台账只读接口返回 JSON，'

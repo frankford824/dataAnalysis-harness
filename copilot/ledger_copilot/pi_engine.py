@@ -42,6 +42,7 @@ class Run:
         self.wants_engineer = False
         self.handoff = ''
         self.results, self.used_tools, self.thinking = [], set(), 'off'
+        self.stop = None
         self.lock = threading.Lock()
 
     def add_usage(self, model_id, tokens, cost):
@@ -218,6 +219,7 @@ def _stderr(process, tail):
 def run(run, *, model_id, system, prompt, inbox, stop, on_text, escalate, session=None):
     """跑完一轮，返回 (是否有过动作, 错误说明或 None)。没开始干活就出错抛 Unavailable。"""
     _write_config()
+    run.stop = threading.Event()
     system_file = AGENT_DIR / f'system-{run.token[:12]}.md'
     system_file.write_text(system, encoding='utf-8')
     env = {**os.environ, 'PI_CODING_AGENT_DIR': str(AGENT_DIR), 'PI_OFFLINE': '1', 'PI_SKIP_VERSION_CHECK': '1',
@@ -246,10 +248,12 @@ def run(run, *, model_id, system, prompt, inbox, stop, on_text, escalate, sessio
         while True:
             if stop.is_set() and not aborting:
                 aborting = True
+                run.stop.set()
                 _send(process, {'type': 'abort'})
             if time.time() - started > TURN_DEADLINE and not aborting:
                 aborting = True
                 error = '这个问题查得太久，先停在这里。'
+                run.stop.set()
                 _send(process, {'type': 'abort'})
             while inbox is not None:
                 try:
@@ -296,6 +300,7 @@ def run(run, *, model_id, system, prompt, inbox, stop, on_text, escalate, sessio
                     _send(process, {'type': 'set_model', 'provider': PROVIDER, 'modelId': target})
                 if turns > MAX_TURNS + 3 and not aborting:
                     aborting = True
+                    run.stop.set()
                     _send(process, {'type': 'abort'})
             elif kind == 'auto_retry_end' and not record.get('success'):
                 error = '这次处理遇到了问题，请稍后再试或换个说法。'
@@ -317,6 +322,7 @@ def run(run, *, model_id, system, prompt, inbox, stop, on_text, escalate, sessio
             raise Unavailable('Pi 管道断开：' + str(exc)) from exc
         error = '这次处理中断了，请再问一次。'
     finally:
+        run.stop.set()
         _live.pop(run.token, None)
         try:
             process.stdin.close()

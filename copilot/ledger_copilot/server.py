@@ -511,7 +511,11 @@ def pi_call(request: Request, body: dict):
         allowed = set()
     if allowed and name not in allowed:
         return {'text': '这轮不能做这件事。'}
-    result = agent._call(call, run.thread_id, run.step_emit, run.cards, run.emit, run.role)
+    token = tools.current_stop.set(run.stop)
+    try:
+        result = agent._call(call, run.thread_id, run.step_emit, run.cards, run.emit, run.role)
+    finally:
+        tools.current_stop.reset(token)
     if name == '交给':
         try:
             run.handoff = json.loads(result).get('handoff') or ''
