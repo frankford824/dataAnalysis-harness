@@ -19,10 +19,16 @@ watch(()=>props.show,show=>{
   basis.value=scope();proposal.value=null;submission.value=null;sourceRequest.value=null;error.value='';unsettled.value=false
 })
 watch([costs,reason],()=>{if(!busy.value&&!unsettled.value){proposal.value=null;submission.value=null;sourceRequest.value=null}},{deep:true})
-const eligible=computed(()=>{
-  if(props.revoke)return !!reason.value.trim()&&reason.value.trim().length<=500&&!!props.snapshot?.period_cost_input?.decision_id
-  try{periodCostRequest(props.storeId,props.period,props.snapshot?.run_id,costs.value,reason.value);return true}catch{return false}
+const blockReason=computed(()=>{
+  if(props.revoke){
+    if(!props.snapshot?.period_cost_input?.decision_id)return '没有可撤销的本期成本批准'
+    if(!reason.value.trim()||reason.value.trim().length>500)return '请填写不超过500字的撤销依据'
+    return ''
+  }
+  try{periodCostRequest(props.storeId,props.period,props.snapshot?.run_id,costs.value,reason.value);return ''}
+  catch(error){return error.message}
 })
+const eligible=computed(()=>!blockReason.value)
 function close(){if(!busy.value)emit('update:show',false)}
 async function preview(){
   if(busy.value||!eligible.value)return
@@ -89,6 +95,7 @@ async function confirm(){
     <div class="period-cost-actions">
       <n-button :disabled="busy" @click="close">取消</n-button>
       <n-button v-if="proposal&&!unsettled" :disabled="busy" @click="proposal=null;submission=null">返回修改</n-button>
+      <span v-if="!proposal && blockReason" class="small muted">{{blockReason}}</span>
       <n-button v-if="!proposal" type="primary" :loading="busy" :disabled="!eligible" @click="preview">{{revoke?'预览撤销成本批准':'预览本期成本'}}</n-button>
       <n-button v-else-if="unsettled" type="primary" :loading="busy" @click="confirm">核对提交结果</n-button>
       <n-button v-else type="primary" :loading="busy" :disabled="invalidated" @click="confirm">{{revoke?'确认撤销成本批准':'确认保存成本'}}</n-button>

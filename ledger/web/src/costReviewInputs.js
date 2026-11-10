@@ -14,8 +14,8 @@ export function needsManualCostInput(review) {
 
 export function initialCostInputs(review) {
   return Object.fromEntries(COST_KEYS.map(key => {
-    const value = amount(review?.observed?.[key])
-    return [key, review?.amount_complete?.[key] === true && value !== null ? value.toFixed(2) : '']
+    const value = amount(review?.known_partial?.[key] ?? review?.observed?.[key])
+    return [key, value === null ? '' : value.toFixed(2)]
   }))
 }
 

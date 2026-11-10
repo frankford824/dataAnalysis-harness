@@ -3,8 +3,10 @@ export const periodCostKeys=['goods','dropship','reshipment']
 const identity=value=>typeof value==='string'&&/^[A-Za-z0-9:_-]{1,128}$/.test(value)
 const sha=value=>typeof value==='string'&&/^[a-f0-9]{64}$/.test(value)
 export function costMoney(value){
-  if(typeof value!=='string'||value.length>32||!/^[-]?\d+(?:\.\d{1,2})?$/.test(value.trim()))throw Error('请分别填写有效的三项成本金额，最多两位小数')
-  const text=value.trim(),negative=text.startsWith('-'),[whole,fraction='']=text.replace(/^-/,'').split('.')
+  if(typeof value!=='string')throw Error('请分别填写有效的三项成本金额，最多两位小数')
+  const text=value.trim().replace(/[,，\s]/g,'')
+  if(!text||text.length>32||!/^[-]?\d+(?:\.\d{1,2})?$/.test(text))throw Error('请分别填写有效的三项成本金额，最多两位小数')
+  const negative=text.startsWith('-'),[whole,fraction='']=text.replace(/^-/,'').split('.')
   let cents=BigInt(whole)*100n+BigInt(fraction.padEnd(2,'0'))
   if(cents>99999999999999n)throw Error('成本金额超过允许范围')
   if(negative)cents=-cents

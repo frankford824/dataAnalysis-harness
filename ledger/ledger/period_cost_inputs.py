@@ -183,9 +183,10 @@ def _current(ws,model,store_id,period,run_id):
     if not run or type(run_id) is not int or run['id']!=run_id:raise WorkspaceError('核算结果已更新，请重新预览成本输入')
     if run['model_revision']!=hashlib.sha256(model.model_dump_json().encode()).hexdigest():raise WorkspaceError('核算模型已变化，请先重算')
     checked=checker.check(ws,store_id,period,model=model,check_company=False,check_pending=False,verify_artifacts=True)
-    forbidden={'stale_run','evidence_archive','input_capture_unverified','unverified_code_change','unverified_model_change',
-      'unverified_input_change','manual_input_unverified','source_sync_pending','original_date_input_unverified',
-      'source_fact_input_unverified','code_source_drift','period_cost_input_unverified','period_cost_input_source_unverified'}
+    # Pending-recompute codes are not forbidden: the approval binds the cost
+    # business input, and apply_payload marks it stale if a recompute moves it.
+    forbidden={'stale_run','evidence_archive','input_capture_unverified','code_source_drift',
+      'period_cost_input_unverified','period_cost_input_source_unverified'}
     if forbidden & {i['code'] for i in checked['issues']}:raise WorkspaceError('批准成本前的实际输入尚未复核，不能使用过期结果')
     proof=ws.conn.execute('SELECT manifest_json FROM automation_run_proof WHERE run_id=?',(run_id,)).fetchone()
     if not proof or not run['evidence_ready'] or run['evidence_error']:raise WorkspaceError('核算事实证据尚未完成封存')

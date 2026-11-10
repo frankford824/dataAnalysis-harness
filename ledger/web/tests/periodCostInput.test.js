@@ -6,6 +6,7 @@ const proposal=r=>({proposal_id:'proposal1',kind:'decision',proposal_sha:'a'.rep
 test('money stays exact including signed costs and maximum amounts',()=>{
   assert.equal(costMoney('000999999999999.99'),'999999999999.99')
   assert.equal(costMoney('-40.1'),'-40.10');assert.equal(costMoney('-0.00'),'0.00')
+  assert.equal(costMoney('1,802.27'),'1802.27');assert.equal(costMoney('1，802.27'),'1802.27')
   for(const bad of ['','NaN','Infinity','0.004','1e4','1000000000000',true,null,4])assert.throws(()=>costMoney(bad))
 })
 test('cost inputs require all three amounts and never carry payout or close fields',()=>{

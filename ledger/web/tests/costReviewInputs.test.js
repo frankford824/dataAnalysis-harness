@@ -2,10 +2,10 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import {initialCostInputs, needsManualCostInput, sourceCostText} from '../src/costReviewInputs.js'
 
-test('a 95-percent known subtotal is visible but cannot become a default total', () => {
+test('a recognised subtotal is filled in so the person can confirm it, and is still labelled incomplete', () => {
   const review = {observed: {goods: 38, dropship: 0, reshipment: 0},
     amount_complete: {goods: false, dropship: true, reshipment: true}, requires_human: true}
-  assert.deepEqual(initialCostInputs(review), {goods: '', dropship: '0.00', reshipment: '0.00'})
+  assert.deepEqual(initialCostInputs(review), {goods: '38.00', dropship: '0.00', reshipment: '0.00'})
   assert.equal(needsManualCostInput(review), true)
   assert.match(sourceCostText(review, 'goods'), /已识别部分 38\.00 元.*总额待补齐/)
 })
@@ -27,7 +27,7 @@ test('missing completeness and unknown or malformed numbers never prefill zero',
   for (const value of [null, undefined, '', ' ', false, true, [], [0], {}, NaN, Infinity, 'unknown']) {
     assert.equal(initialCostInputs({observed: {goods: value}, amount_complete: {goods: true}}).goods, '')
   }
-  assert.equal(initialCostInputs({observed: {goods: 38}, requires_human: false}).goods, '')
+  assert.equal(initialCostInputs({observed: {goods: 38}, requires_human: false}).goods, '38.00')
   assert.equal(sourceCostText({observed: {goods: null}}, 'goods'), '总额待补齐')
   assert.equal(sourceCostText({observed: {goods: 0}, amount_complete: {goods: false}}, 'goods'), '总额待补齐')
   assert.equal(sourceCostText({observed: {goods: 0}, amount_complete: {goods: true}}, 'goods'), '0.00 元')
