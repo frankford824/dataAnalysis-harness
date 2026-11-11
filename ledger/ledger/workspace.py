@@ -1053,7 +1053,9 @@ class Workspace:
             if f.get("blocking") and not f.get("passed")
         }
         from .feed_freshness import current as current_feed_freshness
-        feed_blocked = current_feed_freshness(self,store_id,period)['blocked']
+        # A human close confirms the run on screen; later order changes only
+        # mark the closed period as having new evidence.
+        feed_blocked = not human_override and current_feed_freshness(self,store_id,period)['blocked']
         if feed_blocked:
             active.setdefault("source_sync_pending", {
                 "id": "source_sync_pending", "name": "订单数据仍在同步",
