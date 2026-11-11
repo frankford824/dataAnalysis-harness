@@ -1573,6 +1573,7 @@ def close_period(store_id: str, period: str, action: PeriodAction) -> dict:
                 human_override=bool(action.note.strip()),
             )
     except WorkspaceError as exc:
+        logging.getLogger(__name__).warning("close refused store=%s period=%s: %s", store_id, period, exc)
         raise HTTPException(409, str(exc)) from exc
     return {"state": st.state, "at": st.at, "run_id": st.run_id, "labor_cut": st.labor_cut}
 
