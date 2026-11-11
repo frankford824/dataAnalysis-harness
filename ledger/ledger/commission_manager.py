@@ -8,9 +8,12 @@ import sqlite3
 import logging
 import uuid
 from contextlib import closing
+from pathlib import Path
 
 from . import commission_catalog, commission_import, order_feed, service, fee_jobs, publication_scope
 from .commission_registry import Registry, json_text
+
+PAUSE_FILE = 'accounting-queue.paused'
 
 
 def working_months(ws):
@@ -139,6 +142,11 @@ class Manager:
 
     def _once(self):
         ws=self.workspace()
+        # Operators drop this file while closing a month by hand: queued work
+        # stays durable, but no new run replaces the one being confirmed.
+        if (Path(ws.root)/PAUSE_FILE).exists():
+            self.stop_event.wait(10)
+            return
         scope=self._scope(ws)
         with publication_scope.bind(scope,ws.root):
             return self._once_scoped(ws,scope)
