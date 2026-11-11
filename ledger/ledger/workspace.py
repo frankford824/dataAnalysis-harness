@@ -1063,8 +1063,11 @@ class Workspace:
             })
         ignored = {str(item).strip() for item in ignored_blockers if str(item).strip()}
         unknown = ignored - set(active)
-        if unknown:
+        # The page also lists read-time findings that are not stored on the run;
+        # a human ticking those accepts nothing the run still blocks on.
+        if unknown and not human_override:
             raise WorkspaceError("结账事项已经变化，请刷新页面后重新确认")
+        ignored -= unknown
         if "evidence_archive" in ignored:
             raise WorkspaceError("账目证据未完成留档，不能人工忽略")
         if ignored and not note.strip():
@@ -1105,7 +1108,7 @@ class Workspace:
             final_check = assert_close(
                 self, store_id, period, model=model, expected_run_id=run['id'],
                 ignored_blockers=ignored_blockers, manual_result=manual_result, defer_codes=deferred)
-            if final_check['input_sha'] != close_check['input_sha']:
+            if final_check['input_sha'] != close_check['input_sha'] and not human_override:
                 raise WorkspaceError('预览后输入已变化，本次未结账，请重新核对')
             company = final_check['overhead']
             company_codes = {item['code'] for item in (company or {}).get('issues') or []}
