@@ -188,7 +188,7 @@ function openManualClose() {
   manualPayouts.value = (snap.value?.commission?.people || []).map(person => ({
     person_id: person.person_id, person: person.person,
     sales: person.sales, gross: person.gross, ...suggestedManualPayout(person,{
-      complete:(person.amount_complete ?? snap.value?.commission?.amount_complete) === true && !needsCompanyDecision.value,
+      complete:!needsCompanyDecision.value,
     }),
   }))
   manualNoPayout.value = false
@@ -903,7 +903,7 @@ watch(
           <n-alert v-if="manualPreviewError" type="warning" :bordered="false">{{ manualPreviewError }}</n-alert>
         </template>
         <template v-if="manualCostEnabled || manualPayoutEnabled">
-          <div class="manual-payout-head"><b>逐人确认提成</b><small>仅依据完整的建议金额会预填；空白项请补齐依据，或填写已有财务核定金额。试算与工资实际发放分别留痕。</small></div>
+          <div class="manual-payout-head"><b>逐人确认提成</b><small>已按源订单试算预填，请逐人核对后再确认；可改为财务核定金额。试算与工资实际发放分别留痕。</small></div>
           <div v-if="manualPayouts.length" class="manual-payout-list">
             <label v-for="person in manualPayouts" :key="person.person_id">
               <span>{{ person.person }}<small>参与销售 {{ money(person.sales) }} · 参与毛利 {{ money(person.gross) }}<template v-if="person.trial != null && person.suggested == null"> · 源订单试算 {{ money(person.trial) }}</template><template v-if="person.trial != null && person.suggested != null && person.trial !== person.suggested"> · 扣兼职前试算 {{ money(person.trial) }}</template><template v-if="person.suggested != null"> · 折算参考 {{ money(person.suggested) }}</template></small></span>
