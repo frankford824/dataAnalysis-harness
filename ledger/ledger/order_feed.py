@@ -2223,19 +2223,23 @@ class OrderFeed:
     ) -> pl.DataFrame:
         # 订单台读过售后商品明细页的售后（item_source=jst_detail），每个退货商品已按
         # 商品编码落到订单商品行；下面两条按件数、按金额推断商品的兜底只给没读到明细的。
+        # 售后挂的单被拆分/合并时，商品行落在实际发货的单上，内部单号以行上的为准；
+        # 取消且未发货的单（item_match=order_cancelled）一行不落，什么都不清。
         detail = (items.filter(pl.col("item_source").cast(pl.Utf8) == "jst_detail")
                   .get_column("after_sale_id").cast(pl.Utf8).unique().implode()
                   if "item_source" in items.columns and not items.is_empty() else None)
         if detail is not None and len(detail[0]):
             known = pl.col("after_sale_id").cast(pl.Utf8).is_in(detail)
             named, items = items.filter(known), items.filter(~known)
+            named = named.with_columns(pl.col("order_id").cast(pl.Utf8).alias("__resolved_internal"))
             guessed_after = after.filter(~known)
         else:
             named, guessed_after = None, after
         items, self._whole_order_after_sales = self._whole_platform_order_items(guessed_after, items, order_items)
         items, *self._unnamed_after_sales = self._unnamed_after_sale_items(guessed_after, items, order_items, orders)
         if named is not None:
-            items = pl.concat([items, named.select([c for c in named.columns if c in items.columns])],
+            items = pl.concat([items, named.select([c for c in named.columns
+                                                    if c in items.columns or c == "__resolved_internal"])],
                               how="diagonal_relaxed")
         # 成本帧的 sub_order_id 是平台子订单号（outer_sku），售后行要走同一把钥匙，
         # 否则「内部单号 + 子订单号 + 商品编码」三键永远对不上，规则形同虚设。

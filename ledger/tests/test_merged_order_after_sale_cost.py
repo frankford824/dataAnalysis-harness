@@ -60,7 +60,8 @@ class MergedClient(FakeClient):
         return super().get(path, params)
 
 
-def _feed(root: Path, after=AFTER, goods="卖家已收到退货", refund="退款成功", detail=None) -> dict:
+def _feed(root: Path, after=AFTER, goods="卖家已收到退货", refund="退款成功", detail=None,
+          head_order="16046161") -> dict:
     sub, parent, sku, qty, paid, unit = map(list, zip(*LINES))
     a_id, a_parent, a_sub, i_sub, i_sku, a_qty = map(list, zip(*after)) if after else ([],) * 6
     text = lambda values: pl.Series(values, dtype=pl.Utf8)
@@ -85,7 +86,7 @@ def _feed(root: Path, after=AFTER, goods="卖家已收到退货", refund="退款
             "sku_id": sku, "merchant_sku": sku, "product_name": ["剪纸"] * 6, "quantity": qty,
             "paid_amount": paid, "line_amount": paid, "refund_amount": ["0"] * 6, "tracking_no": ["SF1"] * 6})),
         "after_sales.parquet": _write(root, "after_sales.parquet", pl.DataFrame({
-            "after_sale_id": text(a_id), "order_id": text(["16046161"] * len(a_id)),
+            "after_sale_id": text(a_id), "order_id": text([head_order] * len(a_id)),
             "online_order_no": text(a_parent), "sub_order_id": text(a_sub),
             "order_store_id": text([SHOP] * len(a_id)), "after_sale_type_raw": text(["普通退货"] * len(a_id)),
             "goods_status_raw": text([goods] * len(a_id)), "online_status_raw": text([refund] * len(a_id)),
@@ -160,6 +161,23 @@ def test_goods_page_line_is_not_widened_to_the_whole_platform_order(tmp_path):
     costs = _goods_cost(tmp_path, after=[AFTER[1]], detail=detail)
     assert costs == {"HBJ01100": -5.7249, "HQT22539": -0.22, "HBJ01098": -1.5488,
                      "HZS08986": 0.0, "HZS12652": -0.9684}
+
+
+def test_goods_page_line_on_the_order_that_shipped_clears_that_order(tmp_path):
+    # The after-sale hangs on the pre-split order 16046100, which shipped nothing;
+    # its goods page line sits on 16046161, the order that shipped them.
+    detail = [("1022217808", "52015709", "HZS08986", "1")]
+    costs = _goods_cost(tmp_path, after=[AFTER[1]], detail=detail, head_order="16046100")
+    assert costs == {"HBJ01100": -5.7249, "HQT22539": -0.22, "HBJ01098": -1.5488,
+                     "HZS08986": 0.0, "HZS12652": -0.9684}
+
+
+def test_cancelled_order_line_clears_nothing(tmp_path):
+    # Cancelled before shipping: one line naming no goods; the shipped siblings keep cost.
+    detail = [("1022217808", None, None, "9")]
+    costs = _goods_cost(tmp_path, after=[AFTER[1]], detail=detail, head_order="16046100")
+    assert costs == {"HBJ01100": -5.7249, "HQT22539": -0.22, "HBJ01098": -1.5488,
+                     "HZS08986": -0.8797, "HZS12652": -0.9684}
 
 
 @pytest.mark.parametrize("goods,refund", [("买家已收到货", "退款成功"), ("卖家已收到退货", "退款关闭")])
