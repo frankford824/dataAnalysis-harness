@@ -308,6 +308,27 @@ def test_unrelated_metrics_and_store_namespaces_are_not_suppressed(calendar_case
     _frozen_unchanged(c)
 
 
+def test_settlement_rows_not_classified_as_refund_are_not_held(calendar_case):
+    # A settlement file is read by every metric of its source. Its ad top-ups,
+    # withdrawals and unclassified rows are not refunds and cannot be a
+    # refund already booked in a closed month.
+    from ledger.engine.runtime import ingest
+    c=calendar_case
+    c.replace([['','202600001',-20,datetime(2026,9,8),'','']])
+    c.publish('2026-09-01','e');frame=_refunds(c.compute())
+    assert frame[STATUS][0]=='pending'
+    model=c.model.model_copy(update={'metrics':tuple(m.model_copy(update={'major':'trade_refund'}) if m.id=='trade_refund' else m
+                                                     for m in c.model.metrics)})
+    store=model.store('s1')
+    raw=next(i for i in ingest(c.ws.active_files('s1'),model,[store.name],default_store=store.name).known
+             if i.template.id=='declared_refunds')
+    for major,expected in (('ad_topup',None),('withdrawal',None),(None,None),('trade_refund','pending')):
+        rows=frame.drop(STATUS).with_columns(pl.lit(major,dtype=pl.String).alias('major'))
+        result=Context(c.ws,model,store).annotate(SimpleNamespace(known=[raw]),rows,model.metrics)
+        assert result[STATUS][0]==expected,major
+    _frozen_unchanged(c)
+
+
 def test_confirmed_payout_stays_unchanged_when_new_period_excludes_duplicate(tmp_path,monkeypatch):
     c=_case(tmp_path,monkeypatch,payout=True)
     try:

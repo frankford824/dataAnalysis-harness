@@ -1,5 +1,19 @@
+// A run that posted manual cost lines reports coverage with them already
+// counted (approved_cost_line_count, upstream_coverage = the source-only
+// rate). Everything below works from the source-only counts.
+function sourceCoverage(coverage) {
+  const approved = coverage?.approved_cost_line_count
+  const expected = Number(coverage?.expected)
+  if (!Number.isSafeInteger(approved) || approved <= 0 || !(expected > 0)) return coverage
+  const rate = Number(coverage.upstream_coverage)
+  if (!Number.isFinite(rate)) return { ...coverage, coverage: null }
+  const covered = Math.round(rate * expected)
+  return { ...coverage, coverage: rate, covered, uncovered: expected - covered }
+}
+
 // Presentation only: never infer complete coverage from a missing denominator.
-export function costCoverageView(coverage, coverageRows = 0, pending = 0, closed = false, postedCount = null) {
+export function costCoverageView(reported, coverageRows = 0, pending = 0, closed = false, postedCount = null) {
+  const coverage = sourceCoverage(reported)
   const known = Number(coverage?.expected) > 0 && Number.isFinite(coverage?.coverage)
   const gaps = known ? Math.max(Number(coverage?.uncovered || 0), Number(coverageRows || 0)) : Number(coverageRows || 0)
   // Posting counts are captured with this run, after matching unique gap keys.

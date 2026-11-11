@@ -351,6 +351,9 @@ class Context:
         targets={m.id for m in metrics if m.id in REFUNDS and m.posting_basis=='order_number'}
         if not targets or facts.is_empty():return facts
         if facts.filter(pl.col('metric_id').is_in(targets)&(pl.col('store')==self.store.name)).is_empty():return facts
+        # A settlement file is read by every metric of its source; only rows
+        # classified as this metric's major are refunds (engine.project.claims).
+        majors={m.id:m.major for m in metrics if m.id in targets}
         self.history();rows=facts.to_dicts();identities={};native_groups=defaultdict(list);archives={}
         def required_archive(entry):
             key=id(entry)
@@ -361,6 +364,7 @@ class Context:
             return archives[key]
         for index,row in enumerate(rows):
             if row['metric_id'] not in targets or row['store']!=self.store.name:continue
+            if majors[row['metric_id']] and row.get('major')!=majors[row['metric_id']]:continue
             identity=self.current_identity(row,ingestion);identities[index]=identity
             key=native_key(row,identity)
             if key:

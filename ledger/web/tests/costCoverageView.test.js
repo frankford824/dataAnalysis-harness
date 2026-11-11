@@ -72,6 +72,15 @@ test('closed counts are tied to the saved snapshot and do not imply full manual-
   assert.equal(costCoverageView(coverage,3,0,true).afterKnown,false)
 })
 
+test('coverage that already counts posted lines is read back to the source-only counts',()=>{
+  // 蔡果-抖店浅花涧 2026-08: 4 gaps, all 4 posted; the run reports 1541/1541.
+  const reported={expected:1541,covered:1541,coverage:1,uncovered:0,upstream_coverage:1537/1541,approved_cost_line_count:4,passed:true}
+  const view=costCoverageView(reported,4,4,false,4)
+  assert.equal(view.percentage,'99.7%');assert.equal(view.gaps,4)
+  assert.equal(view.afterKnown,true);assert.equal(view.afterPercentage,'100.0%');assert.equal(view.afterGapLabel,'0 笔')
+  assert.equal(costCoverageView({...reported,upstream_coverage:undefined},4,4,false,4).percentage,'未统计')
+})
+
 test('zero posted supplements leaves the original rate and gap intact',()=>{
   const view=costCoverageView({expected:10,covered:7,coverage:.7,uncovered:3},3,0,false,0)
   assert.equal(view.afterPercentage,'70.0%');assert.equal(view.afterGaps,3)

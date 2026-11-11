@@ -906,7 +906,7 @@ watch(
           <div class="manual-payout-head"><b>逐人确认提成</b><small>仅依据完整的建议金额会预填；空白项请补齐依据，或填写已有财务核定金额。试算与工资实际发放分别留痕。</small></div>
           <div v-if="manualPayouts.length" class="manual-payout-list">
             <label v-for="person in manualPayouts" :key="person.person_id">
-              <span>{{ person.person }}<small>参与销售 {{ money(person.sales) }} · 参与毛利 {{ money(person.gross) }}<template v-if="person.trial != null && person.suggested != null && person.trial !== person.suggested"> · 扣兼职前试算 {{ money(person.trial) }}</template><template v-if="person.suggested != null"> · 折算参考 {{ money(person.suggested) }}</template></small></span>
+              <span>{{ person.person }}<small>参与销售 {{ money(person.sales) }} · 参与毛利 {{ money(person.gross) }}<template v-if="person.trial != null && person.suggested == null"> · 源订单试算 {{ money(person.trial) }}</template><template v-if="person.trial != null && person.suggested != null && person.trial !== person.suggested"> · 扣兼职前试算 {{ money(person.trial) }}</template><template v-if="person.suggested != null"> · 折算参考 {{ money(person.suggested) }}</template></small></span>
               <n-input v-model:value="person.amount" inputmode="decimal" :input-props="{'aria-label':`${person.person}确认提成额`}" placeholder="确认提成额" />
             </label>
           </div>
