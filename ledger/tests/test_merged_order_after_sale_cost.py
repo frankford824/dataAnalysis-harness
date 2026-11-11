@@ -60,10 +60,21 @@ class MergedClient(FakeClient):
         return super().get(path, params)
 
 
-def _feed(root: Path, after=AFTER, goods="卖家已收到退货", refund="退款成功") -> dict:
+def _feed(root: Path, after=AFTER, goods="卖家已收到退货", refund="退款成功", detail=None) -> dict:
     sub, parent, sku, qty, paid, unit = map(list, zip(*LINES))
     a_id, a_parent, a_sub, i_sub, i_sku, a_qty = map(list, zip(*after)) if after else ([],) * 6
     text = lambda values: pl.Series(values, dtype=pl.Utf8)
+    if detail is None:
+        items = pl.DataFrame({
+            "after_sale_id": text(a_id), "order_id": text(["16046161"] * len(a_id)),
+            "sub_order_id": text(i_sub), "sku_id": text(i_sku), "quantity": text(a_qty),
+            "item_source": text(["inferred"] * len(a_id))})
+    else:
+        d_id, d_sub, d_sku, d_qty = map(list, zip(*detail))
+        items = pl.DataFrame({
+            "after_sale_id": text(d_id), "order_id": text(["16046161"] * len(d_id)),
+            "sub_order_id": text(d_sub), "sku_id": text(d_sku), "quantity": text(d_qty),
+            "item_source": text(["jst_detail"] * len(d_id))})
     objects = {
         "stores.parquet": _write(root, "stores.parquet", pl.DataFrame({
             "order_store_id": [SHOP], "ledger_store_id": ["alibaba1688_xingze"], "mapping_status": ["confirmed"]})),
@@ -80,9 +91,7 @@ def _feed(root: Path, after=AFTER, goods="卖家已收到退货", refund="退款
             "goods_status_raw": text([goods] * len(a_id)), "online_status_raw": text([refund] * len(a_id)),
             "refund_status_raw": text(["已确认"] * len(a_id)),
             "updated_at_source": text(["2026-08-24T14:09:57+08:00"] * len(a_id))})),
-        "after_sale_items.parquet": _write(root, "after_sale_items.parquet", pl.DataFrame({
-            "after_sale_id": text(a_id), "order_id": text(["16046161"] * len(a_id)),
-            "sub_order_id": text(i_sub), "sku_id": text(i_sku), "quantity": text(a_qty)})),
+        "after_sale_items.parquet": _write(root, "after_sale_items.parquet", items),
         "order_costs.parquet": _write(root, "order_costs.parquet", pl.DataFrame({
             "order_id": ["16046161"] * 6, "sub_order_id": sub, "sku_id": sku, "quantity": qty,
             "unit_cost": unit, "cost_amount": [str(round(float(q) * float(u), 4)) for q, u in zip(qty, unit)],
@@ -133,6 +142,24 @@ def test_partial_return_keeps_the_existing_per_line_rule(tmp_path):
     costs = _goods_cost(tmp_path, after=[(*AFTER[1][:5], "5")])
     assert costs == {"HBJ01100": 0.0, "HQT22539": -0.22, "HBJ01098": -1.5488,
                      "HZS08986": -0.8797, "HZS12652": -0.9684}
+
+
+def test_goods_page_lines_clear_exactly_the_returned_lines(tmp_path):
+    # The goods page of P1's after-sale names its three lines; P2 and P3 keep their cost.
+    detail = [("1022217808", "52015708", "HQT22539", "6"), ("1022217808", "52015709", "HZS08986", "1"),
+              ("1022217808", "52015710", "HZS12652", "2")]
+    costs = _goods_cost(tmp_path, after=[AFTER[1]], detail=detail)
+    assert costs == {"HBJ01100": -5.7249, "HQT22539": -0.088, "HBJ01098": -1.5488,
+                     "HZS08986": 0.0, "HZS12652": 0.0}
+
+
+def test_goods_page_line_is_not_widened_to_the_whole_platform_order(tmp_path):
+    # Its quantity equals P1's units, which widens a guessed line to all of P1.
+    # A line read off the goods page stays the line it names.
+    detail = [("1022217808", "52015709", "HZS08986", "9")]
+    costs = _goods_cost(tmp_path, after=[AFTER[1]], detail=detail)
+    assert costs == {"HBJ01100": -5.7249, "HQT22539": -0.22, "HBJ01098": -1.5488,
+                     "HZS08986": 0.0, "HZS12652": -0.9684}
 
 
 @pytest.mark.parametrize("goods,refund", [("买家已收到货", "退款成功"), ("卖家已收到退货", "退款关闭")])

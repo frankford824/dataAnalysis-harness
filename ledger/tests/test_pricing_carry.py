@@ -36,6 +36,15 @@ def test_after_sale_without_goods_blocks_every_line_of_the_order(monkeypatch):
     assert after_sale_block('O1', 'HQT22732')[2] == 'clear'
 
 
+def test_after_sale_goods_page_names_the_returned_skus(monkeypatch):
+    _after_sales(monkeypatch, {
+        'after_sale_id': 'A1', 'goods_status_raw': '卖家已收到退货',
+        'returned_items': [{'sku_id': 'hqt00840', 'sub_order_id': '11'}, {'sku_id': 'HQT01373', 'sub_order_id': '12'}],
+    })
+    assert after_sale_block('O1', 'HQT22732') == (False, '', '')
+    assert after_sale_block('O1', 'HQT00840')[2] == 'clear'
+
+
 def test_candidates_two_each_side_nearest_first(monkeypatch):
     history = [{'effectiveOn': f'2026-0{m}-01', 'newCost': m} for m in range(3, 10)]
     monkeypatch.setattr(pricing_carry, '_get', lambda *a, **k: {'history': history})

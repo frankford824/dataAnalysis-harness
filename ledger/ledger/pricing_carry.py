@@ -139,6 +139,11 @@ def _states(record: dict[str, Any]) -> str:
 
 
 def _skus(record: dict[str, Any]) -> set[str]:
+    returned = record.get("returned_items")
+    if isinstance(returned, list) and returned:
+        # 订单台读过这张售后的商品明细页，退了哪些货以它为准。
+        return {str(x.get("sku_id") or "").strip().upper()
+                for x in returned if isinstance(x, dict) and str(x.get("sku_id") or "").strip()}
     found = set()
     for key, value in record.items():
         if "sku" in key.lower() or "商品编码" in key:
