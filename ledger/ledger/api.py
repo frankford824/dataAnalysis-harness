@@ -1944,6 +1944,83 @@ def pricing_gaps_export(run_id: int, q: str = "", category: str = '') -> PlainTe
         headers={"Content-Disposition": f'attachment; filename="pricing-pending-{run_id}.csv"'})
 
 
+class CarryBody(BaseModel):
+    """沿用价补录：确认候选价和补录范围后提交。"""
+    store_id: str
+    period: str
+    sku: str
+    unit_cost: float
+    price_date: str = ""
+    scope: str = "store"  # store=只补本店这一类；all=补全系统同商品的缺价行
+    reason: str = ""  # 手填单价（price_date 为空）时必填的成本依据
+
+
+def _require_open_period(store_id: str, period: str) -> None:
+    """已结账的账期是冻结的，不能再补录成本。"""
+    with workspace().transaction() as conn:
+        row = conn.execute('SELECT state FROM period WHERE store_id = ? AND period = ?',
+                           (store_id, period)).fetchone()
+    if row is None:
+        raise HTTPException(404, '没有这个店月')
+    if str(row[0]) != 'open':
+        raise HTTPException(409, f'{period} 已结账，不能再补录成本')
+
+
+def _carry_store_ids() -> set[str]:
+    return {s.id for s in _model().stores}
+
+
+@app.get("/api/runs/{run_id}/pricing-carry")
+def pricing_carry_options(run_id: int, sku: str, order_date: str = "") -> dict:
+    """「下单日成本依据不足」的沿用价候选：下单日前后各 2 个价格，交人工确认。"""
+    from . import pricing_carry
+    st = workspace().state_by_run(run_id)
+    if st is None:
+        raise HTTPException(404, "没有这次计算记录")
+    day = pricing_carry._day(order_date)
+    candidates = pricing_carry.carry_candidates(sku, day)
+    rows = pricing_carry.store_rows(workspace(), st.store_id, st.period, sku)
+    return {
+        "store_id": st.store_id, "period": st.period, "sku": sku.strip(),
+        "order_date": order_date, "candidates": candidates,
+        "store_rows": len(rows), "rows": rows[:20],
+        "label": pricing_carry.CATEGORY_LABEL,
+        "hint": ("这个货号在订单台没有成本变动记录，取不到沿用价；可手填单价并写明成本依据（成本原表、采购单等）"
+                 if not candidates else "挑一个沿用价，再选补录范围；符合售后清成本条件的行会按 0 计入"),
+    }
+
+
+@app.post("/api/pricing-carry/preview")
+def pricing_carry_preview(body: CarryBody) -> dict:
+    """按所选范围列出会补录的行：符合售后清成本条件的按 0 计入，售后查不到的不写。"""
+    from . import pricing_carry
+    _require_open_period(body.store_id, body.period)
+    try:
+        reason = pricing_carry.carry_reason(body.price_date, body.reason)
+        return pricing_carry.plan(workspace(), scope=body.scope, store_id=body.store_id,
+                                  period=body.period, sku=body.sku, unit_cost=body.unit_cost,
+                                  price_date=body.price_date, reason=reason)
+    except pricing_carry.CarryError as exc:
+        raise HTTPException(409, str(exc)) from exc
+
+
+@app.post("/api/pricing-carry/apply")
+def pricing_carry_apply(body: CarryBody) -> dict:
+    """确认后补录成本单价，相关店铺自动重算。符合售后清成本条件的行按 0 计入。"""
+    from . import pricing_carry
+    _require_open_period(body.store_id, body.period)
+    try:
+        reason = pricing_carry.carry_reason(body.price_date, body.reason)
+        plan = pricing_carry.plan(workspace(), scope=body.scope, store_id=body.store_id,
+                                  period=body.period, sku=body.sku, unit_cost=body.unit_cost,
+                                  price_date=body.price_date, reason=reason)
+        saved = pricing_carry.apply(workspace(), plan, _carry_store_ids(), by='人工操作')
+    except pricing_carry.CarryError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    _enqueue_adjusted(saved['stores'], saved['revision'])
+    return saved
+
+
 @app.get("/api/runs/{run_id}/fees.csv")
 def fees_export(run_id: int) -> PlainTextResponse:
     """这个账期按订单号列出所有费项，用来和手工表对差异。"""

@@ -401,6 +401,20 @@ def save(ws, store_id: str, period: str, run_id: int, *, coverage_key: str,
         raise WorkspaceError("这笔订单在最新计算里已不缺成本，不用再补录")
     if source['order_count'] != 1 or source['context_sha'] != context_sha:
         raise WorkspaceError("这笔订单的商品或数量在最新计算里有变化，请按最新明细重新确认金额")
+    cleared_note = ''
+    if action == 'save':
+        # 2026-11-10 业务确认：识别到符合售后清成本条件的行，补录金额按 0 执行。
+        from .pricing_carry import after_sale_block
+        skus = [s.strip() for s in str(source.get('pending_cost_skus') or '').split('、') if s.strip()]
+        hits = [after_sale_block(str(source.get('order_id') or ''), sku) for sku in skus] if skus else []
+        unknown = [why for hit, why, kind in hits if hit and kind != 'clear']
+        if unknown:
+            raise WorkspaceError(f"这笔订单的售后情况查不到，先不补录：{unknown[0]}")
+        cleared = [why for hit, why, kind in hits if hit and kind == 'clear']
+        if cleared and len(cleared) == len(skus):
+            amount = 0
+            cleared_note = f"{cleared[0]}，本行成本按 0 计"
+            reason = f"{reason.strip()}；{cleared_note}"[:500]
     conn = ws.conn
     with ws.transaction():
         active = conn.execute('SELECT id FROM run WHERE store_id=? AND period=? ORDER BY id DESC LIMIT 1',

@@ -127,6 +127,13 @@ def write_xlsx(
     return path
 
 
+@pytest.fixture(autouse=True)
+def no_order_console_after_sales(monkeypatch):
+    """补录前查订单台售后要连生产订单台；测试里一律视为没有清成本的售后。"""
+    from ledger import pricing_carry
+    monkeypatch.setattr(pricing_carry, "after_sale_block", lambda order_id, sku="": (False, "", ""))
+
+
 @pytest.fixture
 def tmp_xlsx(tmp_path: Path):
     """返回一个写 xlsx 的函数，文件落在临时目录。"""

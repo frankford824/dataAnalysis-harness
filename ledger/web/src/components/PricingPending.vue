@@ -61,7 +61,69 @@ const columns = [
   { title: '来源 / 取价日', key: 'cost_source', width: 160, render: row => `${row.cost_source || '未提供'} / ${row.cost_as_of || '未提供'}` },
   { title: '依据类型', key: 'register_basis', width: 130 },
   { title: '还缺什么依据', key: 'required_evidence', minWidth: 260 },
+  { title: '补录', key: 'carry', width: 130, fixed: 'right', render: row => (!props.closed && row.category === 'historical_price' && row.sku)
+    ? h(NButton, { size: 'small', text: true, type: 'primary', onClick: () => openCarry(row) }, () => '取沿用价补录')
+    : h('span', { class: 'coverage-secondary' }, props.closed ? '已结账 · 只读' : '—') },
 ]
+// 「下单日成本依据不足」按沿用价补录：候选价由人挑，范围二选一，符合售后清成本条件的行按 0 计入。
+const carryRow = ref(null), carryData = ref(null), carryPlan = ref(null), carryDone = ref('')
+const carryPrice = ref(''), carryScope = ref('store'), carryBusy = ref(false), carryError = ref('')
+// 订单台取不到沿用价、或候选价都不合适时手填单价，后端要求同时写明成本依据。
+const carryManual = ref(false), carryManualPrice = ref(''), carryBasis = ref('')
+const carryCandidates = computed(() => carryData.value?.candidates || [])
+const carrySelected = computed(() => carryManual.value ? null : carryCandidates.value.find(item => Number(item.unit_cost) === Number(carryPrice.value)) || null)
+const carryUnitCost = computed(() => {
+  const text = String(carryManual.value ? carryManualPrice.value : carryPrice.value).replace(/,/g, '').trim()
+  return text !== '' && Number.isFinite(Number(text)) && Number(text) >= 0 ? Number(text) : null
+})
+const carryValid = computed(() => carryUnitCost.value !== null && (!carryManual.value || carryBasis.value.trim().length >= 4))
+async function carryFetch(url, body) {
+  const response = await fetch(url, body ? { method: 'POST', headers: { 'Content-Type': 'application/json' }, body } : undefined)
+  const payload = await response.json().catch(() => ({}))
+  if (!response.ok) throw new Error(payload.detail || response.statusText || '请求失败')
+  return payload
+}
+function carryPayload() {
+  return JSON.stringify({ store_id: props.storeId, period: props.period, sku: carryRow.value?.sku || '',
+    unit_cost: carryUnitCost.value, price_date: carrySelected.value?.effective_on || '', scope: carryScope.value,
+    reason: carryManual.value ? carryBasis.value.trim() : '' })
+}
+async function openCarry(row) {
+  carryRow.value = row; carryData.value = null; carryPlan.value = null; carryDone.value = ''
+  carryError.value = ''; carryPrice.value = ''; carryScope.value = 'store'; carryBusy.value = true
+  carryManual.value = false; carryManualPrice.value = ''; carryBasis.value = ''
+  try {
+    carryData.value = await carryFetch(`/api/runs/${props.runId}/pricing-carry?${new URLSearchParams({ sku: row.sku || '', order_date: row.order_date || '' })}`)
+    const picked = carryCandidates.value.find(item => item.on_order_day) || carryCandidates.value[0]
+    if (picked) carryPrice.value = String(picked.unit_cost)
+    else carryManual.value = true
+  } catch (error) { carryError.value = error.message }
+  finally { carryBusy.value = false }
+}
+function chooseCarryPrice(item) { carryManual.value = false; carryPrice.value = String(item.unit_cost); carryPlan.value = null; carryDone.value = ''; carryError.value = '' }
+function chooseCarryManual() { carryManual.value = true; carryPlan.value = null; carryDone.value = ''; carryError.value = '' }
+function carryEdited() { carryPlan.value = null; carryDone.value = '' }
+function chooseCarryScope(scope) { carryScope.value = scope; carryPlan.value = null; carryDone.value = ''; carryError.value = '' }
+async function carryPreview() {
+  if (!carryValid.value || carryBusy.value) return
+  carryBusy.value = true; carryError.value = ''; carryDone.value = ''; carryPlan.value = null
+  try { carryPlan.value = await carryFetch('/api/pricing-carry/preview', carryPayload()) }
+  catch (error) { carryError.value = error.message }
+  finally { carryBusy.value = false }
+}
+async function carryApply() {
+  if (!carryPlan.value?.items?.length || carryBusy.value) return false
+  carryBusy.value = true; carryError.value = ''
+  try {
+    const saved = await carryFetch('/api/pricing-carry/apply', carryPayload())
+    const skipped = (saved.blocked || []).length
+    const zeroed = (saved.cleared || []).length
+    carryDone.value = `已补录 ${saved.saved} 行（${saved.stores?.length || 0} 家店），相关店铺自动重算中` + (zeroed ? `；其中 ${zeroed} 行符合售后清成本、按 0 计入` : '') + (skipped ? `；${skipped} 行售后情况查不到、未补录` : '')
+    carryPlan.value = null; await loadCoverage(); emit('line-saved')
+    return false
+  } catch (error) { carryError.value = error.message; return false }
+  finally { carryBusy.value = false }
+}
 const sourceCategory = computed(() => ['mixed','unmatched'].includes(category.value) ? '' : category.value)
 const sourceDownloadLabel = computed(() => sourceCategory.value ? '导出本类来源明细' : search.value ? '导出查询来源明细' : '导出全部来源明细')
 const download = computed(() => `/api/runs/${props.runId}/pricing-gaps.csv?${new URLSearchParams({ q: search.value, category:sourceCategory.value })}`)
@@ -274,6 +336,45 @@ const coverageColumns=[
     <n-button v-if="editor?.manual_amount != null" size="small" text style="margin-top:10px" @click="editorAction=editorAction==='remove'?'save':'remove'">{{ editorAction==='remove'?'继续修改金额':'撤销此前补录' }}</n-button>
     <n-alert v-if="saveError" type="error" style="margin-top:12px">{{ saveError }}</n-alert>
   </n-modal>
+  <n-modal :show="!!carryRow" :z-index="3960" preset="dialog" title="按沿用价补录成本 · 规则 W20261110" positive-text="确认补录" negative-text="关闭"
+    :positive-button-props="{ disabled: carryBusy || !carryPlan || !carryPlan.items?.length }"
+    @update:show="!$event && (carryRow = null)" @positive-click="carryApply">
+    <p class="small muted">商品编码 {{ carryRow?.sku }} · 下单日 {{ carryRow?.order_date || '未提供' }} · 平台订单 {{ carryRow?.order_id }}。<br>
+      下面是订单台里这个货号在下单日前后各 2 个沿用价，挑一个再选补录范围；取不到或都不合适时可手填单价，须写明成本依据。符合售后清成本条件（买家未收到货 / 买家已退货 / 卖家已收到退货）的行会按 0 计入，不按沿用价。</p>
+    <n-alert v-if="carryBusy" type="info" :bordered="false" style="margin-top:10px">正在取数…</n-alert>
+    <n-alert v-else-if="!carryCandidates.length" type="warning" :bordered="false" style="margin-top:10px">{{ carryData?.hint || '订单台没有这个货号的成本变动记录，取不到沿用价，需另附成本原表' }}</n-alert>
+    <div v-if="!carryBusy" class="pricing-carry-list">
+      <n-button v-for="item in carryCandidates" :key="item.effective_on + item.unit_cost" size="small"
+        :type="!carryManual && Number(carryPrice) === Number(item.unit_cost) ? 'primary' : 'default'"
+        :secondary="carryManual || Number(carryPrice) !== Number(item.unit_cost)" @click="chooseCarryPrice(item)">{{ item.label }}</n-button>
+      <n-button size="small" :type="carryManual ? 'primary' : 'default'" :secondary="!carryManual" @click="chooseCarryManual">手填单价</n-button>
+    </div>
+    <div v-if="carryManual && !carryBusy" style="margin-top:10px">
+      <n-input v-model:value="carryManualPrice" inputmode="decimal" aria-label="手填成本单价" placeholder="成本单价（元/件）" style="max-width:220px" @update:value="carryEdited" />
+      <n-input v-model:value="carryBasis" type="textarea" :rows="2" maxlength="300" show-count aria-label="手填单价的成本依据"
+        placeholder="成本依据（必填，至少 4 个字）：成本原表、采购单号、供应商报价等" style="margin-top:8px" @update:value="carryEdited" />
+    </div>
+    <div class="pricing-carry-list" style="margin-top:12px">
+      <n-button size="small" :type="carryScope === 'store' ? 'primary' : 'default'" :secondary="carryScope !== 'store'" @click="chooseCarryScope('store')">① 只补本店这一类缺价行</n-button>
+      <n-button size="small" :type="carryScope === 'all' ? 'primary' : 'default'" :secondary="carryScope !== 'all'" @click="chooseCarryScope('all')">② 补全系统所有店铺这个商品的缺价行</n-button>
+    </div>
+    <p class="small muted" style="margin-top:10px">本店这一类共 {{ carryData?.store_rows ?? 0 }} 行。范围②只扫未结账月份，逐行判售后；已结账的账期不动。</p>
+    <n-button size="small" type="primary" ghost :disabled="carryBusy || !carryValid" @click="carryPreview" style="margin-top:6px">先看清会补哪些行</n-button>
+    <template v-if="carryPlan">
+      <n-alert type="success" :bordered="false" style="margin-top:12px">{{ carryPlan.note }} · 单价 {{ Number(carryPlan.unit_cost).toFixed(2) }} 元 · {{ carryPlan.scope_label }}，涉及 {{ carryPlan.stores?.length || 0 }} 家店</n-alert>
+      <n-alert v-if="carryPlan.cleared?.length" type="info" :bordered="false" style="margin-top:10px">
+        以下 {{ carryPlan.cleared.length }} 行符合售后清成本条件，按 0 计入：
+        <div v-for="(row, index) in carryPlan.cleared" :key="'c'+index" class="small muted">{{ row.store_name || row.store_id }} {{ row.period }} · 订单 {{ row.order_id }} · {{ row.cleared_reason }}</div>
+      </n-alert>
+      <n-alert v-if="carryPlan.blocked?.length" type="warning" :bordered="false" style="margin-top:10px">
+        以下 {{ carryPlan.blocked.length }} 行售后情况查不到，暂不补录：
+        <div v-for="(row, index) in carryPlan.blocked" :key="index" class="small muted">{{ row.store_name || row.store_id }} {{ row.period }} · 订单 {{ row.order_id }} · {{ row.blocked_reason }}</div>
+      </n-alert>
+      <n-alert v-if="!carryPlan.items?.length" type="error" :bordered="false" style="margin-top:10px">没有可补录的行，无法提交。</n-alert>
+    </template>
+    <n-alert v-if="carryDone" type="success" :bordered="false" style="margin-top:12px">{{ carryDone }}</n-alert>
+    <n-alert v-if="carryError" type="error" :bordered="false" style="margin-top:12px">{{ carryError }}</n-alert>
+  </n-modal>
 </template>
 
 <style scoped>
@@ -289,6 +390,7 @@ const coverageColumns=[
 .pricing-work-bar span { display:block;height:100%;border-radius:inherit;background:#4783f4;transition:width .2s ease; }
 .pricing-notice p { margin: 4px 0 0; font-size: 13px; }
 .pricing-help { color: #657184; margin: 0 0 16px; }
+.pricing-carry-list { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
 .pricing-search { display: flex; align-items: center; gap: 10px; margin-bottom: 16px; }
 .pricing-summary { display:flex;flex-wrap:wrap;gap:8px;margin:-4px 0 14px; }
 .pricing-category-filters {display:flex;flex-wrap:wrap;gap:8px;margin:12px 0;}
