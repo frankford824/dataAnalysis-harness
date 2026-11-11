@@ -479,7 +479,9 @@ def _validate_run(ws,model,store,period,run_id,context):
             [m for original in model.metrics if (m:=original.for_platform(store.platform)) is not None])
         bindings=[];stale=False
         for before,after in zip(rows.to_dicts(),refreshed.to_dicts()):
-            previous=doc(before).get('frozen_refund') or {};now=doc(after)['frozen_refund']
+            now=doc(after).get('frozen_refund')
+            if now is None:continue
+            previous=doc(before).get('frozen_refund') or {}
             bindings.append([physical(after),now])
             if now['status']=='pending' or (now['status']=='excluded' and before.get('counted')):
                 stale=True

@@ -134,8 +134,11 @@ HUMAN_CLOSE_DEFER = frozenset({
     'recompute_pending', 'unverified_code_change', 'unverified_input_change',
     'unverified_model_change', 'input_capture_unverified', 'source_sync_pending',
     'manual_input_unverified', 'company_revenue_unknown', 'overhead_basis_empty',
-    'overhead_total_unknown',
+    'overhead_total_unknown', 'missing_sources', 'period_cost_input_stale',
+    'shared_fee_evidence_unverified', 'shared_fee_index_pending', 'shared_fee_source_conflict',
 })
+# 人工结账写明原因后，页面上能勾选接受的事项都可放过；只有这些连人工也不能忽略（与店月页一致）。
+HUMAN_CLOSE_HARD = frozenset({'evidence_archive','statement_identity','promotion_integrity','promotion_scope_evidence'})
 
 
 def company_basis(ws,model,period):
@@ -347,7 +350,7 @@ def check(ws,store_id,period,*,model=None,expected_run_id=None,ignored_blockers=
             if finding.get('blocking') and not finding.get('passed'):
                 code=str(finding.get('id') or 'unverified_finding')
                 hard=code in HARD_FINDINGS or code not in {'fees','dropship','chk_goods_coverage','unclassified','manual_review'}
-                if code in ignored_blockers and not hard:continue
+                if code in ignored_blockers and (not hard or code not in HUMAN_CLOSE_HARD):continue
                 problems.append(issue(code,str(finding.get('message') or finding.get('name') or '核算依据待核对'),hard))
         if payload.get('missing_sources'):problems.append(issue('missing_sources','还缺：'+'、'.join(map(str,payload['missing_sources']))))
         if payload.get('source_sync_pending'):problems.append(issue('source_sync_pending','本次输入捕获时来源尚未追平'))
