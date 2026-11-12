@@ -548,7 +548,13 @@ def select_report(month, *, level='store', platform='', store_id='', team_id='',
         # Unknown classification keeps the managed share unknown; it is never read as non-managed.
         if not detail_loaded or any(row['managed']=='unknown' and any(row['values'].get(key)!=0 for key in ROW_PRIMITIVES) for row in group):
             return None
-        selected=[row for row in group if row['managed']=='managed']
+        return _part(group,'managed')
+    def standard_part(group):
+        if managed_part(group) is None:
+            return None
+        return _part(group,'standard')
+    def _part(group,kind):
+        selected=[row for row in group if row['managed']==kind]
         if not selected:
             return derive({name:Decimal(0) for name in (*PRIMITIVES,'commission')},net_income=Decimal(0))
         return total(selected)
@@ -559,6 +565,7 @@ def select_report(month, *, level='store', platform='', store_id='', team_id='',
                 'product':head['product_name'] or head['product_id'] or '待归属商品',
                 'order':head['sub_order_id'] or head['order_id'] or '待归属金额'}[level]
         part = managed_part(group)
+        standard = standard_part(group)
         return {'id':key,'name':name,'store_id':head['store_id'] if len({row['store_id'] for row in group}) == 1 else '',
             'store':head['store'] if len({row['store_id'] for row in group}) == 1 else '',
             'platform':head['platform'] if len({row['platform'] for row in group}) == 1 else '',
@@ -568,6 +575,7 @@ def select_report(month, *, level='store', platform='', store_id='', team_id='',
             'order_id':head['order_id'] if level=='order' else '', 'sub_order_id':head['sub_order_id'] if level=='order' else '',
             'order_count':len({(row['store_id'],row['order_id'],row['sub_order_id']) for row in group if row['order_id'] or row['sub_order_id']}),
             'metrics':public_metrics(metrics),'managed_metrics':None if part is None else public_metrics(part),
+            'standard_metrics':None if standard is None else public_metrics(standard),
             'run_ids':sorted({row['run_id'] for row in group if row['run_id']}),
             'managed':sorted({row['managed'] for row in group}),'cost_input_scope':head.get('cost_input_scope','')}
     # Store summary remains authoritative even if historical order detail is absent.
@@ -595,6 +603,7 @@ def select_report(month, *, level='store', platform='', store_id='', team_id='',
                         for key,group in grouped(refs,per_person=True).items()]
     reference_groups.sort(key=lambda row:(row['metrics']['net_income'] is None,-(decimal(row['metrics']['net_income']) or Decimal(0)),row['id']))
     managed_summary = managed_part(atoms)
+    standard_summary = standard_part(atoms)
     all_runs = [{'store_id':row['input'].store_id,'run_id':row['input'].run_id,'input_sha':row['input'].input_sha,'state':row['input'].state,
              'stale':row['input'].stale,'at':row['input'].at,'engine':row['input'].engine,'evidence_complete':row['input'].evidence_complete,'cost_input_scope':row['input'].cost_input_scope}
             for row in month['stores']]
@@ -610,6 +619,7 @@ def select_report(month, *, level='store', platform='', store_id='', team_id='',
         'amount_precision':{'money':'source_decimal','subcent_minimum_fraction_digits':6,'display_fraction_digits':2,'aggregation':'before_display_rounding'},
         'display_rounding':display_rounding(raw_metrics,summary),
         'summary':public_metrics(summary),'managed_summary':None if managed_summary is None else public_metrics(managed_summary),
+        'standard_summary':None if standard_summary is None else public_metrics(standard_summary),
         'rows':rows,'reference_groups':reference_groups,'reference_rows':[{**{k:v for k,v in row.items() if k not in ('values','link_keys') and not k.startswith('_')},'metrics':public_metrics(derive(row['values'],net_income=row['values'].get('net_income')))} for row in refs],
         'issues':sorted({issue for row in month['stores'] for issue in row['input'].issues} | ({'店月成本已批准，商品与人员尚无完整成本分配依据，明细利润保持待补齐'} if not store_summary and any(row['input'].cost_input_scope=='approved_store_period_total' for row in month['stores']) else set())),
         'unclaimed_count':sum(row['unclaimed'] for row in atoms) if detail_loaded else None,
