@@ -518,13 +518,6 @@ function onDrop(e) {
 const draft = ref('')
 const textarea = ref(null)
 const shotTip = ref(false)
-function autosize() {
-  const el = textarea.value
-  if (!el) return
-  el.style.height = 'auto'
-  el.style.height = `${Math.min(el.scrollHeight, 180)}px`
-}
-watch(draft, () => nextTick(autosize))
 function onKeydown(e) {
   if (e.key !== 'Enter' || e.shiftKey || e.isComposing || e.keyCode === 229) return
   e.preventDefault()
@@ -1325,7 +1318,6 @@ onMounted(() => {
   window.addEventListener('ledger-agent-open', onOpenAgent)
   connectEvents()
   loadUiHistory()
-  nextTick(autosize)
   if ('ResizeObserver' in window && list.value) {
     listObserver = new ResizeObserver(pinOnResize)
     listObserver.observe(list.value)
@@ -2201,9 +2193,10 @@ onUnmounted(() => {
   width: 100%;
   min-height: 46px;
   max-height: 180px;
+  field-sizing: content;
+  overflow: auto;
   padding: 12px 0 10px;
   border: 0;
-  outline: none;
   background: transparent;
   color: var(--n9);
   font: var(--t-base)/1.6 var(--sans);

@@ -129,9 +129,9 @@ async function saveAll(){
 .payout-help{margin:0 0 12px;color:#475569;font-size:13px;line-height:1.6}
 .payout-stores{max-height:56vh;overflow:auto;display:flex;flex-direction:column;gap:10px}
 .payout-store{border:1px solid #e2e8f0;border-radius:8px;padding:10px 12px}
-.payout-store header{display:flex;align-items:center;gap:10px}
+.payout-store header{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
 .payout-total{margin-left:auto;color:#334155;font-size:13px}
-.payout-person{display:flex;align-items:center;gap:12px;margin-top:8px}
+.payout-person{display:flex;align-items:center;gap:12px;margin-top:8px;flex-wrap:wrap}
 .payout-person span{min-width:90px}
 .payout-person small{color:#64748b;flex:1}
 .payout-error{margin:6px 0 0;color:#b45309;font-size:12px}

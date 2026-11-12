@@ -261,6 +261,9 @@ html body .n-message-container.n-message-container--top { right: var(--agent-doc
   min-width: 0;
   margin-right: calc(var(--s3) * -1);
   padding-right: var(--s3);
+  scroll-padding-block-start: 48px;
+  scrollbar-width: thin;
+  scrollbar-color: var(--n4) var(--n1);
 }
 
 /* 该交的表：没交的原因可能是一整句话（表认出来了但缺一列之类），
@@ -280,10 +283,15 @@ html body .n-message-container.n-message-container--top { right: var(--agent-doc
   overflow-wrap: anywhere;
 }
 .scroll.tall { max-height: 560px; }
+.scroll thead {
+  position: sticky;
+  inset-block-start: 0;
+  z-index: 3;
+}
 .scroll thead th {
   position: sticky;
-  top: 0;
-  z-index: 1;
+  inset-block-start: 0;
+  z-index: 3;
   background: var(--n0);
 }
 
