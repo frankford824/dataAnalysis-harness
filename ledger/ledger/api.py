@@ -1277,6 +1277,7 @@ class PeriodAction(BaseModel):
     payouts: list[dict[str, Any]] = Field(default_factory=list, max_length=100)
     payout_only: bool = False
     no_payout: bool = False
+    defer_payout: bool = False
     line_revision: int | None = Field(default=None, ge=0)
 
 
@@ -1545,6 +1546,7 @@ def close_period(store_id: str, period: str, action: PeriodAction) -> dict:
                     _costs_with_lines(action.costs, lines),
                     action.payouts, action.no_payout, action.note,
                     labor_cut=labor_cut, allow_open_profit=True,
+                    defer_payout=action.defer_payout,
                 )
                 manual_decision['base_costs'] = {key: str(value) for key, value in action.costs.items()}
                 manual_decision['line_revision'] = lines['line_revision']

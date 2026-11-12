@@ -135,6 +135,7 @@ HUMAN_CLOSE_DEFER = frozenset({
     'unverified_model_change', 'input_capture_unverified', 'source_sync_pending',
     'manual_input_unverified', 'company_revenue_unknown', 'overhead_basis_empty',
     'overhead_total_unknown', 'missing_sources', 'period_cost_input_stale', 'profit_unknown',
+    'commission_incomplete',
     'shared_fee_evidence_unverified', 'shared_fee_index_pending', 'shared_fee_source_conflict',
 })
 # 人工结账写明原因后，页面上能勾选接受的事项都可放过；只有这些连人工也不能忽略（与店月页一致）。

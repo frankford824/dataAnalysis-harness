@@ -106,27 +106,33 @@ def _deduct_labor_if_trial_accepted(amounts: dict[str, Decimal], commission: dic
 
 def certified(model, result: dict, source_run_id: int, confirmed: dict,
               payouts: list[dict], no_payout: bool, reason: str,
-              labor_cut=None, allow_open_profit: bool = False) -> tuple[dict, dict]:
-    """Prepare a separate immutable human result for the close transaction."""
+              labor_cut=None, allow_open_profit: bool = False,
+              defer_payout: bool = False) -> tuple[dict, dict]:
+    """Prepare a separate immutable human result for the close transaction.
+
+    With ``defer_payout`` the close confirms costs and profit only; payouts are
+    confirmed later on the month board and the commission keeps its trial."""
     if not reason.strip():
         raise WorkspaceError("人工确认成本和提成必须填写原因")
     trial = preview(model, result, confirmed)
     if trial["profit"] is None and not allow_open_profit:
         raise WorkspaceError("除成本外仍有资料缺口，当前无法确认利润；请先补齐其他资料")
-    original_people = list((result.get("commission") or {}).get("people") or [])
-    identities = [str(person.get("person_id") or "") for person in original_people]
-    if len(identities) != len(set(identities)) or any(not pid for pid in identities):
-        raise WorkspaceError("提成人员身份不完整，不能人工确认金额")
-    if no_payout and (payouts or identities):
-        raise WorkspaceError("已有提成人员时，请分别确认其提成金额")
-    if not identities and not no_payout:
-        raise WorkspaceError("本期没有提成人员，请明确确认无需提成")
-    entered = [str(item.get("person_id") or "") for item in payouts]
-    if not no_payout and (len(entered) != len(set(entered)) or set(entered) != set(identities)):
-        raise WorkspaceError("请分别填写全部提成人员的确认金额")
-    amounts = {str(item["person_id"]): _cents(item.get("amount")) for item in payouts}
-    amounts, labor_adjusted = _deduct_labor_if_trial_accepted(
-        amounts, result.get("commission") or {}, labor_cut, trial.get("profit"))
+    amounts, labor_adjusted = None, False
+    if not defer_payout:
+        original_people = list((result.get("commission") or {}).get("people") or [])
+        identities = [str(person.get("person_id") or "") for person in original_people]
+        if len(identities) != len(set(identities)) or any(not pid for pid in identities):
+            raise WorkspaceError("提成人员身份不完整，不能人工确认金额")
+        if no_payout and (payouts or identities):
+            raise WorkspaceError("已有提成人员时，请分别确认其提成金额")
+        if not identities and not no_payout:
+            raise WorkspaceError("本期没有提成人员，请明确确认无需提成")
+        entered = [str(item.get("person_id") or "") for item in payouts]
+        if not no_payout and (len(entered) != len(set(entered)) or set(entered) != set(identities)):
+            raise WorkspaceError("请分别填写全部提成人员的确认金额")
+        amounts = {str(item["person_id"]): _cents(item.get("amount")) for item in payouts}
+        amounts, labor_adjusted = _deduct_labor_if_trial_accepted(
+            amounts, result.get("commission") or {}, labor_cut, trial.get("profit"))
     decided = deepcopy(result)
     decided["statement"] = trial["statement"]
     decided["manual_cost"] = {
@@ -152,7 +158,7 @@ def certified(model, result: dict, source_run_id: int, confirmed: dict,
             finding.update(passed=True, blocking=False,
                            message="商品成本已按人工确认金额结账；原覆盖缺口与源明细保留")
     commission = deepcopy(result.get("commission") or {})
-    for person in commission.get("people") or []:
+    for person in commission.get("people") or [] if amounts is not None else []:
         person["amount"] = money_float(amounts[person["person_id"]])
         person["amount_complete"] = True
     basis_id = commission.get("base_node")
@@ -162,14 +168,18 @@ def certified(model, result: dict, source_run_id: int, confirmed: dict,
         commission["base_node"] = basis.id
         commission["base_name"] = basis.name
         commission["base_total"] = row["value"] if row and row["available"] else None
-    commission.update(
-        engine="commission-v2", configured=bool(identities),
-        total=money_float(sum(amounts.values(), Decimal(0))),
-        amount_complete=True, manual_confirmed=True,
-        manual_amounts_after_labor=True,
-        pricing_threshold_met=True,
-    )
-    commission.setdefault("notes", []).append("提成金额由人工逐人确认，已含兼职分摊；源订单提成试算未替代人工确认")
+    if amounts is None:
+        commission.update(amount_complete=False, manual_confirmed=False, payout_deferred=True)
+        commission.setdefault("notes", []).append("结账只确认成本与利润；提成待在月度看板「确认应发」核定")
+    else:
+        commission.update(
+            engine="commission-v2", configured=bool(amounts) or bool(commission.get("people")),
+            total=money_float(sum(amounts.values(), Decimal(0))),
+            amount_complete=True, manual_confirmed=True,
+            manual_amounts_after_labor=True,
+            pricing_threshold_met=True,
+        )
+        commission.setdefault("notes", []).append("提成金额由人工逐人确认，已含兼职分摊；源订单提成试算未替代人工确认")
     if labor_adjusted:
         commission["notes"].append(
             f"提交金额等于扣兼职前试算，已按兼职分摊 {money_float(labor_cut):,.2f} 元折算")
@@ -183,8 +193,8 @@ def certified(model, result: dict, source_run_id: int, confirmed: dict,
     decision = {"source_run_id": source_run_id, "observed": trial["observed"],
                 "confirmed": trial["confirmed"], "payouts": [
                     {"person_id": pid, "amount": money_float(amount)}
-                    for pid, amount in sorted(amounts.items())],
-                "no_payout": no_payout, "reason": reason.strip(),
+                    for pid, amount in sorted((amounts or {}).items())],
+                "no_payout": no_payout, "payout_deferred": amounts is None, "reason": reason.strip(),
                 "original_findings": [finding for finding in result.get("findings") or []
                                       if finding.get("id") in resolved_cost_checks]}
     return decided, decision
