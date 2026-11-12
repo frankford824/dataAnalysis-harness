@@ -11,6 +11,7 @@ import PageHead from '../components/PageHead.vue'
 import CompanyFinanceCard from '../components/CompanyFinanceCard.vue'
 import AgentAuthorityPanel from '../components/AgentAuthorityPanel.vue'
 import AgentInbox from '../components/AgentInbox.vue'
+import BoardPayoutConfirm from '../components/BoardPayoutConfirm.vue'
 import {onlyCompanyHistoryRemains} from '../companyFinanceView'
 import {operationLevels,operationBoards,workflowLabels,comparisonCopy,sortedOperations,boardColumns,componentsOf,identityColumns,managedPart} from '../operationsView'
 import {clientRequestId,recordTelemetry} from '../telemetry'
@@ -267,7 +268,7 @@ const metricChange=(key,item)=>comparisonCopy(item,(report.value?.metrics||[]).f
       <div class="operations-controls">
         <label v-if="ranking">排名维度<n-select :value="level" :options="[{label:'个人排名',value:'person'},{label:'团队排名',value:'team'}]" @update:value="changeLevel" aria-label="排名维度"/></label>
         <label>经营范围<n-select v-model:value="managed" :options="[{label:'全部（互斥合计）',value:'all'},{label:'托管',value:'managed'},{label:'非托管',value:'standard'}]" aria-label="托管范围"/></label>
-        <n-button v-if="compare==='current'" :type="managedSplit?'primary':'default'" :disabled="managed!=='all'" :aria-pressed="managedSplit" @click="managedSplit=!managedSplit">{{managedSplit?'收起托管拆分':'显示其中托管'}}</n-button><a :href="exportUrl" class="export-link" aria-label="导出当前看板全部记录" @click.prevent="exportBoard()">{{exporting?'导出中…':'全部导出'}}</a><a v-if="board==='person'" :href="peopleStoresExportUrl" class="export-link" aria-label="导出所有人在各店铺的做货和抽点" @click.prevent="exportBoard(()=>peopleStoresExportUrl)">{{exporting?'导出中…':'所有人所有店铺'}}</a>
+        <n-button v-if="compare==='current'" :type="managedSplit?'primary':'default'" :disabled="managed!=='all'" :aria-pressed="managedSplit" @click="managedSplit=!managedSplit">{{managedSplit?'收起托管拆分':'显示其中托管'}}</n-button><BoardPayoutConfirm :period="period" :run-refs="report?.run_refs||[]" :stores="workflow?.stores||[]" @saved="loadReport(true)"/><a :href="exportUrl" class="export-link" aria-label="导出当前看板全部记录" @click.prevent="exportBoard()">{{exporting?'导出中…':'全部导出'}}</a><a v-if="board==='person'" :href="peopleStoresExportUrl" class="export-link" aria-label="导出所有人在各店铺的做货和抽点" @click.prevent="exportBoard(()=>peopleStoresExportUrl)">{{exporting?'导出中…':'所有人所有店铺'}}</a>
       </div>
       <div v-if="trail.length" class="operations-trail"><n-button text @click="reset">全公司</n-button><span v-for="(name,index) in trail" :key="index"> / {{name}}</span></div>
       <p class="small muted operations-note">{{report?.is_final?'当前为已结账依据的完整经营结果。':'当前为阶段结果，缺少依据的金额显示“—”。'}} 点击名称继续查看下一层（店铺→宝贝→订单，人员→店铺）；环比、同比红色表示上升，绿色表示下降。</p>

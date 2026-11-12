@@ -125,6 +125,8 @@ def context(ws, registry, model, store_id, period, *, expected_run=None):
                'person': row.get('person') or known.get(pid, {}).get('name') or pid,
                'suggested': suggestions.get(pid) if pid in suggestions else
                money_float(Decimal(str(row['amount'])) * keep)
+               if row.get('amount') is not None else None,
+               'saved': money_float(Decimal(str(row['amount'])))
                if row.get('amount') is not None else None}
               for pid, row in identities.items()]
     original_order = {row['person_id']: index for index, row in enumerate(original)}
