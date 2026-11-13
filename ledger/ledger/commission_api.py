@@ -931,6 +931,11 @@ def install(app, workspace, model, model_root: Path | None = None):
     def report_export(kind: str, selection: ReportSelection):
         if kind not in commission_reports.COLUMNS:
             raise RegistryError("请选择导出类型")
+        # 页面查询不带核算编号。导出若把编号再传回来，兼职口径会变，指纹永远对不上，
+        # 接口就一直 409。后台写入也会让指纹在点击前失效。导出直接给当前这张表。
+        selection.fingerprint = ''
+        selection.run_ids = None
+        selection.view = kind
         report = report_result(selection, view=kind)
         if selection.presentation:
             columns, rows = commission_reports.business_export(report, kind)

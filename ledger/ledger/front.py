@@ -52,7 +52,7 @@ SHARED = re.compile(r'/api/stores/[^/]+/periods/[^/]+')
 PREWARM_HOUR = 4
 PREWARM_MONTHS = 5
 
-NOT_WRITES = re.compile(r'/api/(automation/telemetry|.*preview.*|search.*)')
+NOT_WRITES = re.compile(r'/api/(automation/telemetry|.*preview.*|search.*|commission-v2/export/.*)')
 
 _entries = OrderedDict()
 _flights = {}
