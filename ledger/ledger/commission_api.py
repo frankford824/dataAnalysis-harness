@@ -181,32 +181,37 @@ class SettlementCreate(BaseModel):
     note: str = Field(min_length=1, max_length=2000)
 
 
+def csv_chunks(columns, rows):
+    buffer = io.StringIO()
+    writer = csv.writer(buffer)
+    writer.writerow(columns)
+    for row in rows:
+        values = []
+        for column in columns:
+            value = row.get(column, "")
+            if isinstance(value, (dict, list)):
+                value = json_text(value)
+            if isinstance(value, str):
+                # Prevent formulas; preserve long identifiers as text in Excel.
+                if value[:1] in "=+@-\t\r\n" or column.endswith("_id") or column in {"product_id", "宝贝ID", "人员ID", "工号", "主订单号", "子订单号", "商品ID"}:
+                    value = "'" + value if value else ""
+            values.append(value)
+        writer.writerow(values)
+        if buffer.tell() >= 65536:
+            yield buffer.getvalue()
+            buffer.seek(0)
+            buffer.truncate()
+    if buffer.tell():
+        yield buffer.getvalue()
+
+
 def csv_response(filename, columns, rows):
     def stream():
         yield "\ufeff"
-        buffer = io.StringIO()
-        writer = csv.writer(buffer)
-        writer.writerow(columns)
-        for row in rows:
-            values = []
-            for column in columns:
-                value = row.get(column, "")
-                if isinstance(value, (dict, list)):
-                    value = json_text(value)
-                if isinstance(value, str):
-                    # Prevent formulas; preserve long identifiers as text in Excel.
-                    if value[:1] in "=+@-\t\r\n" or column.endswith("_id") or column in {"product_id", "宝贝ID", "人员ID", "工号", "主订单号", "子订单号", "商品ID"}:
-                        value = "'" + value if value else ""
-                values.append(value)
-            writer.writerow(values)
-            if buffer.tell() >= 65536:
-                yield buffer.getvalue()
-                buffer.seek(0)
-                buffer.truncate()
-        if buffer.tell():
-            yield buffer.getvalue()
+        yield from csv_chunks(columns, rows)
     return StreamingResponse(stream(), media_type="text/csv; charset=utf-8",
-                             headers={"Content-Disposition": f'attachment; filename="{filename}"'})
+                             headers={"Content-Disposition": f'attachment; filename="{filename}"',
+                                      "Cache-Control": "no-store"})
 
 
 def install(app, workspace, model, model_root: Path | None = None):
@@ -927,21 +932,43 @@ def install(app, workspace, model, model_root: Path | None = None):
         clear_report_cache()
         return result
 
-    @router.post("/export/reports/{kind}")
-    def report_export(kind: str, selection: ReportSelection):
+    def _export_selection(kind: str, selection: ReportSelection):
         if kind not in commission_reports.COLUMNS:
             raise RegistryError("请选择导出类型")
-        # 页面查询不带核算编号。导出若把编号再传回来，兼职口径会变，指纹永远对不上，
-        # 接口就一直 409。后台写入也会让指纹在点击前失效。导出直接给当前这张表。
+        # 页面查询不带核算编号。带上编号会改变兼职口径，指纹就对不上，导出一直 409。
+        # 浏览器要自己发起下载，不能等整表算完再模拟点击，否则慢网络上点击已经失效。
         selection.fingerprint = ''
         selection.run_ids = None
         selection.view = kind
-        report = report_result(selection, view=kind)
-        if selection.presentation:
-            columns, rows = commission_reports.business_export(report, kind)
-            return csv_response(f"commission-{kind}-{selection.start}-{selection.end}.csv", columns, rows)
-        return csv_response(f"commission-{kind}-{selection.start}-{selection.end}.csv",
-                            commission_reports.COLUMNS[kind], commission_reports.export_rows(report, kind))
+        filename = f"commission-{kind}-{selection.start}-{selection.end}.csv"
+
+        async def generate():
+            # 先吐出文件头，WiFi 路由器才不会把这段静默重算当成死连接拆掉。
+            yield "\ufeff"
+            report = await run_in_threadpool(lambda: report_result(selection, view=kind))
+            if selection.presentation:
+                columns, rows = commission_reports.business_export(report, kind)
+            else:
+                columns, rows = commission_reports.COLUMNS[kind], commission_reports.export_rows(report, kind)
+            for chunk in csv_chunks(columns, rows):
+                yield chunk
+
+        return StreamingResponse(generate(), media_type="text/csv; charset=utf-8",
+                                 headers={"Content-Disposition": f'attachment; filename="{filename}"',
+                                          "Cache-Control": "no-store"})
+
+    @router.get("/export/reports/{kind}")
+    def report_export_get(kind: str, start: str, end: str,
+                          store_ids: list[str] = Query(default=[]),
+                          person_ids: list[str] = Query(default=[]),
+                          presentation: bool = True):
+        return _export_selection(kind, ReportSelection(
+            start=start, end=end, store_ids=store_ids, person_ids=person_ids,
+            presentation=presentation))
+
+    @router.post("/export/reports/{kind}")
+    def report_export(kind: str, selection: ReportSelection):
+        return _export_selection(kind, selection)
 
     def settlement_row(row):
         result = dict(row)

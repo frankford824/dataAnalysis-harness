@@ -245,18 +245,18 @@ watch(() => report.value?.count, () => {
 })
 onDeactivated(()=>{detail.value=null;profit.value=null})
 watch(report, value => { if(value)state.reportPeople=value.available_people || [] })
-async function download() {
-  if(!report.value || locked.value || downloading.value)return
-  downloading.value=true;downloadError.value=''
-  try {
-    const current=report.value, kind=state.reportView
-    const response=await fetch(`/api/commission-v2/export/reports/${kind}`,{method:'POST',headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({...current.selection,fingerprint:current.fingerprint,presentation:true})})
-    if(!response.ok){const failure=await response.json().catch(()=>({}));throw new Error(response.status===409?'金额有更新，请刷新后再导出':typeof failure.detail==='string'?failure.detail:'导出失败，请重试')}
-    const url=URL.createObjectURL(await response.blob()),link=document.createElement('a')
-    link.href=url;link.download=`提成-${labels[kind]}-${current.selection.start}至${current.selection.end}.csv`
-    document.body.appendChild(link);link.click();link.remove();setTimeout(()=>URL.revokeObjectURL(url),1000)
-  }catch(e){downloadError.value=e.message}finally{downloading.value=false;if(stale.value)load()}
+function download() {
+  if(!report.value || locked.value)return
+  const current=report.value, kind=state.reportView
+  const params=new URLSearchParams({start:current.selection.start,end:current.selection.end,presentation:'true'})
+  for(const id of current.selection.store_ids||[])params.append('store_ids',id)
+  for(const id of current.selection.person_ids||[])params.append('person_ids',id)
+  const link=document.createElement('a')
+  link.href=`/api/commission-v2/export/reports/${kind}?${params}`
+  link.rel='noopener'
+  document.body.appendChild(link)
+  link.click()
+  link.remove()
 }
 
 const matchingSettlements = computed(() => settlements.value.filter(item =>

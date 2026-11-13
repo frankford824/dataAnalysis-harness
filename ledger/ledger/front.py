@@ -98,7 +98,8 @@ def _persist(key, entry):
 async def _open(port, method, target, headers, body_chunks, host=None):
     reader, writer = await asyncio.wait_for(asyncio.open_connection('127.0.0.1', port), 5)
     # 台账拒绝 Origin 与 Host 不一致的写入，所以转发时保留浏览器看到的 Host。
-    head = [f'{method} {target} HTTP/1.0', f'Host: {host or f"127.0.0.1:{port}"}']
+    # 1.1 才能边算边把文件传出去。必须声明关闭，否则读端会一直等下一段。
+    head = [f'{method} {target} HTTP/1.1', 'Connection: close', f'Host: {host or f"127.0.0.1:{port}"}']
     head += [f'{k}: {v}' for k, v in headers if k.lower() not in HOP]
     if body_chunks is None:
         head.append('Content-Length: 0')
