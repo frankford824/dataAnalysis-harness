@@ -251,7 +251,7 @@ async function download() {
   try {
     const current=report.value, kind=state.reportView
     const response=await fetch(`/api/commission-v2/export/reports/${kind}`,{method:'POST',headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({...current.selection,run_ids:current.run_ids,fingerprint:current.fingerprint,presentation:true})})
+      body:JSON.stringify({...current.selection,fingerprint:current.fingerprint,presentation:true})})
     if(!response.ok){const failure=await response.json().catch(()=>({}));throw new Error(response.status===409?'金额有更新，请刷新后再导出':typeof failure.detail==='string'?failure.detail:'导出失败，请重试')}
     const url=URL.createObjectURL(await response.blob()),link=document.createElement('a')
     link.href=url;link.download=`提成-${labels[kind]}-${current.selection.start}至${current.selection.end}.csv`
